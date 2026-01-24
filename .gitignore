@@ -1,0 +1,43 @@
+# Binaries
+opscart-scan
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# Test binary, built with `go test -c`
+*.test
+
+# Output of the go coverage tool
+*.out
+
+# Go workspace file
+go.work
+
+# Dependency directories
+vendor/
+
+# IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Test outputs
+cluster-resources.json
+*.log
+
+# Build artifacts
+bin/
+dist/
+build/
+
+# Temporary files
+tmp/
+temp/
