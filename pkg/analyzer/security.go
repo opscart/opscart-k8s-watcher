@@ -2,7 +2,9 @@ package analyzer
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"strings"
 
 	"github.com/opscart/opscart-k8s-watcher/pkg/models"
 	corev1 "k8s.io/api/core/v1"
@@ -51,9 +53,6 @@ func (sa *SecurityAuditor) AuditClusterSecurity(namespace string) (*models.Secur
 		}
 	}
 
-	// Calculate security score
-	audit.SecurityScore = sa.calculateSecurityScore(audit)
-
 	// Generate priority actions
 	audit.PriorityActions = sa.generatePriorityActions(audit)
 
@@ -81,7 +80,7 @@ func (sa *SecurityAuditor) auditPod(pod corev1.Pod) []models.SecurityIssue {
 				Namespace:   pod.Namespace,
 				Name:        pod.Name,
 				Description: fmt.Sprintf("Pod mounts host path: %s", volume.HostPath.Path),
-				Remediation: "Remove hostPath volume - use PersistentVolumeClaims or emptyDir instead. hostPath gives direct access to host filesystem.",
+				Remediation: "Remove hostPath volume - use PersistentVolumeClaims or emptyDir instead",
 			})
 		}
 	}
@@ -97,7 +96,7 @@ func (sa *SecurityAuditor) auditPod(pod corev1.Pod) []models.SecurityIssue {
 				Namespace:   pod.Namespace,
 				Name:        pod.Name,
 				Description: "Pod uses default service account",
-				Remediation: "Create a dedicated ServiceAccount with minimal required permissions. Default SA may have excessive privileges.",
+				Remediation: "Create a dedicated ServiceAccount with minimal permissions",
 			})
 		}
 	}
@@ -117,7 +116,7 @@ func (sa *SecurityAuditor) auditPod(pod corev1.Pod) []models.SecurityIssue {
 				Namespace:   pod.Namespace,
 				Name:        pod.Name,
 				Description: "Pod uses host network namespace",
-				Remediation: "Remove hostNetwork: true unless absolutely necessary for CNI plugins",
+				Remediation: "Remove hostNetwork: true unless absolutely necessary",
 			})
 		}
 
@@ -130,7 +129,7 @@ func (sa *SecurityAuditor) auditPod(pod corev1.Pod) []models.SecurityIssue {
 				Namespace:   pod.Namespace,
 				Name:        pod.Name,
 				Description: "Pod uses host PID namespace",
-				Remediation: "Remove hostPID: true - rarely needed",
+				Remediation: "Remove hostPID: true",
 			})
 		}
 
@@ -143,7 +142,7 @@ func (sa *SecurityAuditor) auditPod(pod corev1.Pod) []models.SecurityIssue {
 				Namespace:   pod.Namespace,
 				Name:        pod.Name,
 				Description: "Pod uses host IPC namespace",
-				Remediation: "Remove hostIPC: true unless required for shared memory",
+				Remediation: "Remove hostIPC: true",
 			})
 		}
 	}
@@ -194,7 +193,7 @@ func (sa *SecurityAuditor) auditContainer(pod corev1.Pod, container corev1.Conta
 			Namespace:   pod.Namespace,
 			Name:        fmt.Sprintf("%s/%s", pod.Name, container.Name),
 			Description: "Container running in privileged mode",
-			Remediation: "Remove privileged: true - grants all capabilities",
+			Remediation: "Remove privileged: true",
 		})
 	}
 
@@ -209,7 +208,7 @@ func (sa *SecurityAuditor) auditContainer(pod corev1.Pod, container corev1.Conta
 				Namespace:   pod.Namespace,
 				Name:        fmt.Sprintf("%s/%s", pod.Name, container.Name),
 				Description: fmt.Sprintf("Container adds capabilities: %s", capsList),
-				Remediation: "Review if added capabilities are necessary. Drop all and add only required ones",
+				Remediation: "Drop all capabilities and add only required ones",
 			})
 		}
 	}
@@ -228,22 +227,6 @@ func (sa *SecurityAuditor) auditContainer(pod corev1.Pod, container corev1.Conta
 		})
 	}
 
-	// Check health probes
-	hasLiveness := container.LivenessProbe != nil
-	hasReadiness := container.ReadinessProbe != nil
-
-	if !hasLiveness && !hasReadiness {
-		issues = append(issues, models.SecurityIssue{
-			Type:        "missing_probes",
-			Severity:    "low",
-			Resource:    "container",
-			Namespace:   pod.Namespace,
-			Name:        fmt.Sprintf("%s/%s", pod.Name, container.Name),
-			Description: "Container missing health probes",
-			Remediation: "Add livenessProbe and readinessProbe for better reliability",
-		})
-	}
-
 	// Check for allowPrivilegeEscalation
 	if container.SecurityContext == nil || container.SecurityContext.AllowPrivilegeEscalation == nil ||
 		*container.SecurityContext.AllowPrivilegeEscalation {
@@ -256,23 +239,6 @@ func (sa *SecurityAuditor) auditContainer(pod corev1.Pod, container corev1.Conta
 				Name:        fmt.Sprintf("%s/%s", pod.Name, container.Name),
 				Description: "Container allows privilege escalation",
 				Remediation: "Set securityContext.allowPrivilegeEscalation: false",
-			})
-		}
-	}
-
-	// Check read-only root filesystem
-	if container.SecurityContext == nil || container.SecurityContext.ReadOnlyRootFilesystem == nil ||
-		!*container.SecurityContext.ReadOnlyRootFilesystem {
-		// This is a best practice but not always feasible, so low severity
-		if !isSystemNamespace {
-			issues = append(issues, models.SecurityIssue{
-				Type:        "writable_filesystem",
-				Severity:    "low",
-				Resource:    "container",
-				Namespace:   pod.Namespace,
-				Name:        fmt.Sprintf("%s/%s", pod.Name, container.Name),
-				Description: "Container filesystem is writable",
-				Remediation: "Consider setting securityContext.readOnlyRootFilesystem: true",
 			})
 		}
 	}
@@ -299,94 +265,11 @@ func (sa *SecurityAuditor) incrementRiskCounter(audit *models.SecurityAudit, iss
 		audit.Risks.DefaultServiceAccount++
 	case "missing_resource_limits":
 		audit.Risks.MissingResourceLimits++
-	case "missing_probes":
-		audit.Risks.MissingProbes++
 	case "added_capabilities":
 		audit.Risks.AddedCapabilities++
 	case "privilege_escalation":
 		audit.Risks.PrivilegeEscalation++
-	case "writable_filesystem":
-		audit.Risks.WritableFilesystem++
 	}
-}
-
-// calculateSecurityScore calculates a 0-100 security score with exponential penalties
-func (sa *SecurityAuditor) calculateSecurityScore(audit *models.SecurityAudit) int {
-	if audit.TotalPodsAudited == 0 {
-		return 100
-	}
-
-	score := 100.0
-
-	// CRITICAL ISSUES - Exponential penalties (these are severe!)
-	// Privileged containers: Each one is exponentially worse
-	if audit.Risks.PrivilegedContainers > 0 {
-		penalty := float64(audit.Risks.PrivilegedContainers) * float64(audit.Risks.PrivilegedContainers) * 2.0
-		score -= penalty
-	}
-
-	// HostPath volumes: Direct host filesystem access (exponential)
-	if audit.Risks.HostPathVolumes > 0 {
-		penalty := float64(audit.Risks.HostPathVolumes) * float64(audit.Risks.HostPathVolumes) * 2.0
-		score -= penalty
-	}
-
-	// Host PID: Can see all host processes (exponential)
-	if audit.Risks.HostPID > 0 {
-		penalty := float64(audit.Risks.HostPID) * float64(audit.Risks.HostPID) * 1.5
-		score -= penalty
-	}
-
-	// HIGH SEVERITY - Aggressive linear penalties
-	// Host Network: Bypasses network policies
-	score -= float64(audit.Risks.HostNetwork) * 4.0
-
-	// Host IPC: Shared memory risks
-	score -= float64(audit.Risks.HostIPC) * 4.0
-
-	// MEDIUM SEVERITY - Moderate penalties with scaling
-	// Running as root: Bad practice, scales with count
-	if audit.Risks.RunningAsRoot > 0 {
-		// First 10: 0.5 each, after that: 1.0 each
-		if audit.Risks.RunningAsRoot <= 10 {
-			score -= float64(audit.Risks.RunningAsRoot) * 0.5
-		} else {
-			score -= 5.0 + float64(audit.Risks.RunningAsRoot-10)*1.0
-		}
-	}
-
-	// Missing resource limits: Can DoS cluster
-	if audit.Risks.MissingResourceLimits > 0 {
-		// First 10: 0.5 each, after that: 1.0 each
-		if audit.Risks.MissingResourceLimits <= 10 {
-			score -= float64(audit.Risks.MissingResourceLimits) * 0.5
-		} else {
-			score -= 5.0 + float64(audit.Risks.MissingResourceLimits-10)*1.0
-		}
-	}
-
-	// Privilege escalation allowed
-	score -= float64(audit.Risks.PrivilegeEscalation) * 1.0
-
-	// Added capabilities
-	score -= float64(audit.Risks.AddedCapabilities) * 1.5
-
-	// Default service account usage
-	score -= float64(audit.Risks.DefaultServiceAccount) * 0.8
-
-	// LOW SEVERITY - Small penalties
-	score -= float64(audit.Risks.MissingProbes) * 0.2
-	score -= float64(audit.Risks.WritableFilesystem) * 0.1
-
-	// Ensure score stays in 0-100 range
-	if score < 0 {
-		score = 0
-	}
-	if score > 100 {
-		score = 100
-	}
-
-	return int(score)
 }
 
 // generatePriorityActions creates a prioritized action list
@@ -426,10 +309,396 @@ func (sa *SecurityAuditor) generatePriorityActions(audit *models.SecurityAudit) 
 		actions = append(actions, "Set allowPrivilegeEscalation: false")
 	}
 
-	// Best practices
-	if audit.Risks.MissingProbes > 0 {
-		actions = append(actions, "Implement health probes for better reliability")
+	return actions
+}
+
+// ===================================================================
+// HELPER FUNCTIONS - FIX #2 and #3
+// ===================================================================
+
+// detectEnvironment detects environment type from namespace name
+func detectEnvironment(namespace string) string {
+	lower := strings.ToLower(namespace)
+
+	// System namespaces
+	if strings.Contains(lower, "kube-system") ||
+		strings.Contains(lower, "kube-public") ||
+		strings.Contains(lower, "istio-system") ||
+		strings.Contains(lower, "monitoring") {
+		return "SYSTEM"
 	}
 
-	return actions
+	// Production
+	if strings.Contains(lower, "prod") {
+		return "PRODUCTION"
+	}
+
+	// Staging/QA
+	if strings.Contains(lower, "staging") ||
+		strings.Contains(lower, "stage") ||
+		strings.Contains(lower, "qa") ||
+		strings.Contains(lower, "uat") {
+		return "STAGING"
+	}
+
+	// Default to development
+	return "DEVELOPMENT"
+}
+
+// filterIssuesByType returns issues of a specific type
+func filterIssuesByType(issues []models.SecurityIssue, issueType string) []models.SecurityIssue {
+	var filtered []models.SecurityIssue
+	for _, issue := range issues {
+		if issue.Type == issueType {
+			filtered = append(filtered, issue)
+		}
+	}
+	return filtered
+}
+
+// getTopIssues returns top N issues of a specific type
+func getTopIssues(issues []models.SecurityIssue, issueType string, limit int) []models.SecurityIssue {
+	filtered := filterIssuesByType(issues, issueType)
+
+	// Group by environment priority
+	production := []models.SecurityIssue{}
+	staging := []models.SecurityIssue{}
+	development := []models.SecurityIssue{}
+	system := []models.SecurityIssue{}
+
+	for _, issue := range filtered {
+		env := detectEnvironment(issue.Namespace)
+		switch env {
+		case "PRODUCTION":
+			production = append(production, issue)
+		case "STAGING":
+			staging = append(staging, issue)
+		case "SYSTEM":
+			system = append(system, issue)
+		default:
+			development = append(development, issue)
+		}
+	}
+
+	// Combine with production first
+	result := []models.SecurityIssue{}
+	result = append(result, production...)
+	result = append(result, staging...)
+	result = append(result, development...)
+	result = append(result, system...)
+
+	if len(result) > limit {
+		return result[:limit]
+	}
+	return result
+}
+
+// countByEnvironment counts issues by environment type
+func countByEnvironment(issues []models.SecurityIssue, issueType string) map[string]int {
+	counts := map[string]int{
+		"PRODUCTION":  0,
+		"STAGING":     0,
+		"DEVELOPMENT": 0,
+		"SYSTEM":      0,
+	}
+
+	filtered := filterIssuesByType(issues, issueType)
+	for _, issue := range filtered {
+		env := detectEnvironment(issue.Namespace)
+		counts[env]++
+	}
+
+	return counts
+}
+
+// ===================================================================
+// OUTPUT FUNCTIONS
+// ===================================================================
+
+// PrintSecurityAudit displays security audit results with CIS compliance
+func PrintSecurityAudit(audit *models.SecurityAudit, format string) {
+	if format == "json" {
+		PrintSecurityAuditJSON(audit)
+		return
+	}
+
+	// Print disclaimer
+	printSecurityDisclaimer()
+
+	// Print cluster summary
+	printClusterSummary(audit)
+
+	// Calculate and print CIS score
+	cisResult := CalculateCISScore(audit)
+	PrintCISResult(cisResult)
+
+	// Print detailed findings with specific resources
+	printDetailedFindings(audit)
+
+	// Print recommendations
+	printRecommendations(audit)
+
+	// FIX #1: Validate counting
+	validateCounting(audit)
+}
+
+func printSecurityDisclaimer() {
+	fmt.Println()
+	fmt.Println("╔════════════════════════════════════════════════════════════╗")
+	fmt.Println("║                    ⚠️  DISCLAIMER ⚠️                        ║")
+	fmt.Println("╠════════════════════════════════════════════════════════════╣")
+	fmt.Println("║  • SECURITY AWARENESS TOOL - NOT FOR COMPLIANCE AUDITS     ║")
+	fmt.Println("║  • CIS scoring based on Pod Security subset only           ║")
+	fmt.Println("║  • Use kube-bench for complete CIS compliance assessment   ║")
+	fmt.Println("║  • Consult security professionals for production decisions ║")
+	fmt.Println("╚════════════════════════════════════════════════════════════╝")
+	fmt.Println()
+}
+
+func printClusterSummary(audit *models.SecurityAudit) {
+	fmt.Println("═══════════════════════════════════════════════════════════")
+	fmt.Println("CLUSTER SECURITY SUMMARY")
+	fmt.Println("═══════════════════════════════════════════════════════════")
+	fmt.Printf("Pods Scanned: %d\n", audit.TotalPodsAudited)
+	fmt.Printf("Issues Found: %d\n", len(audit.Issues))
+	fmt.Println()
+}
+
+func printDetailedFindings(audit *models.SecurityAudit) {
+	risks := audit.Risks
+
+	fmt.Println("\n═══════════════════════════════════════════════════════════")
+	fmt.Println("DETAILED SECURITY FINDINGS")
+	fmt.Println("═══════════════════════════════════════════════════════════")
+
+	// Critical findings with TOP 5 resources (FIX #2)
+	if hasAnyCriticalFindings(risks) {
+		fmt.Println("\n🔴 CRITICAL FINDINGS:")
+
+		if risks.PrivilegedContainers > 0 {
+			printFindingWithResources("Privileged containers", risks.PrivilegedContainers,
+				"Container escape risk", audit.Issues, "privileged_container")
+		}
+
+		if risks.HostPID > 0 {
+			printFindingWithResources("Host PID namespace", risks.HostPID,
+				"Process visibility risk", audit.Issues, "host_pid")
+		}
+
+		if risks.HostPathVolumes > 0 {
+			printFindingWithResources("Host path volumes", risks.HostPathVolumes,
+				"Host filesystem access", audit.Issues, "host_path_volume")
+		}
+	}
+
+	// High findings with TOP 5 resources
+	if hasAnyHighFindings(risks) {
+		fmt.Println("\n🟠 HIGH PRIORITY FINDINGS:")
+
+		if risks.HostIPC > 0 {
+			printFindingWithResources("Host IPC namespace", risks.HostIPC,
+				"Inter-process communication risk", audit.Issues, "host_ipc")
+		}
+
+		if risks.HostNetwork > 0 {
+			printFindingWithResources("Host network", risks.HostNetwork,
+				"Network isolation bypass", audit.Issues, "host_network")
+		}
+	}
+
+	// Medium findings with TOP 5 resources
+	if hasAnyMediumFindings(risks) {
+		fmt.Println("\n🟡 MEDIUM PRIORITY FINDINGS:")
+
+		if risks.RunningAsRoot > 0 {
+			printFindingWithResources("Containers running as root", risks.RunningAsRoot,
+				"Unnecessary privileges", audit.Issues, "running_as_root")
+		}
+
+		if risks.PrivilegeEscalation > 0 {
+			printFindingWithResources("Privilege escalation allowed", risks.PrivilegeEscalation,
+				"Escalation risk", audit.Issues, "privilege_escalation")
+		}
+
+		if risks.AddedCapabilities > 0 {
+			printFindingWithResources("Added capabilities", risks.AddedCapabilities,
+				"Unnecessary capabilities", audit.Issues, "added_capabilities")
+		}
+
+		if risks.MissingResourceLimits > 0 {
+			printFindingWithResources("Missing resource limits", risks.MissingResourceLimits,
+				"Resource exhaustion risk", audit.Issues, "missing_resource_limits")
+		}
+
+		if risks.DefaultServiceAccount > 0 {
+			printFindingWithResources("Default service account", risks.DefaultServiceAccount,
+				"Overly permissive", audit.Issues, "default_service_account")
+		}
+	}
+
+	fmt.Println()
+}
+
+// FIX #2 and #3: Print finding with top resources and environment context
+func printFindingWithResources(name string, count int, risk string, allIssues []models.SecurityIssue, issueType string) {
+	if count == 0 {
+		return
+	}
+
+	// Get environment breakdown (FIX #3)
+	envCounts := countByEnvironment(allIssues, issueType)
+
+	// Print summary with environment context
+	fmt.Printf("  • %s: %d (%s)\n", name, count, risk)
+
+	// Show environment breakdown if multiple environments
+	if envCounts["PRODUCTION"] > 0 {
+		fmt.Printf("    └─ PRODUCTION: %d (⚠️  REQUIRES IMMEDIATE ACTION)\n", envCounts["PRODUCTION"])
+	}
+	if envCounts["STAGING"] > 0 {
+		fmt.Printf("    └─ STAGING: %d (should fix before prod)\n", envCounts["STAGING"])
+	}
+	if envCounts["DEVELOPMENT"] > 0 {
+		fmt.Printf("    └─ DEVELOPMENT: %d (acceptable for dev, monitor)\n", envCounts["DEVELOPMENT"])
+	}
+	if envCounts["SYSTEM"] > 0 {
+		fmt.Printf("    └─ SYSTEM: %d (expected for infrastructure)\n", envCounts["SYSTEM"])
+	}
+
+	// Show top 5 specific resources (FIX #2)
+	topIssues := getTopIssues(allIssues, issueType, 5)
+	if len(topIssues) > 0 {
+		fmt.Println("    Top resources:")
+		for i, issue := range topIssues {
+			env := detectEnvironment(issue.Namespace)
+			envLabel := ""
+			if env == "PRODUCTION" {
+				envLabel = " [PROD]"
+			}
+			fmt.Printf("      %d. %s in namespace %s%s\n",
+				i+1, issue.Name, issue.Namespace, envLabel)
+		}
+		if count > 5 {
+			fmt.Printf("      ... and %d more\n", count-5)
+		}
+	}
+}
+
+func printFinding(name string, count int, risk string) {
+	if count > 0 {
+		fmt.Printf("  • %s: %d (%s)\n", name, count, risk)
+	}
+}
+
+func hasAnyCriticalFindings(r models.SecurityRisks) bool {
+	return r.PrivilegedContainers > 0 || r.HostPID > 0 || r.HostPathVolumes > 0
+}
+
+func hasAnyHighFindings(r models.SecurityRisks) bool {
+	return r.HostIPC > 0 || r.HostNetwork > 0
+}
+
+func hasAnyMediumFindings(r models.SecurityRisks) bool {
+	return r.RunningAsRoot > 0 || r.PrivilegeEscalation > 0 || r.AddedCapabilities > 0 ||
+		r.MissingResourceLimits > 0 || r.DefaultServiceAccount > 0
+}
+
+func printRecommendations(audit *models.SecurityAudit) {
+	if len(audit.PriorityActions) == 0 {
+		return
+	}
+
+	fmt.Println("═══════════════════════════════════════════════════════════")
+	fmt.Println("RECOMMENDED ACTIONS (Priority Order)")
+	fmt.Println("═══════════════════════════════════════════════════════════")
+	fmt.Println()
+
+	for i, action := range audit.PriorityActions {
+		fmt.Printf("%d. %s\n", i+1, action)
+	}
+
+	fmt.Println()
+	fmt.Println("─────────────────────────────────────────────────────────")
+	fmt.Println("VALIDATION STEPS")
+	fmt.Println("─────────────────────────────────────────────────────────")
+	fmt.Println("1. Test fixes in staging environment first")
+	fmt.Println("2. Verify application functionality after changes")
+	fmt.Println("3. Run kube-bench for complete CIS assessment")
+	fmt.Println("4. Re-scan cluster after remediation")
+	fmt.Println()
+}
+
+// FIX #1: Validate issue counting and show breakdown
+func validateCounting(audit *models.SecurityAudit) {
+	// Calculate total from risk counters
+	totalCounted := audit.Risks.PrivilegedContainers +
+		audit.Risks.HostPID +
+		audit.Risks.HostIPC +
+		audit.Risks.HostNetwork +
+		audit.Risks.HostPathVolumes +
+		audit.Risks.RunningAsRoot +
+		audit.Risks.PrivilegeEscalation +
+		audit.Risks.AddedCapabilities +
+		audit.Risks.MissingResourceLimits +
+		audit.Risks.DefaultServiceAccount
+
+	actualIssues := len(audit.Issues)
+
+	// Always show breakdown for transparency
+	fmt.Println("═══════════════════════════════════════════════════════════")
+	fmt.Println("ISSUE COUNT BREAKDOWN")
+	fmt.Println("═══════════════════════════════════════════════════════════")
+	fmt.Printf("  Privileged containers:      %3d\n", audit.Risks.PrivilegedContainers)
+	fmt.Printf("  Host PID:                   %3d\n", audit.Risks.HostPID)
+	fmt.Printf("  Host IPC:                   %3d\n", audit.Risks.HostIPC)
+	fmt.Printf("  Host network:               %3d\n", audit.Risks.HostNetwork)
+	fmt.Printf("  Host path volumes:          %3d\n", audit.Risks.HostPathVolumes)
+	fmt.Printf("  Running as root:            %3d\n", audit.Risks.RunningAsRoot)
+	fmt.Printf("  Privilege escalation:       %3d\n", audit.Risks.PrivilegeEscalation)
+	fmt.Printf("  Added capabilities:         %3d\n", audit.Risks.AddedCapabilities)
+	fmt.Printf("  Missing resource limits:    %3d\n", audit.Risks.MissingResourceLimits)
+	fmt.Printf("  Default service account:    %3d\n", audit.Risks.DefaultServiceAccount)
+	fmt.Println("  ─────────────────────────────────")
+	fmt.Printf("  TOTAL:                      %3d\n", totalCounted)
+
+	// Only show warning if there's a discrepancy
+	if totalCounted != actualIssues {
+		fmt.Println()
+		fmt.Printf("⚠️  WARNING: Total (%d) doesn't match Issues Found (%d)\n", totalCounted, actualIssues)
+		fmt.Printf("Difference: %d issues not tracked in SecurityRisks\n", actualIssues-totalCounted)
+	} else {
+		fmt.Printf("\nCount verified: All %d issues accounted for\n", actualIssues)
+	}
+	fmt.Println()
+}
+
+// PrintSecurityAuditJSON outputs security audit in JSON format
+func PrintSecurityAuditJSON(audit *models.SecurityAudit) {
+	// Calculate CIS score
+	cisResult := CalculateCISScore(audit)
+
+	output := struct {
+		Disclaimer  string                 `json:"disclaimer"`
+		PodsScanned int                    `json:"pods_scanned"`
+		IssuesFound int                    `json:"issues_found"`
+		CISScore    int                    `json:"cis_score"`
+		CISPassed   int                    `json:"cis_passed"`
+		CISFailed   int                    `json:"cis_failed"`
+		Risks       models.SecurityRisks   `json:"risks"`
+		Issues      []models.SecurityIssue `json:"issues"`
+		Actions     []string               `json:"priority_actions"`
+	}{
+		Disclaimer:  "Security awareness tool - not for compliance auditing. Use kube-bench for complete CIS assessment.",
+		PodsScanned: audit.TotalPodsAudited,
+		IssuesFound: len(audit.Issues),
+		CISScore:    cisResult.Score,
+		CISPassed:   cisResult.PassedChecks,
+		CISFailed:   cisResult.FailedChecks,
+		Risks:       audit.Risks,
+		Issues:      audit.Issues,
+		Actions:     audit.PriorityActions,
+	}
+
+	jsonData, _ := json.MarshalIndent(output, "", "  ")
+	fmt.Println(string(jsonData))
 }

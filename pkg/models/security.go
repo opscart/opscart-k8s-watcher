@@ -11,18 +11,20 @@ type SecurityAudit struct {
 
 // SecurityRisks contains counts of different security risks
 type SecurityRisks struct {
-	RunningAsRoot         int `json:"running_as_root"`
-	PrivilegedContainers  int `json:"privileged_containers"`
-	HostNetwork           int `json:"host_network"`
-	HostPID               int `json:"host_pid"`
-	HostIPC               int `json:"host_ipc"`
-	HostPathVolumes       int `json:"host_path_volumes"`       // NEW - Phase 1
-	DefaultServiceAccount int `json:"default_service_account"` // NEW - Phase 1
-	MissingResourceLimits int `json:"missing_resource_limits"`
-	MissingProbes         int `json:"missing_probes"`
-	AddedCapabilities     int `json:"added_capabilities"`
-	PrivilegeEscalation   int `json:"privilege_escalation"`
-	WritableFilesystem    int `json:"writable_filesystem"`
+	RunningAsRoot          int `json:"running_as_root"`
+	PrivilegedContainers   int `json:"privileged_containers"`
+	HostNetwork            int `json:"host_network"`
+	HostPID                int `json:"host_pid"`
+	HostIPC                int `json:"host_ipc"`
+	HostPathVolumes        int `json:"host_path_volumes"`       // NEW - Phase 1
+	DefaultServiceAccount  int `json:"default_service_account"` // NEW - Phase 1
+	MissingResourceLimits  int `json:"missing_resource_limits"`
+	MissingProbes          int `json:"missing_probes"`
+	AddedCapabilities      int `json:"added_capabilities"`
+	PrivilegeEscalation    int `json:"privilege_escalation"`
+	WritableFilesystem     int `json:"writable_filesystem"`
+	MissingNetworkPolicies int
+	MissingLimits          int
 }
 
 // SecurityIssue represents a single security issue
