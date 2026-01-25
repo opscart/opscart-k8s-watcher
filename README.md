@@ -1,27 +1,86 @@
-# OpsCart Kubernetes Watcher
+# opscart-k8s-watcher
 
-**Production-grade Kubernetes war room toolkit for DevOps engineers managing multi-cluster environments.**
+**Version:** 0.1 (Beta)  
+**Purpose:** Emergency Kubernetes cluster scanner for war room situations  
+**Focus:** Security awareness, resource optimization, and rapid troubleshooting
 
-[![Go Version](https://img.shields.io/badge/Go-1.21+-00ADD8?style=flat&logo=go)](https://go.dev/)
-[![License](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+---
 
-## Overview
+## ⚠️ Important Disclaimer
 
-OpsCart K8s Watcher is a comprehensive CLI tool designed for emergency response, security auditing, cost optimization, and risk assessment across multiple Kubernetes clusters. Built for enterprise environments managing 8+ AKS clusters in regulated industries (pharmaceutical, fintech, healthcare).
+**This is a security awareness and troubleshooting tool - NOT for:**
+- Compliance auditing (use kube-bench for CIS compliance)
+- Financial decision-making (consult cloud architects for cost analysis)
+- Production security decisions (consult security professionals)
 
-### Key Features
+**What it IS for:**
+- Quick security posture checks
+- War room troubleshooting
+- Resource optimization opportunities
+- Trend tracking across environments
 
-- 🚨 **Emergency Response** - Find critical issues immediately during incidents
-- 🔒 **Security Audit** - Comprehensive security posture analysis with 0-100 scoring
-- 💰 **Cost Analysis** - Honest, range-based cost estimation with optimization scenarios
-- ⚠️ **Risk Quantification** - Industry-first security → financial risk mapping
-- 🔍 **Multi-Cluster Search** - Find resources across all clusters instantly
-- 📊 **Resource Analysis** - CPU/memory breakdown with waste detection
-- 📸 **Enhanced Snapshots** - Complete cluster state for war room visibility
+---
 
-## Quick Start
+## Features
 
-### Installation
+### 🔒 Security Auditing
+- **CIS Kubernetes Benchmark scoring** (Pod Security subset)
+- **Environment-aware analysis** (PRODUCTION vs DEVELOPMENT)
+- **Top 5 specific resources** per issue type
+- **Actionable remediation steps**
+
+Example output:
+```
+  • Containers running as root: 31
+    └─ PRODUCTION: 6 (⚠️  REQUIRES IMMEDIATE ACTION)
+    └─ DEVELOPMENT: 25 (acceptable for dev, monitor)
+    Top resources:
+      1. backend-api in namespace prod-api [PROD]
+      2. web-frontend in namespace prod-web [PROD]
+```
+
+**Checks performed:**
+- Privileged containers (CIS 5.2.1)
+- Host namespace sharing (CIS 5.2.2-5.2.4)
+- Root containers (CIS 5.2.6)
+- Privilege escalation
+- Resource limits
+- Security contexts
+- Service account usage
+
+**Reference:** Based on [CIS Kubernetes Benchmark v1.8](https://www.cisecurity.org/benchmark/kubernetes)
+
+### 🚨 Emergency Scanner
+- Crash looping pods
+- Pending pods
+- Image pull failures
+- High restart counts
+
+### 📊 Resource Analysis
+- Cluster capacity utilization
+- Namespace resource breakdown
+- Idle namespace detection
+- Spot instance eligibility
+
+### 💰 Cost Optimization
+- Idle resource detection
+- Spot instance recommendations
+- Resource right-sizing opportunities
+
+**Note:** Spot instance savings based on cloud provider published rates (~70-90%)
+
+### 🔍 Multi-Cluster Search
+- Find resources across clusters
+- Quick troubleshooting
+
+### 📸 Enhanced Snapshots
+- Complete cluster state capture
+- Deployment, service, PVC status
+- Configuration inventory
+
+---
+
+## Installation
 
 ```bash
 # Clone repository
@@ -31,337 +90,258 @@ cd opscart-k8s-watcher
 # Build
 go build -o opscart-scan cmd/opscart-scan/main.go
 
-# Verify installation
+# Run
 ./opscart-scan --help
 ```
 
-### Basic Usage
+---
 
-```bash
-# Emergency war room scan
-./opscart-scan emergency --cluster prod-aks-01
-
-# Security audit
-./opscart-scan security --cluster prod-aks-01
-
-# Cost analysis with optimization
-./opscart-scan costs --cluster prod-aks-01 --monthly-cost 12000
-
-# Risk-cost analysis (pharma industry)
-./opscart-scan risk-cost --cluster prod-aks-01 --industry pharma
-
-# Find resource across all clusters
-./opscart-scan find backend-api --all-clusters
-```
-
-## Commands
-
-### Emergency Response
-
-```bash
-# Find critical issues immediately
-./opscart-scan emergency --cluster prod-aks-01
-
-# Output:
-# 🔴 CRITICAL ISSUES:
-# - 3 CrashLoopBackOff pods
-# - 2 failed deployments
-# - 1 OOMKilled pod
-```
+## Usage
 
 ### Security Audit
-
 ```bash
-# Comprehensive security analysis
+# Full security scan
 ./opscart-scan security --cluster prod-aks-01
 
-# Features:
-# - 0-100 security score
-# - Privileged container detection
-# - hostPath volume checks
-# - Root user detection
-# - Missing resource limits
-# - Network policy gaps
-```
-
-### Cost Analysis
-
-```bash
-# Namespace-level cost breakdown
-./opscart-scan costs --cluster prod-aks-01 --monthly-cost 10000
-
-# Features:
-# - Honest range estimates (Low/Best/High)
-# - Spot migration scenarios
-# - Idle resource detection
-# - Right-sizing recommendations
-# - HPA opportunities
-```
-
-### Risk-Cost Analysis
-
-```bash
-# Map security vulnerabilities → financial risk
-./opscart-scan risk-cost --cluster prod-aks-01 --industry pharma
-
-# Industries: generic, pharma, fintech, startup
-
-# Output:
-# Risk Exposure: $601K
-# Fix Cost: $28K
-# ROI: 21.3x
-# Payback: 0.6 months
-```
-
-### Resource Analysis
-
-```bash
-# CPU/Memory breakdown by namespace
-./opscart-scan resources --cluster prod-aks-01
-
-# Features:
-# - Waste score (0-100)
-# - Spot eligibility detection
-# - Idle pod identification
-# - Over-provisioning detection
-```
-
-### Multi-Cluster Search
-
-```bash
-# Find resource across all clusters
-./opscart-scan find backend-api --all-clusters
-
-# Search by pod name, deployment, service, etc.
-```
-
-### Enhanced Snapshot
-
-```bash
-# Complete cluster state
-./opscart-scan snapshot --cluster prod-aks-01 --enhanced
-
-# Includes:
-# - Pods with health status
-# - Deployments with replica status
-# - Services with endpoints
-# - Ingresses with TLS status
-# - PVCs with usage tracking
-# - Network policies
-```
-
-## Industry-Specific Configurations
-
-### Pharmaceutical/Healthcare (HIPAA)
-
-```bash
-./opscart-scan risk-cost --cluster prod-aks-01 --industry pharma
-
-# Features:
-# - 2x higher breach costs (PHI data)
-# - HIPAA compliance focus
-# - Patient data protection emphasis
-```
-
-### Financial Services (PCI-DSS)
-
-```bash
-./opscart-scan risk-cost --cluster prod-aks-01 --industry fintech
-
-# Features:
-# - 1.6x higher breach costs
-# - Payment card data focus
-# - PCI compliance emphasis
-```
-
-### Startups
-
-```bash
-./opscart-scan risk-cost --cluster dev-cluster --industry startup
-
-# Features:
-# - Lower breach cost estimates
-# - Reduced engineer rates
-# - Budget-conscious recommendations
-```
-
-## Architecture
-
-```
-opscart-k8s-watcher/
-├── cmd/
-│   └── opscart-scan/
-│       └── main.go              # CLI entry point
-├── pkg/
-│   ├── analyzer/
-│   │   ├── costs.go             # Cost analysis engine
-│   │   ├── resources.go         # Resource analysis
-│   │   ├── security.go          # Security audit
-│   │   ├── riskcost.go          # Risk quantification
-│   │   └── riskcost_config.go   # Industry configs
-│   ├── scanner/
-│   │   ├── cluster.go           # Cluster scanning
-│   │   └── enhanced.go          # Enhanced snapshots
-│   └── models/
-│       ├── resources.go         # Resource models
-│       ├── security.go          # Security models
-│       └── riskcost.go          # Risk-cost models
-└── README.md
-```
-
-## Key Differentiators
-
-### vs Kubecost
-- No installation required (single binary)
-- Honest range estimates (not fake precision)
-- Security + cost integration
-- Industry-specific configurations
-
-### vs Traditional Security Scanners
-- Financial impact quantification
-- ROI calculation built-in
-- Executive-friendly reporting
-- Remediation cost estimation
-
-### vs Azure Cost Management
-- Namespace-level granularity
-- Optimization scenario generation
-- Security risk integration
-- Multi-cluster support
-
-## Unique Features
-
-### 1. Security → Financial Risk Mapping
-World's first tool to map Kubernetes security vulnerabilities to quantified financial risk with industry-specific breach costs.
-
-### 2. Honest Cost Ranges
-Shows Low/Best/High estimates instead of fake precision, with confidence-based uncertainty calculations.
-
-### 3. Industry Configurations
-Pharmaceutical, fintech, and startup-specific cost models based on real-world incident data.
-
-### 4. War Room Optimized
-Built for emergency response with instant issue detection and multi-cluster search.
-
-## Use Cases
-
-### Emergency Response
-"Dashboard is down in production!"
-```bash
-./opscart-scan emergency --cluster prod-aks-01
-# Instantly finds CrashLoopBackOff pods, failed deployments
-```
-
-### Budget Justification
-"Need budget for security fixes"
-```bash
-./opscart-scan risk-cost --cluster prod-aks-01 --industry pharma
-# Shows $601K risk, $28K fix cost, 21.3x ROI
-```
-
-### Cost Optimization
-"How can we reduce cloud costs?"
-```bash
-./opscart-scan costs --cluster prod-aks-01 --monthly-cost 12000
-# Identifies $2,400/month in spot migration savings
-```
-
-### Compliance Audit
-"Preparing for SOC2/PCI audit"
-```bash
-./opscart-scan security --cluster prod-aks-01
-# Shows security score, remediation timeline, compliance gaps
-```
-
-## Configuration
-
-### Cluster Access
-Tool uses standard kubeconfig (~/.kube/config). Ensure you have access to target clusters:
-
-```bash
-# Add cluster credentials
-az aks get-credentials --resource-group <rg> --name prod-aks-01
-
-# Verify access
-kubectl get nodes --context prod-aks-01
-```
-
-### Industry Configuration
-Default: Generic industry
-Override: Use `--industry` flag
-
-```bash
---industry pharma     # Pharmaceutical/Healthcare
---industry fintech    # Financial Services
---industry startup    # Early-stage companies
---industry generic    # Default
-```
-
-## Output Formats
-
-All commands support table (default) and JSON output:
-
-```bash
-# Table format (human-readable)
-./opscart-scan security --cluster prod-aks-01
-
-# JSON format (machine-readable)
+# JSON output
 ./opscart-scan security --cluster prod-aks-01 --format json
 ```
 
-## Requirements
-
-- Go 1.21 or higher
-- kubectl configured with cluster access
-- Azure CLI (for AKS clusters)
-
-## Development
-
+### Emergency Scanner
 ```bash
-# Run tests
-go test ./...
-
-# Build
-go build -o opscart-scan cmd/opscart-scan/main.go
-
-# Install locally
-go install ./cmd/opscart-scan
+# Find critical issues immediately
+./opscart-scan emergency --cluster prod-aks-01
 ```
 
-## Roadmap
+### Resource Analysis
+```bash
+# Analyze cluster resources
+./opscart-scan resources --cluster prod-aks-01
 
-- [ ] HTML report generation
-- [ ] Carbon footprint calculator (ESG)
-- [ ] Compliance module (PCI/HIPAA/SOC2)
-- [ ] Historical cost tracking
-- [ ] Azure Pricing API integration
-- [ ] Multi-cloud support (EKS, GKE)
+# By namespace
+./opscart-scan resources --cluster prod-aks-01 --namespace production
+```
 
-## Contributing
+### Cost Analysis
+```bash
+# Requires monthly cluster cost
+./opscart-scan costs --cluster prod-aks-01 --monthly-cost 5000
+```
 
-Contributions welcome! Please open an issue first to discuss proposed changes.
+### Optimization
+```bash
+# Quick optimization wins
+./opscart-scan optimize --cluster prod-aks-01
+```
 
-## License
+### Find Resources
+```bash
+# Find pods across clusters
+./opscart-scan find pod --cluster prod-aks-01
 
-MIT License - See LICENSE file for details
+# Find deployments
+./opscart-scan find deployment --cluster prod-aks-01
+```
 
-## Author
-
-**Shamsher Khan**
-- Senior DevOps and Kubernetes Engineer
-- IEEE Senior Member
-- Blog: [OpsCart.com](https://opscart.com)
-
-## Acknowledgments
-
-Built for production environments managing 8+ AKS clusters in pharmaceutical industry.
-
-Based on real-world incident data from:
-- Ponemon Institute (breach costs)
-- Aqua Security (K8s security reports)
-- CNCF (incident analysis)
-- StackRox/Red Hat (container security)
+### Cluster Snapshot
+```bash
+# Capture cluster state
+./opscart-scan snapshot --cluster prod-aks-01
+```
 
 ---
 
-**Note:** This tool provides risk estimates based on industry averages. Actual costs depend on your specific environment, security posture, and regulatory requirements. Use Azure Cost Management for precise billing data.
+## What's New in v0.1
+
+### Security Improvements
+- **Removed unvalidated financial risk calculations**
+  - Eliminated fake probabilities and ROI projections
+  - Removed linear risk scaling assumptions
+  - No more made-up breach cost estimates
+
+- **Added CIS Kubernetes Benchmark scoring**
+  - Based on official CIS Benchmark v1.8
+  - Covers 7 pod security controls
+  - Weighted scoring system
+  - Clear pass/fail status
+
+- **Environment-aware recommendations**
+  - Detects PRODUCTION, STAGING, DEVELOPMENT, SYSTEM
+  - Prioritizes production issues
+  - Context-appropriate severity levels
+
+- **Specific resource identification**
+  - Shows top 5 resources per issue type
+  - Sorted by environment (production first)
+  - Direct kubectl commands for remediation
+
+- **Issue count validation**
+  - Transparent breakdown of all issues
+  - Validation that counts match
+  - Debug output if discrepancies detected
+
+### Transparency Improvements
+- Prominent disclaimers on all commands
+- Citations for industry benchmarks
+- Clear about tool limitations
+- References to authoritative tools (kube-bench)
+
+---
+
+## Output Examples
+
+### Security Scan
+```
+╔════════════════════════════════════════════════════════════╗
+║                    ⚠️  DISCLAIMER ⚠️                        ║
+║  • SECURITY AWARENESS TOOL - NOT FOR COMPLIANCE AUDITS     ║
+║  • Use kube-bench for complete CIS compliance assessment   ║
+╚════════════════════════════════════════════════════════════╝
+
+CIS Compliance Score: 67/100
+Controls Passed: 4/7
+Controls Failed: 3/7
+
+🔴 CRITICAL FINDINGS:
+  • Privileged containers: 3 (Container escape risk)
+    └─ SYSTEM: 3 (expected for infrastructure)
+    Top resources:
+      1. kube-proxy in namespace kube-system
+      2. metrics-server in namespace kube-system
+```
+
+### Emergency Scanner
+```
+🔴 CRITICAL: 1    🟡 HIGH: 2    🟠 MEDIUM: 1
+
+🔴 CRITICAL ISSUES:
+  kubernetes-dashboard/dashboard-xxx
+  └─ Status: CrashLoopBackOff | Restarts: 2157
+  └─ Container crash looping
+```
+
+### Resource Analysis
+```
+Cluster Capacity:  24.0 CPU cores, 29.1 GB memory
+Total Requested:   4.0 CPU cores (16.5%), 5.8 GB memory (20.0%)
+
+OPTIMIZATION OPPORTUNITIES:
+🔴 HIGH IMPACT:
+  • staging idle for 21+ days (0.3 CPU, 0.4 GB)
+    └─ kubectl delete namespace staging
+```
+
+---
+
+## Limitations
+
+### Security Scanning
+- ✅ **Covers:** Pod security controls (CIS section 5)
+- ❌ **Does NOT cover:**
+  - Control plane configuration
+  - etcd security
+  - Node security
+  - RBAC policies
+  - Admission controllers
+  - Network policies (yet)
+
+**For comprehensive compliance:** Use [kube-bench](https://github.com/aquasecurity/kube-bench)
+
+### Cost Analysis
+- Shows relative resource usage
+- Identifies optimization opportunities
+- Does NOT provide:
+  - Exact cost calculations
+  - ROI projections
+  - Financial recommendations
+
+**For cost analysis:** Use cloud provider tools (AWS Cost Explorer, GCP Cost Management, Azure Cost Management)
+
+---
+
+## Environment Detection
+
+The tool automatically detects environment types based on namespace naming:
+
+```
+prod-api          → PRODUCTION  (⚠️ REQUIRES IMMEDIATE ACTION)
+production-web    → PRODUCTION
+staging-api       → STAGING     (should fix before prod)
+qa-environment    → STAGING
+kube-system       → SYSTEM      (expected for infrastructure)
+istio-system      → SYSTEM
+default           → DEVELOPMENT (acceptable for dev, monitor)
+my-app            → DEVELOPMENT
+```
+
+You can customize detection logic in `pkg/analyzer/security.go` function `detectEnvironment()`.
+
+---
+
+## Roadmap
+
+### v0.2 (Next Release)
+- [ ] Network policy detection and scoring
+- [ ] Pod Security Standards (PSS) compliance
+- [ ] Historical trend tracking
+- [ ] Baseline comparison
+- [ ] SARIF output for CI/CD
+
+### v0.3 (Future)
+- [ ] Custom policy definitions
+- [ ] Multi-cluster aggregation
+- [ ] Prometheus metric export
+- [ ] Slack/Teams notifications
+
+---
+
+## Contributing
+
+This is currently an internal tool being refined for broader use.
+
+**Feedback welcome:**
+- Bug reports
+- Feature requests
+- Use case examples
+- Documentation improvements
+
+**Not accepting:**
+- Financial modeling features
+- Unvalidated risk calculations
+- Arbitrary scoring systems
+
+---
+
+## References
+
+- [CIS Kubernetes Benchmark](https://www.cisecurity.org/benchmark/kubernetes)
+- [kube-bench](https://github.com/aquasecurity/kube-bench) - Official CIS benchmark tool
+- [Pod Security Standards](https://kubernetes.io/docs/concepts/security/pod-security-standards/)
+- [AWS Spot Instances](https://aws.amazon.com/ec2/spot/pricing/)
+- [GCP Preemptible VMs](https://cloud.google.com/compute/docs/instances/preemptible)
+- [Azure Spot VMs](https://azure.microsoft.com/en-us/pricing/spot/)
+
+---
+
+## Acknowledgments
+
+Built with insights from:
+- **CIS Benchmarks** - Security baseline controls
+- **Aqua Security** - kube-bench methodology
+- **CNCF** - Kubernetes security best practices
+- **StackRox** - Pod security guidance
+
+Special thanks to the Kubernetes security community for establishing these standards.
+
+---
+
+## Support
+
+For questions or issues:
+- Create a GitHub issue
+- Contact: opscart.inc@gmail.com
+- Blog: https://opscart.com
+
+---
+
+**Remember:** This tool provides awareness, not decisions. Always validate findings with security professionals and cloud architects before making production changes.

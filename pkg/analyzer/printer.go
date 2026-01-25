@@ -26,7 +26,8 @@ func printResourceTable(analysis *models.ClusterResourceAnalysis) {
 	fmt.Println("║         CLUSTER RESOURCE USAGE ANALYSIS                    ║")
 	fmt.Println("╚════════════════════════════════════════════════════════════╝")
 	fmt.Println()
-
+	fmt.Println("ℹ️  Note: Spot instance savings based on cloud provider published rates (~70-90%)")
+	fmt.Println()
 	// Cluster summary
 	fmt.Printf("Cluster Capacity:  %0.1f CPU cores, %0.1f GB memory\n",
 		analysis.TotalCPUCores, analysis.TotalMemoryGB)

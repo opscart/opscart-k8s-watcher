@@ -19,7 +19,6 @@ var (
 	enhanced      bool
 	monthlyCost   float64
 	showScenarios bool
-	industry      string
 )
 
 func main() {
@@ -92,7 +91,7 @@ Quickly find broken resources, idle workloads, security issues, and generate rep
 	resourcesCmd.Flags().StringVarP(&format, "format", "f", "table", "Output format (table|json)")
 	resourcesCmd.MarkFlagRequired("cluster")
 
-	// Security command - NEW
+	// Security command
 	securityCmd := &cobra.Command{
 		Use:   "security",
 		Short: "Audit cluster security posture",
@@ -123,45 +122,6 @@ Quickly find broken resources, idle workloads, security issues, and generate rep
 	securityCmd.Flags().StringVarP(&namespace, "namespace", "n", "", "Namespace to audit (default: all)")
 	securityCmd.Flags().StringVarP(&format, "format", "f", "table", "Output format (table|json)")
 	securityCmd.MarkFlagRequired("cluster")
-
-	// Risk-Cost command - NEW
-	riskCostCmd := &cobra.Command{
-		Use:   "risk-cost",
-		Short: "Calculate financial risk from security vulnerabilities",
-		Long:  "Maps security issues to financial risk exposure and calculates ROI of fixes",
-		Run: func(cmd *cobra.Command, args []string) {
-			if cluster == "" {
-				fmt.Println("Error: --cluster required")
-				os.Exit(1)
-			}
-
-			clientset, err := getKubernetesClient(cluster)
-			if err != nil {
-				fmt.Printf("Error connecting to cluster: %v\n", err)
-				os.Exit(1)
-			}
-
-			// First run security audit
-			sa := analyzer.NewSecurityAuditor(clientset)
-			audit, err := sa.AuditClusterSecurity(namespace)
-			if err != nil {
-				fmt.Printf("Error auditing security: %v\n", err)
-				os.Exit(1)
-			}
-
-			// Then calculate risk-cost with industry config
-			config := analyzer.GetConfigForIndustry(industry)
-			rca := analyzer.NewRiskCostAnalyzerWithConfig(audit, config)
-			riskAnalysis := rca.CalculateRiskCost()
-
-			analyzer.PrintRiskCostAnalysis(riskAnalysis, format)
-		},
-	}
-	riskCostCmd.Flags().StringVarP(&cluster, "cluster", "c", "", "Cluster context name (required)")
-	riskCostCmd.Flags().StringVarP(&namespace, "namespace", "n", "", "Namespace to analyze (default: all)")
-	riskCostCmd.Flags().StringVarP(&format, "format", "f", "table", "Output format (table|json)")
-	riskCostCmd.Flags().StringVarP(&industry, "industry", "i", "generic", "Industry type (generic|pharma|fintech|startup)")
-	riskCostCmd.MarkFlagRequired("cluster")
 
 	// Optimize command
 	optimizeCmd := &cobra.Command{
@@ -194,7 +154,7 @@ Quickly find broken resources, idle workloads, security issues, and generate rep
 	optimizeCmd.Flags().StringVarP(&namespace, "namespace", "n", "", "Namespace to analyze (default: all)")
 	optimizeCmd.MarkFlagRequired("cluster")
 
-	// Costs command - NEW
+	// Costs command
 	costsCmd := &cobra.Command{
 		Use:   "costs",
 		Short: "Analyze cluster costs and optimization opportunities",
@@ -271,7 +231,7 @@ Quickly find broken resources, idle workloads, security issues, and generate rep
 	findCmd.Flags().StringVarP(&cluster, "cluster", "c", "", "Cluster context name")
 	findCmd.Flags().BoolVarP(&allClusters, "all-clusters", "a", false, "Search all clusters in kubeconfig")
 
-	// Snapshot command - enhanced
+	// Snapshot command
 	snapshotCmd := &cobra.Command{
 		Use:   "snapshot",
 		Short: "Take a snapshot of cluster state",
@@ -352,7 +312,6 @@ Quickly find broken resources, idle workloads, security issues, and generate rep
 	rootCmd.AddCommand(emergencyCmd)
 	rootCmd.AddCommand(resourcesCmd)
 	rootCmd.AddCommand(securityCmd)
-	rootCmd.AddCommand(riskCostCmd)
 	rootCmd.AddCommand(optimizeCmd)
 	rootCmd.AddCommand(costsCmd)
 	rootCmd.AddCommand(findCmd)
