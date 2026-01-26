@@ -69,8 +69,10 @@ Example output:
 
 **Note:** Spot instance savings based on cloud provider published rates (~70-90%)
 
-### 🔍 Multi-Cluster Search
-- Find resources across clusters
+### 🔍 Resource Search
+- Find resources by type (pod, deployment, service)
+- Filter by name pattern or status
+- Multi-cluster search support
 - Quick troubleshooting
 
 ### 📸 Enhanced Snapshots
@@ -136,11 +138,23 @@ go build -o opscart-scan cmd/opscart-scan/main.go
 
 ### Find Resources
 ```bash
-# Find pods across clusters
+# Find all pods
 ./opscart-scan find pod --cluster prod-aks-01
 
-# Find deployments
+# Find all deployments
 ./opscart-scan find deployment --cluster prod-aks-01
+
+# Find all services
+./opscart-scan find service --cluster prod-aks-01
+
+# Filter by name pattern
+./opscart-scan find pod --cluster prod-aks-01 --name=backend
+
+# Filter by status
+./opscart-scan find pod --cluster prod-aks-01 --status=Failed
+
+# Combine filters
+./opscart-scan find pod --cluster prod-aks-01 --name=api --status=Running
 ```
 
 ### Cluster Snapshot
