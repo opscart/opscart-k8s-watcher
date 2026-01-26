@@ -163,6 +163,24 @@ go build -o opscart-scan cmd/opscart-scan/main.go
 ./opscart-scan snapshot --cluster prod-aks-01
 ```
 
+```bash
+# Minimal cluster state
+./opscart-scan snapshot --cluster prod --enhanced=false
+```
+## Troubleshooting
+
+### Kubernetes Warnings (Windows/Corporate Networks)
+
+If you see many "Use tokens from the TokenRequest API" warnings:
+```bash
+# Filter warnings
+./opscart-scan snapshot --cluster prod 2>&1 | grep -v "Use tokens"
+
+# Or suppress all warnings
+./opscart-scan snapshot --cluster prod 2>/dev/null
+```
+
+These are Kubernetes deprecation warnings (not errors). The tool works correctly.
 ---
 
 ## What's New in v0.1
@@ -336,6 +354,16 @@ This is currently an internal tool being refined for broader use.
 - [Azure Spot VMs](https://azure.microsoft.com/en-us/pricing/spot/)
 
 ---
+
+## Known Issues
+
+### Corporate Network Performance
+On Windows machines behind corporate proxies, the enhanced snapshot 
+may be slow due to network latency. Use `--enhanced=false` for faster 
+basic snapshots, or run from Mac/Linux/WSL.
+
+Workaround:
+./opscart-scan snapshot --cluster prod --enhanced=false
 
 ## Acknowledgments
 
