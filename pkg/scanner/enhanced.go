@@ -19,48 +19,75 @@ func (s *Scanner) TakeEnhancedSnapshot(namespace string) (*models.EnhancedCluste
 	}
 
 	// Get base snapshot data (pods, deployments, etc)
+	fmt.Println("📦 Getting pods and deployments...")
 	baseSnapshot, err := s.TakeSnapshot(namespace)
 	if err != nil {
 		return nil, err
 	}
 	snapshot.ClusterSnapshot = *baseSnapshot
+	fmt.Printf("   ✅ Found %d deployments\n", len(baseSnapshot.Deployments))
 
 	// Get services
+	fmt.Println("🌐 Getting services...")
 	services, err := s.getServiceDetails(namespace)
 	if err == nil {
 		snapshot.Services = services
+		fmt.Printf("   ✅ Found %d services\n", len(services))
+	} else {
+		fmt.Printf("   ⚠️  Failed to get services: %v\n", err)
 	}
 
 	// Get ingresses
+	fmt.Println("🔗 Getting ingresses...")
 	ingresses, err := s.getIngressDetails(namespace)
 	if err == nil {
 		snapshot.Ingresses = ingresses
+		fmt.Printf("   ✅ Found %d ingresses\n", len(ingresses))
+	} else {
+		fmt.Printf("   ⚠️  Failed to get ingresses: %v\n", err)
 	}
 
 	// Get PVC details
+	fmt.Println("💾 Getting PVCs...")
 	pvcDetails, err := s.getPVCDetails(namespace)
 	if err == nil {
 		snapshot.PVCDetails = pvcDetails
+		fmt.Printf("   ✅ Found %d PVCs\n", len(pvcDetails))
+	} else {
+		fmt.Printf("   ⚠️  Failed to get PVCs: %v\n", err)
 	}
 
 	// Get ConfigMaps count
+	fmt.Println("📄 Getting ConfigMaps...")
 	configMaps, err := s.getResourceCounts(namespace, "configmaps")
 	if err == nil {
 		snapshot.ConfigMaps = configMaps
+		fmt.Printf("   ✅ Found ConfigMaps in %d namespaces\n", len(configMaps))
+	} else {
+		fmt.Printf("   ⚠️  Failed to get ConfigMaps: %v\n", err)
 	}
 
 	// Get Secrets count
+	fmt.Println("🔐 Getting Secrets...")
 	secrets, err := s.getResourceCounts(namespace, "secrets")
 	if err == nil {
 		snapshot.Secrets = secrets
+		fmt.Printf("   ✅ Found Secrets in %d namespaces\n", len(secrets))
+	} else {
+		fmt.Printf("   ⚠️  Failed to get Secrets: %v\n", err)
 	}
 
 	// Get Network Policies
+	fmt.Println("🔒 Getting Network Policies...")
 	networkPolicies, err := s.getNetworkPolicies(namespace)
 	if err == nil {
 		snapshot.NetworkPolicies = networkPolicies
+		fmt.Printf("   ✅ Found %d network policies\n", len(networkPolicies))
+	} else {
+		fmt.Printf("   ⚠️  Failed to get Network Policies: %v\n", err)
 	}
 
+	fmt.Println("✅ Snapshot complete!")
 	return snapshot, nil
 }
 
@@ -73,7 +100,15 @@ func (s *Scanner) getServiceDetails(namespace string) ([]models.ServiceDetail, e
 		return nil, err
 	}
 
-	for _, svc := range svcList.Items {
+	totalServices := len(svcList.Items)
+	fmt.Printf("   Processing %d services...\n", totalServices)
+
+	for i, svc := range svcList.Items {
+		// Show progress every 10 services
+		if i > 0 && i%10 == 0 {
+			fmt.Printf("   ... processed %d/%d services\n", i, totalServices)
+		}
+
 		// Get endpoints to see if service has backends
 		endpoints, _ := s.clientset.CoreV1().Endpoints(svc.Namespace).Get(s.ctx, svc.Name, metav1.GetOptions{})
 		endpointCount := 0
@@ -186,7 +221,10 @@ func (s *Scanner) getPVCDetails(namespace string) ([]models.PVCDetail, error) {
 		return nil, err
 	}
 
+	fmt.Printf("   Processing %d PVCs...\n", len(pvcList.Items))
+
 	// Get all pods to find which ones use PVCs
+	fmt.Println("   Looking up pod usage for PVCs...")
 	podList, _ := s.clientset.CoreV1().Pods(namespace).List(s.ctx, metav1.ListOptions{})
 	pvcUsage := make(map[string]string)
 
