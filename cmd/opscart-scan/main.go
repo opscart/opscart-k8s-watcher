@@ -205,12 +205,48 @@ Quickly find broken resources, idle workloads, security issues, and generate rep
 
 	// Find command
 	findCmd := &cobra.Command{
-		Use:   "find [resource-name]",
-		Short: "Find a resource across clusters",
-		Long:  "Search for deployments, pods, services by name pattern",
-		Args:  cobra.ExactArgs(1),
+		Use:   "find [resource-type]",
+		Short: "Find resources across clusters",
+		Long: `Search for Kubernetes resources by type (pod, deployment, service).
+	
+Examples:
+  # Find all pods
+  opscart-scan find pod --cluster prod
+  
+  # Find all deployments
+  opscart-scan find deployment --cluster prod
+  
+  # Filter by status
+  opscart-scan find pod --cluster prod --status=Failed
+  opscart-scan find pod --cluster prod --status=Running
+  
+  # Filter by name pattern
+  opscart-scan find pod --cluster prod --name=backend
+  opscart-scan find deployment --cluster prod --name=api
+  
+  # Combine filters
+  opscart-scan find pod --cluster prod --name=api --status=Running
+  
+  # Find all resource types
+  opscart-scan find all --cluster prod`,
+		Args: cobra.ExactArgs(1),
 		Run: func(cmd *cobra.Command, args []string) {
-			pattern := args[0]
+			resourceType := args[0]
+
+			// Validate resource type
+			validTypes := []string{"pod", "deployment", "service", "all"}
+			isValid := false
+			for _, t := range validTypes {
+				if resourceType == t {
+					isValid = true
+					break
+				}
+			}
+
+			if !isValid {
+				fmt.Printf("Error: Invalid resource type '%s'. Valid types: pod, deployment, service, all\n", resourceType)
+				os.Exit(1)
+			}
 
 			if cluster == "" && !allClusters {
 				fmt.Println("Error: specify --cluster or --all-clusters")
@@ -224,12 +260,18 @@ Quickly find broken resources, idle workloads, security issues, and generate rep
 				clusters = []string{cluster}
 			}
 
-			results := scanner.FindResources(clusters, pattern)
+			// Get filter flags
+			namePattern, _ := cmd.Flags().GetString("name")
+			statusFilter, _ := cmd.Flags().GetString("status")
+
+			results := scanner.FindResources(clusters, resourceType, namePattern, statusFilter)
 			scanner.PrintFindResults(results)
 		},
 	}
 	findCmd.Flags().StringVarP(&cluster, "cluster", "c", "", "Cluster context name")
 	findCmd.Flags().BoolVarP(&allClusters, "all-clusters", "a", false, "Search all clusters in kubeconfig")
+	findCmd.Flags().String("name", "", "Filter by name pattern (optional)")
+	findCmd.Flags().String("status", "", "Filter by status (Failed, Pending, Running, etc.)")
 
 	// Snapshot command
 	snapshotCmd := &cobra.Command{

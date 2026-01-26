@@ -153,9 +153,12 @@ func PrintIdleResources(idle []models.IdleResource) {
 }
 
 // FindResources searches for resources across clusters
-func FindResources(clusters []string, pattern string) []models.ResourceSearchResult {
+func FindResources(clusters []string, resourceType, namePattern, statusFilter string) []models.ResourceSearchResult {
 	var results []models.ResourceSearchResult
-	pattern = strings.ToLower(pattern)
+
+	// Convert filters to lowercase for case-insensitive matching
+	namePattern = strings.ToLower(namePattern)
+	statusFilter = strings.ToLower(statusFilter)
 
 	for _, cluster := range clusters {
 		scanner, err := NewScanner(cluster)
@@ -164,56 +167,113 @@ func FindResources(clusters []string, pattern string) []models.ResourceSearchRes
 			continue
 		}
 
-		// Search deployments
-		deployList, err := scanner.clientset.AppsV1().Deployments("").List(scanner.ctx, metav1.ListOptions{})
-		if err == nil {
-			for _, deploy := range deployList.Items {
-				if strings.Contains(strings.ToLower(deploy.Name), pattern) {
-					results = append(results, models.ResourceSearchResult{
-						ClusterName: cluster,
-						Type:        "deployment",
-						Namespace:   deploy.Namespace,
-						Name:        deploy.Name,
-						Status:      fmt.Sprintf("%d/%d ready", deploy.Status.ReadyReplicas, *deploy.Spec.Replicas),
-					})
-				}
-			}
+		// Search based on resource type
+		if resourceType == "deployment" || resourceType == "all" {
+			searchDeployments(scanner, cluster, namePattern, statusFilter, &results)
 		}
 
-		// Search pods
-		podList, err := scanner.clientset.CoreV1().Pods("").List(scanner.ctx, metav1.ListOptions{})
-		if err == nil {
-			for _, pod := range podList.Items {
-				if strings.Contains(strings.ToLower(pod.Name), pattern) {
-					results = append(results, models.ResourceSearchResult{
-						ClusterName: cluster,
-						Type:        "pod",
-						Namespace:   pod.Namespace,
-						Name:        pod.Name,
-						Status:      string(pod.Status.Phase),
-					})
-				}
-			}
+		if resourceType == "pod" || resourceType == "all" {
+			searchPods(scanner, cluster, namePattern, statusFilter, &results)
 		}
 
-		// Search services
-		svcList, err := scanner.clientset.CoreV1().Services("").List(scanner.ctx, metav1.ListOptions{})
-		if err == nil {
-			for _, svc := range svcList.Items {
-				if strings.Contains(strings.ToLower(svc.Name), pattern) {
-					results = append(results, models.ResourceSearchResult{
-						ClusterName: cluster,
-						Type:        "service",
-						Namespace:   svc.Namespace,
-						Name:        svc.Name,
-						Status:      string(svc.Spec.Type),
-					})
-				}
-			}
+		if resourceType == "service" || resourceType == "all" {
+			searchServices(scanner, cluster, namePattern, statusFilter, &results)
 		}
 	}
 
 	return results
+}
+
+func searchDeployments(scanner *Scanner, cluster, namePattern, statusFilter string, results *[]models.ResourceSearchResult) {
+	deployList, err := scanner.clientset.AppsV1().Deployments("").List(scanner.ctx, metav1.ListOptions{})
+	if err != nil {
+		return
+	}
+
+	for _, deploy := range deployList.Items {
+		// Filter by name if pattern provided
+		if namePattern != "" && !strings.Contains(strings.ToLower(deploy.Name), namePattern) {
+			continue
+		}
+
+		status := fmt.Sprintf("%d/%d ready", deploy.Status.ReadyReplicas, *deploy.Spec.Replicas)
+
+		// Filter by status if provided
+		if statusFilter != "" {
+			// Check if deployment is healthy
+			isHealthy := deploy.Status.ReadyReplicas == *deploy.Spec.Replicas
+			if statusFilter == "healthy" && !isHealthy {
+				continue
+			}
+			if statusFilter == "unhealthy" && isHealthy {
+				continue
+			}
+		}
+
+		*results = append(*results, models.ResourceSearchResult{
+			ClusterName: cluster,
+			Type:        "deployment",
+			Namespace:   deploy.Namespace,
+			Name:        deploy.Name,
+			Status:      status,
+		})
+	}
+}
+
+func searchPods(scanner *Scanner, cluster, namePattern, statusFilter string, results *[]models.ResourceSearchResult) {
+	podList, err := scanner.clientset.CoreV1().Pods("").List(scanner.ctx, metav1.ListOptions{})
+	if err != nil {
+		return
+	}
+
+	for _, pod := range podList.Items {
+		// Filter by name if pattern provided
+		if namePattern != "" && !strings.Contains(strings.ToLower(pod.Name), namePattern) {
+			continue
+		}
+
+		podStatus := string(pod.Status.Phase)
+
+		// Filter by status if provided
+		if statusFilter != "" && strings.ToLower(podStatus) != statusFilter {
+			continue
+		}
+
+		*results = append(*results, models.ResourceSearchResult{
+			ClusterName: cluster,
+			Type:        "pod",
+			Namespace:   pod.Namespace,
+			Name:        pod.Name,
+			Status:      podStatus,
+		})
+	}
+}
+
+func searchServices(scanner *Scanner, cluster, namePattern, statusFilter string, results *[]models.ResourceSearchResult) {
+	svcList, err := scanner.clientset.CoreV1().Services("").List(scanner.ctx, metav1.ListOptions{})
+	if err != nil {
+		return
+	}
+
+	for _, svc := range svcList.Items {
+		// Filter by name if pattern provided
+		if namePattern != "" && !strings.Contains(strings.ToLower(svc.Name), namePattern) {
+			continue
+		}
+
+		// Services don't have a meaningful status filter, skip if status requested
+		if statusFilter != "" {
+			continue
+		}
+
+		*results = append(*results, models.ResourceSearchResult{
+			ClusterName: cluster,
+			Type:        "service",
+			Namespace:   svc.Namespace,
+			Name:        svc.Name,
+			Status:      string(svc.Spec.Type),
+		})
+	}
 }
 
 // PrintFindResults displays search results
