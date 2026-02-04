@@ -1,8 +1,8 @@
 # opscart-k8s-watcher
 
-**Version:** 0.1 (Beta)  
+**Version:** 0.2 (Beta)  
 **Purpose:** Emergency Kubernetes cluster scanner for war room situations  
-**Focus:** Security awareness, resource optimization, and rapid troubleshooting
+**Focus:** Security awareness, resource optimization, and rapid troubleshooting across multiple clusters
 
 ---
 
@@ -18,10 +18,19 @@
 - War room troubleshooting
 - Resource optimization opportunities
 - Trend tracking across environments
+- Multi-cluster analysis and comparison
 
 ---
 
 ## Features
+
+### 🆕 v0.2: Multi-Cluster Support
+- **Scan all clusters at once** with `--all-clusters`
+- **Scan by environment group** with `--cluster-group`
+- **Compare two clusters** side-by-side
+- **Centralized configuration** in `~/.opscart/config.yaml`
+- **Sequential execution** for clear, readable output
+- **Cluster identification** in all scan outputs
 
 ### 🔒 Security Auditing
 - **CIS Kubernetes Benchmark scoring** (Pod Security subset)
@@ -31,6 +40,8 @@
 
 Example output:
 ```
+🔍 Cluster: prod-aks-01
+
   • Containers running as root: 31
     └─ PRODUCTION: 6 (⚠️  REQUIRES IMMEDIATE ACTION)
     └─ DEVELOPMENT: 25 (acceptable for dev, monitor)
@@ -92,15 +103,111 @@ cd opscart-k8s-watcher
 # Build
 go build -o opscart-scan cmd/opscart-scan/main.go
 
+# Initialize multi-cluster config
+./opscart-scan config init
+
+# Edit config with your clusters
+nano ~/.opscart/config.yaml
+
 # Run
 ./opscart-scan --help
 ```
 
 ---
 
+## Quick Start (v0.2)
+
+### 1. Configure Your Clusters
+
+```bash
+# Initialize config file
+./opscart-scan config init
+
+# Edit ~/.opscart/config.yaml
+nano ~/.opscart/config.yaml
+```
+
+Example config:
+```yaml
+clusters:
+  - name: prod-aks-01
+    context: prod-aks-01-context
+    group: production
+
+  - name: prod-aks-02
+    context: prod-aks-02-context
+    group: production
+
+  - name: staging-aks-01
+    context: staging-aks-01-context
+    group: staging
+
+  - name: dev-aks-01
+    context: dev-aks-01-context
+    group: development
+```
+
+**Find your context names:**
+```bash
+kubectl config get-contexts
+```
+
+### 2. Verify Configuration
+
+```bash
+./opscart-scan config show
+```
+
+### 3. Scan All Clusters
+
+```bash
+# Security scan across all clusters
+./opscart-scan security --all-clusters
+
+# Resource analysis across all clusters
+./opscart-scan resources --all-clusters
+
+# Emergency scan across all clusters
+./opscart-scan emergency --all-clusters
+```
+
+---
+
 ## Usage
 
-### Security Audit
+### Multi-Cluster Commands (New in v0.2)
+
+#### Scan All Configured Clusters
+```bash
+./opscart-scan security --all-clusters
+./opscart-scan resources --all-clusters
+./opscart-scan emergency --all-clusters
+./opscart-scan costs --all-clusters --monthly-cost 5000
+```
+
+#### Scan by Cluster Group
+```bash
+# Scan only production clusters
+./opscart-scan security --cluster-group production
+
+# Scan only staging clusters
+./opscart-scan resources --cluster-group staging
+
+# Scan only development clusters
+./opscart-scan emergency --cluster-group development
+```
+
+#### Compare Two Clusters
+```bash
+# Side-by-side security comparison
+./opscart-scan security --compare=prod-aks-01,staging-aks-01
+
+# Note: Use comma-separated cluster names
+```
+
+### Single-Cluster Commands (v0.1 - Still Supported)
+
+#### Security Audit
 ```bash
 # Full security scan
 ./opscart-scan security --cluster prod-aks-01
@@ -109,13 +216,13 @@ go build -o opscart-scan cmd/opscart-scan/main.go
 ./opscart-scan security --cluster prod-aks-01 --format json
 ```
 
-### Emergency Scanner
+#### Emergency Scanner
 ```bash
 # Find critical issues immediately
 ./opscart-scan emergency --cluster prod-aks-01
 ```
 
-### Resource Analysis
+#### Resource Analysis
 ```bash
 # Analyze cluster resources
 ./opscart-scan resources --cluster prod-aks-01
@@ -124,19 +231,19 @@ go build -o opscart-scan cmd/opscart-scan/main.go
 ./opscart-scan resources --cluster prod-aks-01 --namespace production
 ```
 
-### Cost Analysis
+#### Cost Analysis
 ```bash
 # Requires monthly cluster cost
 ./opscart-scan costs --cluster prod-aks-01 --monthly-cost 5000
 ```
 
-### Optimization
+#### Optimization
 ```bash
 # Quick optimization wins
 ./opscart-scan optimize --cluster prod-aks-01
 ```
 
-### Find Resources
+#### Find Resources
 ```bash
 # Find all pods
 ./opscart-scan find pod --cluster prod-aks-01
@@ -157,16 +264,161 @@ go build -o opscart-scan cmd/opscart-scan/main.go
 ./opscart-scan find pod --cluster prod-aks-01 --name=api --status=Running
 ```
 
-### Cluster Snapshot
+#### Cluster Snapshot
 ```bash
 # Capture cluster state
 ./opscart-scan snapshot --cluster prod-aks-01
-```
 
-```bash
 # Minimal cluster state
 ./opscart-scan snapshot --cluster prod --enhanced=false
 ```
+
+---
+
+## Output Examples
+
+### Multi-Cluster Scan (v0.2)
+```
+╔═══════════════════════════════════════════════════════════╗
+║           MULTI-CLUSTER SCAN                              ║
+╚═══════════════════════════════════════════════════════════╝
+  📦 Scanning 3 clusters...
+  ─────────────────────────────────────────────
+  • prod-aks-01          [production]
+  • prod-aks-02          [production]
+  • staging-aks-01       [staging]
+  ─────────────────────────────────────────────
+
+🔄 Scanning prod-aks-01 (1/3)...
+
+🔍 Cluster: prod-aks-01
+[Full security scan output for prod-aks-01]
+✅ prod-aks-01 done (1.2s)
+
+🔄 Scanning prod-aks-02 (2/3)...
+
+🔍 Cluster: prod-aks-02
+[Full security scan output for prod-aks-02]
+✅ prod-aks-02 done (1.5s)
+
+🔄 Scanning staging-aks-01 (3/3)...
+
+🔍 Cluster: staging-aks-01
+[Full security scan output for staging-aks-01]
+✅ staging-aks-01 done (0.9s)
+
+╔═══════════════════════════════════════════════════════════╗
+║           MULTI-CLUSTER SUMMARY                           ║
+╚═══════════════════════════════════════════════════════════╝
+
+  CLUSTER              GROUP        STATUS    
+  ─────────────────────────────────────────────
+  prod-aks-01          production   ✅ (1.2s)
+  prod-aks-02          production   ✅ (1.5s)
+  staging-aks-01       staging      ✅ (0.9s)
+  ─────────────────────────────────────────────
+  ✅ Success: 3  |  ❌ Failed: 0  |  📦 Total: 3
+```
+
+### Security Scan (Single Cluster)
+```
+╔════════════════════════════════════════════════════════════╗
+║                    ⚠️  DISCLAIMER ⚠️                        ║
+║  • SECURITY AWARENESS TOOL - NOT FOR COMPLIANCE AUDITS     ║
+║  • Use kube-bench for complete CIS compliance assessment   ║
+╚════════════════════════════════════════════════════════════╝
+
+🔍 Cluster: prod-aks-01
+
+CIS Compliance Score: 67/100
+Controls Passed: 4/7
+Controls Failed: 3/7
+
+🔴 CRITICAL FINDINGS:
+  • Privileged containers: 3 (Container escape risk)
+    └─ SYSTEM: 3 (expected for infrastructure)
+    Top resources:
+      1. kube-proxy in namespace kube-system
+      2. metrics-server in namespace kube-system
+```
+
+### Emergency Scanner
+```
+🔍 Cluster: prod-aks-01
+
+🔴 CRITICAL: 1    🟡 HIGH: 2    🟢 MEDIUM: 1
+
+🔴 CRITICAL ISSUES:
+  kubernetes-dashboard/dashboard-xxx
+  └─ Status: CrashLoopBackOff | Restarts: 2157
+  └─ Container crash looping
+```
+
+### Resource Analysis
+```
+🔍 Cluster: prod-aks-01
+
+Cluster Capacity:  24.0 CPU cores, 29.1 GB memory
+Total Requested:   4.0 CPU cores (16.5%), 5.8 GB memory (20.0%)
+
+OPTIMIZATION OPPORTUNITIES:
+🔴 HIGH IMPACT:
+  • staging idle for 21+ days (0.3 CPU, 0.4 GB)
+    └─ kubectl delete namespace staging
+```
+
+---
+
+## Configuration
+
+### Config File Location
+
+**Global config:** `~/.opscart/config.yaml`  
+**Project config:** `.opscart.yaml` (overrides global)
+
+### Config File Format
+
+```yaml
+# OpsCart Multi-Cluster Configuration
+
+clusters:
+  - name: prod-aks-01           # Friendly name
+    context: prod-aks-context   # kubectl context name
+    group: production           # Group name
+
+  - name: staging-aks-01
+    context: staging-aks-context
+    group: staging
+
+# Groups are auto-generated from the 'group' field
+# But you can also define custom groups:
+
+groups:
+  production:
+    - prod-aks-01
+    - prod-aks-02
+  
+  critical:                     # Custom group mixing environments
+    - prod-aks-01
+    - staging-aks-01
+```
+
+### Finding Your Cluster Contexts
+
+```bash
+# List all available contexts
+kubectl config get-contexts
+
+# Output shows:
+# CURRENT   NAME                  CLUSTER               AUTHINFO
+# *         prod-aks-01-context   prod-aks-01-cluster   prod-user
+#           staging-aks-context   staging-aks-cluster   staging-user
+```
+
+Use the **NAME** column values in your config file.
+
+---
+
 ## Troubleshooting
 
 ### Kubernetes Warnings (Windows/Corporate Networks)
@@ -181,6 +433,57 @@ If you see many "Use tokens from the TokenRequest API" warnings:
 ```
 
 These are Kubernetes deprecation warnings (not errors). The tool works correctly.
+
+### Config Issues
+
+```bash
+# Config file not found
+./opscart-scan config init
+
+# Show current config
+./opscart-scan config show
+
+# Verify YAML syntax (no tabs, only spaces)
+cat ~/.opscart/config.yaml
+```
+
+### Cluster Not Found
+
+```bash
+# Error: cluster 'prod-aks-01' not found in config
+
+# Solution: Check your config
+./opscart-scan config show
+
+# Verify context exists
+kubectl config get-contexts | grep prod-aks-01
+```
+
+---
+
+## What's New in v0.2
+
+### Multi-Cluster Support
+- **Config management** - Centralized cluster configuration
+- **Scan all clusters** - `--all-clusters` flag on all commands
+- **Cluster groups** - Scan by environment with `--cluster-group`
+- **Side-by-side comparison** - Compare security posture across clusters
+- **Sequential execution** - Clear, readable output for multiple clusters
+- **Cluster identification** - Every scan output shows which cluster
+
+### Real-World Value
+During v0.2 testing, found:
+- Production namespace idle for 70+ days
+- Staging namespace idle for 21+ days
+- Development namespace idle for 14+ days
+- Spot instance optimization opportunities across multiple clusters
+
+### Developer Experience
+- **100% backward compatible** - All v0.1 commands still work
+- **Clear output** - Sequential execution prevents output confusion
+- **Progress indicators** - Shows "Scanning X (1/3)..."
+- **Summary views** - Aggregated results across all clusters
+
 ---
 
 ## What's New in v0.1
@@ -220,51 +523,6 @@ These are Kubernetes deprecation warnings (not errors). The tool works correctly
 
 ---
 
-## Output Examples
-
-### Security Scan
-```
-╔════════════════════════════════════════════════════════════╗
-║                    ⚠️  DISCLAIMER ⚠️                        ║
-║  • SECURITY AWARENESS TOOL - NOT FOR COMPLIANCE AUDITS     ║
-║  • Use kube-bench for complete CIS compliance assessment   ║
-╚════════════════════════════════════════════════════════════╝
-
-CIS Compliance Score: 67/100
-Controls Passed: 4/7
-Controls Failed: 3/7
-
-🔴 CRITICAL FINDINGS:
-  • Privileged containers: 3 (Container escape risk)
-    └─ SYSTEM: 3 (expected for infrastructure)
-    Top resources:
-      1. kube-proxy in namespace kube-system
-      2. metrics-server in namespace kube-system
-```
-
-### Emergency Scanner
-```
-🔴 CRITICAL: 1    🟡 HIGH: 2    🟠 MEDIUM: 1
-
-🔴 CRITICAL ISSUES:
-  kubernetes-dashboard/dashboard-xxx
-  └─ Status: CrashLoopBackOff | Restarts: 2157
-  └─ Container crash looping
-```
-
-### Resource Analysis
-```
-Cluster Capacity:  24.0 CPU cores, 29.1 GB memory
-Total Requested:   4.0 CPU cores (16.5%), 5.8 GB memory (20.0%)
-
-OPTIMIZATION OPPORTUNITIES:
-🔴 HIGH IMPACT:
-  • staging idle for 21+ days (0.3 CPU, 0.4 GB)
-    └─ kubectl delete namespace staging
-```
-
----
-
 ## Limitations
 
 ### Security Scanning
@@ -289,6 +547,11 @@ OPTIMIZATION OPPORTUNITIES:
 
 **For cost analysis:** Use cloud provider tools (AWS Cost Explorer, GCP Cost Management, Azure Cost Management)
 
+### Multi-Cluster Comparison
+- Security comparison shows both outputs side-by-side
+- Full diff functionality coming in v0.3
+- Currently limited to security command only
+
 ---
 
 ## Environment Detection
@@ -312,18 +575,24 @@ You can customize detection logic in `pkg/analyzer/security.go` function `detect
 
 ## Roadmap
 
-### v0.2 (Next Release)
+### v0.3 (Next Release)
+- [ ] HTML report generation
+- [ ] JSON/CSV output formats
+- [ ] Full diff view for cluster comparison
 - [ ] Network policy detection and scoring
 - [ ] Pod Security Standards (PSS) compliance
+
+### v0.4 (Future)
+- [ ] Watch mode with Slack/Teams alerts
 - [ ] Historical trend tracking
 - [ ] Baseline comparison
-- [ ] SARIF output for CI/CD
-
-### v0.3 (Future)
 - [ ] Custom policy definitions
-- [ ] Multi-cluster aggregation
+
+### v0.5 (Future)
+- [ ] Multi-cluster aggregation dashboard
 - [ ] Prometheus metric export
-- [ ] Slack/Teams notifications
+- [ ] SARIF output for CI/CD
+- [ ] Helm chart deployment
 
 ---
 
@@ -363,7 +632,11 @@ may be slow due to network latency. Use `--enhanced=false` for faster
 basic snapshots, or run from Mac/Linux/WSL.
 
 Workaround:
+```bash
 ./opscart-scan snapshot --cluster prod --enhanced=false
+```
+
+---
 
 ## Acknowledgments
 
