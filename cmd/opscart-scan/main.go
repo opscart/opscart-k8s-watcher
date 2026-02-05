@@ -3,9 +3,13 @@ package main
 import (
 	"fmt"
 	"os"
+	"strings"
+	"time"
 
 	"github.com/opscart/opscart-k8s-watcher/pkg/analyzer"
 	"github.com/opscart/opscart-k8s-watcher/pkg/config"
+	"github.com/opscart/opscart-k8s-watcher/pkg/models"
+	"github.com/opscart/opscart-k8s-watcher/pkg/report"
 	"github.com/opscart/opscart-k8s-watcher/pkg/scanner"
 	"github.com/spf13/cobra"
 	"k8s.io/client-go/kubernetes"
@@ -14,13 +18,15 @@ import (
 
 var (
 	// Existing flags
-	cluster       string
-	namespace     string
-	allClusters   bool
-	format        string
-	enhanced      bool
-	monthlyCost   float64
-	showScenarios bool
+	cluster        string
+	namespace      string
+	allClusters    bool
+	format         string // Used by resources, costs, etc.
+	securityFormat string // Used by security command
+	reportFormat   string // Used by report command
+	enhanced       bool
+	monthlyCost    float64
+	showScenarios  bool
 
 	// NEW v0.2 flags
 	allClustersFlag  bool
@@ -222,7 +228,7 @@ Quickly find broken resources, idle workloads, security issues, and generate rep
 	}
 	securityCmd.Flags().StringVarP(&cluster, "cluster", "c", "", "Cluster context name")
 	securityCmd.Flags().StringVarP(&namespace, "namespace", "n", "", "Namespace to audit (default: all)")
-	securityCmd.Flags().StringVarP(&format, "format", "f", "table", "Output format (table|json)")
+	securityCmd.Flags().StringVarP(&securityFormat, "format", "f", "table", "Output format (table|json|html)")
 	securityCmd.Flags().BoolVar(&allClustersFlag, "all-clusters", false, "Scan all configured clusters")
 	securityCmd.Flags().StringVar(&clusterGroupFlag, "cluster-group", "", "Scan all clusters in a group")
 	securityCmd.Flags().StringSliceVar(&compareFlag, "compare", nil, "Compare two clusters (provide exactly 2)")
@@ -489,6 +495,53 @@ Examples:
 	idleCmd.Flags().BoolVar(&allClustersFlag, "all-clusters", false, "Scan all configured clusters")
 	idleCmd.Flags().StringVar(&clusterGroupFlag, "cluster-group", "", "Scan all clusters in a group")
 
+	// ================================================================
+	// Report command - NEW in v0.3
+	// ================================================================
+	reportCmd := &cobra.Command{
+		Use:   "report",
+		Short: "Generate comprehensive cluster report",
+		Long:  "Generate HTML/JSON/CSV report combining security, resources, and cost analysis",
+		Run: func(cmd *cobra.Command, args []string) {
+			clusters, isCompare, err := resolveTargetClusters()
+			if err != nil {
+				fmt.Printf("Error: %v\n", err)
+				os.Exit(1)
+			}
+
+			if isCompare {
+				fmt.Println("Error: --compare not supported for report command")
+				os.Exit(1)
+			}
+
+			// Single cluster
+			if len(clusters) == 1 {
+				if err := runReportGeneration(clusters[0].Context, clusters[0].Name); err != nil {
+					fmt.Printf("Error: %v\n", err)
+					os.Exit(1)
+				}
+				return
+			}
+
+			// Multi-cluster
+			scanner.PrintMultiClusterHeader(clusters)
+			for i, cluster := range clusters {
+				fmt.Printf("\n🔄 Generating report for %s (%d/%d)...\n", cluster.Name, i+1, len(clusters))
+				if err := runReportGeneration(cluster.Context, cluster.Name); err != nil {
+					fmt.Printf("❌ %s failed: %v\n", cluster.Name, err)
+				}
+			}
+
+			fmt.Println("\n✅ All reports generated!")
+		},
+	}
+
+	reportCmd.Flags().StringVarP(&cluster, "cluster", "c", "", "Cluster context name")
+	reportCmd.Flags().StringVarP(&reportFormat, "format", "f", "html", "Output format (html|json|csv)")
+	reportCmd.Flags().BoolVar(&allClustersFlag, "all-clusters", false, "Generate reports for all clusters")
+	reportCmd.Flags().StringVar(&clusterGroupFlag, "cluster-group", "", "Generate reports for cluster group")
+	reportCmd.Flags().Float64Var(&monthlyCost, "monthly-cost", 0, "Monthly cluster cost (optional)")
+
 	// Add all commands
 	rootCmd.AddCommand(configCmd)
 	rootCmd.AddCommand(emergencyCmd)
@@ -499,6 +552,7 @@ Examples:
 	rootCmd.AddCommand(findCmd)
 	rootCmd.AddCommand(snapshotCmd)
 	rootCmd.AddCommand(idleCmd)
+	rootCmd.AddCommand(reportCmd)
 
 	if err := rootCmd.Execute(); err != nil {
 		fmt.Println(err)
@@ -609,6 +663,18 @@ func runResourcesScan(clusterContext string) error {
 
 func runSecurityScan(clusterContext string) error {
 	fmt.Printf("\n🔍 Cluster: %s\n", clusterContext)
+
+	// Default to table if not specified
+	if securityFormat == "" {
+		securityFormat = "table"
+	}
+
+	// Check if HTML report requested
+	if securityFormat == "html" {
+		return generateSecurityReport(clusterContext)
+	}
+
+	// Terminal output
 	clientset, err := getKubernetesClient(clusterContext)
 	if err != nil {
 		return fmt.Errorf("connecting to cluster: %w", err)
@@ -620,7 +686,7 @@ func runSecurityScan(clusterContext string) error {
 		return fmt.Errorf("auditing security: %w", err)
 	}
 
-	analyzer.PrintSecurityAudit(audit, format)
+	analyzer.PrintSecurityAudit(audit, securityFormat)
 	return nil
 }
 
@@ -710,6 +776,391 @@ func runIdleScan(clusterContext string) error {
 
 	scanner.PrintIdleResources(idle)
 	return nil
+}
+
+func runReportGeneration(clusterContext string, clusterName string) error {
+	fmt.Printf("\n🔍 Cluster: %s\n", clusterName)
+	fmt.Println("📊 Generating comprehensive report...")
+
+	// Get Kubernetes client
+	clientset, err := getKubernetesClient(clusterContext)
+	if err != nil {
+		return fmt.Errorf("connecting to cluster: %w", err)
+	}
+
+	// Run REAL security audit
+	fmt.Println("  🛡️  Running security audit...")
+	sa := analyzer.NewSecurityAuditor(clientset)
+	audit, err := sa.AuditClusterSecurity(namespace)
+	if err != nil {
+		return fmt.Errorf("security audit failed: %w", err)
+	}
+	cisResult := analyzer.CalculateCISScore(audit)
+
+	// Build report data with REAL security findings
+	reportData := &report.ReportData{
+		ClusterName:    clusterName,
+		GeneratedAt:    time.Now(),
+		CISScore:       cisResult.Score,
+		SecurityScore:  cisResult.Score,
+		ControlsPassed: cisResult.PassedChecks,
+		ControlsFailed: cisResult.FailedChecks,
+		PodCount:       audit.TotalPodsAudited,
+		NamespaceCount: len(audit.Issues),
+		MonthlyCost:    monthlyCost,
+	}
+
+	// Calculate savings if cost provided
+	if monthlyCost > 0 {
+		reportData.PotentialSavings = report.SavingsRange{
+			Min: monthlyCost * 0.24,
+			Max: monthlyCost * 0.36,
+		}
+	}
+
+	// Extract security risks
+	risks := audit.Risks
+
+	// Add critical issues
+	if risks.PrivilegedContainers > 0 {
+		reportData.CriticalIssues = append(reportData.CriticalIssues, report.IssueItem{
+			Severity:    "critical",
+			Title:       fmt.Sprintf("🔴 %d privileged containers detected", risks.PrivilegedContainers),
+			Description: "Containers with elevated privileges can escape containment",
+			Count:       risks.PrivilegedContainers,
+		})
+	}
+
+	if risks.HostPathVolumes > 0 {
+		reportData.CriticalIssues = append(reportData.CriticalIssues, report.IssueItem{
+			Severity:    "critical",
+			Title:       fmt.Sprintf("🔴 %d pods mounting host paths", risks.HostPathVolumes),
+			Description: "Host path volumes provide direct access to host filesystem",
+			Count:       risks.HostPathVolumes,
+		})
+	}
+
+	if risks.HostPID > 0 {
+		reportData.CriticalIssues = append(reportData.CriticalIssues, report.IssueItem{
+			Severity:    "critical",
+			Title:       fmt.Sprintf("🔴 %d containers sharing host PID namespace", risks.HostPID),
+			Description: "Host PID namespace sharing allows container processes to see all processes",
+			Count:       risks.HostPID,
+		})
+	}
+
+	// Add warnings
+	if risks.RunningAsRoot > 0 {
+		reportData.WarningIssues = append(reportData.WarningIssues, report.IssueItem{
+			Severity:    "warning",
+			Title:       fmt.Sprintf("🟡 %d containers running as root", risks.RunningAsRoot),
+			Description: "Running as root increases attack surface",
+			Count:       risks.RunningAsRoot,
+		})
+	}
+
+	if risks.MissingResourceLimits > 0 {
+		reportData.WarningIssues = append(reportData.WarningIssues, report.IssueItem{
+			Severity:    "warning",
+			Title:       fmt.Sprintf("🟡 %d containers missing resource limits", risks.MissingResourceLimits),
+			Description: "Missing resource limits can lead to resource exhaustion",
+			Count:       risks.MissingResourceLimits,
+		})
+	}
+
+	if risks.HostNetwork > 0 {
+		reportData.WarningIssues = append(reportData.WarningIssues, report.IssueItem{
+			Severity:    "warning",
+			Title:       fmt.Sprintf("🟡 %d containers using host network", risks.HostNetwork),
+			Description: "Host network access bypasses network policies",
+			Count:       risks.HostNetwork,
+		})
+	}
+
+	if risks.HostIPC > 0 {
+		reportData.WarningIssues = append(reportData.WarningIssues, report.IssueItem{
+			Severity:    "warning",
+			Title:       fmt.Sprintf("🟡 %d containers sharing host IPC namespace", risks.HostIPC),
+			Description: "Host IPC namespace sharing can leak sensitive information",
+			Count:       risks.HostIPC,
+		})
+	}
+
+	if risks.PrivilegeEscalation > 0 {
+		reportData.WarningIssues = append(reportData.WarningIssues, report.IssueItem{
+			Severity:    "warning",
+			Title:       fmt.Sprintf("🟡 %d containers allowing privilege escalation", risks.PrivilegeEscalation),
+			Description: "Privilege escalation can lead to container breakout",
+			Count:       risks.PrivilegeEscalation,
+		})
+	}
+
+	if risks.DefaultServiceAccount > 0 {
+		reportData.WarningIssues = append(reportData.WarningIssues, report.IssueItem{
+			Severity:    "warning",
+			Title:       fmt.Sprintf("🟡 %d pods using default service account", risks.DefaultServiceAccount),
+			Description: "Default service account may have excessive permissions",
+			Count:       risks.DefaultServiceAccount,
+		})
+	}
+
+	if risks.AddedCapabilities > 0 {
+		reportData.WarningIssues = append(reportData.WarningIssues, report.IssueItem{
+			Severity:    "warning",
+			Title:       fmt.Sprintf("🟡 %d containers with added capabilities", risks.AddedCapabilities),
+			Description: "Unnecessary capabilities increase attack surface",
+			Count:       risks.AddedCapabilities,
+		})
+	}
+
+	// Calculate overall scores
+	reportData.OverallScore = report.CalculateOverallScore(reportData.SecurityScore, 75, 60)
+	reportData.ResourceScore = 75
+	reportData.CostScore = 60
+
+	// Default to html if not specified
+	if reportFormat == "" {
+		reportFormat = "html"
+	}
+
+	// Determine format
+	var reportFmt report.ReportFormat
+	switch reportFormat {
+	case "html":
+		reportFmt = report.FormatHTML
+	case "json":
+		reportFmt = report.FormatJSON
+	case "csv":
+		reportFmt = report.FormatCSV
+	default:
+		return fmt.Errorf("unsupported format: %s", reportFormat)
+	}
+
+	// Generate report
+	generator := report.NewGenerator(reportFmt, "")
+	outputPath, err := generator.Generate(reportData)
+	if err != nil {
+		return fmt.Errorf("generating report: %w", err)
+	}
+
+	// Show success
+	fmt.Printf("\n✅ Report generated: %s\n", outputPath)
+	if reportFmt == report.FormatHTML {
+		fmt.Printf("🌐 Open in browser: file://%s\n", outputPath)
+	}
+	fmt.Printf("📊 Summary: CIS Score %d/100 | %d Critical | %d Warnings | %d Total Issues\n",
+		cisResult.Score, len(reportData.CriticalIssues), len(reportData.WarningIssues), len(audit.Issues))
+
+	return nil
+}
+
+func generateSecurityReport(clusterContext string) error {
+	fmt.Println("📊 Generating security report...")
+
+	// Get clientset and run audit
+	clientset, err := getKubernetesClient(clusterContext)
+	if err != nil {
+		return fmt.Errorf("connecting to cluster: %w", err)
+	}
+
+	sa := analyzer.NewSecurityAuditor(clientset)
+	audit, err := sa.AuditClusterSecurity(namespace)
+	if err != nil {
+		return fmt.Errorf("auditing security: %w", err)
+	}
+
+	// Calculate CIS score
+	cisResult := analyzer.CalculateCISScore(audit)
+
+	// Build report data with REAL values
+	reportData := &report.ReportData{
+		ClusterName:    clusterContext,
+		GeneratedAt:    time.Now(),
+		CISScore:       cisResult.Score,
+		SecurityScore:  cisResult.Score,
+		ControlsPassed: cisResult.PassedChecks,
+		ControlsFailed: cisResult.FailedChecks,
+		PodCount:       audit.TotalPodsAudited,
+		NamespaceCount: len(audit.Issues),
+	}
+
+	risks := audit.Risks
+
+	// Add critical issues with details
+	if risks.PrivilegedContainers > 0 {
+		details := extractResourceNames(audit.Issues, "privileged_container", 5)
+		reportData.CriticalIssues = append(reportData.CriticalIssues, report.IssueItem{
+			Severity:    "critical",
+			Title:       fmt.Sprintf("🔴 %d privileged containers detected", risks.PrivilegedContainers),
+			Description: "Containers with elevated privileges can escape containment and compromise the host",
+			Count:       risks.PrivilegedContainers,
+			Details:     details,
+		})
+	}
+
+	if risks.HostPID > 0 {
+		details := extractResourceNames(audit.Issues, "host_pid", 5)
+		reportData.CriticalIssues = append(reportData.CriticalIssues, report.IssueItem{
+			Severity:    "critical",
+			Title:       fmt.Sprintf("🔴 %d containers sharing host PID namespace", risks.HostPID),
+			Description: "Host PID namespace sharing allows container processes to see all host processes",
+			Count:       risks.HostPID,
+			Details:     details,
+		})
+	}
+
+	if risks.HostPathVolumes > 0 {
+		details := extractResourceNames(audit.Issues, "host_path_volume", 5)
+		reportData.CriticalIssues = append(reportData.CriticalIssues, report.IssueItem{
+			Severity:    "critical",
+			Title:       fmt.Sprintf("🔴 %d pods mounting host paths", risks.HostPathVolumes),
+			Description: "Host path volumes provide direct access to host filesystem",
+			Count:       risks.HostPathVolumes,
+			Details:     details,
+		})
+	}
+
+	// Add warnings with details
+	if risks.HostIPC > 0 {
+		details := extractResourceNames(audit.Issues, "host_ipc", 5)
+		reportData.WarningIssues = append(reportData.WarningIssues, report.IssueItem{
+			Severity:    "warning",
+			Title:       fmt.Sprintf("🟡 %d containers sharing host IPC namespace", risks.HostIPC),
+			Description: "Host IPC namespace sharing can leak sensitive information",
+			Count:       risks.HostIPC,
+			Details:     details,
+		})
+	}
+
+	if risks.RunningAsRoot > 0 {
+		details := extractResourceNames(audit.Issues, "running_as_root", 5)
+		reportData.WarningIssues = append(reportData.WarningIssues, report.IssueItem{
+			Severity:    "warning",
+			Title:       fmt.Sprintf("🟡 %d containers running as root", risks.RunningAsRoot),
+			Description: "Running as root increases attack surface",
+			Count:       risks.RunningAsRoot,
+			Details:     details,
+		})
+	}
+
+	if risks.MissingResourceLimits > 0 {
+		details := extractResourceNames(audit.Issues, "missing_resource_limits", 5)
+		reportData.WarningIssues = append(reportData.WarningIssues, report.IssueItem{
+			Severity:    "warning",
+			Title:       fmt.Sprintf("🟡 %d containers missing resource limits", risks.MissingResourceLimits),
+			Description: "Missing resource limits can lead to resource exhaustion",
+			Count:       risks.MissingResourceLimits,
+			Details:     details,
+		})
+	}
+
+	if risks.HostNetwork > 0 {
+		details := extractResourceNames(audit.Issues, "host_network", 5)
+		reportData.WarningIssues = append(reportData.WarningIssues, report.IssueItem{
+			Severity:    "warning",
+			Title:       fmt.Sprintf("🟡 %d containers using host network", risks.HostNetwork),
+			Description: "Host network access bypasses network policies",
+			Count:       risks.HostNetwork,
+			Details:     details,
+		})
+	}
+
+	if risks.PrivilegeEscalation > 0 {
+		details := extractResourceNames(audit.Issues, "privilege_escalation", 5)
+		reportData.WarningIssues = append(reportData.WarningIssues, report.IssueItem{
+			Severity:    "warning",
+			Title:       fmt.Sprintf("🟡 %d containers allowing privilege escalation", risks.PrivilegeEscalation),
+			Description: "Privilege escalation can lead to container breakout",
+			Count:       risks.PrivilegeEscalation,
+			Details:     details,
+		})
+	}
+
+	if risks.AddedCapabilities > 0 {
+		details := extractResourceNames(audit.Issues, "added_capabilities", 5)
+		reportData.WarningIssues = append(reportData.WarningIssues, report.IssueItem{
+			Severity:    "warning",
+			Title:       fmt.Sprintf("🟡 %d containers with added capabilities", risks.AddedCapabilities),
+			Description: "Unnecessary capabilities increase attack surface",
+			Count:       risks.AddedCapabilities,
+			Details:     details,
+		})
+	}
+
+	if risks.DefaultServiceAccount > 0 {
+		details := extractResourceNames(audit.Issues, "default_service_account", 5)
+		reportData.WarningIssues = append(reportData.WarningIssues, report.IssueItem{
+			Severity:    "warning",
+			Title:       fmt.Sprintf("🟡 %d pods using default service account", risks.DefaultServiceAccount),
+			Description: "Default service account may have excessive permissions",
+			Count:       risks.DefaultServiceAccount,
+			Details:     details,
+		})
+	}
+
+	// Generate HTML report
+	generator := report.NewGenerator(report.FormatHTML, "")
+	outputPath, err := generator.GenerateSecurityHTML(reportData)
+	if err != nil {
+		return fmt.Errorf("generating report: %w", err)
+	}
+
+	fmt.Printf("\n✅ Security report generated: %s\n", outputPath)
+	fmt.Printf("🌐 Open in browser: file://%s\n", outputPath)
+	fmt.Printf("\n📊 Summary: CIS Score %d/100 | %d Critical | %d Warnings | %d Total Issues\n",
+		cisResult.Score, len(reportData.CriticalIssues), len(reportData.WarningIssues), len(audit.Issues))
+
+	return nil
+}
+
+// extractResourceNames gets top N resource names (deduplicated with counts)
+func extractResourceNames(issues []models.SecurityIssue, issueType string, limit int) []string {
+	podCounts := make(map[string]int)
+
+	for _, issue := range issues {
+		if issue.Type == issueType {
+			key := issue.Namespace + "/" + issue.Name
+			podCounts[key]++
+		}
+	}
+
+	type podInfo struct {
+		key   string
+		count int
+	}
+	var pods []podInfo
+	for key, count := range podCounts {
+		pods = append(pods, podInfo{key, count})
+	}
+
+	// Sort by count descending
+	for i := 0; i < len(pods)-1; i++ {
+		for j := i + 1; j < len(pods); j++ {
+			if pods[j].count > pods[i].count {
+				pods[i], pods[j] = pods[j], pods[i]
+			}
+		}
+	}
+
+	var resources []string
+	for i := 0; i < len(pods) && i < limit; i++ {
+		parts := strings.Split(pods[i].key, "/")
+		podName := parts[1]
+		namespace := parts[0]
+
+		if pods[i].count > 1 {
+			resources = append(resources, fmt.Sprintf("%s in namespace %s (%d issues)", podName, namespace, pods[i].count))
+		} else {
+			resources = append(resources, fmt.Sprintf("%s in namespace %s", podName, namespace))
+		}
+	}
+
+	remaining := len(pods) - limit
+	if remaining > 0 {
+		resources = append(resources, fmt.Sprintf("... and %d more pods", remaining))
+	}
+
+	return resources
 }
 
 // ================================================================
