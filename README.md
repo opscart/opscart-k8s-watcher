@@ -1,8 +1,8 @@
 # opscart-k8s-watcher
 
-**Version:** 0.4  
-**Purpose:** Production-grade Kubernetes security auditing with multi-cluster support, HTML reporting, and network policy analysis  
-**Focus:** CIS compliance, HTML reports, network isolation, and multi-cluster analysis
+**Version:** 0.5  
+**Purpose:** Production-grade Kubernetes security auditing with multi-cluster support, HTML reporting, network policy analysis, and waste detection  
+**Focus:** CIS compliance, HTML reports, network isolation, waste detection, and multi-cluster analysis
 
 ---
 
@@ -19,6 +19,45 @@
 - Resource optimization opportunities
 - War room troubleshooting
 - Executive-ready HTML reports
+
+---
+
+## What's New in v0.5
+
+### Waste & Drift Detection (`waste` command)
+Detects forgotten, idle, and orphaned resources. **Suggestions only - never modifies the cluster.**
+
+- **Abandoned namespaces** - Old namespaces with no running pods (`dev-john`, `test-2024`, `poc-ai`)
+- **Zombie pods** - CrashLoopBackOff, ImagePullBackOff, OOMKilled for days
+- **Unmanaged pods** - Bare pods with no controller (forgotten `kubectl run` sessions)
+- **Orphaned PVCs** - Unbound, released, or bound-but-no-pod (silent storage cost leaks)
+- **Stale Jobs/CronJobs** - Completed jobs not cleaned up, CronJobs that never ran, no history limits set
+- **Zero-replica workloads** - Deployments and StatefulSets scaled to 0
+- **Old ReplicaSets** - Leftover rollout artifacts accumulating over time
+- **Services with no endpoints** - LoadBalancers flagged with cloud cost warning
+- **Broken Ingresses** - Backends pointing to services with no endpoints
+- **Misconfigured HPAs** - Scaling disabled or always stuck at minReplicas
+
+Every finding includes: observed data, reason it's suspicious, and a `kubectl` command to investigate.
+
+```bash
+./opscart-scan waste --cluster prod                        # default: 7+ days old
+./opscart-scan waste --cluster prod --min-age-days 30      # stricter threshold
+./opscart-scan waste --cluster prod --namespace staging    # single namespace
+./opscart-scan waste --all-clusters --min-age-days 14      # all clusters
+```
+
+**Example scorecard:**
+```
+WASTE SCORECARD
+  🔴 Abandoned Namespaces:           1
+  🔴 Zombie Pods (CrashLoop/OOM):    2
+  🔴 Unmanaged Pods (no controller): 1
+  ✅ Orphaned PVCs:                  0
+  🟢 Old ReplicaSets:                2
+  🟢 Misconfigured HPAs:             1
+  Total waste items found:  7
+```
 
 ---
 
@@ -117,6 +156,13 @@ Coverage: [░░░░░░░░░░░░░░░░░░░░░░░
 - **Cluster groups** - Scan by environment with `--cluster-group production`
 - **Side-by-side comparison** - Compare security posture with `--compare=a,b`
 - **Sequential execution** - Clear, readable output for multiple clusters
+
+### 🗑️ Waste & Drift Detection (v0.5)
+- **9 resource types** - namespaces, pods, PVCs, jobs, deployments, ReplicaSets, services, ingresses, HPAs
+- **Data-driven findings** - every result shows observed data, not assumptions
+- **Smart filtering** - auto-skips infrastructure namespaces (same patterns as `network` command)
+- **Configurable threshold** - `--min-age-days` (default: 7)
+- **Suggestions only** - never modifies the cluster
 
 ### 🌐 Network Policy Detection (v0.4)
 - **Namespace coverage analysis** - Protected vs unprotected namespaces
@@ -280,6 +326,21 @@ go build -o opscart-scan cmd/opscart-scan/main.go
 ./opscart-scan network --cluster prod --skip-namespaces monitoring,vault
 ```
 
+### 6. Waste & Drift Detection (v0.5)
+```bash
+# Detect forgotten/idle/orphaned resources (default: 7+ days old)
+./opscart-scan waste --cluster prod
+
+# Adjust age threshold
+./opscart-scan waste --cluster prod --min-age-days 30
+
+# Focus on specific namespace
+./opscart-scan waste --cluster prod --namespace staging
+
+# All clusters
+./opscart-scan waste --all-clusters --min-age-days 14
+```
+
 ---
 
 ## Commands
@@ -330,6 +391,15 @@ go build -o opscart-scan cmd/opscart-scan/main.go
 
 # Cluster group
 ./opscart-scan report --cluster-group production --monthly-cost 50000
+```
+
+### Waste & Drift Detection (NEW in v0.5)
+```bash
+./opscart-scan waste --cluster CLUSTER
+./opscart-scan waste --cluster CLUSTER --min-age-days 30
+./opscart-scan waste --cluster CLUSTER --namespace NAMESPACE
+./opscart-scan waste --all-clusters
+./opscart-scan waste --cluster-group production --min-age-days 14
 ```
 
 ### Network Policy Analysis (NEW in v0.4)
@@ -450,6 +520,17 @@ kubectl get pods --all-namespaces -o json | \
 
 ## Use Cases
 
+### Weekly Waste Review (v0.5)
+```bash
+./opscart-scan waste --all-clusters --min-age-days 30
+
+# Finds real issues like:
+# - Namespace 'data-processing': 9 pods, none Running, 30 days old
+# - Pod 'kubernetes-dashboard': CrashLoopBackOff, 7792 restarts
+# - HPA 'worker': FailedGetResourceMetric - autoscaling silently broken
+# - Bare pod 'webtest-34210': no controller, sitting in default namespace
+```
+
 ### Network Policy Audit (v0.4)
 ```bash
 # Weekly network isolation check across all clusters
@@ -534,7 +615,18 @@ This enables powerful multi-cluster workflows with `--all-clusters` and `--clust
 
 ## Version History
 
-### v0.4 (Current - February 2026)
+### v0.5 (Current - February 2026)
+**Waste & Drift Detection:**
+- `waste` command - detects forgotten, idle, and orphaned resources across 9 types
+- Abandoned namespaces, zombie pods, unmanaged bare pods
+- Orphaned PVCs, stale jobs, zero-replica workloads, old ReplicaSets
+- Services with no endpoints, broken ingresses, misconfigured HPAs
+- Data-driven findings with kubectl investigation commands
+- Smart infrastructure namespace filtering (same patterns as `network` command)
+- Configurable age threshold (`--min-age-days`, default: 7)
+- Suggestions only - never modifies the cluster
+
+### v0.4 (February 2026)
 **Network Policy Detection:**
 - Namespace coverage analysis (protected vs unprotected)
 - Smart infrastructure filtering - auto-skips 15+ patterns (`kube-*`, `istio-*`, `calico-*`, `tigera-*`, `cert-manager`, `ingress-nginx`, `flux-system`, `argocd`, `velero`, `longhorn-*`, `cattle-*`, `openshift-*`, `gke-*`, `azure-*`, `karpenter`, `crossplane-*`)
@@ -589,20 +681,13 @@ This enables powerful multi-cluster workflows with `--all-clusters` and `--clust
 
 ## Roadmap
 
-### v0.5 (Next)
-**Waste & Cleanup Detector:**
-- Pod age analysis - all pods sorted by age descending (oldest first)
-- Idle detection - CPU < 5% for extended periods
-- Priority scoring - Age + Idle + Cost combined score
-- Orphaned resources - unused PVCs, services without endpoints, 0-replica deployments, old completed/failed jobs
-- Cost estimation per cleanup candidate with potential monthly savings
-- Ready-to-run `kubectl delete` commands for each candidate
-- Multi-cluster support
+### v0.6 (Next)
+- Full diff view for cluster comparison (promised in v0.2)
+- Per-namespace breakdown in comprehensive HTML reports
+- Historical trend tracking
 
-**Full diff view for cluster comparison** (promised in v0.2)
-
-### v0.6 (Future)
-- Prometheus integration for metrics
+### v0.7 (Future)
+- Prometheus integration for CPU/memory idle detection
 - Grafana dashboard templates
 - Webhook notifications (Slack, email)
 - Custom policy definitions
@@ -635,10 +720,6 @@ MIT License - See LICENSE file for details
 
 ---
 
-## Acknowledgments
-
-Built for production pharmaceutical environments handling 500+ cores across multiple Fortune 500 clients. Validated in enterprise Kubernetes deployments with strict compliance requirements.
-
-**Version:** v0.4  
-**Status:** Production-ready for multi-cluster security auditing with network policy detection  
+**Version:** v0.5  
+**Status:** Dev/Stag/Production-ready for multi-cluster security auditing, network policy detection, and waste detection  
 **Last Updated:** February 2026
