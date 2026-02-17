@@ -45,7 +45,28 @@ Every finding includes: observed data, reason it's suspicious, and a `kubectl` c
 ./opscart-scan waste --cluster prod --min-age-days 30      # stricter threshold
 ./opscart-scan waste --cluster prod --namespace staging    # single namespace
 ./opscart-scan waste --all-clusters --min-age-days 14      # all clusters
+./opscart-scan waste --cluster CLUSTER 2>/dev/null         # Corporate clusters: suppress harmless klog warnings
 ```
+
+## Troubleshooting
+
+### Corporate Cluster Warnings
+
+When scanning corporate AKS/EKS clusters, you may see Kubernetes client library warnings:
+```bash
+W0217 11:00:42.760152 warnings.go:70] Use tokens from the TokenRequest API...
+```
+
+**Workaround:** Redirect stderr to suppress these warnings (they're harmless):
+```bash
+./opscart-scan waste --cluster CLUSTER 2>/dev/null
+./opscart-scan network --cluster CLUSTER 2>/dev/null
+./opscart-scan security --cluster CLUSTER 2>/dev/null
+```
+
+These warnings come from the Kubernetes client library (`klog`) and don't affect functionality.
+
+---
 
 **Example scorecard:**
 ```

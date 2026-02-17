@@ -188,9 +188,13 @@ type MisconfiguredHPA struct {
 // ================================================================
 
 func NewWasteAuditor(clientset *kubernetes.Clientset, minAgeDays int) *WasteAuditor {
+	// 60-second timeout per cluster - prevents hanging on corporate networks
+	// with RBAC restrictions or slow API servers
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	_ = cancel // timeout handles cleanup automatically
 	return &WasteAuditor{
 		clientset:  clientset,
-		ctx:        context.Background(),
+		ctx:        ctx,
 		minAgeDays: minAgeDays,
 	}
 }
@@ -264,7 +268,7 @@ func (w *WasteAuditor) detectAbandonedNamespaces(audit *WasteAudit, filterNamesp
 		return nil // namespace filter means we're already scoped
 	}
 
-	nsList, err := w.clientset.CoreV1().Namespaces().List(w.ctx, metav1.ListOptions{})
+	nsList, err := w.clientset.CoreV1().Namespaces().List(w.ctx, metav1.ListOptions{TimeoutSeconds: int64Ptr(10)})
 	if err != nil {
 		return err
 	}
@@ -285,7 +289,7 @@ func (w *WasteAuditor) detectAbandonedNamespaces(audit *WasteAudit, filterNamesp
 		}
 
 		// Count running pods
-		pods, err := w.clientset.CoreV1().Pods(nsName).List(w.ctx, metav1.ListOptions{})
+		pods, err := w.clientset.CoreV1().Pods(nsName).List(w.ctx, metav1.ListOptions{TimeoutSeconds: int64Ptr(10)})
 		if err != nil {
 			continue
 		}
@@ -337,7 +341,7 @@ func (w *WasteAuditor) detectAbandonedNamespaces(audit *WasteAudit, filterNamesp
 // ================================================================
 
 func (w *WasteAuditor) detectStalePods(audit *WasteAudit, filterNamespace string) error {
-	pods, err := w.clientset.CoreV1().Pods(filterNamespace).List(w.ctx, metav1.ListOptions{})
+	pods, err := w.clientset.CoreV1().Pods(filterNamespace).List(w.ctx, metav1.ListOptions{TimeoutSeconds: int64Ptr(10)})
 	if err != nil {
 		return err
 	}
@@ -460,13 +464,13 @@ func (w *WasteAuditor) detectStalePods(audit *WasteAudit, filterNamespace string
 // ================================================================
 
 func (w *WasteAuditor) detectOrphanedPVCs(audit *WasteAudit, filterNamespace string) error {
-	pvcs, err := w.clientset.CoreV1().PersistentVolumeClaims(filterNamespace).List(w.ctx, metav1.ListOptions{})
+	pvcs, err := w.clientset.CoreV1().PersistentVolumeClaims(filterNamespace).List(w.ctx, metav1.ListOptions{TimeoutSeconds: int64Ptr(10)})
 	if err != nil {
 		return err
 	}
 
 	// Build set of PVCs actively used by pods
-	pods, err := w.clientset.CoreV1().Pods(filterNamespace).List(w.ctx, metav1.ListOptions{})
+	pods, err := w.clientset.CoreV1().Pods(filterNamespace).List(w.ctx, metav1.ListOptions{TimeoutSeconds: int64Ptr(10)})
 	if err != nil {
 		return err
 	}
@@ -569,7 +573,7 @@ func (w *WasteAuditor) detectOrphanedPVCs(audit *WasteAudit, filterNamespace str
 // ================================================================
 
 func (w *WasteAuditor) detectStaleJobs(audit *WasteAudit, filterNamespace string) error {
-	jobs, err := w.clientset.BatchV1().Jobs(filterNamespace).List(w.ctx, metav1.ListOptions{})
+	jobs, err := w.clientset.BatchV1().Jobs(filterNamespace).List(w.ctx, metav1.ListOptions{TimeoutSeconds: int64Ptr(10)})
 	if err != nil {
 		return err
 	}
@@ -635,7 +639,7 @@ func (w *WasteAuditor) detectStaleJobs(audit *WasteAudit, filterNamespace string
 	}
 
 	// CronJobs - detect misconfigured ones
-	cronJobs, err := w.clientset.BatchV1().CronJobs(filterNamespace).List(w.ctx, metav1.ListOptions{})
+	cronJobs, err := w.clientset.BatchV1().CronJobs(filterNamespace).List(w.ctx, metav1.ListOptions{TimeoutSeconds: int64Ptr(10)})
 	if err == nil {
 		for _, cj := range cronJobs.Items {
 			if isInfraPattern(cj.Namespace) {
@@ -701,7 +705,7 @@ func (w *WasteAuditor) detectZeroReplicaWorkloads(audit *WasteAudit, filterNames
 	now := time.Now()
 
 	// Deployments
-	deployments, err := w.clientset.AppsV1().Deployments(filterNamespace).List(w.ctx, metav1.ListOptions{})
+	deployments, err := w.clientset.AppsV1().Deployments(filterNamespace).List(w.ctx, metav1.ListOptions{TimeoutSeconds: int64Ptr(10)})
 	if err != nil {
 		return err
 	}
@@ -736,7 +740,7 @@ func (w *WasteAuditor) detectZeroReplicaWorkloads(audit *WasteAudit, filterNames
 	}
 
 	// StatefulSets
-	statefulsets, err := w.clientset.AppsV1().StatefulSets(filterNamespace).List(w.ctx, metav1.ListOptions{})
+	statefulsets, err := w.clientset.AppsV1().StatefulSets(filterNamespace).List(w.ctx, metav1.ListOptions{TimeoutSeconds: int64Ptr(10)})
 	if err == nil {
 		for _, s := range statefulsets.Items {
 			if isInfraPattern(s.Namespace) {
@@ -779,7 +783,7 @@ func (w *WasteAuditor) detectZeroReplicaWorkloads(audit *WasteAudit, filterNames
 // ================================================================
 
 func (w *WasteAuditor) detectOldReplicaSets(audit *WasteAudit, filterNamespace string) error {
-	rsList, err := w.clientset.AppsV1().ReplicaSets(filterNamespace).List(w.ctx, metav1.ListOptions{})
+	rsList, err := w.clientset.AppsV1().ReplicaSets(filterNamespace).List(w.ctx, metav1.ListOptions{TimeoutSeconds: int64Ptr(10)})
 	if err != nil {
 		return err
 	}
@@ -839,7 +843,7 @@ func (w *WasteAuditor) detectOldReplicaSets(audit *WasteAudit, filterNamespace s
 // ================================================================
 
 func (w *WasteAuditor) detectOrphanedServices(audit *WasteAudit, filterNamespace string) error {
-	services, err := w.clientset.CoreV1().Services(filterNamespace).List(w.ctx, metav1.ListOptions{})
+	services, err := w.clientset.CoreV1().Services(filterNamespace).List(w.ctx, metav1.ListOptions{TimeoutSeconds: int64Ptr(10)})
 	if err != nil {
 		return err
 	}
@@ -914,7 +918,7 @@ func (w *WasteAuditor) detectOrphanedServices(audit *WasteAudit, filterNamespace
 // ================================================================
 
 func (w *WasteAuditor) detectBrokenIngresses(audit *WasteAudit, filterNamespace string) error {
-	ingresses, err := w.clientset.NetworkingV1().Ingresses(filterNamespace).List(w.ctx, metav1.ListOptions{})
+	ingresses, err := w.clientset.NetworkingV1().Ingresses(filterNamespace).List(w.ctx, metav1.ListOptions{TimeoutSeconds: int64Ptr(10)})
 	if err != nil {
 		return err
 	}
@@ -998,7 +1002,7 @@ func (w *WasteAuditor) detectBrokenIngresses(audit *WasteAudit, filterNamespace 
 // ================================================================
 
 func (w *WasteAuditor) detectMisconfiguredHPAs(audit *WasteAudit, filterNamespace string) error {
-	hpas, err := w.clientset.AutoscalingV2().HorizontalPodAutoscalers(filterNamespace).List(w.ctx, metav1.ListOptions{})
+	hpas, err := w.clientset.AutoscalingV2().HorizontalPodAutoscalers(filterNamespace).List(w.ctx, metav1.ListOptions{TimeoutSeconds: int64Ptr(10)})
 	if err != nil {
 		// Try v1 if v2 not available
 		return nil
@@ -1408,4 +1412,10 @@ func isInfraPattern(name string) bool {
 		}
 	}
 	return false
+}
+
+// int64Ptr returns a pointer to an int64 value.
+// Used for Kubernetes API ListOptions.TimeoutSeconds.
+func int64Ptr(i int64) *int64 {
+	return &i
 }
