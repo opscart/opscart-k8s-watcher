@@ -32,6 +32,9 @@ var (
 	allClustersFlag  bool
 	clusterGroupFlag string
 	compareFlag      []string
+
+	// NEW v0.4 flags
+	skipNamespacesFlag []string // network command: skip specific namespaces
 )
 
 func main() {
@@ -542,6 +545,50 @@ Examples:
 	reportCmd.Flags().StringVar(&clusterGroupFlag, "cluster-group", "", "Generate reports for cluster group")
 	reportCmd.Flags().Float64Var(&monthlyCost, "monthly-cost", 0, "Monthly cluster cost (optional)")
 
+	// ================================================================
+	// Network command - NEW in v0.4
+	// ================================================================
+	networkCmd := &cobra.Command{
+		Use:   "network",
+		Short: "Analyze NetworkPolicy coverage across namespaces",
+		Long:  "Scan cluster for NetworkPolicy resources and identify namespaces with no network isolation",
+		Run: func(cmd *cobra.Command, args []string) {
+			clusters, isCompare, err := resolveTargetClusters()
+			if err != nil {
+				fmt.Printf("Error: %v\n", err)
+				os.Exit(1)
+			}
+
+			if isCompare {
+				fmt.Println("Error: --compare not supported for network command")
+				os.Exit(1)
+			}
+
+			// Single cluster
+			if len(clusters) == 1 {
+				if err := runNetworkScan(clusters[0].Context); err != nil {
+					fmt.Printf("Error: %v\n", err)
+					os.Exit(1)
+				}
+				return
+			}
+
+			// Multi-cluster
+			scanner.PrintMultiClusterHeader(clusters)
+			for i, cl := range clusters {
+				fmt.Printf("\n🔄 Scanning network policies for %s (%d/%d)...\n", cl.Name, i+1, len(clusters))
+				if err := runNetworkScan(cl.Context); err != nil {
+					fmt.Printf("❌ %s failed: %v\n", cl.Name, err)
+				}
+			}
+		},
+	}
+	networkCmd.Flags().StringVarP(&cluster, "cluster", "c", "", "Cluster context name")
+	networkCmd.Flags().StringVarP(&namespace, "namespace", "n", "", "Limit to specific namespace")
+	networkCmd.Flags().BoolVar(&allClustersFlag, "all-clusters", false, "Scan all configured clusters")
+	networkCmd.Flags().StringVar(&clusterGroupFlag, "cluster-group", "", "Scan all clusters in a group")
+	networkCmd.Flags().StringSliceVar(&skipNamespacesFlag, "skip-namespaces", []string{}, "Additional namespaces to skip (comma-separated)")
+
 	// Add all commands
 	rootCmd.AddCommand(configCmd)
 	rootCmd.AddCommand(emergencyCmd)
@@ -553,6 +600,7 @@ Examples:
 	rootCmd.AddCommand(snapshotCmd)
 	rootCmd.AddCommand(idleCmd)
 	rootCmd.AddCommand(reportCmd)
+	rootCmd.AddCommand(networkCmd)
 
 	if err := rootCmd.Execute(); err != nil {
 		fmt.Println(err)
@@ -1186,4 +1234,23 @@ func getKubernetesClient(clusterContext string) (*kubernetes.Clientset, error) {
 	}
 
 	return clientset, nil
+}
+
+func runNetworkScan(clusterContext string) error {
+	fmt.Printf("\n🔍 Cluster: %s\n", clusterContext)
+
+	clientset, err := getKubernetesClient(clusterContext)
+	if err != nil {
+		return fmt.Errorf("connecting to cluster: %w", err)
+	}
+
+	npa := analyzer.NewNetworkPolicyAuditor(clientset).
+		WithSkipNamespaces(skipNamespacesFlag)
+	audit, err := npa.AuditNetworkPolicies(namespace)
+	if err != nil {
+		return fmt.Errorf("auditing network policies: %w", err)
+	}
+
+	analyzer.PrintNetworkPolicyAudit(audit)
+	return nil
 }
