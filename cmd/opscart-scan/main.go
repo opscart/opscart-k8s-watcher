@@ -35,6 +35,9 @@ var (
 
 	// NEW v0.4 flags
 	skipNamespacesFlag []string // network command: skip specific namespaces
+
+	// NEW v0.5 flags
+	minAgeDays int // waste command: minimum resource age to report
 )
 
 func main() {
@@ -589,6 +592,64 @@ Examples:
 	networkCmd.Flags().StringVar(&clusterGroupFlag, "cluster-group", "", "Scan all clusters in a group")
 	networkCmd.Flags().StringSliceVar(&skipNamespacesFlag, "skip-namespaces", []string{}, "Additional namespaces to skip (comma-separated)")
 
+	// ================================================================
+	// Waste command - NEW in v0.5
+	// ================================================================
+	wasteCmd := &cobra.Command{
+		Use:   "waste",
+		Short: "Detect drifted, idle, and orphaned resources",
+		Long: `Scan cluster for resources that are old, idle, or orphaned.
+Shows data-driven findings and suggestions. Does not delete anything.
+
+Detects:
+  - Abandoned namespaces (no running pods, old creation date)
+  - Zombie pods (CrashLoopBackOff, OOMKilled for days)
+  - Idle pods (old, no restarts, no recent activity)
+  - Orphaned PVCs (unbound, released, or bound with no pod)
+  - Stale Jobs/CronJobs (completed, failed, or never ran)
+  - Zero-replica Deployments and StatefulSets
+  - Old ReplicaSets (leftover from rollouts)
+  - Services with no endpoints
+  - Ingresses with missing backends
+  - Misconfigured HPAs`,
+		Run: func(cmd *cobra.Command, args []string) {
+			clusters, isCompare, err := resolveTargetClusters()
+			if err != nil {
+				fmt.Printf("Error: %v\n", err)
+				os.Exit(1)
+			}
+
+			if isCompare {
+				fmt.Println("Error: --compare not supported for waste command")
+				os.Exit(1)
+			}
+
+			// Single cluster
+			if len(clusters) == 1 {
+				if err := runWasteScan(clusters[0].Context); err != nil {
+					fmt.Printf("Error: %v\n", err)
+					os.Exit(1)
+				}
+				return
+			}
+
+			// Multi-cluster
+			scanner.PrintMultiClusterHeader(clusters)
+			for i, cl := range clusters {
+				fmt.Printf("\n🔄 Scanning waste for %s (%d/%d)...\n", cl.Name, i+1, len(clusters))
+				if err := runWasteScan(cl.Context); err != nil {
+					fmt.Printf("❌ %s failed: %v\n", cl.Name, err)
+				}
+			}
+		},
+	}
+	wasteCmd.Flags().StringVarP(&cluster, "cluster", "c", "", "Cluster context name")
+	wasteCmd.Flags().StringVarP(&namespace, "namespace", "n", "", "Limit scan to specific namespace")
+	wasteCmd.Flags().BoolVar(&allClustersFlag, "all-clusters", false, "Scan all configured clusters")
+	wasteCmd.Flags().StringVar(&clusterGroupFlag, "cluster-group", "", "Scan all clusters in a group")
+	wasteCmd.Flags().IntVar(&minAgeDays, "min-age-days", 7, "Minimum resource age in days to report (default: 7)")
+	wasteCmd.Flags().Float64Var(&monthlyCost, "monthly-cost", 0, "Monthly cluster cost for waste estimation (optional)")
+
 	// Add all commands
 	rootCmd.AddCommand(configCmd)
 	rootCmd.AddCommand(emergencyCmd)
@@ -601,6 +662,7 @@ Examples:
 	rootCmd.AddCommand(idleCmd)
 	rootCmd.AddCommand(reportCmd)
 	rootCmd.AddCommand(networkCmd)
+	rootCmd.AddCommand(wasteCmd)
 
 	if err := rootCmd.Execute(); err != nil {
 		fmt.Println(err)
@@ -1252,5 +1314,24 @@ func runNetworkScan(clusterContext string) error {
 	}
 
 	analyzer.PrintNetworkPolicyAudit(audit)
+	return nil
+}
+
+func runWasteScan(clusterContext string) error {
+	fmt.Printf("\n🔍 Cluster: %s\n", clusterContext)
+	fmt.Printf("   Minimum age: %d days\n", minAgeDays)
+
+	clientset, err := getKubernetesClient(clusterContext)
+	if err != nil {
+		return fmt.Errorf("connecting to cluster: %w", err)
+	}
+
+	wa := analyzer.NewWasteAuditor(clientset, minAgeDays)
+	audit, err := wa.AuditWaste(namespace)
+	if err != nil {
+		return fmt.Errorf("auditing waste: %w", err)
+	}
+
+	analyzer.PrintWasteAudit(audit, minAgeDays)
 	return nil
 }
