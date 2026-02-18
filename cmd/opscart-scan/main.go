@@ -1326,7 +1326,9 @@ func runWasteScan(clusterContext string) error {
 		return fmt.Errorf("connecting to cluster: %w", err)
 	}
 
-	wa := analyzer.NewWasteAuditor(clientset, minAgeDays)
+	wa, cancel := analyzer.NewWasteAuditor(clientset, minAgeDays)
+	defer cancel() // Ensure context cleanup even if we exit early
+
 	audit, err := wa.AuditWaste(namespace)
 	if err != nil {
 		return fmt.Errorf("auditing waste: %w", err)
