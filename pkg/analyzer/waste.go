@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	autoscalingv2 "k8s.io/api/autoscaling/v2"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
@@ -187,16 +188,15 @@ type MisconfiguredHPA struct {
 // Constructor
 // ================================================================
 
-func NewWasteAuditor(clientset *kubernetes.Clientset, minAgeDays int) *WasteAuditor {
+func NewWasteAuditor(clientset *kubernetes.Clientset, minAgeDays int) (*WasteAuditor, context.CancelFunc) {
 	// 60-second timeout per cluster - prevents hanging on corporate networks
-	// with RBAC restrictions or slow API servers
+	// Caller should defer the cancel function for proper cleanup
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
-	_ = cancel // timeout handles cleanup automatically
 	return &WasteAuditor{
 		clientset:  clientset,
 		ctx:        ctx,
 		minAgeDays: minAgeDays,
-	}
+	}, cancel
 }
 
 // ================================================================
@@ -472,7 +472,8 @@ func (w *WasteAuditor) detectOrphanedPVCs(audit *WasteAudit, filterNamespace str
 	// Build set of PVCs actively used by pods
 	pods, err := w.clientset.CoreV1().Pods(filterNamespace).List(w.ctx, metav1.ListOptions{TimeoutSeconds: int64Ptr(10)})
 	if err != nil {
-		return err
+		fmt.Printf("⚠️  Could not list pods for PVC orphan detection: %v. Continuing with incomplete data.\n", err)
+		pods = &corev1.PodList{} // Continue with empty list
 	}
 
 	usedPVCs := map[string]bool{}
@@ -1002,15 +1003,43 @@ func (w *WasteAuditor) detectBrokenIngresses(audit *WasteAudit, filterNamespace 
 // ================================================================
 
 func (w *WasteAuditor) detectMisconfiguredHPAs(audit *WasteAudit, filterNamespace string) error {
-	hpas, err := w.clientset.AutoscalingV2().HorizontalPodAutoscalers(filterNamespace).List(w.ctx, metav1.ListOptions{TimeoutSeconds: int64Ptr(10)})
+	// Try v2 first (preferred, available in k8s 1.23+)
+	hpasV2, err := w.clientset.AutoscalingV2().HorizontalPodAutoscalers(filterNamespace).List(w.ctx, metav1.ListOptions{TimeoutSeconds: int64Ptr(10)})
+
+	// If v2 fails, try v1 (older clusters)
 	if err != nil {
-		// Try v1 if v2 not available
-		return nil
+		hpasV1, errV1 := w.clientset.AutoscalingV1().HorizontalPodAutoscalers(filterNamespace).List(w.ctx, metav1.ListOptions{TimeoutSeconds: int64Ptr(10)})
+		if errV1 != nil {
+			// Both v2 and v1 failed - skip HPA detection
+			return nil
+		}
+
+		// Convert v1 to v2 format for unified processing
+		hpasV2 = &autoscalingv2.HorizontalPodAutoscalerList{Items: make([]autoscalingv2.HorizontalPodAutoscaler, len(hpasV1.Items))}
+		for i, v1hpa := range hpasV1.Items {
+			hpasV2.Items[i] = autoscalingv2.HorizontalPodAutoscaler{
+				ObjectMeta: v1hpa.ObjectMeta,
+				Spec: autoscalingv2.HorizontalPodAutoscalerSpec{
+					ScaleTargetRef: autoscalingv2.CrossVersionObjectReference{
+						Kind:       v1hpa.Spec.ScaleTargetRef.Kind,
+						Name:       v1hpa.Spec.ScaleTargetRef.Name,
+						APIVersion: v1hpa.Spec.ScaleTargetRef.APIVersion,
+					},
+					MinReplicas: v1hpa.Spec.MinReplicas,
+					MaxReplicas: v1hpa.Spec.MaxReplicas,
+				},
+				Status: autoscalingv2.HorizontalPodAutoscalerStatus{
+					CurrentReplicas: v1hpa.Status.CurrentReplicas,
+					DesiredReplicas: v1hpa.Status.DesiredReplicas,
+					Conditions:      []autoscalingv2.HorizontalPodAutoscalerCondition{}, // v1 API does not support conditions
+				},
+			}
+		}
 	}
 
 	now := time.Now()
 
-	for _, hpa := range hpas.Items {
+	for _, hpa := range hpasV2.Items {
 		if isInfraPattern(hpa.Namespace) {
 			continue
 		}
