@@ -33,7 +33,7 @@ const wasteHTMLTemplate = `<!DOCTYPE html>
             box-shadow: 0 2px 8px rgba(0,0,0,0.1);
         }
         .header {
-            background: linear-gradient(135deg, #f093fb 0%, #f5576c 100%);
+            background: linear-gradient(135deg, #326ce5 0%, #1a4d8f 100%);
             color: white;
             padding: 30px;
             border-radius: 8px 8px 0 0;
@@ -47,7 +47,7 @@ const wasteHTMLTemplate = `<!DOCTYPE html>
             font-weight: 600;
             margin-bottom: 20px;
             color: #2d3748;
-            border-bottom: 2px solid #e2e8f0;
+            border-bottom: 2px solid #326ce5;
             padding-bottom: 10px;
         }
         .scorecard {
@@ -64,7 +64,7 @@ const wasteHTMLTemplate = `<!DOCTYPE html>
         }
         .score-card.critical { border-color: #fc8181; }
         .score-card.warning { border-color: #f6ad55; }
-        .score-card.success { border-color: #68d391; }
+        .score-card.success { border-color: #326ce5; }
         .score-value {
             font-size: 36px;
             font-weight: bold;
@@ -76,7 +76,7 @@ const wasteHTMLTemplate = `<!DOCTYPE html>
             margin-bottom: 15px;
             border-radius: 8px;
             background: #f7fafc;
-            border-left: 4px solid #cbd5e0;
+            border-left: 4px solid #326ce5;
         }
         .item-box.critical { background: #fff5f5; border-color: #fc8181; }
         .item-box.warning { background: #fffaf0; border-color: #f6ad55; }
@@ -128,7 +128,7 @@ const wasteHTMLTemplate = `<!DOCTYPE html>
         }
         .badge-critical { background: #fed7d7; color: #c53030; }
         .badge-warning { background: #feebc8; color: #c05621; }
-        .badge-success { background: #c6f6d5; color: #22543d; }
+        .badge-success { background: #dbeafe; color: #1e40af; }
         .empty-state {
             text-align: center;
             padding: 60px 20px;
