@@ -37,7 +37,8 @@ var (
 	skipNamespacesFlag []string // network command: skip specific namespaces
 
 	// NEW v0.5 flags
-	minAgeDays int // waste command: minimum resource age to report
+	minAgeDays  int    // waste command: minimum resource age to report
+	wasteFormat string // waste command: output format (cli, html)
 )
 
 func main() {
@@ -649,6 +650,7 @@ Detects:
 	wasteCmd.Flags().StringVar(&clusterGroupFlag, "cluster-group", "", "Scan all clusters in a group")
 	wasteCmd.Flags().IntVar(&minAgeDays, "min-age-days", 7, "Minimum resource age in days to report (default: 7)")
 	wasteCmd.Flags().Float64Var(&monthlyCost, "monthly-cost", 0, "Monthly cluster cost for waste estimation (optional)")
+	wasteCmd.Flags().StringVar(&wasteFormat, "format", "cli", "Output format: cli (default) or html")
 
 	// Add all commands
 	rootCmd.AddCommand(configCmd)
@@ -1320,6 +1322,9 @@ func runNetworkScan(clusterContext string) error {
 func runWasteScan(clusterContext string) error {
 	fmt.Printf("\n🔍 Cluster: %s\n", clusterContext)
 	fmt.Printf("   Minimum age: %d days\n", minAgeDays)
+	if wasteFormat == "html" {
+		fmt.Printf("   Format: HTML report\n")
+	}
 
 	clientset, err := getKubernetesClient(clusterContext)
 	if err != nil {
@@ -1334,6 +1339,15 @@ func runWasteScan(clusterContext string) error {
 		return fmt.Errorf("auditing waste: %w", err)
 	}
 
-	analyzer.PrintWasteAudit(audit, minAgeDays)
+	// Output based on format
+	switch wasteFormat {
+	case "html":
+		if err := report.GenerateWasteHTML(audit, clusterContext, minAgeDays); err != nil {
+			return fmt.Errorf("generating HTML report: %w", err)
+		}
+	default:
+		analyzer.PrintWasteAudit(audit, minAgeDays)
+	}
+
 	return nil
 }
