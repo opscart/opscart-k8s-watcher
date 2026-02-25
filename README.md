@@ -1,6 +1,6 @@
 # opscart-k8s-watcher
 
-**Version:** 0.5  
+**Version:** 0.5.2  
 **Purpose:** Production-grade Kubernetes security auditing with multi-cluster support, HTML reporting, network policy analysis, and waste detection  
 **Focus:** CIS compliance, HTML reports, network isolation, waste detection, and multi-cluster analysis
 
@@ -19,6 +19,30 @@
 - Resource optimization opportunities
 - War room troubleshooting
 - Executive-ready HTML reports
+
+---
+
+## What's New in v0.5.2
+
+### HTML Reports for Waste Detection
+The `waste` command now supports HTML output alongside CLI format.
+
+```bash
+# Generate HTML report (same professional format as security reports)
+./opscart-scan waste --cluster prod --format html
+
+# CLI output (default - unchanged)
+./opscart-scan waste --cluster prod
+```
+
+**HTML report includes:**
+- Visual scorecard showing all 9 waste categories at a glance
+- Color-coded severity (red=critical, orange=warning, blue=success)
+- Detailed findings with kubectl investigation commands
+- Separate "Housekeeping" section for Old ReplicaSets (not counted in total)
+- Kubernetes blue theme for professional/corporate environments
+
+Reports saved to: `reports/YYYY-MM-DD/opscart-waste-HHMM.html`
 
 ---
 
@@ -183,6 +207,7 @@ Coverage: [░░░░░░░░░░░░░░░░░░░░░░░
 - **Data-driven findings** - every result shows observed data, not assumptions
 - **Smart filtering** - auto-skips infrastructure namespaces (same patterns as `network` command)
 - **Configurable threshold** - `--min-age-days` (default: 7)
+- **HTML reports** - `--format html` for visual dashboards (v0.5.2)
 - **Suggestions only** - never modifies the cluster
 
 ### 🌐 Network Policy Detection (v0.4)
@@ -352,6 +377,9 @@ go build -o opscart-scan cmd/opscart-scan/main.go
 # Detect forgotten/idle/orphaned resources (default: 7+ days old)
 ./opscart-scan waste --cluster prod
 
+# Generate HTML report (v0.5.2)
+./opscart-scan waste --cluster prod --format html
+
 # Adjust age threshold
 ./opscart-scan waste --cluster prod --min-age-days 30
 
@@ -417,6 +445,7 @@ go build -o opscart-scan cmd/opscart-scan/main.go
 ### Waste & Drift Detection (NEW in v0.5)
 ```bash
 ./opscart-scan waste --cluster CLUSTER
+./opscart-scan waste --cluster CLUSTER --format html  # HTML report (v0.5.2)
 ./opscart-scan waste --cluster CLUSTER --min-age-days 30
 ./opscart-scan waste --cluster CLUSTER --namespace NAMESPACE
 ./opscart-scan waste --all-clusters
@@ -636,7 +665,23 @@ This enables powerful multi-cluster workflows with `--all-clusters` and `--clust
 
 ## Version History
 
-### v0.5 (Current - February 2026)
+### v0.5.2 (Current - February 2026)
+**HTML Reports for Waste Detection:**
+- `--format html` flag for waste command
+- Visual scorecard with all 9 waste categories
+- Color-coded severity (red/orange/blue Kubernetes theme)
+- Detailed findings with kubectl commands
+- Old ReplicaSets shown separately (not counted in total)
+- Same professional format as security reports
+
+### v0.5.1 (February 2026)
+**Bug Fixes:**
+- Fixed context cancellation leak in waste detector
+- Fixed PVC detection failing when pod listing errors
+- Fixed HPA detection on older Kubernetes clusters (< 1.23)
+- Added v1 HPA API fallback
+
+### v0.5 (February 2026)
 **Waste & Drift Detection:**
 - `waste` command - detects forgotten, idle, and orphaned resources across 9 types
 - Abandoned namespaces, zombie pods, unmanaged bare pods
@@ -741,6 +786,6 @@ MIT License - See LICENSE file for details
 
 ---
 
-**Version:** v0.5  
+**Version:** v0.5.2  
 **Status:** Dev/Stag/Production-ready for multi-cluster security auditing, network policy detection, and waste detection  
 **Last Updated:** February 2026
