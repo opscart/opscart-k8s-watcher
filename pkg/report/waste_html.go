@@ -330,7 +330,7 @@ const wasteHTMLTemplate = `<!DOCTYPE html>
                 <div class="section-title">🔌 Orphaned Services ({{.OrphanedServiceCount}})</div>
                 {{range .OrphanedServices}}
                 <div class="item-box warning">
-                    <div class="item-title">{{.Name}} <span class="badge badge-warning">{{.ServiceType}}</span></div>
+                    <div class="item-title">{{.Name}} <span class="badge badge-warning">{{.Type}}</span></div>
                     <div class="item-meta">
                         <div class="item-meta-item"><span class="item-meta-label">Namespace:</span> {{.Namespace}}</div>
                         <div class="item-meta-item"><span class="item-meta-label">Age:</span> {{.AgeDays}} days</div>
