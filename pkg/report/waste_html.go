@@ -183,6 +183,22 @@ const wasteHTMLTemplate = `<!DOCTYPE html>
                     <div class="score-label">Stale Jobs/CronJobs</div>
                     <div class="score-value">{{.StaleJobCount}}</div>
                 </div>
+                <div class="score-card {{if gt .ZeroReplicaCount 0}}warning{{else}}success{{end}}">
+                    <div class="score-label">Zero-Replica Workloads</div>
+                    <div class="score-value">{{.ZeroReplicaCount}}</div>
+                </div>
+                <div class="score-card {{if gt .OrphanedServiceCount 0}}warning{{else}}success{{end}}">
+                    <div class="score-label">Orphaned Services</div>
+                    <div class="score-value">{{.OrphanedServiceCount}}</div>
+                </div>
+                <div class="score-card {{if gt .BrokenIngressCount 0}}warning{{else}}success{{end}}">
+                    <div class="score-label">Broken Ingresses</div>
+                    <div class="score-value">{{.BrokenIngressCount}}</div>
+                </div>
+                <div class="score-card {{if gt .MisconfiguredHPACount 0}}warning{{else}}success{{end}}">
+                    <div class="score-label">Misconfigured HPAs</div>
+                    <div class="score-value">{{.MisconfiguredHPACount}}</div>
+                </div>
                 <div class="score-card {{if gt .TotalWasteItems 0}}warning{{else}}success{{end}}">
                     <div class="score-label">Total Items</div>
                     <div class="score-value">{{.TotalWasteItems}}</div>
@@ -308,6 +324,62 @@ const wasteHTMLTemplate = `<!DOCTYPE html>
             </div>
             {{end}}
 
+            <!-- Orphaned Services -->
+            {{if gt .OrphanedServiceCount 0}}
+            <div class="section">
+                <div class="section-title">🔌 Orphaned Services ({{.OrphanedServiceCount}})</div>
+                {{range .OrphanedServices}}
+                <div class="item-box warning">
+                    <div class="item-title">{{.Name}} <span class="badge badge-warning">{{.ServiceType}}</span></div>
+                    <div class="item-meta">
+                        <div class="item-meta-item"><span class="item-meta-label">Namespace:</span> {{.Namespace}}</div>
+                        <div class="item-meta-item"><span class="item-meta-label">Age:</span> {{.AgeDays}} days</div>
+                    </div>
+                    <div class="item-finding">{{.Reason}}</div>
+                    <div class="item-suggest">kubectl describe service {{.Name}} -n {{.Namespace}}</div>
+                </div>
+                {{end}}
+            </div>
+            {{end}}
+
+            <!-- Broken Ingresses -->
+            {{if gt .BrokenIngressCount 0}}
+            <div class="section">
+                <div class="section-title">🌐 Broken Ingresses ({{.BrokenIngressCount}})</div>
+                {{range .BrokenIngresses}}
+                <div class="item-box warning">
+                    <div class="item-title">{{.Name}}</div>
+                    <div class="item-meta">
+                        <div class="item-meta-item"><span class="item-meta-label">Namespace:</span> {{.Namespace}}</div>
+                        <div class="item-meta-item"><span class="item-meta-label">Age:</span> {{.AgeDays}} days</div>
+                    </div>
+                    <div class="item-finding">{{.Reason}}</div>
+                    <div class="item-suggest">kubectl describe ingress {{.Name}} -n {{.Namespace}}</div>
+                </div>
+                {{end}}
+            </div>
+            {{end}}
+
+            <!-- Misconfigured HPAs -->
+            {{if gt .MisconfiguredHPACount 0}}
+            <div class="section">
+                <div class="section-title">📈 Misconfigured HPAs ({{.MisconfiguredHPACount}})</div>
+                {{range .MisconfiguredHPAs}}
+                <div class="item-box warning">
+                    <div class="item-title">{{.Name}} <span class="badge badge-warning">{{.Condition}}</span></div>
+                    <div class="item-meta">
+                        <div class="item-meta-item"><span class="item-meta-label">Namespace:</span> {{.Namespace}}</div>
+                        <div class="item-meta-item"><span class="item-meta-label">Target:</span> {{.TargetName}}</div>
+                        <div class="item-meta-item"><span class="item-meta-label">Age:</span> {{.AgeDays}} days</div>
+                        <div class="item-meta-item"><span class="item-meta-label">Replicas:</span> {{.MinReplicas}}-{{.MaxReplicas}}</div>
+                    </div>
+                    <div class="item-finding">{{.Reason}}</div>
+                    <div class="item-suggest">kubectl describe hpa {{.Name}} -n {{.Namespace}}</div>
+                </div>
+                {{end}}
+            </div>
+            {{end}}
+
             <!-- Housekeeping Items (not counted in total) -->
             {{if gt .OldReplicaSetCount 0}}
             <div class="section">
@@ -364,6 +436,9 @@ type WasteHTMLData struct {
 	OrphanedPVCCount        int
 	StaleJobCount           int
 	ZeroReplicaCount        int
+	OrphanedServiceCount    int
+	BrokenIngressCount      int
+	MisconfiguredHPACount   int
 	OldReplicaSetCount      int
 	TotalWasteItems         int
 
@@ -374,6 +449,9 @@ type WasteHTMLData struct {
 	OrphanedPVCs         []analyzer.OrphanedPVC
 	StaleJobs            []analyzer.StaleJob
 	ZeroReplicaWorkloads []analyzer.ZeroReplicaWorkload
+	OrphanedServices     []analyzer.OrphanedService
+	BrokenIngresses      []analyzer.BrokenIngress
+	MisconfiguredHPAs    []analyzer.MisconfiguredHPA
 	OldReplicaSets       []analyzer.OldReplicaSet
 }
 
@@ -399,6 +477,9 @@ func GenerateWasteHTML(audit *analyzer.WasteAudit, clusterContext string, minAge
 		OrphanedPVCCount:        len(audit.OrphanedPVCs),
 		StaleJobCount:           len(audit.StaleJobs),
 		ZeroReplicaCount:        len(audit.ZeroReplicaWorkloads),
+		OrphanedServiceCount:    len(audit.OrphanedServices),
+		BrokenIngressCount:      len(audit.BrokenIngresses),
+		MisconfiguredHPACount:   len(audit.MisconfiguredHPAs),
 		OldReplicaSetCount:      len(audit.OldReplicaSets),
 		TotalWasteItems:         audit.TotalWasteItems,
 		AbandonedNamespaces:     audit.AbandonedNamespaces,
@@ -407,6 +488,9 @@ func GenerateWasteHTML(audit *analyzer.WasteAudit, clusterContext string, minAge
 		OrphanedPVCs:            audit.OrphanedPVCs,
 		StaleJobs:               audit.StaleJobs,
 		ZeroReplicaWorkloads:    audit.ZeroReplicaWorkloads,
+		OrphanedServices:        audit.OrphanedServices,
+		BrokenIngresses:         audit.BrokenIngresses,
+		MisconfiguredHPAs:       audit.MisconfiguredHPAs,
 		OldReplicaSets:          audit.OldReplicaSets,
 	}
 
