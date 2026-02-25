@@ -245,13 +245,12 @@ func (w *WasteAuditor) AuditWaste(filterNamespace string) (*WasteAudit, error) {
 		fmt.Printf("⚠️  HPA scan skipped: %v\n", err)
 	}
 
-	// Count totals
+	// Count totals (excluding OldReplicaSets - they're low-severity housekeeping items)
 	audit.TotalWasteItems = len(audit.AbandonedNamespaces) +
 		len(audit.StalePods) +
 		len(audit.OrphanedPVCs) +
 		len(audit.StaleJobs) +
 		len(audit.ZeroReplicaWorkloads) +
-		len(audit.OldReplicaSets) +
 		len(audit.OrphanedServices) +
 		len(audit.BrokenIngresses) +
 		len(audit.MisconfiguredHPAs)
