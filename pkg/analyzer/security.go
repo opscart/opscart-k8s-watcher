@@ -417,6 +417,46 @@ func detectEnvironment(namespace string) string {
 	return "DEVELOPMENT"
 }
 
+// calculateIssueCounts separates actionable issues from expected infrastructure configurations
+func calculateIssueCounts(issues []models.SecurityIssue) (actionable, infrastructure, prodStaging, development, systemUnexpected int) {
+	for _, issue := range issues {
+		env := detectEnvironment(issue.Namespace)
+
+		// Check if it's an expected system configuration
+		isExpectedSystemConfig := false
+		if env == "SYSTEM" {
+			// For privileged containers, check if expected
+			if issue.Type == "privileged_container" {
+				if strings.Contains(issue.Description, "expected for this infrastructure") {
+					isExpectedSystemConfig = true
+				}
+			} else {
+				// Other system namespace issues are considered expected infrastructure
+				isExpectedSystemConfig = true
+			}
+		}
+
+		if isExpectedSystemConfig {
+			infrastructure++
+		} else {
+			actionable++
+
+			// Count by environment for actionable issues
+			switch env {
+			case "PRODUCTION", "STAGING":
+				prodStaging++
+			case "DEVELOPMENT":
+				development++
+			case "SYSTEM":
+				// System but not expected (e.g., unexpected privileged)
+				systemUnexpected++
+			}
+		}
+	}
+
+	return
+}
+
 // isExpectedPrivileged checks if a pod legitimately needs privileged access
 // Only certain system pods require privileged mode for their core functionality
 func isExpectedPrivileged(podName, namespace string) bool {
@@ -573,11 +613,31 @@ func printSecurityDisclaimer() {
 }
 
 func printClusterSummary(audit *models.SecurityAudit) {
+	// Calculate actionable vs infrastructure counts
+	actionable, infrastructure, prodStaging, development, systemUnexpected := calculateIssueCounts(audit.Issues)
+
 	fmt.Println("═══════════════════════════════════════════════════════════")
 	fmt.Println("CLUSTER SECURITY SUMMARY")
 	fmt.Println("═══════════════════════════════════════════════════════════")
 	fmt.Printf("Pods Scanned: %d\n", audit.TotalPodsAudited)
-	fmt.Printf("Issues Found: %d\n", len(audit.Issues))
+	fmt.Println()
+
+	fmt.Printf("SECURITY ISSUES REQUIRING ACTION: %d\n", actionable)
+	if prodStaging > 0 {
+		fmt.Printf("  └─ Production/Staging:    %d (⚠️  IMMEDIATE ATTENTION)\n", prodStaging)
+	}
+	if development > 0 {
+		fmt.Printf("  └─ Development:          %d (lower priority, monitor)\n", development)
+	}
+	if systemUnexpected > 0 {
+		fmt.Printf("  └─ System (unexpected):  %d (⚠️  REVIEW REQUIRED)\n", systemUnexpected)
+	}
+
+	if infrastructure > 0 {
+		fmt.Println()
+		fmt.Printf("Infrastructure Configurations: %d (expected for system components)\n", infrastructure)
+	}
+
 	fmt.Println()
 }
 
@@ -587,10 +647,15 @@ func printDetailedFindings(audit *models.SecurityAudit) {
 	fmt.Println("\n═══════════════════════════════════════════════════════════")
 	fmt.Println("DETAILED SECURITY FINDINGS")
 	fmt.Println("═══════════════════════════════════════════════════════════")
+	fmt.Println()
+	fmt.Println("ℹ️  Note: Findings marked as 'SYSTEM (expected)' are normal infrastructure")
+	fmt.Println("   configurations. Focus on Production/Staging/Development and")
+	fmt.Println("   'SYSTEM (unexpected)' findings for remediation.")
+	fmt.Println()
 
 	// Critical findings with TOP 5 resources (FIX #2)
 	if hasAnyCriticalFindings(risks) {
-		fmt.Println("\n🔴 CRITICAL FINDINGS:")
+		fmt.Println("🔴 CRITICAL FINDINGS:")
 
 		if risks.PrivilegedContainers > 0 {
 			printFindingWithResources("Privileged containers", risks.PrivilegedContainers,
@@ -799,9 +864,12 @@ func validateCounting(audit *models.SecurityAudit) {
 
 	actualIssues := len(audit.Issues)
 
+	// Calculate actionable vs infrastructure
+	actionable, infrastructure, _, _, _ := calculateIssueCounts(audit.Issues)
+
 	// Always show breakdown for transparency
 	fmt.Println("═══════════════════════════════════════════════════════════")
-	fmt.Println("ISSUE COUNT BREAKDOWN")
+	fmt.Println("DETAILED ISSUE COUNT BREAKDOWN")
 	fmt.Println("═══════════════════════════════════════════════════════════")
 	fmt.Printf("  Privileged containers:      %3d\n", audit.Risks.PrivilegedContainers)
 	fmt.Printf("  Host PID:                   %3d\n", audit.Risks.HostPID)
@@ -814,7 +882,10 @@ func validateCounting(audit *models.SecurityAudit) {
 	fmt.Printf("  Missing resource limits:    %3d\n", audit.Risks.MissingResourceLimits)
 	fmt.Printf("  Default service account:    %3d\n", audit.Risks.DefaultServiceAccount)
 	fmt.Println("  ─────────────────────────────────")
-	fmt.Printf("  TOTAL:                      %3d\n", totalCounted)
+	fmt.Printf("  TOTAL FINDINGS:             %3d\n", totalCounted)
+	fmt.Println()
+	fmt.Printf("  Actionable Issues:          %3d (require remediation)\n", actionable)
+	fmt.Printf("  Infrastructure Expected:    %3d (system components functioning normally)\n", infrastructure)
 
 	// Only show warning if there's a discrepancy
 	if totalCounted != actualIssues {
@@ -822,7 +893,7 @@ func validateCounting(audit *models.SecurityAudit) {
 		fmt.Printf("⚠️  WARNING: Total (%d) doesn't match Issues Found (%d)\n", totalCounted, actualIssues)
 		fmt.Printf("Difference: %d issues not tracked in SecurityRisks\n", actualIssues-totalCounted)
 	} else {
-		fmt.Printf("\nCount verified: All %d issues accounted for\n", actualIssues)
+		fmt.Printf("\nCount verified: All %d findings accounted for\n", actualIssues)
 	}
 	fmt.Println()
 }
