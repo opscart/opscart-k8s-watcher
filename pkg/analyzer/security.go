@@ -490,7 +490,8 @@ func isExpectedPrivileged(podName, namespace string) bool {
 	if strings.Contains(lower, "node-exporter") ||
 		strings.Contains(lower, "datadog-agent") ||
 		strings.Contains(lower, "newrelic-agent") ||
-		strings.Contains(lower, "dynatrace-agent") {
+		strings.Contains(lower, "dynatrace-agent") ||
+		strings.Contains(lower, "ama-logs") { // Azure Monitor Agent
 		return true
 	}
 
@@ -738,6 +739,7 @@ func printFindingWithResources(name string, count int, risk string, allIssues []
 		systemIssues := filterIssuesByType(allIssues, issueType)
 		expectedCount := 0
 		unexpectedCount := 0
+		unexpectedPods := []string{}
 
 		for _, issue := range systemIssues {
 			if detectEnvironment(issue.Namespace) == "SYSTEM" {
@@ -745,6 +747,7 @@ func printFindingWithResources(name string, count int, risk string, allIssues []
 					expectedCount++
 				} else if strings.Contains(issue.Description, "unexpected - review required") {
 					unexpectedCount++
+					unexpectedPods = append(unexpectedPods, issue.Name)
 				}
 			}
 		}
@@ -764,6 +767,21 @@ func printFindingWithResources(name string, count int, risk string, allIssues []
 		}
 		if unexpectedCount > 0 {
 			fmt.Printf("    └─ SYSTEM (unexpected): %d (⚠️  REVIEW REQUIRED - not in expected list)\n", unexpectedCount)
+
+			// Show which pods are unexpected (limit to 5)
+			if len(unexpectedPods) > 0 {
+				fmt.Println("       Unexpected pods to review:")
+				limit := 5
+				if len(unexpectedPods) < limit {
+					limit = len(unexpectedPods)
+				}
+				for i := 0; i < limit; i++ {
+					fmt.Printf("       • %s\n", unexpectedPods[i])
+				}
+				if len(unexpectedPods) > 5 {
+					fmt.Printf("       • ... and %d more\n", len(unexpectedPods)-5)
+				}
+			}
 		}
 	} else {
 		// Standard environment breakdown for other issue types
