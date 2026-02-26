@@ -183,16 +183,36 @@ func (sa *SecurityAuditor) auditContainer(pod corev1.Pod, container corev1.Conta
 	// Check privileged containers
 	if container.SecurityContext != nil && container.SecurityContext.Privileged != nil && *container.SecurityContext.Privileged {
 		severity := "high"
-		if !isSystemNamespace {
+		env := detectEnvironment(pod.Namespace)
+
+		// Check if this is an expected privileged pod
+		isExpected := isExpectedPrivileged(pod.Name, pod.Namespace)
+
+		// Only lower severity if it's SYSTEM and expected
+		if env != "SYSTEM" {
 			severity = "critical"
+		} else if !isExpected {
+			// System namespace but NOT in expected list - still concerning
+			severity = "high"
+		} else {
+			// System namespace AND in expected list
+			severity = "medium"
 		}
+
+		description := "Container running in privileged mode"
+		if env == "SYSTEM" && isExpected {
+			description = "Container running in privileged mode (expected for this infrastructure component)"
+		} else if env == "SYSTEM" && !isExpected {
+			description = "Container running in privileged mode (unexpected - review required)"
+		}
+
 		issues = append(issues, models.SecurityIssue{
 			Type:        "privileged_container",
 			Severity:    severity,
 			Resource:    "container",
 			Namespace:   pod.Namespace,
 			Name:        fmt.Sprintf("%s/%s", pod.Name, container.Name),
-			Description: "Container running in privileged mode",
+			Description: description,
 			Remediation: "Remove privileged: true",
 		})
 	}
@@ -320,16 +340,66 @@ func (sa *SecurityAuditor) generatePriorityActions(audit *models.SecurityAudit) 
 func detectEnvironment(namespace string) string {
 	lower := strings.ToLower(namespace)
 
-	// System namespaces
-	if strings.Contains(lower, "kube-system") ||
-		strings.Contains(lower, "kube-public") ||
-		strings.Contains(lower, "istio-system") ||
-		strings.Contains(lower, "monitoring") {
-		return "SYSTEM"
+	// System/Infrastructure namespaces (comprehensive list covering major K8s distributions)
+	infraPatterns := []string{
+		// Core Kubernetes
+		"kube-system", "kube-public", "kube-node-lease",
+
+		// CNI (Container Network Interface)
+		"calico-system", "tigera-", "cilium", "flannel", "weave", "canal",
+
+		// Service Mesh
+		"istio-system", "istio-", "linkerd", "consul", "consul-",
+
+		// Storage
+		"longhorn-system", "rook-", "openebs", "csi-", "portworx",
+
+		// GitOps
+		"argocd", "argo-", "flux-system", "flux-", "fleet-system",
+
+		// Monitoring & Observability
+		"monitoring", "prometheus", "grafana", "datadog", "newrelic",
+		"dynatrace", "elastic-system", "splunk-", "jaeger", "tempo",
+
+		// Security & Policy
+		"cert-manager", "vault", "sealed-secrets", "gatekeeper-system",
+		"falco", "trivy-system", "aqua-", "sysdig-", "neuvector-",
+
+		// Ingress Controllers
+		"ingress-nginx", "nginx-ingress", "traefik", "ambassador",
+		"contour", "haproxy-",
+
+		// Backup & DR
+		"velero", "kasten-io", "stash-",
+
+		// Cloud Provider Specific
+		"azure-", "aws-", "gke-", "aks-", "eks-",
+		"gmp-system", "config-management-system", // GCP
+		"aad-pod-identity",                    // Azure
+		"amazon-cloudwatch", "amazon-vpc-cni", // AWS
+
+		// Platform/Distribution
+		"openshift-", "rancher-", "cattle-", "tanzu-", "vmware-system-",
+		"k3s-", "rke2-",
+
+		// Autoscaling
+		"karpenter", "cluster-autoscaler", "descheduler",
+
+		// Service Catalog & Operators
+		"operator-", "olm", "marketplace-",
+
+		// Logging
+		"logging", "fluentd", "fluent-bit", "loki", "elasticsearch",
 	}
 
-	// Production
-	if strings.Contains(lower, "prod") {
+	for _, pattern := range infraPatterns {
+		if strings.Contains(lower, pattern) {
+			return "SYSTEM"
+		}
+	}
+
+	// Production (check after infrastructure; exclude "prodfix" pattern)
+	if strings.Contains(lower, "prod") && !strings.Contains(lower, "prodfix") {
 		return "PRODUCTION"
 	}
 
@@ -337,12 +407,59 @@ func detectEnvironment(namespace string) string {
 	if strings.Contains(lower, "staging") ||
 		strings.Contains(lower, "stage") ||
 		strings.Contains(lower, "qa") ||
-		strings.Contains(lower, "uat") {
+		strings.Contains(lower, "uat") ||
+		strings.Contains(lower, "e2e") ||
+		strings.Contains(lower, "perf") {
 		return "STAGING"
 	}
 
 	// Default to development
 	return "DEVELOPMENT"
+}
+
+// isExpectedPrivileged checks if a pod legitimately needs privileged access
+// Only certain system pods require privileged mode for their core functionality
+func isExpectedPrivileged(podName, namespace string) bool {
+	lower := strings.ToLower(podName)
+	lowerNs := strings.ToLower(namespace)
+
+	// CNI pods (need to manipulate network interfaces)
+	if strings.Contains(lowerNs, "calico") ||
+		strings.Contains(lowerNs, "cilium") ||
+		strings.Contains(lowerNs, "flannel") ||
+		strings.Contains(lowerNs, "weave") ||
+		strings.Contains(lowerNs, "canal") ||
+		strings.Contains(lower, "kindnet") {
+		return true
+	}
+
+	// kube-proxy (manipulates iptables/ipvs)
+	if strings.HasPrefix(lower, "kube-proxy") {
+		return true
+	}
+
+	// Storage CSI drivers (mount/unmount volumes)
+	if strings.Contains(lower, "csi-") ||
+		strings.Contains(lower, "longhorn") ||
+		strings.Contains(lower, "rook") ||
+		strings.Contains(lower, "openebs") {
+		return true
+	}
+
+	// Node-level monitoring agents (need host metrics)
+	if strings.Contains(lower, "node-exporter") ||
+		strings.Contains(lower, "datadog-agent") ||
+		strings.Contains(lower, "newrelic-agent") ||
+		strings.Contains(lower, "dynatrace-agent") {
+		return true
+	}
+
+	// Node problem detector
+	if strings.Contains(lower, "node-problem-detector") {
+		return true
+	}
+
+	return false
 }
 
 // filterIssuesByType returns issues of a specific type
@@ -551,18 +668,52 @@ func printFindingWithResources(name string, count int, risk string, allIssues []
 	// Print summary with environment context
 	fmt.Printf("  • %s: %d (%s)\n", name, count, risk)
 
-	// Show environment breakdown if multiple environments
-	if envCounts["PRODUCTION"] > 0 {
-		fmt.Printf("    └─ PRODUCTION: %d (⚠️  REQUIRES IMMEDIATE ACTION)\n", envCounts["PRODUCTION"])
-	}
-	if envCounts["STAGING"] > 0 {
-		fmt.Printf("    └─ STAGING: %d (should fix before prod)\n", envCounts["STAGING"])
-	}
-	if envCounts["DEVELOPMENT"] > 0 {
-		fmt.Printf("    └─ DEVELOPMENT: %d (acceptable for dev, monitor)\n", envCounts["DEVELOPMENT"])
-	}
-	if envCounts["SYSTEM"] > 0 {
-		fmt.Printf("    └─ SYSTEM: %d (expected for infrastructure)\n", envCounts["SYSTEM"])
+	// Special handling for privileged containers - show expected vs unexpected
+	if issueType == "privileged_container" {
+		systemIssues := filterIssuesByType(allIssues, issueType)
+		expectedCount := 0
+		unexpectedCount := 0
+
+		for _, issue := range systemIssues {
+			if detectEnvironment(issue.Namespace) == "SYSTEM" {
+				if strings.Contains(issue.Description, "expected for this infrastructure") {
+					expectedCount++
+				} else if strings.Contains(issue.Description, "unexpected - review required") {
+					unexpectedCount++
+				}
+			}
+		}
+
+		// Show breakdown
+		if envCounts["PRODUCTION"] > 0 {
+			fmt.Printf("    └─ PRODUCTION: %d (⚠️  REQUIRES IMMEDIATE ACTION)\n", envCounts["PRODUCTION"])
+		}
+		if envCounts["STAGING"] > 0 {
+			fmt.Printf("    └─ STAGING: %d (should fix before prod)\n", envCounts["STAGING"])
+		}
+		if envCounts["DEVELOPMENT"] > 0 {
+			fmt.Printf("    └─ DEVELOPMENT: %d (acceptable for dev, monitor)\n", envCounts["DEVELOPMENT"])
+		}
+		if expectedCount > 0 {
+			fmt.Printf("    └─ SYSTEM (expected): %d (CNI/storage/monitoring infrastructure)\n", expectedCount)
+		}
+		if unexpectedCount > 0 {
+			fmt.Printf("    └─ SYSTEM (unexpected): %d (⚠️  REVIEW REQUIRED - not in expected list)\n", unexpectedCount)
+		}
+	} else {
+		// Standard environment breakdown for other issue types
+		if envCounts["PRODUCTION"] > 0 {
+			fmt.Printf("    └─ PRODUCTION: %d (⚠️  REQUIRES IMMEDIATE ACTION)\n", envCounts["PRODUCTION"])
+		}
+		if envCounts["STAGING"] > 0 {
+			fmt.Printf("    └─ STAGING: %d (should fix before prod)\n", envCounts["STAGING"])
+		}
+		if envCounts["DEVELOPMENT"] > 0 {
+			fmt.Printf("    └─ DEVELOPMENT: %d (acceptable for dev, monitor)\n", envCounts["DEVELOPMENT"])
+		}
+		if envCounts["SYSTEM"] > 0 {
+			fmt.Printf("    └─ SYSTEM: %d (expected for infrastructure)\n", envCounts["SYSTEM"])
+		}
 	}
 
 	// Show top 5 specific resources (FIX #2)
@@ -574,6 +725,10 @@ func printFindingWithResources(name string, count int, risk string, allIssues []
 			envLabel := ""
 			if env == "PRODUCTION" {
 				envLabel = " [PROD]"
+			} else if issueType == "privileged_container" && env == "SYSTEM" {
+				if strings.Contains(issue.Description, "unexpected - review required") {
+					envLabel = " [⚠️ UNEXPECTED]"
+				}
 			}
 			fmt.Printf("      %d. %s in namespace %s%s\n",
 				i+1, issue.Name, issue.Namespace, envLabel)
