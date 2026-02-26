@@ -183,16 +183,36 @@ func (sa *SecurityAuditor) auditContainer(pod corev1.Pod, container corev1.Conta
 	// Check privileged containers
 	if container.SecurityContext != nil && container.SecurityContext.Privileged != nil && *container.SecurityContext.Privileged {
 		severity := "high"
-		if !isSystemNamespace {
+		env := detectEnvironment(pod.Namespace)
+
+		// Check if this is an expected privileged pod
+		isExpected := isExpectedPrivileged(pod.Name, pod.Namespace)
+
+		// Only lower severity if it's SYSTEM and expected
+		if env != "SYSTEM" {
 			severity = "critical"
+		} else if !isExpected {
+			// System namespace but NOT in expected list - still concerning
+			severity = "high"
+		} else {
+			// System namespace AND in expected list
+			severity = "medium"
 		}
+
+		description := "Container running in privileged mode"
+		if env == "SYSTEM" && isExpected {
+			description = "Container running in privileged mode (expected for this infrastructure component)"
+		} else if env == "SYSTEM" && !isExpected {
+			description = "Container running in privileged mode (unexpected - review required)"
+		}
+
 		issues = append(issues, models.SecurityIssue{
 			Type:        "privileged_container",
 			Severity:    severity,
 			Resource:    "container",
 			Namespace:   pod.Namespace,
 			Name:        fmt.Sprintf("%s/%s", pod.Name, container.Name),
-			Description: "Container running in privileged mode",
+			Description: description,
 			Remediation: "Remove privileged: true",
 		})
 	}
@@ -320,16 +340,66 @@ func (sa *SecurityAuditor) generatePriorityActions(audit *models.SecurityAudit) 
 func detectEnvironment(namespace string) string {
 	lower := strings.ToLower(namespace)
 
-	// System namespaces
-	if strings.Contains(lower, "kube-system") ||
-		strings.Contains(lower, "kube-public") ||
-		strings.Contains(lower, "istio-system") ||
-		strings.Contains(lower, "monitoring") {
-		return "SYSTEM"
+	// System/Infrastructure namespaces (comprehensive list covering major K8s distributions)
+	infraPatterns := []string{
+		// Core Kubernetes
+		"kube-system", "kube-public", "kube-node-lease",
+
+		// CNI (Container Network Interface)
+		"calico-system", "tigera-", "cilium", "flannel", "weave", "canal",
+
+		// Service Mesh
+		"istio-system", "istio-", "linkerd", "consul", "consul-",
+
+		// Storage
+		"longhorn-system", "rook-", "openebs", "csi-", "portworx",
+
+		// GitOps
+		"argocd", "argo-", "flux-system", "flux-", "fleet-system",
+
+		// Monitoring & Observability
+		"monitoring", "prometheus", "grafana", "datadog", "newrelic",
+		"dynatrace", "elastic-system", "splunk-", "jaeger", "tempo",
+
+		// Security & Policy
+		"cert-manager", "vault", "sealed-secrets", "gatekeeper-system",
+		"falco", "trivy-system", "aqua-", "sysdig-", "neuvector-",
+
+		// Ingress Controllers
+		"ingress-nginx", "nginx-ingress", "traefik", "ambassador",
+		"contour", "haproxy-",
+
+		// Backup & DR
+		"velero", "kasten-io", "stash-",
+
+		// Cloud Provider Specific
+		"azure-", "aws-", "gke-", "aks-", "eks-",
+		"gmp-system", "config-management-system", // GCP
+		"aad-pod-identity",                    // Azure
+		"amazon-cloudwatch", "amazon-vpc-cni", // AWS
+
+		// Platform/Distribution
+		"openshift-", "rancher-", "cattle-", "tanzu-", "vmware-system-",
+		"k3s-", "rke2-",
+
+		// Autoscaling
+		"karpenter", "cluster-autoscaler", "descheduler",
+
+		// Service Catalog & Operators
+		"operator-", "olm", "marketplace-",
+
+		// Logging
+		"logging", "fluentd", "fluent-bit", "loki", "elasticsearch",
 	}
 
-	// Production
-	if strings.Contains(lower, "prod") {
+	for _, pattern := range infraPatterns {
+		if strings.Contains(lower, pattern) {
+			return "SYSTEM"
+		}
+	}
+
+	// Production (check after infrastructure; exclude "prodfix" pattern)
+	if strings.Contains(lower, "prod") && !strings.Contains(lower, "prodfix") {
 		return "PRODUCTION"
 	}
 
@@ -337,12 +407,100 @@ func detectEnvironment(namespace string) string {
 	if strings.Contains(lower, "staging") ||
 		strings.Contains(lower, "stage") ||
 		strings.Contains(lower, "qa") ||
-		strings.Contains(lower, "uat") {
+		strings.Contains(lower, "uat") ||
+		strings.Contains(lower, "e2e") ||
+		strings.Contains(lower, "perf") {
 		return "STAGING"
 	}
 
 	// Default to development
 	return "DEVELOPMENT"
+}
+
+// calculateIssueCounts separates actionable issues from expected infrastructure configurations
+func calculateIssueCounts(issues []models.SecurityIssue) (actionable, infrastructure, prodStaging, development, systemUnexpected int) {
+	for _, issue := range issues {
+		env := detectEnvironment(issue.Namespace)
+
+		// Check if it's an expected system configuration
+		isExpectedSystemConfig := false
+		if env == "SYSTEM" {
+			// For privileged containers, check if expected
+			if issue.Type == "privileged_container" {
+				if strings.Contains(issue.Description, "expected for this infrastructure") {
+					isExpectedSystemConfig = true
+				}
+			} else {
+				// Other system namespace issues are considered expected infrastructure
+				isExpectedSystemConfig = true
+			}
+		}
+
+		if isExpectedSystemConfig {
+			infrastructure++
+		} else {
+			actionable++
+
+			// Count by environment for actionable issues
+			switch env {
+			case "PRODUCTION", "STAGING":
+				prodStaging++
+			case "DEVELOPMENT":
+				development++
+			case "SYSTEM":
+				// System but not expected (e.g., unexpected privileged)
+				systemUnexpected++
+			}
+		}
+	}
+
+	return
+}
+
+// isExpectedPrivileged checks if a pod legitimately needs privileged access
+// Only certain system pods require privileged mode for their core functionality
+func isExpectedPrivileged(podName, namespace string) bool {
+	lower := strings.ToLower(podName)
+	lowerNs := strings.ToLower(namespace)
+
+	// CNI pods (need to manipulate network interfaces)
+	if strings.Contains(lowerNs, "calico") ||
+		strings.Contains(lowerNs, "cilium") ||
+		strings.Contains(lowerNs, "flannel") ||
+		strings.Contains(lowerNs, "weave") ||
+		strings.Contains(lowerNs, "canal") ||
+		strings.Contains(lower, "kindnet") {
+		return true
+	}
+
+	// kube-proxy (manipulates iptables/ipvs)
+	if strings.HasPrefix(lower, "kube-proxy") {
+		return true
+	}
+
+	// Storage CSI drivers (mount/unmount volumes)
+	if strings.Contains(lower, "csi-") ||
+		strings.Contains(lower, "longhorn") ||
+		strings.Contains(lower, "rook") ||
+		strings.Contains(lower, "openebs") {
+		return true
+	}
+
+	// Node-level monitoring agents (need host metrics)
+	if strings.Contains(lower, "node-exporter") ||
+		strings.Contains(lower, "datadog-agent") ||
+		strings.Contains(lower, "newrelic-agent") ||
+		strings.Contains(lower, "dynatrace-agent") ||
+		strings.Contains(lower, "ama-logs") { // Azure Monitor Agent
+		return true
+	}
+
+	// Node problem detector
+	if strings.Contains(lower, "node-problem-detector") {
+		return true
+	}
+
+	return false
 }
 
 // filterIssuesByType returns issues of a specific type
@@ -456,11 +614,31 @@ func printSecurityDisclaimer() {
 }
 
 func printClusterSummary(audit *models.SecurityAudit) {
+	// Calculate actionable vs infrastructure counts
+	actionable, infrastructure, prodStaging, development, systemUnexpected := calculateIssueCounts(audit.Issues)
+
 	fmt.Println("═══════════════════════════════════════════════════════════")
 	fmt.Println("CLUSTER SECURITY SUMMARY")
 	fmt.Println("═══════════════════════════════════════════════════════════")
 	fmt.Printf("Pods Scanned: %d\n", audit.TotalPodsAudited)
-	fmt.Printf("Issues Found: %d\n", len(audit.Issues))
+	fmt.Println()
+
+	fmt.Printf("SECURITY ISSUES REQUIRING ACTION: %d\n", actionable)
+	if prodStaging > 0 {
+		fmt.Printf("  └─ Production/Staging:    %d (⚠️  IMMEDIATE ATTENTION)\n", prodStaging)
+	}
+	if development > 0 {
+		fmt.Printf("  └─ Development:          %d (lower priority, monitor)\n", development)
+	}
+	if systemUnexpected > 0 {
+		fmt.Printf("  └─ System (unexpected):  %d (⚠️  REVIEW REQUIRED)\n", systemUnexpected)
+	}
+
+	if infrastructure > 0 {
+		fmt.Println()
+		fmt.Printf("Infrastructure Configurations: %d (expected for system components)\n", infrastructure)
+	}
+
 	fmt.Println()
 }
 
@@ -470,10 +648,15 @@ func printDetailedFindings(audit *models.SecurityAudit) {
 	fmt.Println("\n═══════════════════════════════════════════════════════════")
 	fmt.Println("DETAILED SECURITY FINDINGS")
 	fmt.Println("═══════════════════════════════════════════════════════════")
+	fmt.Println()
+	fmt.Println("ℹ️  Note: Findings marked as 'SYSTEM (expected)' are normal infrastructure")
+	fmt.Println("   configurations. Focus on Production/Staging/Development and")
+	fmt.Println("   'SYSTEM (unexpected)' findings for remediation.")
+	fmt.Println()
 
 	// Critical findings with TOP 5 resources (FIX #2)
 	if hasAnyCriticalFindings(risks) {
-		fmt.Println("\n🔴 CRITICAL FINDINGS:")
+		fmt.Println("🔴 CRITICAL FINDINGS:")
 
 		if risks.PrivilegedContainers > 0 {
 			printFindingWithResources("Privileged containers", risks.PrivilegedContainers,
@@ -551,18 +734,69 @@ func printFindingWithResources(name string, count int, risk string, allIssues []
 	// Print summary with environment context
 	fmt.Printf("  • %s: %d (%s)\n", name, count, risk)
 
-	// Show environment breakdown if multiple environments
-	if envCounts["PRODUCTION"] > 0 {
-		fmt.Printf("    └─ PRODUCTION: %d (⚠️  REQUIRES IMMEDIATE ACTION)\n", envCounts["PRODUCTION"])
-	}
-	if envCounts["STAGING"] > 0 {
-		fmt.Printf("    └─ STAGING: %d (should fix before prod)\n", envCounts["STAGING"])
-	}
-	if envCounts["DEVELOPMENT"] > 0 {
-		fmt.Printf("    └─ DEVELOPMENT: %d (acceptable for dev, monitor)\n", envCounts["DEVELOPMENT"])
-	}
-	if envCounts["SYSTEM"] > 0 {
-		fmt.Printf("    └─ SYSTEM: %d (expected for infrastructure)\n", envCounts["SYSTEM"])
+	// Special handling for privileged containers - show expected vs unexpected
+	if issueType == "privileged_container" {
+		systemIssues := filterIssuesByType(allIssues, issueType)
+		expectedCount := 0
+		unexpectedCount := 0
+		unexpectedPods := []string{}
+
+		for _, issue := range systemIssues {
+			if detectEnvironment(issue.Namespace) == "SYSTEM" {
+				if strings.Contains(issue.Description, "expected for this infrastructure") {
+					expectedCount++
+				} else if strings.Contains(issue.Description, "unexpected - review required") {
+					unexpectedCount++
+					unexpectedPods = append(unexpectedPods, issue.Name)
+				}
+			}
+		}
+
+		// Show breakdown
+		if envCounts["PRODUCTION"] > 0 {
+			fmt.Printf("    └─ PRODUCTION: %d (⚠️  REQUIRES IMMEDIATE ACTION)\n", envCounts["PRODUCTION"])
+		}
+		if envCounts["STAGING"] > 0 {
+			fmt.Printf("    └─ STAGING: %d (should fix before prod)\n", envCounts["STAGING"])
+		}
+		if envCounts["DEVELOPMENT"] > 0 {
+			fmt.Printf("    └─ DEVELOPMENT: %d (acceptable for dev, monitor)\n", envCounts["DEVELOPMENT"])
+		}
+		if expectedCount > 0 {
+			fmt.Printf("    └─ SYSTEM (expected): %d (CNI/storage/monitoring infrastructure)\n", expectedCount)
+		}
+		if unexpectedCount > 0 {
+			fmt.Printf("    └─ SYSTEM (unexpected): %d (⚠️  REVIEW REQUIRED - not in expected list)\n", unexpectedCount)
+
+			// Show which pods are unexpected (limit to 5)
+			if len(unexpectedPods) > 0 {
+				fmt.Println("       Unexpected pods to review:")
+				limit := 5
+				if len(unexpectedPods) < limit {
+					limit = len(unexpectedPods)
+				}
+				for i := 0; i < limit; i++ {
+					fmt.Printf("       • %s\n", unexpectedPods[i])
+				}
+				if len(unexpectedPods) > 5 {
+					fmt.Printf("       • ... and %d more\n", len(unexpectedPods)-5)
+				}
+			}
+		}
+	} else {
+		// Standard environment breakdown for other issue types
+		if envCounts["PRODUCTION"] > 0 {
+			fmt.Printf("    └─ PRODUCTION: %d (⚠️  REQUIRES IMMEDIATE ACTION)\n", envCounts["PRODUCTION"])
+		}
+		if envCounts["STAGING"] > 0 {
+			fmt.Printf("    └─ STAGING: %d (should fix before prod)\n", envCounts["STAGING"])
+		}
+		if envCounts["DEVELOPMENT"] > 0 {
+			fmt.Printf("    └─ DEVELOPMENT: %d (acceptable for dev, monitor)\n", envCounts["DEVELOPMENT"])
+		}
+		if envCounts["SYSTEM"] > 0 {
+			fmt.Printf("    └─ SYSTEM: %d (expected for infrastructure)\n", envCounts["SYSTEM"])
+		}
 	}
 
 	// Show top 5 specific resources (FIX #2)
@@ -574,6 +808,10 @@ func printFindingWithResources(name string, count int, risk string, allIssues []
 			envLabel := ""
 			if env == "PRODUCTION" {
 				envLabel = " [PROD]"
+			} else if issueType == "privileged_container" && env == "SYSTEM" {
+				if strings.Contains(issue.Description, "unexpected - review required") {
+					envLabel = " [⚠️ UNEXPECTED]"
+				}
 			}
 			fmt.Printf("      %d. %s in namespace %s%s\n",
 				i+1, issue.Name, issue.Namespace, envLabel)
@@ -644,9 +882,12 @@ func validateCounting(audit *models.SecurityAudit) {
 
 	actualIssues := len(audit.Issues)
 
+	// Calculate actionable vs infrastructure
+	actionable, infrastructure, _, _, _ := calculateIssueCounts(audit.Issues)
+
 	// Always show breakdown for transparency
 	fmt.Println("═══════════════════════════════════════════════════════════")
-	fmt.Println("ISSUE COUNT BREAKDOWN")
+	fmt.Println("DETAILED ISSUE COUNT BREAKDOWN")
 	fmt.Println("═══════════════════════════════════════════════════════════")
 	fmt.Printf("  Privileged containers:      %3d\n", audit.Risks.PrivilegedContainers)
 	fmt.Printf("  Host PID:                   %3d\n", audit.Risks.HostPID)
@@ -659,7 +900,10 @@ func validateCounting(audit *models.SecurityAudit) {
 	fmt.Printf("  Missing resource limits:    %3d\n", audit.Risks.MissingResourceLimits)
 	fmt.Printf("  Default service account:    %3d\n", audit.Risks.DefaultServiceAccount)
 	fmt.Println("  ─────────────────────────────────")
-	fmt.Printf("  TOTAL:                      %3d\n", totalCounted)
+	fmt.Printf("  TOTAL FINDINGS:             %3d\n", totalCounted)
+	fmt.Println()
+	fmt.Printf("  Actionable Issues:          %3d (require remediation)\n", actionable)
+	fmt.Printf("  Infrastructure Expected:    %3d (system components functioning normally)\n", infrastructure)
 
 	// Only show warning if there's a discrepancy
 	if totalCounted != actualIssues {
@@ -667,7 +911,7 @@ func validateCounting(audit *models.SecurityAudit) {
 		fmt.Printf("⚠️  WARNING: Total (%d) doesn't match Issues Found (%d)\n", totalCounted, actualIssues)
 		fmt.Printf("Difference: %d issues not tracked in SecurityRisks\n", actualIssues-totalCounted)
 	} else {
-		fmt.Printf("\nCount verified: All %d issues accounted for\n", actualIssues)
+		fmt.Printf("\nCount verified: All %d findings accounted for\n", actualIssues)
 	}
 	fmt.Println()
 }
