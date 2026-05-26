@@ -147,6 +147,58 @@ const wasteHTMLTemplate = `<!DOCTYPE html>
             color: #718096;
             font-size: 14px;
         }
+        .exec-summary {
+            background: #1a202c;
+            color: #e2e8f0;
+            border-radius: 8px;
+            padding: 24px 30px;
+            margin-bottom: 30px;
+        }
+        .exec-summary-title {
+            font-size: 18px;
+            font-weight: 700;
+            color: #fff;
+            margin-bottom: 20px;
+            letter-spacing: 0.5px;
+        }
+        .exec-stats {
+            display: flex;
+            gap: 30px;
+            margin-bottom: 20px;
+            flex-wrap: wrap;
+        }
+        .exec-stat { text-align: center; min-width: 80px; }
+        .exec-stat-value {
+            font-size: 32px;
+            font-weight: 800;
+            line-height: 1.1;
+        }
+        .exec-stat-value.critical { color: #fc8181; }
+        .exec-stat-value.warning  { color: #f6ad55; }
+        .exec-stat-value.total    { color: #fff; }
+        .exec-stat-value.storage  { color: #76e4f7; }
+        .exec-stat-label {
+            font-size: 12px;
+            color: #a0aec0;
+            margin-top: 4px;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+        .exec-divider { border: none; border-top: 1px solid #2d3748; margin: 16px 0; }
+        .exec-findings { display: flex; gap: 40px; flex-wrap: wrap; }
+        .exec-col { flex: 1; min-width: 220px; }
+        .exec-col-title {
+            font-size: 13px;
+            font-weight: 700;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            margin-bottom: 10px;
+        }
+        .exec-col-title.critical { color: #fc8181; }
+        .exec-col-title.warning  { color: #f6ad55; }
+        .exec-col-title.info     { color: #76e4f7; }
+        .exec-finding { font-size: 14px; color: #cbd5e0; margin-bottom: 6px; padding-left: 4px; }
+        .exec-finding.none { color: #4a5568; font-style: italic; }
     </style>
 </head>
 <body>
@@ -161,6 +213,75 @@ const wasteHTMLTemplate = `<!DOCTYPE html>
         </div>
 
         <div class="content">
+
+            <!-- Executive Summary -->
+            <div class="exec-summary">
+                <div class="exec-summary-title">📊 Executive Summary</div>
+                <div class="exec-stats">
+                    <div class="exec-stat">
+                        <div class="exec-stat-value total">{{.TotalWasteItems}}</div>
+                        <div class="exec-stat-label">Total Items</div>
+                    </div>
+                    <div class="exec-stat">
+                        <div class="exec-stat-value critical">{{.CriticalCount}}</div>
+                        <div class="exec-stat-label">Critical</div>
+                    </div>
+                    <div class="exec-stat">
+                        <div class="exec-stat-value warning">{{.WarningCount}}</div>
+                        <div class="exec-stat-label">Warning</div>
+                    </div>
+                    {{if gt .OrphanedPVCStorageGB 0}}
+                    <div class="exec-stat">
+                        <div class="exec-stat-value storage">{{.OrphanedPVCStorageGB}}GB</div>
+                        <div class="exec-stat-label">Idle Storage</div>
+                    </div>
+                    {{end}}
+                </div>
+                <hr class="exec-divider">
+                <div class="exec-findings">
+                    <div class="exec-col">
+                        <div class="exec-col-title critical">🔴 Critical — Action Required</div>
+                        {{if gt .ZombiePodCount 0}}
+                        <div class="exec-finding">• {{.ZombiePodCount}} zombie pod(s) — up to {{.MaxZombieRestarts}} restarts</div>
+                        {{end}}
+                        {{if gt .OrphanedPVCCount 0}}
+                        <div class="exec-finding">• {{.OrphanedPVCCount}} orphaned PVC(s){{if gt .OrphanedPVCStorageGB 0}} — {{.OrphanedPVCStorageGB}}GB idle storage{{end}}</div>
+                        {{end}}
+                        {{if gt .AbandonedNamespaceCount 0}}
+                        <div class="exec-finding">• {{.AbandonedNamespaceCount}} abandoned namespace(s)</div>
+                        {{end}}
+                        {{if eq .CriticalCount 0}}<div class="exec-finding none">None</div>{{end}}
+                    </div>
+                    <div class="exec-col">
+                        <div class="exec-col-title warning">🟡 Warning — Review Recommended</div>
+                        {{if gt .StaleJobCount 0}}
+                        <div class="exec-finding">• {{.StaleJobCount}} stale job(s)/cronjob(s)</div>
+                        {{end}}
+                        {{if gt .OrphanedServiceCount 0}}
+                        <div class="exec-finding">• {{.OrphanedServiceCount}} service(s) with no endpoints</div>
+                        {{end}}
+                        {{if gt .ZeroReplicaCount 0}}
+                        <div class="exec-finding">• {{.ZeroReplicaCount}} zero-replica workload(s)</div>
+                        {{end}}
+                        {{if gt .BrokenIngressCount 0}}
+                        <div class="exec-finding">• {{.BrokenIngressCount}} broken ingress(es)</div>
+                        {{end}}
+                        {{if gt .MisconfiguredHPACount 0}}
+                        <div class="exec-finding">• {{.MisconfiguredHPACount}} misconfigured HPA(s)</div>
+                        {{end}}
+                        {{if eq .WarningCount 0}}<div class="exec-finding none">None</div>{{end}}
+                    </div>
+                    <div class="exec-col">
+                        <div class="exec-col-title info">ℹ️ Housekeeping</div>
+                        {{if gt .OldReplicaSetCount 0}}
+                        <div class="exec-finding">• {{.OldReplicaSetCount}} old ReplicaSet(s) from rollouts</div>
+                        {{else}}
+                        <div class="exec-finding none">None</div>
+                        {{end}}
+                    </div>
+                </div>
+            </div>
+
             <!-- Scorecard -->
             <div class="scorecard">
                 <div class="score-card {{if gt .AbandonedNamespaceCount 0}}critical{{else}}success{{end}}">
@@ -272,7 +393,7 @@ const wasteHTMLTemplate = `<!DOCTYPE html>
             <!-- Orphaned PVCs -->
             {{if gt .OrphanedPVCCount 0}}
             <div class="section">
-                <div class="section-title">💾 Orphaned PVCs ({{.OrphanedPVCCount}})</div>
+                <div class="section-title">💾 Orphaned PVCs ({{.OrphanedPVCCount}}){{if gt .OrphanedPVCStorageGB 0}} &nbsp;—&nbsp; Total idle storage: <strong>{{.OrphanedPVCStorageGB}}GB</strong>{{end}}</div>
                 {{range .OrphanedPVCs}}
                 <div class="item-box critical">
                     <div class="item-title">{{.Name}} <span class="badge badge-critical">{{.Status}}</span></div>
@@ -429,11 +550,17 @@ type WasteHTMLData struct {
 	ScannedAt      time.Time
 	MinAgeDays     int
 
+	// Summary counts for executive section
+	CriticalCount    int
+	WarningCount     int
+	MaxZombieRestarts int32
+
 	// Counts
 	AbandonedNamespaceCount int
 	ZombiePodCount          int
 	UnmanagedPodCount       int
 	OrphanedPVCCount        int
+	OrphanedPVCStorageGB    int
 	StaleJobCount           int
 	ZeroReplicaCount        int
 	OrphanedServiceCount    int
@@ -459,22 +586,35 @@ func GenerateWasteHTML(audit *analyzer.WasteAudit, clusterContext string, minAge
 	// Separate zombie from unmanaged pods
 	zombiePods := []analyzer.StalePod{}
 	unmanagedPods := []analyzer.StalePod{}
+	maxZombieRestarts := int32(0)
 	for _, p := range audit.StalePods {
 		if p.Kind == analyzer.StalePodZombie {
 			zombiePods = append(zombiePods, p)
+			if p.RestartCount > maxZombieRestarts {
+				maxZombieRestarts = p.RestartCount
+			}
 		} else {
 			unmanagedPods = append(unmanagedPods, p)
 		}
 	}
 
+	// Derive executive summary counts
+	criticalCount := len(audit.AbandonedNamespaces) + len(zombiePods) + len(audit.OrphanedPVCs)
+	warningCount := len(audit.StaleJobs) + len(audit.ZeroReplicaWorkloads) +
+		len(audit.OrphanedServices) + len(audit.BrokenIngresses) + len(audit.MisconfiguredHPAs)
+
 	data := WasteHTMLData{
 		ClusterContext:          clusterContext,
 		ScannedAt:               audit.ScannedAt,
 		MinAgeDays:              minAgeDays,
+		CriticalCount:           criticalCount,
+		WarningCount:            warningCount,
+		MaxZombieRestarts:       maxZombieRestarts,
 		AbandonedNamespaceCount: len(audit.AbandonedNamespaces),
 		ZombiePodCount:          len(zombiePods),
 		UnmanagedPodCount:       len(unmanagedPods),
 		OrphanedPVCCount:        len(audit.OrphanedPVCs),
+		OrphanedPVCStorageGB:    audit.OrphanedPVCStorageGB,
 		StaleJobCount:           len(audit.StaleJobs),
 		ZeroReplicaCount:        len(audit.ZeroReplicaWorkloads),
 		OrphanedServiceCount:    len(audit.OrphanedServices),
