@@ -38,6 +38,7 @@ type WasteAudit struct {
 	MisconfiguredHPAs    []MisconfiguredHPA
 
 	TotalWasteItems       int
+	OrphanedPVCStorageGB  int     // total GB across all orphaned PVCs
 	EstimatedMonthlyWaste float64 // 0 if monthly cost not provided
 }
 
@@ -559,6 +560,7 @@ func (w *WasteAuditor) detectOrphanedPVCs(audit *WasteAudit, filterNamespace str
 			Reason:    reason,
 			Score:     score,
 		})
+		audit.OrphanedPVCStorageGB += sizeGB
 	}
 
 	sort.Slice(audit.OrphanedPVCs, func(i, j int) bool {
@@ -860,6 +862,19 @@ func (w *WasteAuditor) detectOrphanedServices(audit *WasteAudit, filterNamespace
 			continue
 		}
 
+		// ExternalName services DNS-alias to external hosts — they have no endpoints by design.
+		// Flagging them as "no endpoints" is always a false positive.
+		if svc.Spec.Type == corev1.ServiceTypeExternalName {
+			continue
+		}
+
+		// Services with no selector are intentional: manually-managed endpoints,
+		// headless StatefulSet discovery, or external endpoint objects.
+		// Only services WITH a selector that matches nothing are genuinely orphaned.
+		if len(svc.Spec.Selector) == 0 {
+			continue
+		}
+
 		ageDays := int(now.Sub(svc.CreationTimestamp.Time).Hours() / 24)
 		if ageDays < w.minAgeDays {
 			continue
@@ -877,13 +892,13 @@ func (w *WasteAuditor) detectOrphanedServices(audit *WasteAudit, filterNamespace
 				reason = fmt.Sprintf(
 					"LoadBalancer service has no active endpoints for %d days. "+
 						"Cloud load balancers incur hourly cost even with zero traffic. "+
-						"The selector '%v' does not match any running pod.",
+						"Selector '%v' does not match any running pod.",
 					ageDays, svc.Spec.Selector,
 				)
 			} else {
 				reason = fmt.Sprintf(
 					"Service (type: %s) has no active endpoints for %d days. "+
-						"The selector '%v' does not match any running pod. "+
+						"Selector '%v' does not match any running pod. "+
 						"This service cannot route traffic to anything.",
 					svc.Spec.Type, ageDays, svc.Spec.Selector,
 				)
@@ -1123,6 +1138,9 @@ func PrintWasteAudit(audit *WasteAudit, minAgeDays int) {
 		return
 	}
 
+	// Executive summary — high-level picture before the detail
+	printExecutiveSummary(audit)
+
 	// Scorecard
 	printWasteScorecard(audit)
 
@@ -1139,6 +1157,86 @@ func PrintWasteAudit(audit *WasteAudit, minAgeDays int) {
 
 	// Summary actions
 	printWasteSummary(audit)
+}
+
+func printExecutiveSummary(audit *WasteAudit) {
+	zombieCount := 0
+	for _, p := range audit.StalePods {
+		if p.Kind == StalePodZombie {
+			zombieCount++
+		}
+	}
+
+	criticalCount := len(audit.AbandonedNamespaces) + zombieCount + len(audit.OrphanedPVCs)
+	warningCount := len(audit.StaleJobs) + len(audit.ZeroReplicaWorkloads) +
+		len(audit.OrphanedServices) + len(audit.BrokenIngresses) + len(audit.MisconfiguredHPAs)
+
+	fmt.Println("EXECUTIVE SUMMARY")
+	fmt.Println("═══════════════════════════════════════════════════════════")
+	fmt.Printf("  Total Waste Items:  %d   (%d critical  /  %d warning)\n",
+		audit.TotalWasteItems, criticalCount, warningCount)
+
+	if audit.OrphanedPVCStorageGB > 0 {
+		fmt.Printf("  Idle Storage:       %dGB across %d orphaned PVCs\n",
+			audit.OrphanedPVCStorageGB, len(audit.OrphanedPVCs))
+	}
+
+	fmt.Println()
+	fmt.Println("  🔴 Critical findings requiring action:")
+	if zombieCount > 0 {
+		// Find the worst zombie for context
+		maxRestarts := int32(0)
+		for _, p := range audit.StalePods {
+			if p.Kind == StalePodZombie && p.RestartCount > maxRestarts {
+				maxRestarts = p.RestartCount
+			}
+		}
+		fmt.Printf("     • %d zombie pod(s) — up to %d restarts, consuming scheduling resources\n",
+			zombieCount, maxRestarts)
+	}
+	if len(audit.OrphanedPVCs) > 0 {
+		storageStr := ""
+		if audit.OrphanedPVCStorageGB > 0 {
+			storageStr = fmt.Sprintf(" (%dGB idle storage)", audit.OrphanedPVCStorageGB)
+		}
+		fmt.Printf("     • %d orphaned PVC(s)%s\n", len(audit.OrphanedPVCs), storageStr)
+	}
+	if len(audit.AbandonedNamespaces) > 0 {
+		fmt.Printf("     • %d abandoned namespace(s)\n", len(audit.AbandonedNamespaces))
+	}
+	if criticalCount == 0 {
+		fmt.Println("     • None")
+	}
+
+	fmt.Println()
+	fmt.Println("  🟡 Warning findings to review:")
+	if len(audit.StaleJobs) > 0 {
+		fmt.Printf("     • %d stale job(s)/cronjob(s) not cleaned up\n", len(audit.StaleJobs))
+	}
+	if len(audit.OrphanedServices) > 0 {
+		fmt.Printf("     • %d service(s) with no endpoints\n", len(audit.OrphanedServices))
+	}
+	if len(audit.ZeroReplicaWorkloads) > 0 {
+		fmt.Printf("     • %d zero-replica workload(s)\n", len(audit.ZeroReplicaWorkloads))
+	}
+	if len(audit.BrokenIngresses) > 0 {
+		fmt.Printf("     • %d broken ingress(es)\n", len(audit.BrokenIngresses))
+	}
+	if len(audit.MisconfiguredHPAs) > 0 {
+		fmt.Printf("     • %d misconfigured HPA(s)\n", len(audit.MisconfiguredHPAs))
+	}
+	if warningCount == 0 {
+		fmt.Println("     • None")
+	}
+
+	fmt.Println()
+	fmt.Println("  ℹ️  Housekeeping (not counted in total):")
+	if len(audit.OldReplicaSets) > 0 {
+		fmt.Printf("     • %d old ReplicaSet(s) from past rollouts\n", len(audit.OldReplicaSets))
+	} else {
+		fmt.Println("     • None")
+	}
+	fmt.Println()
 }
 
 func printWasteScorecard(audit *WasteAudit) {
@@ -1247,7 +1345,12 @@ func printOrphanedPVCs(audit *WasteAudit) {
 		return
 	}
 	fmt.Println("═══════════════════════════════════════════════════════════")
-	fmt.Printf("🔴 ORPHANED PVCs - storage waste (%d)\n", len(audit.OrphanedPVCs))
+	if audit.OrphanedPVCStorageGB > 0 {
+		fmt.Printf("🔴 ORPHANED PVCs - storage waste (%d)  |  Total idle: %dGB\n",
+			len(audit.OrphanedPVCs), audit.OrphanedPVCStorageGB)
+	} else {
+		fmt.Printf("🔴 ORPHANED PVCs - storage waste (%d)\n", len(audit.OrphanedPVCs))
+	}
 	fmt.Println("═══════════════════════════════════════════════════════════")
 	for _, pvc := range audit.OrphanedPVCs {
 		sizeStr := "unknown size"
@@ -1425,9 +1528,19 @@ func printWasteSummary(audit *WasteAudit) {
 // Helpers
 // ================================================================
 
-// isInfraPattern checks well-known infrastructure namespace prefixes.
+// isInfraPattern checks well-known infrastructure namespace prefixes and exact names.
 // Reuses the same logic as the network command for consistency.
 func isInfraPattern(name string) bool {
+	// Exact name matches — system namespaces that are always present but often empty.
+	// These should never be flagged as abandoned regardless of pod count.
+	infraExact := map[string]bool{
+		"default":     true, // Kubernetes built-in, always exists
+		"aks-command": true, // Azure AKS internal namespace (az aks command invoke)
+	}
+	if infraExact[name] {
+		return true
+	}
+
 	infraPatterns := []string{
 		"kube-", "istio-", "calico-", "tigera-", "cert-manager",
 		"ingress-nginx", "flux-system", "argocd", "velero",

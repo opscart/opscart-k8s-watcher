@@ -587,7 +587,7 @@ func PrintSecurityAudit(audit *models.SecurityAudit, format string) {
 	printClusterSummary(audit)
 
 	// Calculate and print CIS score
-	cisResult := CalculateCISScore(audit)
+	cisResult := CalculateCISScore(audit, nil)
 	PrintCISResult(cisResult)
 
 	// Print detailed findings with specific resources
@@ -919,7 +919,7 @@ func validateCounting(audit *models.SecurityAudit) {
 // PrintSecurityAuditJSON outputs security audit in JSON format
 func PrintSecurityAuditJSON(audit *models.SecurityAudit) {
 	// Calculate CIS score
-	cisResult := CalculateCISScore(audit)
+	cisResult := CalculateCISScore(audit, nil)
 
 	output := struct {
 		Disclaimer  string                 `json:"disclaimer"`

@@ -900,6 +900,15 @@ func runReportGeneration(clusterContext string, clusterName string) error {
 		return fmt.Errorf("connecting to cluster: %w", err)
 	}
 
+	// Run resource analysis for real ResourceScore and CostScore
+	fmt.Println("  📦 Running resource analysis...")
+	ra := analyzer.NewResourceAnalyzer(clientset)
+	resourceAnalysis, raErr := ra.AnalyzeClusterResources(namespace)
+	if raErr != nil {
+		fmt.Printf("  ⚠️  Resource analysis skipped: %v\n", raErr)
+		resourceAnalysis = nil
+	}
+
 	// Run REAL security audit
 	fmt.Println("  🛡️  Running security audit...")
 	sa := analyzer.NewSecurityAuditor(clientset)
@@ -907,7 +916,16 @@ func runReportGeneration(clusterContext string, clusterName string) error {
 	if err != nil {
 		return fmt.Errorf("security audit failed: %w", err)
 	}
-	cisResult := analyzer.CalculateCISScore(audit)
+
+	// Run network policy audit for CIS 5.7.3 — real coverage data
+	fmt.Println("  🌐 Running network policy audit (CIS 5.7.3)...")
+	npa := analyzer.NewNetworkPolicyAuditor(clientset)
+	netAudit, netErr := npa.AuditNetworkPolicies(namespace)
+	if netErr != nil {
+		fmt.Printf("  ⚠️  Network policy audit skipped: %v\n", netErr)
+		netAudit = nil
+	}
+	cisResult := analyzer.CalculateCISScore(audit, netAudit)
 
 	// Build report data with REAL security findings
 	reportData := &report.ReportData{
@@ -1025,10 +1043,32 @@ func runReportGeneration(clusterContext string, clusterName string) error {
 		})
 	}
 
-	// Calculate overall scores
-	reportData.OverallScore = report.CalculateOverallScore(reportData.SecurityScore, 75, 60)
-	reportData.ResourceScore = 75
-	reportData.CostScore = 60
+	// Calculate real resource and cost scores from actual cluster data
+	resourceScore := 75 // fallback if resource analysis was skipped
+	costScore := 60     // fallback if resource analysis was skipped
+	if resourceAnalysis != nil {
+		avgUtilization := (resourceAnalysis.CPUUtilization + resourceAnalysis.MemoryUtilization) / 2
+		resourceScore = report.CalculateResourceScore(avgUtilization)
+
+		totalPods, idlePods, spotEligible := 0, 0, 0
+		for _, ns := range resourceAnalysis.Namespaces {
+			totalPods += ns.PodCount
+			idlePods += ns.IdlePods
+			spotEligible += ns.SpotEligiblePods
+		}
+		if totalPods > 0 {
+			costScore = report.CalculateCostScore(idlePods, spotEligible, totalPods)
+		}
+
+		// Populate resource fields in report data
+		reportData.TotalCPU = resourceAnalysis.TotalCPUCores
+		reportData.TotalMemory = resourceAnalysis.TotalMemoryGB
+		reportData.UsedCPU = resourceAnalysis.TotalCPURequested
+		reportData.UsedMemory = resourceAnalysis.TotalMemoryRequested
+	}
+	reportData.ResourceScore = resourceScore
+	reportData.CostScore = costScore
+	reportData.OverallScore = report.CalculateOverallScore(reportData.SecurityScore, resourceScore, costScore)
 
 	// Default to html if not specified
 	if reportFormat == "" {
@@ -1081,8 +1121,15 @@ func generateSecurityReport(clusterContext string) error {
 		return fmt.Errorf("auditing security: %w", err)
 	}
 
-	// Calculate CIS score
-	cisResult := analyzer.CalculateCISScore(audit)
+	// Run network policy audit for CIS 5.7.3 — real coverage data
+	npa := analyzer.NewNetworkPolicyAuditor(clientset)
+	netAudit, netErr := npa.AuditNetworkPolicies(namespace)
+	if netErr != nil {
+		netAudit = nil
+	}
+
+	// Calculate CIS score with real network data
+	cisResult := analyzer.CalculateCISScore(audit, netAudit)
 
 	// Build report data with REAL values
 	reportData := &report.ReportData{
