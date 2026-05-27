@@ -2,6 +2,7 @@ package analyzer
 
 import (
 	"fmt"
+	"sort"
 	"strings"
 
 	"github.com/opscart/opscart-k8s-watcher/pkg/models"
@@ -19,15 +20,17 @@ func NewCostAnalyzer(resourceAnalysis *models.ClusterResourceAnalysis) *CostAnal
 	}
 }
 
-// AnalyzeCosts calculates cost estimates with ranges and optimization scenarios
+// AnalyzeCosts calculates cost estimates with ranges and optimization scenarios.
+// When totalClusterCost == 0, operates in resource-share mode (no dollar amounts).
 func (ca *CostAnalyzer) AnalyzeCosts(totalClusterCost float64) (*models.CostEstimate, error) {
+	method := "request_proportional"
 	if totalClusterCost <= 0 {
-		return nil, fmt.Errorf("total cluster cost must be greater than 0")
+		method = "resource_share_only"
 	}
 
 	estimate := &models.CostEstimate{
 		TotalClusterCost: totalClusterCost,
-		Method:           "request_proportional",
+		Method:           method,
 		Confidence:       "medium",
 		Assumptions:      ca.generateAssumptions(),
 		Disclaimers:      ca.generateDisclaimers(),
@@ -65,8 +68,20 @@ func (ca *CostAnalyzer) calculateNamespaceCosts(totalCost float64) []models.Name
 			CPUShare:      ns.CPUPercent / 100.0,
 			MemoryShare:   ns.MemoryPercent / 100.0,
 			WeightedShare: weightedShare,
+			CPUCores:      ns.CPUCoresRequested,
+			MemoryGB:      ns.MemoryGBRequested,
+			PodCount:      ns.PodCount,
+			IdlePods:      ns.IdlePods,
+			WasteScore:    ns.WasteScore,
 		})
 	}
+
+	sort.Slice(costs, func(i, j int) bool {
+		if costs[i].EstimatedCost.Best != costs[j].EstimatedCost.Best {
+			return costs[i].EstimatedCost.Best > costs[j].EstimatedCost.Best
+		}
+		return costs[i].WeightedShare > costs[j].WeightedShare
+	})
 
 	return costs
 }
@@ -152,12 +167,6 @@ func (ca *CostAnalyzer) calculateConfidence(ns models.NamespaceResourceUsage) fl
 // generateOptimizationScenarios creates actionable cost optimization scenarios
 func (ca *CostAnalyzer) generateOptimizationScenarios(totalCost float64) []models.OptimizationScenario {
 	var scenarios []models.OptimizationScenario
-
-	// Scenario 1: Move spot-eligible workloads to spot nodes
-	spotScenario := ca.generateSpotScenario(totalCost)
-	if spotScenario != nil {
-		scenarios = append(scenarios, *spotScenario)
-	}
 
 	// Scenario 2: Delete idle namespaces
 	idleScenario := ca.generateIdleScenario(totalCost)
@@ -267,20 +276,25 @@ func (ca *CostAnalyzer) generateSpotScenario(totalCost float64) *models.Optimiza
 
 // generateIdleScenario calculates savings from deleting idle resources
 func (ca *CostAnalyzer) generateIdleScenario(totalCost float64) *models.OptimizationScenario {
+	noCost := totalCost <= 0
 	idleCost := 0.0
 	idleCPU := 0.0
 	idleMemory := 0.0
 	idleNamespaces := []string{}
 
 	for _, ns := range ca.resourceAnalysis.Namespaces {
+		if isSystemNamespaceForOptimization(ns.Name) {
+			continue
+		}
+
 		// Use WasteScore from resource analysis
 		// High waste score (>70) indicates idle/unused resources
 		if ns.WasteScore > 70 {
 			weightedShare := (ns.CPUPercent + ns.MemoryPercent) / 2.0 / 100.0
 			nsCost := totalCost * weightedShare
 
-			// Only recommend deletion if cost is significant enough
-			if nsCost > 20 {
+			// Include if: cost is significant, OR no-cost mode with actual CPU usage
+			if nsCost > 20 || (noCost && ns.CPUCoresRequested > 0.5) {
 				idleCost += nsCost
 				idleCPU += ns.CPUCoresRequested
 				idleMemory += ns.MemoryGBRequested
@@ -296,17 +310,22 @@ func (ca *CostAnalyzer) generateIdleScenario(totalCost float64) *models.Optimiza
 		}
 	}
 
-	// Need at least $30/month for large clusters, scale down for smaller clusters
-	minThreshold := 30.0
-	if totalCost < 2000 {
-		minThreshold = totalCost * 0.03 // 3% of cluster cost minimum
-		if minThreshold < 15 {
-			minThreshold = 15 // Absolute minimum $15/month
-		}
+	if len(idleNamespaces) == 0 {
+		return nil
 	}
 
-	if idleCost < minThreshold {
-		return nil
+	// In no-cost mode, skip dollar threshold
+	if !noCost {
+		minThreshold := 30.0
+		if totalCost < 2000 {
+			minThreshold = totalCost * 0.03
+			if minThreshold < 15 {
+				minThreshold = 15
+			}
+		}
+		if idleCost < minThreshold {
+			return nil
+		}
 	}
 
 	// Deleting idle resources = 100% savings on those resources
@@ -345,11 +364,16 @@ func (ca *CostAnalyzer) generateIdleScenario(totalCost float64) *models.Optimiza
 
 // generateRightsizeScenario calculates savings from right-sizing
 func (ca *CostAnalyzer) generateRightsizeScenario(totalCost float64) *models.OptimizationScenario {
+	noCost := totalCost <= 0
 	oversizedCost := 0.0
 	oversizedCPU := 0.0
 	oversizedNamespaces := []string{}
 
 	for _, ns := range ca.resourceAnalysis.Namespaces {
+		if isSystemNamespaceForOptimization(ns.Name) {
+			continue
+		}
+
 		// Check if over-provisioned (high requests, low pod count)
 		if ns.PodCount > 0 && ns.PodCount < 5 {
 			avgCPU := ns.CPUCoresRequested / float64(ns.PodCount)
@@ -363,17 +387,24 @@ func (ca *CostAnalyzer) generateRightsizeScenario(totalCost float64) *models.Opt
 		}
 	}
 
-	// Need meaningful savings for large clusters, scale for smaller ones
-	minThreshold := 50.0
-	if totalCost < 2000 {
-		minThreshold = totalCost * 0.05 // 5% of cluster cost
-		if minThreshold < 20 {
-			minThreshold = 20
-		}
+	if len(oversizedNamespaces) == 0 {
+		return nil
 	}
 
-	if oversizedCost < minThreshold {
-		return nil
+	// In no-cost mode, skip dollar threshold; require at least 1 CPU to be freed
+	if !noCost {
+		minThreshold := 50.0
+		if totalCost < 2000 {
+			minThreshold = totalCost * 0.05
+			if minThreshold < 20 {
+				minThreshold = 20
+			}
+		}
+		if oversizedCost < minThreshold {
+			return nil
+		}
+	} else if oversizedCPU*0.5 < 1.0 {
+		return nil // Not worth mentioning if <1 CPU freed
 	}
 
 	// Right-sizing typically saves 40-60% on over-provisioned resources
@@ -422,7 +453,6 @@ func (ca *CostAnalyzer) generateAssumptions() []string {
 	return []string{
 		"Cost allocation based on CPU + Memory resource requests (not actual usage)",
 		"Does NOT include: storage costs, networking egress, load balancers, public IPs",
-		"Spot instance savings assume 70% discount vs on-demand",
 		"Assumes proportional sharing of node costs across pods",
 		"Cluster cost provided by user - not validated against actual Azure billing",
 	}
@@ -440,11 +470,16 @@ func (ca *CostAnalyzer) generateDisclaimers() []string {
 
 // generateHPAScenario detects namespaces that could benefit from autoscaling
 func (ca *CostAnalyzer) generateHPAScenario(totalCost float64) *models.OptimizationScenario {
+	noCost := totalCost <= 0
 	hpaCandidateCost := 0.0
 	hpaCandidateCPU := 0.0
 	hpaCandidates := []string{}
 
 	for _, ns := range ca.resourceAnalysis.Namespaces {
+		if isSystemNamespaceForOptimization(ns.Name) {
+			continue
+		}
+
 		// Good HPA candidates: production namespaces with multiple pods and no waste
 		// (if they had HPA with waste, they'd scale down already)
 		if ns.PodCount >= 3 && ns.PodCount <= 20 {
@@ -454,8 +489,8 @@ func (ca *CostAnalyzer) generateHPAScenario(totalCost float64) *models.Optimizat
 				weightedShare := ns.WeightedShare()
 				nsCost := totalCost * weightedShare
 
-				// Only recommend for namespaces with reasonable cost
-				if nsCost > 100 {
+				// Include if: cost threshold met, OR no-cost mode with >=2 CPU requested
+				if nsCost > 100 || (noCost && ns.CPUCoresRequested >= 2.0) {
 					hpaCandidateCost += nsCost
 					hpaCandidateCPU += ns.CPUCoresRequested
 					hpaCandidates = append(hpaCandidates, fmt.Sprintf("%s (%d pods)", ns.Name, ns.PodCount))
@@ -464,17 +499,22 @@ func (ca *CostAnalyzer) generateHPAScenario(totalCost float64) *models.Optimizat
 		}
 	}
 
-	// Need at least $100/month for large clusters, scale for smaller ones
-	minThreshold := 100.0
-	if totalCost < 2000 {
-		minThreshold = totalCost * 0.10 // 10% of cluster cost
-		if minThreshold < 30 {
-			minThreshold = 30
-		}
+	if len(hpaCandidates) == 0 {
+		return nil
 	}
 
-	if hpaCandidateCost < minThreshold || len(hpaCandidates) == 0 {
-		return nil
+	// In no-cost mode, skip dollar threshold
+	if !noCost {
+		minThreshold := 100.0
+		if totalCost < 2000 {
+			minThreshold = totalCost * 0.10 // 10% of cluster cost
+			if minThreshold < 30 {
+				minThreshold = 30
+			}
+		}
+		if hpaCandidateCost < minThreshold {
+			return nil
+		}
 	}
 
 	// HPA typically saves 20-40% during off-peak hours (assume 40% of the time)
@@ -534,4 +574,34 @@ func formatList(items []string) string {
 	}
 	// More than 3, show first 2 and count
 	return fmt.Sprintf("%s, %s, and %d more", items[0], items[1], len(items)-2)
+}
+
+func isSystemNamespaceForOptimization(namespace string) bool {
+	lower := strings.ToLower(namespace)
+
+	patterns := []string{
+		"kube-",
+		"calico",
+		"tigera",
+		"istio",
+		"cilium",
+		"gatekeeper",
+		"prometheus",
+		"grafana",
+		"dynatrace",
+		"datadog",
+		"newrelic",
+		"azure-",
+		"aks-",
+		"csi",
+		"monitoring",
+	}
+
+	for _, pattern := range patterns {
+		if strings.HasPrefix(lower, pattern) || strings.Contains(lower, pattern) {
+			return true
+		}
+	}
+
+	return false
 }

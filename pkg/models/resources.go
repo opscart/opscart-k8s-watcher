@@ -64,6 +64,7 @@ type Optimization struct {
 
 // CostEstimate represents estimated costs (Phase 2)
 type CostEstimate struct {
+	ClusterName           string                 `json:"cluster_name"`
 	TotalClusterCost      float64                `json:"total_cluster_cost"`
 	NamespaceCosts        []NamespaceCostInfo    `json:"namespace_costs"`
 	OptimizationScenarios []OptimizationScenario `json:"optimization_scenarios"`
@@ -76,11 +77,29 @@ type CostEstimate struct {
 
 // NamespaceCostInfo represents cost information for a namespace
 type NamespaceCostInfo struct {
+	Name          string               `json:"name"`
+	EstimatedCost CostRange            `json:"estimated_cost"`
+	CPUShare      float64              `json:"cpu_share"`
+	MemoryShare   float64              `json:"memory_share"`
+	WeightedShare float64              `json:"weighted_share"`
+	CPUCores      float64              `json:"cpu_cores"`
+	MemoryGB      float64              `json:"memory_gb"`
+	PodCount      int                  `json:"pod_count"`
+	IdlePods      int                  `json:"idle_pods"`
+	WasteScore    float64              `json:"waste_score"`
+	Deployments   []DeploymentCostInfo `json:"deployments,omitempty"`
+}
+
+// DeploymentCostInfo represents cost breakdown for a single deployment/statefulset/daemonset
+type DeploymentCostInfo struct {
 	Name          string    `json:"name"`
-	EstimatedCost CostRange `json:"estimated_cost"`
-	CPUShare      float64   `json:"cpu_share"`
-	MemoryShare   float64   `json:"memory_share"`
-	WeightedShare float64   `json:"weighted_share"`
+	Kind          string    `json:"kind"` // Deployment, StatefulSet, DaemonSet
+	Namespace     string    `json:"namespace"`
+	Replicas      int       `json:"replicas"`
+	CPUCores      float64   `json:"cpu_cores"`
+	MemoryGB      float64   `json:"memory_gb"`
+	NSShare       float64   `json:"ns_share"`       // fraction of namespace cost
+	EstimatedCost CostRange `json:"estimated_cost"` // zero if no monthly cost
 }
 
 // CostRange represents a cost estimate range

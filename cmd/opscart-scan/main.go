@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"os"
+	"sort"
 	"strings"
 	"time"
 
@@ -26,6 +27,7 @@ var (
 	reportFormat   string // Used by report command
 	enhanced       bool
 	monthlyCost    float64
+	breakdown      string // "" | "deployment"
 	showScenarios  bool
 
 	// NEW v0.2 flags
@@ -299,11 +301,6 @@ Quickly find broken resources, idle workloads, security issues, and generate rep
 				os.Exit(1)
 			}
 
-			if monthlyCost <= 0 {
-				fmt.Println("Error: --monthly-cost required")
-				os.Exit(1)
-			}
-
 			if isCompare {
 				fmt.Println("Error: --compare not yet supported for costs command")
 				os.Exit(1)
@@ -332,11 +329,11 @@ Quickly find broken resources, idle workloads, security issues, and generate rep
 	}
 	costsCmd.Flags().StringVarP(&cluster, "cluster", "c", "", "Cluster context name")
 	costsCmd.Flags().StringVarP(&namespace, "namespace", "n", "", "Namespace to analyze (default: all)")
-	costsCmd.Flags().Float64VarP(&monthlyCost, "monthly-cost", "m", 0, "Total cluster cost per month (required)")
-	costsCmd.Flags().StringVarP(&format, "format", "f", "table", "Output format (table|json)")
+	costsCmd.Flags().Float64VarP(&monthlyCost, "monthly-cost", "m", 0, "Total cluster cost per month (optional; omit for resource-share-only view)")
+	costsCmd.Flags().StringVarP(&format, "format", "f", "table", "Output format (table|json|html)")
+	costsCmd.Flags().StringVar(&breakdown, "breakdown", "", "Drill-down level: deployment (shows per-deployment cost within each namespace)")
 	costsCmd.Flags().BoolVar(&allClustersFlag, "all-clusters", false, "Scan all configured clusters")
 	costsCmd.Flags().StringVar(&clusterGroupFlag, "cluster-group", "", "Scan all clusters in a group")
-	costsCmd.MarkFlagRequired("monthly-cost")
 
 	// ================================================================
 	// Find command (keeps existing all-clusters flag — already works)
@@ -345,25 +342,25 @@ Quickly find broken resources, idle workloads, security issues, and generate rep
 		Use:   "find [resource-type]",
 		Short: "Find resources across clusters",
 		Long: `Search for Kubernetes resources by type (pod, deployment, service).
-	
+
 Examples:
   # Find all pods
   opscart-scan find pod --cluster prod
-  
+ 
   # Find all deployments
   opscart-scan find deployment --cluster prod
-  
+ 
   # Filter by status
   opscart-scan find pod --cluster prod --status=Failed
   opscart-scan find pod --cluster prod --status=Running
-  
+ 
   # Filter by name pattern
   opscart-scan find pod --cluster prod --name=backend
   opscart-scan find deployment --cluster prod --name=api
-  
+ 
   # Combine filters
   opscart-scan find pod --cluster prod --name=api --status=Running
-  
+ 
   # Find all resource types
   opscart-scan find all --cluster prod`,
 		Args: cobra.ExactArgs(1),
@@ -835,15 +832,28 @@ func runCostsScan(clusterContext string) error {
 
 	// Then perform cost analysis
 	ca := analyzer.NewCostAnalyzer(resourceAnalysis)
-	costEstimate, err := ca.AnalyzeCosts(monthlyCost)
+	costEstimate, err := ca.AnalyzeCosts(monthlyCost) // monthlyCost=0 => resource-share mode
 	if err != nil {
 		return fmt.Errorf("analyzing costs: %w", err)
 	}
 
-	analyzer.PrintCostAnalysis(costEstimate, format)
+	// Inject cluster name for HTML report
+	costEstimate.ClusterName = clusterContext
+
+	// Optionally enrich with deployment-level breakdown
+	if breakdown == "deployment" {
+		da := analyzer.NewDeploymentCostAnalyzer(clientset)
+		enriched, err := da.EnrichWithDeployments(costEstimate.NamespaceCosts)
+		if err == nil {
+			costEstimate.NamespaceCosts = enriched
+		}
+	}
+
+	if err := analyzer.PrintCostAnalysis(costEstimate, format); err != nil {
+		return fmt.Errorf("rendering output: %w", err)
+	}
 	return nil
 }
-
 func runSnapshotScan(clusterContext string) error {
 	fmt.Printf("\n🔍 Cluster: %s\n", clusterContext)
 	s, err := scanner.NewScanner(clusterContext)
@@ -940,11 +950,39 @@ func runReportGeneration(clusterContext string, clusterName string) error {
 		MonthlyCost:    monthlyCost,
 	}
 
+	namespaceCostBest := map[string]float64{}
+	namespaceCostLow := map[string]float64{}
+	namespaceCostHigh := map[string]float64{}
+
 	// Calculate savings if cost provided
 	if monthlyCost > 0 {
-		reportData.PotentialSavings = report.SavingsRange{
-			Min: monthlyCost * 0.24,
-			Max: monthlyCost * 0.36,
+		if resourceAnalysis != nil {
+			ca := analyzer.NewCostAnalyzer(resourceAnalysis)
+			costEstimate, costErr := ca.AnalyzeCosts(monthlyCost)
+			if costErr != nil {
+				fmt.Printf("  ⚠️  Cost analysis fallback used: %v\n", costErr)
+				reportData.PotentialSavings = report.SavingsRange{
+					Min: monthlyCost * 0.24,
+					Max: monthlyCost * 0.36,
+				}
+			} else {
+				reportData.PotentialSavings = report.SavingsRange{
+					Min: costEstimate.TotalSavingsPotential.Low,
+					Max: costEstimate.TotalSavingsPotential.High,
+				}
+				reportData.CostBreakdown = buildCostBreakdownFromScenarios(costEstimate.OptimizationScenarios, monthlyCost)
+
+				for _, namespaceCost := range costEstimate.NamespaceCosts {
+					namespaceCostBest[namespaceCost.Name] = namespaceCost.EstimatedCost.Best
+					namespaceCostLow[namespaceCost.Name] = namespaceCost.EstimatedCost.Low
+					namespaceCostHigh[namespaceCost.Name] = namespaceCost.EstimatedCost.High
+				}
+			}
+		} else {
+			reportData.PotentialSavings = report.SavingsRange{
+				Min: monthlyCost * 0.24,
+				Max: monthlyCost * 0.36,
+			}
 		}
 	}
 
@@ -1065,6 +1103,48 @@ func runReportGeneration(clusterContext string, clusterName string) error {
 		reportData.TotalMemory = resourceAnalysis.TotalMemoryGB
 		reportData.UsedCPU = resourceAnalysis.TotalCPURequested
 		reportData.UsedMemory = resourceAnalysis.TotalMemoryRequested
+
+		for _, namespaceUsage := range resourceAnalysis.Namespaces {
+			flags := append([]string{}, namespaceUsage.Flags...)
+			if namespaceUsage.IdlePods > 0 {
+				flags = append(flags, fmt.Sprintf("IDLE-%dp", namespaceUsage.IdlePods))
+			}
+			if namespaceUsage.SpotEligiblePods > 0 {
+				flags = append(flags, fmt.Sprintf("SPOT-OK (%d)", namespaceUsage.SpotEligiblePods))
+			}
+
+			weightedSharePct := namespaceUsage.WeightedShare() * 100
+			bestCost := namespaceCostBest[namespaceUsage.Name]
+			lowCost := namespaceCostLow[namespaceUsage.Name]
+			highCost := namespaceCostHigh[namespaceUsage.Name]
+
+			if monthlyCost > 0 && bestCost == 0 {
+				bestCost = monthlyCost * namespaceUsage.WeightedShare()
+				lowCost = bestCost * 0.8
+				highCost = bestCost * 1.2
+			}
+
+			reportData.Namespaces = append(reportData.Namespaces, report.NamespaceItem{
+				Name:             namespaceUsage.Name,
+				CPUPercent:       namespaceUsage.CPUPercent,
+				MemPercent:       namespaceUsage.MemoryPercent,
+				PodCount:         namespaceUsage.PodCount,
+				Cost:             bestCost,
+				CostLow:          lowCost,
+				CostHigh:         highCost,
+				WeightedShare:    weightedSharePct,
+				Confidence:       deriveCostConfidence(weightedSharePct),
+				IdlePods:         namespaceUsage.IdlePods,
+				SpotEligiblePods: namespaceUsage.SpotEligiblePods,
+				Flags:            flags,
+			})
+		}
+
+		if monthlyCost > 0 {
+			sort.Slice(reportData.Namespaces, func(i, j int) bool {
+				return reportData.Namespaces[i].Cost > reportData.Namespaces[j].Cost
+			})
+		}
 	}
 	reportData.ResourceScore = resourceScore
 	reportData.CostScore = costScore
@@ -1104,6 +1184,58 @@ func runReportGeneration(clusterContext string, clusterName string) error {
 		cisResult.Score, len(reportData.CriticalIssues), len(reportData.WarningIssues), len(audit.Issues))
 
 	return nil
+}
+
+func buildCostBreakdownFromScenarios(scenarios []models.OptimizationScenario, totalClusterCost float64) []report.CostItem {
+	if len(scenarios) == 0 {
+		return nil
+	}
+
+	sortedScenarios := make([]models.OptimizationScenario, len(scenarios))
+	copy(sortedScenarios, scenarios)
+	sort.Slice(sortedScenarios, func(i, j int) bool {
+		return sortedScenarios[i].Savings.Best > sortedScenarios[j].Savings.Best
+	})
+
+	items := make([]report.CostItem, 0, len(sortedScenarios))
+	for _, scenario := range sortedScenarios {
+		impact := "Low"
+		if totalClusterCost > 0 {
+			savingsPercent := (scenario.Savings.Best / totalClusterCost) * 100
+			if savingsPercent >= 10 {
+				impact = "High"
+			} else if savingsPercent >= 5 {
+				impact = "Medium"
+			}
+		}
+
+		action := scenario.Timeline
+		if len(scenario.Actions) > 0 {
+			action = scenario.Actions[0]
+		}
+
+		items = append(items, report.CostItem{
+			Name:    scenario.Name,
+			Impact:  impact,
+			Savings: scenario.Savings.Best,
+			Action:  action,
+		})
+	}
+
+	return items
+}
+
+func deriveCostConfidence(weightedSharePct float64) string {
+	if weightedSharePct >= 15 {
+		return "High"
+	}
+	if weightedSharePct >= 5 {
+		return "Medium"
+	}
+	if weightedSharePct < 2 {
+		return "Low"
+	}
+	return "Medium"
 }
 
 func generateSecurityReport(clusterContext string) error {
