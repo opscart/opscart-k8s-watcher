@@ -1,6 +1,6 @@
 # opscart-k8s-watcher
 
-**Version:** 0.5.2  
+**Version:** 0.6.0  
 **Purpose:** Production-grade Kubernetes security auditing with multi-cluster support, HTML reporting, network policy analysis, and waste detection  
 **Focus:** CIS compliance, HTML reports, network isolation, waste detection, and multi-cluster analysis
 
@@ -245,11 +245,14 @@ Coverage: [░░░░░░░░░░░░░░░░░░░░░░░
 - Image pull failures
 - High restart counts
 
-### Cost Optimization
-- Idle resource detection
-- Spot instance recommendations
-- Resource right-sizing opportunities
-- Potential savings estimation
+### Cost Analysis (v0.6.0)
+```bash
+./opscart-scan costs --cluster CLUSTER
+./opscart-scan costs --cluster CLUSTER --monthly-cost 8500
+./opscart-scan costs --cluster CLUSTER --breakdown deployment
+./opscart-scan costs --cluster CLUSTER --monthly-cost 8500 --breakdown deployment --format html
+./opscart-scan costs --cluster CLUSTER --format json
+```
 
 ### Resource Search
 - Find resources by type (pod, deployment, service)
@@ -265,8 +268,8 @@ Coverage: [░░░░░░░░░░░░░░░░░░░░░░░
 git clone https://github.com/opscart/opscart-k8s-watcher.git
 cd opscart-k8s-watcher
 
-# Checkout v0.4
-git checkout v0.4
+# Checkout v0.6.0
+git checkout v0.6.0
 
 # Build
 go build -o opscart-scan cmd/opscart-scan/main.go
@@ -663,7 +666,49 @@ This enables powerful multi-cluster workflows with `--all-clusters` and `--clust
 
 ---
 
+
+## Cost Analysis — How It Works
+
+### Formula
+```
+weighted_share(ns)   = (CPU% + Mem%) / 2
+namespace_cost       = weighted_share × total_cluster_cost
+deployment_share     = (dep_CPU / ns_CPU + dep_Mem / ns_Mem) / 2
+deployment_cost      = deployment_share × namespace_cost
+```
+
+### Confidence Scoring
+| Signal | High | Medium | Low |
+|---|---|---|---|
+| Share size | ≥ 10% | 3–10% | < 3% |
+| Pod count | ≥ 10 pods | 3–9 pods | < 3 pods |
+| Waste score penalty | > 60 → −2 | > 35 → −1 | — |
+
+
+### System Namespace Exclusions
+`kube-system`, `kube-public`, `kube-node-lease`, `cert-manager`, `istio-system`, `istio-operator`, `monitoring`, `prometheus`, `grafana`, `logging`, `flux-system`, `argocd`, `velero`, `ingress-nginx`, `calico-*`, `tigera-*`, `longhorn-*`
+
+### Phase 2 (Planned)
+- Azure Cost Management API — real monthly billing per cluster
+- Snapshot storage — dated cost snapshots for trend analysis
+- Multi-cluster aggregation — single dashboard across all clusters
+
+
+---
+
 ## Version History
+
+### v0.6.0 (May 2026) — Current
+- `costs` command production-ready with FinOps-grade output
+- Resource-share mode — no monthly cost required
+- `--breakdown deployment` — CLI tree + HTML sub-rows
+- HTML dashboard: KPI cards, share bars, waste score bars, scenario cards
+- Unallocated row reconciling namespace allocations vs cluster total
+- Removed spot scenarios; added right-sizing, idle workload, consolidation
+- System namespaces excluded from recommendations and breakdown
+- Idle pod detection: allows up to 5 restarts (init churn tolerated)
+- Confidence scoring: 3-signal model (share + pod count + waste)
+- Waste score bar replaces emoji in HTML
 
 ### v0.5.2 (Current - February 2026)
 **HTML Reports for Waste Detection:**
@@ -732,7 +777,6 @@ This enables powerful multi-cluster workflows with `--all-clusters` and `--clust
 **Real-World Findings:**
 - Found production namespace idle for 70+ days
 - Found staging namespace idle for 21+ days
-- Identified spot instance optimization opportunities
 - Scan time: ~200ms per cluster
 
 ### v0.1 (Initial Release)
@@ -747,17 +791,17 @@ This enables powerful multi-cluster workflows with `--all-clusters` and `--clust
 
 ## Roadmap
 
-### v0.6 (Next)
-- Full diff view for cluster comparison (promised in v0.2)
-- Per-namespace breakdown in comprehensive HTML reports
-- Historical trend tracking
+### v0.7 (Next)
+- Azure Cost Management API integration (Phase 2 of `costs` command)
+- Dated cost snapshots for trend analysis
+- Multi-cluster cost aggregation in a single HTML dashboard
 
-### v0.7 (Future)
-- Prometheus integration for CPU/memory idle detection
+### v0.8 (Future)
+- Prometheus integration for actual CPU/memory utilization (not just requests)
 - Grafana dashboard templates
-- Webhook notifications (Slack, email)
+- Webhook notifications (Slack, Teams, email)
 - Custom policy definitions
-- Multi-cluster aggregated dashboard
+- Full diff view for cluster comparison
 
 ---
 
@@ -786,6 +830,6 @@ MIT License - See LICENSE file for details
 
 ---
 
-**Version:** v0.5.2  
+**Version:** v0.6.0  
 **Status:** Dev/Stag/Production-ready for multi-cluster security auditing, network policy detection, and waste detection  
 **Last Updated:** February 2026

@@ -26,9 +26,30 @@ type CISResult struct {
 	Controls     []CISControl
 }
 
-// CalculateCISScore evaluates cluster against CIS Kubernetes benchmarks
-// Based on CIS Kubernetes Benchmark v1.8 - Pod Security subset
-func CalculateCISScore(audit *models.SecurityAudit) CISResult {
+// CalculateCISScore evaluates cluster against CIS Kubernetes benchmarks.
+// Based on CIS Kubernetes Benchmark v1.8 - Pod Security subset.
+// netAudit is optional — pass nil when network policy data is not available
+// (5.7.3 will be marked as not evaluated rather than a false pass).
+func CalculateCISScore(audit *models.SecurityAudit, netAudit *NetworkPolicyAudit) CISResult {
+	// Derive 5.7.3 result from real network audit data
+	net573Passed := false
+	net573Finding := "Not evaluated — run 'security' command with network audit enabled"
+	if netAudit != nil {
+		unprotected := len(netAudit.UnprotectedNamespaces)
+		total := netAudit.TotalNamespaces
+		if unprotected == 0 && total > 0 {
+			net573Passed = true
+			net573Finding = fmt.Sprintf("All %d namespaces have NetworkPolicies ✅", total)
+		} else if total == 0 {
+			net573Finding = "No namespaces found to evaluate"
+		} else {
+			net573Finding = fmt.Sprintf(
+				"%d of %d namespaces have no NetworkPolicy (%d high-risk)",
+				unprotected, total, netAudit.HighRiskNamespaces,
+			)
+		}
+	}
+
 	controls := []CISControl{
 		{
 			ID:          "5.2.1",
@@ -65,13 +86,12 @@ func CalculateCISScore(audit *models.SecurityAudit) CISResult {
 			Passed:      audit.Risks.RunningAsRoot == 0,
 			Finding:     fmt.Sprintf("%d containers as root", audit.Risks.RunningAsRoot),
 		},
-		// Network Policies - not currently tracked, always passes
 		{
 			ID:          "5.7.3",
 			Description: "Ensure namespaces have network policies",
 			Weight:      5.0,
-			Passed:      true, // Not currently tracked
-			Finding:     "Network policies not currently audited",
+			Passed:      net573Passed,
+			Finding:     net573Finding,
 		},
 		{
 			ID:          "RM-1",
