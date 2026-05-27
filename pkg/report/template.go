@@ -195,7 +195,7 @@ const htmlTemplate = `<!DOCTYPE html>
                 <strong>Period:</strong> Last 24 hours
             </div>
         </div>
-        
+       
         <div class="content">
             <!-- Overall Health Score -->
             <div class="section">
@@ -212,7 +212,7 @@ const htmlTemplate = `<!DOCTYPE html>
                     </div>
                 </div>
             </div>
-            
+           
             <!-- Metrics Grid -->
             <div class="section">
                 <div class="section-title">📊 Key Metrics</div>
@@ -246,7 +246,7 @@ const htmlTemplate = `<!DOCTYPE html>
                     </div>
                 </div>
             </div>
-            
+           
             <!-- Critical Issues -->
             {{if .CriticalIssues}}
             <div class="section">
@@ -264,7 +264,7 @@ const htmlTemplate = `<!DOCTYPE html>
                     </div>
                 </div>
                 {{end}}
-                
+               
                 {{range .WarningIssues}}
                 <div class="alert-box alert-warning">
                     <div class="alert-title">{{.Title}}</div>
@@ -273,12 +273,12 @@ const htmlTemplate = `<!DOCTYPE html>
                 {{end}}
             </div>
             {{end}}
-            
+           
             <!-- Cost Optimization -->
             {{if gt .MonthlyCost 0.0}}
             <div class="section">
                 <div class="section-title">💰 Cost Optimization Opportunities</div>
-                
+               
                 <div class="cost-box">
                     <div class="cost-row">
                         <span>Monthly Cluster Cost:</span>
@@ -292,7 +292,7 @@ const htmlTemplate = `<!DOCTYPE html>
                         💡 Cost Reduction Potential
                     </div>
                 </div>
-                
+               
                 {{if .CostBreakdown}}
                 <table class="data-table">
                     <thead>
@@ -321,7 +321,7 @@ const htmlTemplate = `<!DOCTYPE html>
                 {{end}}
             </div>
             {{end}}
-            
+           
             <!-- Namespace Breakdown -->
             {{if .Namespaces}}
             <div class="section">
@@ -332,8 +332,13 @@ const htmlTemplate = `<!DOCTYPE html>
                             <th>Namespace</th>
                             <th>CPU %</th>
                             <th>Memory %</th>
+                            {{if gt .MonthlyCost 0.0}}<th>Weighted Share</th>{{end}}
                             <th>Pods</th>
-                            {{if gt .MonthlyCost 0.0}}<th>Cost/Month</th>{{end}}
+                            {{if gt .MonthlyCost 0.0}}<th>Est. Cost/Month</th>{{end}}
+                            {{if gt .MonthlyCost 0.0}}<th>Cost Range</th>{{end}}
+                            {{if gt .MonthlyCost 0.0}}<th>Confidence</th>{{end}}
+                            {{if gt .MonthlyCost 0.0}}<th>Idle Pods</th>{{end}}
+                            {{if gt .MonthlyCost 0.0}}<th>Spot-Eligible</th>{{end}}
                             <th>Flags</th>
                         </tr>
                     </thead>
@@ -343,8 +348,13 @@ const htmlTemplate = `<!DOCTYPE html>
                             <td><strong>{{.Name}}</strong></td>
                             <td>{{formatPercent .CPUPercent}}</td>
                             <td>{{formatPercent .MemPercent}}</td>
+                            {{if gt $.MonthlyCost 0.0}}<td>{{formatPercent .WeightedShare}}</td>{{end}}
                             <td>{{.PodCount}}</td>
                             {{if gt $.MonthlyCost 0.0}}<td>{{formatMoney .Cost}}</td>{{end}}
+                            {{if gt $.MonthlyCost 0.0}}<td>{{formatMoney .CostLow}} - {{formatMoney .CostHigh}}</td>{{end}}
+                            {{if gt $.MonthlyCost 0.0}}<td>{{.Confidence}}</td>{{end}}
+                            {{if gt $.MonthlyCost 0.0}}<td>{{.IdlePods}}</td>{{end}}
+                            {{if gt $.MonthlyCost 0.0}}<td>{{.SpotEligiblePods}}</td>{{end}}
                             <td>
                                 {{range .Flags}}
                                 <span class="badge {{if contains . "IDLE"}}badge-critical{{else}}badge-success{{end}}">
@@ -358,7 +368,7 @@ const htmlTemplate = `<!DOCTYPE html>
                 </table>
             </div>
             {{end}}
-            
+           
             <!-- Security Summary -->
             {{if gt .CISScore 0}}
             <div class="section">
@@ -372,7 +382,7 @@ const htmlTemplate = `<!DOCTYPE html>
                 </div>
             </div>
             {{end}}
-            
+           
             <!-- Actions -->
             <div class="actions">
                 <button class="button" onclick="window.print()">📥 Download PDF</button>
@@ -380,7 +390,7 @@ const htmlTemplate = `<!DOCTYPE html>
             </div>
         </div>
     </div>
-    
+   
     <div style="text-align: center; margin-top: 30px; padding: 20px; color: #718096; font-size: 14px;">
         Generated by <strong>OpsCart Kubernetes Watcher v0.3</strong><br>
         <a href="https://opscart.com" style="color: #667eea;">opscart.com</a>

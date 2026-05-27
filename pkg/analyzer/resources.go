@@ -172,10 +172,10 @@ func isPodIdle(pod corev1.Pod) bool {
 		return false
 	}
 
-	// Check restarts
+	// Check restarts — allow up to 5 restarts (init/config restarts expected)
 	for _, cs := range pod.Status.ContainerStatuses {
-		if cs.RestartCount > 0 {
-			return false // Has activity
+		if cs.RestartCount > 5 {
+			return false // Actively crashing or restarting
 		}
 	}
 
