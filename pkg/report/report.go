@@ -89,12 +89,18 @@ type SecurityFinding struct {
 }
 
 type NamespaceItem struct {
-	Name       string
-	CPUPercent float64
-	MemPercent float64
-	PodCount   int
-	Cost       float64
-	Flags      []string
+	Name             string
+	CPUPercent       float64
+	MemPercent       float64
+	PodCount         int
+	Cost             float64
+	CostLow          float64
+	CostHigh         float64
+	WeightedShare    float64
+	Confidence       string
+	IdlePods         int
+	SpotEligiblePods int
+	Flags            []string
 }
 
 type TrendData struct {
