@@ -41,6 +41,11 @@ var (
 	// NEW v0.5 flags
 	minAgeDays  int    // waste command: minimum resource age to report
 	wasteFormat string // waste command: output format (cli, html)
+
+	// NEW v0.7 flags (cloud costs)
+	region       string // cloud-costs: Azure region for pricing lookup
+	autoPrice    bool   // cloud-costs: auto-detect pricing from node labels
+	costFormat   string // cloud-costs: output format (table|json|html)
 )
 
 func main() {
@@ -649,6 +654,62 @@ Detects:
 	wasteCmd.Flags().Float64Var(&monthlyCost, "monthly-cost", 0, "Monthly cluster cost for waste estimation (optional)")
 	wasteCmd.Flags().StringVar(&wasteFormat, "format", "cli", "Output format: cli (default) or html")
 
+	// ================================================================
+	// Cloud Costs command (NEW v0.7 — accurate pricing from node pools)
+	// ================================================================
+	cloudCostsCmd := &cobra.Command{
+		Use:   "cloud-costs",
+		Short: "Accurate cloud cost analysis from node pool VM pricing",
+		Long: `Compute real costs by detecting AKS node pool VM sizes and looking up Azure retail pricing.
+Breaks down costs by node pool, namespace, and deployment.
+
+Examples:
+  opscart-scan cloud-costs                           # Auto-detect region, compute from node labels
+  opscart-scan cloud-costs --region eastus2          # Specify region for pricing
+  opscart-scan cloud-costs --breakdown deployment    # Show per-deployment costs
+  opscart-scan cloud-costs --format html             # Generate HTML report
+  opscart-scan cloud-costs -n my-namespace           # Single namespace`,
+		Run: func(cmd *cobra.Command, args []string) {
+			clusters, isCompare, err := resolveTargetClusters()
+			if err != nil {
+				fmt.Printf("Error: %v\n", err)
+				os.Exit(1)
+			}
+
+			if isCompare {
+				fmt.Println("Error: --compare not yet supported for cloud-costs command")
+				os.Exit(1)
+			}
+
+			if len(clusters) == 1 {
+				if err := runCloudCostsScan(clusters[0].Context); err != nil {
+					fmt.Printf("Error: %v\n", err)
+					os.Exit(1)
+				}
+				return
+			}
+
+			// Multi-cluster mode
+			scanner.PrintMultiClusterHeader(clusters)
+			scanFunc := func(context string) (*scanner.ClusterResult, error) {
+				err := runCloudCostsScan(context)
+				return &scanner.ClusterResult{}, err
+			}
+
+			runner := scanner.NewMultiClusterRunner(clusters, scanFunc)
+			results := runner.RunAll()
+			scanner.PrintMultiClusterSummary(results)
+		},
+	}
+	cloudCostsCmd.Flags().StringVarP(&cluster, "cluster", "c", "", "Cluster context name")
+	cloudCostsCmd.Flags().StringVarP(&namespace, "namespace", "n", "", "Namespace to analyze (default: all)")
+	cloudCostsCmd.Flags().StringVar(&region, "region", "", "Azure region for pricing (auto-detected from node labels if empty)")
+	cloudCostsCmd.Flags().StringVar(&breakdown, "breakdown", "", "Drill-down: deployment")
+	cloudCostsCmd.Flags().StringVarP(&costFormat, "format", "f", "table", "Output format (table|json|html)")
+	cloudCostsCmd.Flags().BoolVar(&allClustersFlag, "all-clusters", false, "Scan all configured clusters")
+	cloudCostsCmd.Flags().StringVar(&clusterGroupFlag, "cluster-group", "", "Scan all clusters in a group")
+	cloudCostsCmd.Flags().BoolVar(&showScenarios, "scenarios", true, "Show optimization scenarios")
+	
 	// Add all commands
 	rootCmd.AddCommand(configCmd)
 	rootCmd.AddCommand(emergencyCmd)
@@ -656,6 +717,7 @@ Detects:
 	rootCmd.AddCommand(securityCmd)
 	rootCmd.AddCommand(optimizeCmd)
 	rootCmd.AddCommand(costsCmd)
+	rootCmd.AddCommand(cloudCostsCmd)
 	rootCmd.AddCommand(findCmd)
 	rootCmd.AddCommand(snapshotCmd)
 	rootCmd.AddCommand(idleCmd)
@@ -854,6 +916,94 @@ func runCostsScan(clusterContext string) error {
 	}
 	return nil
 }
+
+func runCloudCostsScan(clusterContext string) error {
+	fmt.Printf("\n🔍 Cluster: %s\n", clusterContext)
+	clientset, err := getKubernetesClient(clusterContext)
+	if err != nil {
+		return fmt.Errorf("connecting to cluster: %w", err)
+	}
+
+	// ── Step 1: Analyze node pools and compute real VM costs ──────────────
+	npa := analyzer.NewNodePoolCostAnalyzer(clientset, region)
+	poolCosts, _, err := npa.AnalyzeNodePoolCosts()
+	if err != nil {
+		return fmt.Errorf("analyzing node pool costs: %w", err)
+	}
+	totalNodeCost := analyzer.TotalClusterCostFromPools(poolCosts)
+
+	// ── Step 2: Get resource analysis for namespace breakdown ─────────────
+	ra := analyzer.NewResourceAnalyzer(clientset)
+	resourceAnalysis, err := ra.AnalyzeClusterResources(namespace)
+	if err != nil {
+		return fmt.Errorf("analyzing resources: %w", err)
+	}
+
+	// ── Step 3: Allocate costs to namespaces based on real pricing ────────
+	nsCosts := npa.AllocateNamespaceCosts(
+		poolCosts,
+		resourceAnalysis.Namespaces,
+		resourceAnalysis.TotalCPUCores,
+		resourceAnalysis.TotalMemoryGB,
+	)
+
+	// ── Step 4: Optionally enrich with per-deployment breakdown ───────────
+	if breakdown == "deployment" {
+		da := analyzer.NewDeploymentCostAnalyzer(clientset)
+		enriched, err := da.EnrichWithDeployments(nsCosts)
+		if err == nil {
+			nsCosts = enriched
+		}
+	}
+
+	// ── Step 5: Generate optimization scenarios using real costs ─────────
+	ca := analyzer.NewCostAnalyzer(resourceAnalysis)
+	costEstimate, _ := ca.AnalyzeCosts(totalNodeCost)
+	scenarios := costEstimate.OptimizationScenarios
+	savingsPotential := costEstimate.TotalSavingsPotential
+
+	// ── Step 7: Detect region (from node labels if not specified) ─────────
+	detectedRegion := region
+	if detectedRegion == "" && len(poolCosts) > 0 {
+		// Pull from node pool builder
+		detectedRegion = "auto-detected"
+	}
+
+	// ── Step 8: Build CloudCostReport ────────────────────────────────────
+	report := &models.CloudCostReport{
+		Timestamp:     time.Now(),
+		ClusterName:   clusterContext,
+		Region:        detectedRegion,
+		Provider:      "azure",
+		NodePoolCosts: poolCosts,
+		TotalNodeCost: totalNodeCost,
+		NamespaceCosts: nsCosts,
+		TotalMonthlyCost: totalNodeCost,
+		TotalAnnualCost:  totalNodeCost * 12,
+		CostBreakdown: models.CostBreakdown{
+			Compute: totalNodeCost,
+		},
+		OptimizationScenarios: scenarios,
+		TotalSavingsPotential: savingsPotential,
+		PricingSource:         "embedded-catalog",
+		Assumptions: []string{
+			"VM pricing from embedded Azure retail price catalog (East US 2 baseline)",
+			"Cost allocation: weighted average of CPU + Memory resource requests",
+			"Node pool costs = Pay-As-You-Go unless spot label detected",
+			"Does NOT include: disk I/O, network egress, Log Analytics, Defender for Cloud",
+		},
+		Disclaimers: []string{
+			"⚠️  Prices are approximate — based on Azure public pricing as of 2026",
+			"⚠️  Actual costs depend on Enterprise Agreement, MACC commitments, and negotiated rates",
+			"⚠️  Use Azure Cost Management + Billing for exact billing data",
+			"⚠️  Reserved Instance savings shown are potential — requires commitment purchase",
+		},
+	}
+
+	// ── Step 9: Render output ────────────────────────────────────────────
+	return analyzer.PrintCloudCostReport(report, costFormat)
+}
+
 func runSnapshotScan(clusterContext string) error {
 	fmt.Printf("\n🔍 Cluster: %s\n", clusterContext)
 	s, err := scanner.NewScanner(clusterContext)
