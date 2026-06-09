@@ -1,8 +1,8 @@
 # opscart-k8s-watcher
 
-**Version:** 0.6.0  
-**Purpose:** Production-grade Kubernetes security auditing with multi-cluster support, HTML reporting, network policy analysis, and waste detection  
-**Focus:** CIS compliance, HTML reports, network isolation, waste detection, and multi-cluster analysis
+**Version:** 0.7.0  
+**Purpose:** Production-grade Kubernetes security auditing and cloud cost analysis with multi-cluster support, HTML reporting, network policy analysis, and waste detection  
+**Focus:** Cloud cost estimation, CIS compliance, HTML reports, network isolation, waste detection, and multi-cluster analysis
 
 ---
 
@@ -20,6 +20,76 @@
 - War room troubleshooting
 - Executive-ready HTML reports
 
+---
+
+## What's New in v0.7
+
+### Cloud Cost Analysis (`cloud-costs` command)
+Accurate cloud cost estimation by detecting AKS node pool VM sizes and computing real pricing from an embedded Azure retail price catalog. No external API calls required.
+
+**Key capabilities:**
+- **Node pool auto-detection** — Reads node labels (`node.kubernetes.io/instance-type`, `agentpool`, `kubernetes.azure.com/scalesetpriority`) to identify exact VM SKUs
+- **Embedded Azure pricing catalog** — 40+ VM SKUs with Pay-As-You-Go, Reserved Instance (1yr/3yr), and Spot pricing
+- **Region-aware pricing** — Auto-detects region from node labels or specify with `--region`; multipliers for 15+ Azure regions
+- **Namespace cost allocation** — Distributes real node pool costs proportionally based on CPU + Memory resource requests
+- **Deployment-level breakdown** — Optional `--breakdown deployment` shows per-deployment costs within each namespace
+- **Optimization scenarios** — Right-sizing, idle workload removal, Reserved Instance recommendations with projected savings
+- **Enterprise HTML dashboard** — Dark-theme report with SVG confidence ring, collapsible namespace tables, optimization cards, and sidebar navigation
+- **Multi-cluster support** — Works with `--all-clusters` and `--cluster-group`
+
+```bash
+# Auto-detect everything from cluster node labels
+./opscart-scan cloud-costs --cluster prod
+
+# Specify region for pricing lookup
+./opscart-scan cloud-costs --cluster prod --region eastus2
+
+# Per-deployment cost breakdown
+./opscart-scan cloud-costs --cluster prod --breakdown deployment
+
+# Generate enterprise HTML report
+./opscart-scan cloud-costs --cluster prod --format html
+
+# Single namespace analysis
+./opscart-scan cloud-costs --cluster prod -n my-namespace
+
+# JSON output for programmatic use
+./opscart-scan cloud-costs --cluster prod --format json
+
+# All clusters
+./opscart-scan cloud-costs --all-clusters
+```
+
+**Example output (real cluster with 2 node pools):**
+```
+☁️  CLOUD COST ANALYSIS
+   Cluster: my-prod-cluster
+   Region:  centralus
+   Provider: Azure (embedded catalog)
+
+💰 NODE POOL COSTS
+   Pool: systempool
+     VM Size: Standard_D4s_v3 (4 vCPU / 16 GB)
+     Nodes:   2
+     Monthly: $280.32/node → $560.64 total
+     Pricing: Pay-As-You-Go | RI-1yr: $361.30 | RI-3yr: $231.50
+
+   Pool: userpool
+     VM Size: Standard_D48as_v5 (48 vCPU / 192 GB)
+     Nodes:   6
+     Monthly: $1,635.20/node → $9,811.20 total
+     Pricing: Pay-As-You-Go | RI-1yr: $6,339.24 | RI-3yr: $4,048.86
+
+   TOTAL CLUSTER COST: $10,371.84/mo ($124,462.08/yr)
+```
+
+**Reports saved to:** `reports/YYYY-MM-DD/cloud-costs-HHMM.html`
+
+**Pricing disclaimers:**
+- Prices are approximate — based on Azure public pricing as of 2026
+- Actual costs depend on Enterprise Agreement, MACC commitments, and negotiated rates
+- Use Azure Cost Management + Billing for exact billing data
+- Reserved Instance savings shown are potential — requires commitment purchase
 ---
 
 ## What's New in v0.5.2
@@ -195,6 +265,16 @@ Coverage: [░░░░░░░░░░░░░░░░░░░░░░░
 
 ## Features
 
+### ☁️ Cloud Cost Analysis (v0.7)
+- **Real VM pricing** — Detects actual node pool VM SKUs from Kubernetes node labels
+- **Embedded pricing catalog** — 40+ Azure VM SKUs, no API keys or external calls needed
+- **Region multipliers** — Automatic pricing adjustment for 15+ Azure regions
+- **Namespace cost allocation** — Proportional distribution based on CPU + Memory requests
+- **Deployment breakdown** — Optional per-deployment cost drill-down
+- **Optimization scenarios** — RI savings, right-sizing, idle workload identification
+- **Enterprise HTML dashboard** — Dark-theme SPA with SVG charts, collapsible tables, sidebar navigation
+- **Multiple output formats** — table (CLI), JSON, HTML
+
 ### 🌐 Multi-Cluster Support (v0.2)
 - **Config management** - Centralized cluster configuration
 - **Multi-cluster scanning** - Scan all clusters with `--all-clusters`
@@ -245,7 +325,19 @@ Coverage: [░░░░░░░░░░░░░░░░░░░░░░░
 - Image pull failures
 - High restart counts
 
-### Cost Analysis (v0.6.0)
+### Cloud Cost Analysis (v0.7.0)
+```bash
+# Real pricing from node pool VM detection (no monthly-cost input needed)
+./opscart-scan cloud-costs --cluster CLUSTER
+./opscart-scan cloud-costs --cluster CLUSTER --region eastus2
+./opscart-scan cloud-costs --cluster CLUSTER --breakdown deployment
+./opscart-scan cloud-costs --cluster CLUSTER --format html
+./opscart-scan cloud-costs --cluster CLUSTER --format json
+```
+
+### Cost Analysis (v0.6.0) — Resource-Share Mode
+```bash
+# Requires manual monthly-cost input for allocation
 ```bash
 ./opscart-scan costs --cluster CLUSTER
 ./opscart-scan costs --cluster CLUSTER --monthly-cost 8500
@@ -374,8 +466,22 @@ go build -o opscart-scan cmd/opscart-scan/main.go
 # Skip namespaces not caught by auto-detection
 ./opscart-scan network --cluster prod --skip-namespaces monitoring,vault
 ```
+### 6. Cloud Cost Analysis (v0.7)
+```bash
+# Auto-detect VM pricing from cluster node labels
+./opscart-scan cloud-costs --cluster prod
 
-### 6. Waste & Drift Detection (v0.5)
+# Specify region explicitly
+./opscart-scan cloud-costs --cluster prod --region eastus2
+
+# Per-deployment breakdown
+./opscart-scan cloud-costs --cluster prod --breakdown deployment
+
+# Enterprise HTML dashboard
+./opscart-scan cloud-costs --cluster prod --format html
+```
+
+### 7. Waste & Drift Detection (v0.5)
 ```bash
 # Detect forgotten/idle/orphaned resources (default: 7+ days old)
 ./opscart-scan waste --cluster prod
@@ -473,12 +579,36 @@ go build -o opscart-scan cmd/opscart-scan/main.go
 ./opscart-scan network --cluster CLUSTER --skip-namespaces monitoring,vault
 ```
 
+### Cloud Cost Analysis (NEW in v0.7)
+```bash
+# Auto-detect VM pricing from node labels
+./opscart-scan cloud-costs --cluster CLUSTER
+
+# Specify Azure region
+./opscart-scan cloud-costs --cluster CLUSTER --region eastus2
+
+# Per-deployment breakdown
+./opscart-scan cloud-costs --cluster CLUSTER --breakdown deployment
+
+# Enterprise HTML report
+./opscart-scan cloud-costs --cluster CLUSTER --format html
+
+# JSON output
+./opscart-scan cloud-costs --cluster CLUSTER --format json
+
+# All clusters
+./opscart-scan cloud-costs --all-clusters
+
+# Cluster group
+./opscart-scan cloud-costs --cluster-group production
+```
+
 ### Other Commands
 ```bash
 # Resource analysis
 ./opscart-scan resources --cluster CLUSTER
 
-# Cost analysis
+# Cost analysis (resource-share mode, requires --monthly-cost)
 ./opscart-scan costs --cluster CLUSTER --monthly-cost 5000
 
 # Emergency scan
@@ -572,6 +702,28 @@ kubectl get pods --all-namespaces -o json | \
 ---
 
 ## Use Cases
+
+### Cloud Cost Visibility (v0.7)
+```bash
+# Quick cost check — no Azure portal needed
+./opscart-scan cloud-costs --cluster prod
+
+# Monthly executive report
+./opscart-scan cloud-costs --cluster prod --format html
+
+# Which teams/namespaces are spending the most?
+./opscart-scan cloud-costs --cluster prod --breakdown deployment
+
+# Cross-cluster cost comparison
+./opscart-scan cloud-costs --all-clusters
+
+# Shows:
+# - Exact VM SKUs and per-node costs
+# - Reserved Instance savings potential (1yr and 3yr)
+# - Spot node detection
+# - Namespace-level cost allocation
+# - Optimization scenarios with projected annual savings
+```
 
 ### Weekly Waste Review (v0.5)
 ```bash
@@ -669,7 +821,52 @@ This enables powerful multi-cluster workflows with `--all-clusters` and `--clust
 
 ## Cost Analysis — How It Works
 
-### Formula
+### Cloud Costs (v0.7) — Real VM Pricing
+
+**Pipeline:**
+1. Discover all nodes via Kubernetes API
+2. Group nodes by `agentpool` label → node pools
+3. Read `node.kubernetes.io/instance-type` label → VM SKU (e.g., `Standard_D4s_v3`)
+4. Lookup SKU in embedded Azure pricing catalog → per-node monthly cost
+5. Detect spot nodes via `kubernetes.azure.com/scalesetpriority=spot`
+6. Multiply by node count → total pool cost
+7. Sum all pools → total cluster cost
+8. Allocate to namespaces by weighted resource share
+
+**Formula:**
+```
+node_cost            = AzurePricingCatalog[vm_sku] × RegionMultiplier[region]
+pool_cost            = node_cost × node_count
+total_cluster_cost   = Σ pool_costs
+weighted_share(ns)   = (CPU_requests% + Memory_requests%) / 2
+namespace_cost       = weighted_share × total_cluster_cost
+deployment_share     = (dep_CPU / ns_CPU + dep_Mem / ns_Mem) / 2
+deployment_cost      = deployment_share × namespace_cost
+```
+
+**Embedded Pricing Catalog (40+ SKUs):**
+| Family | Examples | vCPU Range |
+|--------|----------|------------|
+| D-series v3/v4/v5 | D2s_v3 – D64s_v5 | 2–64 |
+| E-series (memory) | E2s_v5 – E64s_v5 | 2–64 |
+| F-series (compute) | F2s_v2 – F72s_v2 | 2–72 |
+| B-series (burstable) | B2s – B8ms | 2–8 |
+| AMD variants | D48as_v5, E48as_v5 | 48 |
+
+**Region Multipliers:**
+| Region | Multiplier |
+|--------|------------|
+| East US / East US 2 | 1.00 (baseline) |
+| West US 2/3 | 1.00 |
+| Central US | 1.02 |
+| West Europe | 1.15 |
+| Southeast Asia | 1.08 |
+| Australia East | 1.20 |
+| Brazil South | 1.35 |
+
+### Resource-Share Mode (v0.6 `costs` command)
+
+**Formula (requires manual `--monthly-cost` input):**
 ```
 weighted_share(ns)   = (CPU% + Mem%) / 2
 namespace_cost       = weighted_share × total_cluster_cost
@@ -688,15 +885,36 @@ deployment_cost      = deployment_share × namespace_cost
 ### System Namespace Exclusions
 `kube-system`, `kube-public`, `kube-node-lease`, `cert-manager`, `istio-system`, `istio-operator`, `monitoring`, `prometheus`, `grafana`, `logging`, `flux-system`, `argocd`, `velero`, `ingress-nginx`, `calico-*`, `tigera-*`, `longhorn-*`
 
-### Phase 2 (Planned)
-- Azure Cost Management API — real monthly billing per cluster
-- Snapshot storage — dated cost snapshots for trend analysis
-- Multi-cluster aggregation — single dashboard across all clusters
+### Assumptions & Limitations
+- Pricing based on Azure public retail rates (Pay-As-You-Go baseline)
+- Does NOT include: disk I/O, network egress, Log Analytics, Defender for Cloud, AKS uptime SLA
+- Enterprise Agreement / MACC discounts not reflected
+- Reserved Instance savings are potential — requires actual commitment purchase
+- Resource allocation uses requests (not actual utilization)
 
 
 ---
 
 ## Version History
+
+### v0.7.0 (June 2026) — Current
+- **`cloud-costs` command** — Accurate cloud cost analysis from real node pool VM pricing
+- Embedded Azure pricing catalog with 40+ VM SKUs (no external API calls)
+- Auto-detects VM sizes from Kubernetes node labels (`node.kubernetes.io/instance-type`)
+- Region-aware pricing with multipliers for 15+ Azure regions
+- Spot node detection via `kubernetes.azure.com/scalesetpriority` label
+- Namespace cost allocation based on proportional CPU + Memory requests
+- Per-deployment breakdown with `--breakdown deployment`
+- Enterprise dark-theme HTML dashboard with:
+  - SVG confidence ring showing pricing accuracy
+  - Collapsible namespace cost tables
+  - Optimization scenario cards with projected savings
+  - Sidebar navigation
+  - Reserved Instance vs Pay-As-You-Go comparison per pool
+- JSON output for programmatic integration
+- Reports saved to `reports/YYYY-MM-DD/cloud-costs-HHMM.html`
+- Multi-cluster support (`--all-clusters`, `--cluster-group`)
+- Pricing disclaimers and assumptions clearly documented in output
 
 ### v0.6.0 (May 2026) — Current
 - `costs` command production-ready with FinOps-grade output
@@ -791,17 +1009,20 @@ deployment_cost      = deployment_share × namespace_cost
 
 ## Roadmap
 
-### v0.7 (Next)
-- Azure Cost Management API integration (Phase 2 of `costs` command)
-- Dated cost snapshots for trend analysis
+### v0.8 (Next)
+- **Real-time cost dashboard** — Embedded web server with live cluster data polling
+- Azure Cost Management API integration for exact billing reconciliation
+- Dated cost snapshots for trend analysis (SQLite storage)
 - Multi-cluster cost aggregation in a single HTML dashboard
+- HTMX/Alpine.js interactive frontend
 
-### v0.8 (Future)
+### v0.9 (Future)
 - Prometheus integration for actual CPU/memory utilization (not just requests)
 - Grafana dashboard templates
 - Webhook notifications (Slack, Teams, email)
 - Custom policy definitions
 - Full diff view for cluster comparison
+- AWS/GCP pricing catalog support
 
 ---
 
@@ -830,6 +1051,6 @@ MIT License - See LICENSE file for details
 
 ---
 
-**Version:** v0.6.0  
-**Status:** Dev/Stag/Production-ready for multi-cluster security auditing, network policy detection, and waste detection  
-**Last Updated:** February 2026
+**Version:** v0.7.0  
+**Status:** Dev/Stag/Production-ready for multi-cluster security auditing, cloud cost analysis, network policy detection, and waste detection  
+**Last Updated:** June 2026
