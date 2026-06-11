@@ -133,6 +133,36 @@ func newServer(clusterList []string) *server {
 	}
 }
 
+// startBackgroundRefresh ticks every interval and re-scans every cluster that
+// has already been visited (report != nil). Newly registered clusters are
+// lazily scanned on first HTTP request; this goroutine keeps them fresh
+// afterwards. The same dashboardState.refresh pipeline used by POST /refresh
+// is called here, so the atomic scan flag prevents overlapping scans.
+func (srv *server) startBackgroundRefresh(interval time.Duration) {
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for range ticker.C {
+		srv.mu.RLock()
+		states := make([]*dashboardState, 0, len(srv.states))
+		for _, s := range srv.states {
+			states = append(states, s)
+		}
+		srv.mu.RUnlock()
+
+		for _, state := range states {
+			state.mu.RLock()
+			hasData := state.report != nil
+			state.mu.RUnlock()
+			if !hasData {
+				continue
+			}
+			if err := state.refresh(srv.clusterList); err != nil {
+				log.Printf("[%s] background refresh error: %v", displayName(state.ctx), err)
+			}
+		}
+	}
+}
+
 // getState returns the dashboardState for ctx, creating it if needed.
 func (srv *server) getState(ctx string) *dashboardState {
 	srv.mu.RLock()
@@ -177,6 +207,8 @@ func runDashboard(_ *cobra.Command, _ []string) error {
 	mux.HandleFunc("/api/report", srv.handleReportJSON)
 	mux.HandleFunc("/api/overview", srv.handleOverview)
 	mux.HandleFunc("/healthz", handleHealth)
+
+	go srv.startBackgroundRefresh(60 * time.Second)
 
 	addr := ":" + port
 	log.Printf("Dashboard ready at http://localhost%s", addr)
