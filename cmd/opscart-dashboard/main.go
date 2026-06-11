@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"net/url"
 	"os"
 	"strings"
 	"sync"
@@ -19,11 +20,12 @@ import (
 )
 
 var (
-	port      string
-	cluster   string
-	region    string
-	breakdown string
-	namespace string
+	port         string
+	cluster      string // single-context shorthand (backwards compat)
+	clustersFlag string // comma-separated list for multi-cluster sidebar
+	region       string
+	breakdown    string
+	namespace    string
 )
 
 func main() {
@@ -33,15 +35,19 @@ func main() {
 		Long: `Serves a live cloud cost FinOps dashboard for Kubernetes clusters.
 
 Routes:
-  GET  /           — HTML dashboard (auto-refreshes every 60s)
-  POST /refresh    — trigger an immediate re-scan
-  GET  /api/report — current CloudCostReport as JSON
-  GET  /healthz    — liveness probe`,
+  GET  /                 — HTML dashboard (auto-refreshes every 60s)
+  POST /refresh          — trigger an immediate re-scan
+  GET  /api/report       — full CloudCostReport as JSON
+  GET  /api/overview     — summary KPIs as JSON
+  GET  /healthz          — liveness probe
+
+All data routes accept ?cluster=<context> to target a specific cluster.`,
 		RunE: runDashboard,
 	}
 
 	rootCmd.Flags().StringVarP(&port, "port", "p", "8080", "Port to listen on")
 	rootCmd.Flags().StringVarP(&cluster, "cluster", "c", "", "Kubernetes context to scan (default: current context)")
+	rootCmd.Flags().StringVar(&clustersFlag, "clusters", "", "Comma-separated Kubernetes contexts for the sidebar selector")
 	rootCmd.Flags().StringVar(&region, "region", "", "Azure region for pricing (auto-detected from node labels if empty)")
 	rootCmd.Flags().StringVar(&breakdown, "breakdown", "", "Cost breakdown level: '' or 'deployment'")
 	rootCmd.Flags().StringVarP(&namespace, "namespace", "n", "", "Namespace to analyze (default: all)")
@@ -51,49 +57,125 @@ Routes:
 	}
 }
 
-// dashboardState holds the cached report and rendered HTML under a read-write lock.
-// scan is an atomic flag that prevents concurrent re-scans from piling up.
-type dashboardState struct {
-	mu         sync.RWMutex
-	report     *models.CloudCostReport
-	cachedHTML string
-	scanning   atomic.Bool
+// ── Cluster list ────────────────────────────────────────────────────────────
+
+// parseClusterList merges --cluster and --clusters into an ordered, deduplicated
+// slice. An empty string means "use the kubeconfig current context".
+func parseClusterList() []string {
+	seen := map[string]bool{}
+	var list []string
+	add := func(ctx string) {
+		ctx = strings.TrimSpace(ctx)
+		if !seen[ctx] {
+			seen[ctx] = true
+			list = append(list, ctx)
+		}
+	}
+	add(cluster)
+	for _, ctx := range strings.Split(clustersFlag, ",") {
+		add(ctx)
+	}
+	return list
 }
 
-// refresh runs a fresh cluster scan outside of the lock, then swaps the result in.
-// If a scan is already running the call is a no-op (returns nil).
-func (s *dashboardState) refresh() error {
+func displayName(ctx string) string {
+	if ctx == "" {
+		return "current-context"
+	}
+	return ctx
+}
+
+// ── Per-cluster state ────────────────────────────────────────────────────────
+
+type dashboardState struct {
+	ctx      string
+	mu       sync.RWMutex
+	report   *models.CloudCostReport
+	htmlPage string   // rendered HTML with sidebar + auto-refresh injected
+	scanning atomic.Bool
+}
+
+// refresh runs a cluster scan outside of the lock, then atomically swaps the
+// result in. A concurrent refresh call while one is in progress is a no-op.
+func (s *dashboardState) refresh(clusterList []string) error {
 	if !s.scanning.CompareAndSwap(false, true) {
 		return nil
 	}
 	defer s.scanning.Store(false)
 
-	report, err := buildReport()
+	report, err := buildReport(s.ctx)
 	if err != nil {
 		return err
 	}
-	html := injectAutoRefresh(analyzer.GenerateCloudCostHTML(report), report.Timestamp)
+	page := renderHTML(report, s.ctx, clusterList)
 
 	s.mu.Lock()
 	s.report = report
-	s.cachedHTML = html
+	s.htmlPage = page
 	s.mu.Unlock()
 
-	log.Printf("Scan complete — monthly estimate $%.0f", report.TotalMonthlyCost)
+	log.Printf("[%s] scan complete — $%.0f/mo", displayName(s.ctx), report.TotalMonthlyCost)
 	return nil
 }
 
+// ── Server ───────────────────────────────────────────────────────────────────
+
+type server struct {
+	clusterList []string
+	mu          sync.RWMutex
+	states      map[string]*dashboardState
+}
+
+func newServer(clusterList []string) *server {
+	return &server{
+		clusterList: clusterList,
+		states:      make(map[string]*dashboardState),
+	}
+}
+
+// getState returns the dashboardState for ctx, creating it if needed.
+func (srv *server) getState(ctx string) *dashboardState {
+	srv.mu.RLock()
+	s := srv.states[ctx]
+	srv.mu.RUnlock()
+	if s != nil {
+		return s
+	}
+	srv.mu.Lock()
+	defer srv.mu.Unlock()
+	if s = srv.states[ctx]; s != nil {
+		return s
+	}
+	s = &dashboardState{ctx: ctx}
+	srv.states[ctx] = s
+	return s
+}
+
+// activeCtx resolves the target cluster from ?cluster= query param, falling
+// back to the first cluster in the list.
+func (srv *server) activeCtx(r *http.Request) string {
+	if ctx := r.URL.Query().Get("cluster"); ctx != "" {
+		return ctx
+	}
+	return srv.clusterList[0]
+}
+
+// ── runDashboard ─────────────────────────────────────────────────────────────
+
 func runDashboard(_ *cobra.Command, _ []string) error {
-	log.Printf("Scanning cluster %q ...", resolveClusterName())
-	state := &dashboardState{}
-	if err := state.refresh(); err != nil {
-		return fmt.Errorf("initial cluster scan: %w", err)
+	cl := parseClusterList()
+	srv := newServer(cl)
+
+	log.Printf("Scanning cluster %q ...", displayName(cl[0]))
+	if err := srv.getState(cl[0]).refresh(cl); err != nil {
+		return fmt.Errorf("initial scan: %w", err)
 	}
 
 	mux := http.NewServeMux()
-	mux.HandleFunc("/", state.handleDashboard)
-	mux.HandleFunc("/refresh", state.handleRefresh)
-	mux.HandleFunc("/api/report", state.handleReportJSON)
+	mux.HandleFunc("/", srv.handleDashboard)
+	mux.HandleFunc("/refresh", srv.handleRefresh)
+	mux.HandleFunc("/api/report", srv.handleReportJSON)
+	mux.HandleFunc("/api/overview", srv.handleOverview)
 	mux.HandleFunc("/healthz", handleHealth)
 
 	addr := ":" + port
@@ -101,31 +183,48 @@ func runDashboard(_ *cobra.Command, _ []string) error {
 	return http.ListenAndServe(addr, mux)
 }
 
-func (s *dashboardState) handleDashboard(w http.ResponseWriter, r *http.Request) {
+// ── HTTP handlers ─────────────────────────────────────────────────────────────
+
+func (srv *server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 	if r.URL.Path != "/" {
 		http.NotFound(w, r)
 		return
 	}
-	s.mu.RLock()
-	html := s.cachedHTML
-	s.mu.RUnlock()
+	ctx := srv.activeCtx(r)
+	state := srv.getState(ctx)
+
+	state.mu.RLock()
+	page := state.htmlPage
+	state.mu.RUnlock()
+
+	// Lazy scan: cluster was listed in --clusters but not yet scanned.
+	if page == "" {
+		if err := state.refresh(srv.clusterList); err != nil {
+			http.Error(w, "scan failed: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+		state.mu.RLock()
+		page = state.htmlPage
+		state.mu.RUnlock()
+	}
 
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	fmt.Fprint(w, html)
+	fmt.Fprint(w, page)
 }
 
-func (s *dashboardState) handleRefresh(w http.ResponseWriter, r *http.Request) {
+func (srv *server) handleRefresh(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "use POST /refresh", http.StatusMethodNotAllowed)
 		return
 	}
-	if err := s.refresh(); err != nil {
+	ctx := srv.activeCtx(r)
+	if err := srv.getState(ctx).refresh(srv.clusterList); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	s.mu.RLock()
-	report := s.report
-	s.mu.RUnlock()
+	srv.getState(ctx).mu.RLock()
+	report := srv.getState(ctx).report
+	srv.getState(ctx).mu.RUnlock()
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]any{
@@ -134,10 +233,22 @@ func (s *dashboardState) handleRefresh(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-func (s *dashboardState) handleReportJSON(w http.ResponseWriter, r *http.Request) {
-	s.mu.RLock()
-	report := s.report
-	s.mu.RUnlock()
+func (srv *server) handleReportJSON(w http.ResponseWriter, r *http.Request) {
+	ctx := srv.activeCtx(r)
+	state := srv.getState(ctx)
+	state.mu.RLock()
+	report := state.report
+	state.mu.RUnlock()
+
+	if report == nil {
+		if err := state.refresh(srv.clusterList); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		state.mu.RLock()
+		report = state.report
+		state.mu.RUnlock()
+	}
 
 	w.Header().Set("Content-Type", "application/json")
 	enc := json.NewEncoder(w)
@@ -147,43 +258,105 @@ func (s *dashboardState) handleReportJSON(w http.ResponseWriter, r *http.Request
 	}
 }
 
+// handleOverview returns a lightweight summary suitable for dashboards and
+// monitoring systems that don't need the full CloudCostReport payload.
+//
+//	GET /api/overview[?cluster=<ctx>]
+//	{
+//	  "total_monthly_cost": 10371.84,
+//	  "node_pool_count":    2,
+//	  "namespace_count":    32,
+//	  "last_scanned":       "2026-06-11T10:30:00Z"
+//	}
+func (srv *server) handleOverview(w http.ResponseWriter, r *http.Request) {
+	ctx := srv.activeCtx(r)
+	state := srv.getState(ctx)
+	state.mu.RLock()
+	report := state.report
+	state.mu.RUnlock()
+
+	if report == nil {
+		http.Error(w, "no data yet — POST /refresh first", http.StatusServiceUnavailable)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]any{
+		"total_monthly_cost": report.TotalMonthlyCost,
+		"node_pool_count":    len(report.NodePoolCosts),
+		"namespace_count":    len(report.NamespaceCosts),
+		"last_scanned":       report.Timestamp.Format(time.RFC3339),
+	})
+}
+
 func handleHealth(w http.ResponseWriter, _ *http.Request) {
 	w.WriteHeader(http.StatusOK)
 	fmt.Fprintln(w, "ok")
 }
 
-// injectAutoRefresh appends a script block before </body> that:
-//   - shows a fixed "Last updated: X seconds ago" badge
-//   - auto-refreshes by POST /refresh then location.reload() every 60 seconds
-func injectAutoRefresh(html string, scannedAt time.Time) string {
+// ── HTML rendering pipeline ───────────────────────────────────────────────────
+
+func renderHTML(report *models.CloudCostReport, activeCtx string, clusterList []string) string {
+	html := analyzer.GenerateCloudCostHTML(report)
+	if len(clusterList) > 1 {
+		html = injectClusterSelector(html, clusterList, activeCtx)
+	}
+	return injectAutoRefresh(html, report.Timestamp, activeCtx)
+}
+
+// injectClusterSelector adds a "Clusters" nav section to the sidebar so users
+// can switch between contexts with a single click. Each item navigates to
+// /?cluster=<ctx> (a full-page reload with the target cluster's cached data).
+func injectClusterSelector(html string, clusterList []string, activeCtx string) string {
+	var sb strings.Builder
+	sb.WriteString(`<div class="nav-section">`)
+	sb.WriteString(`<div class="nav-label">Clusters</div>`)
+	for _, ctx := range clusterList {
+		cls := "nav-item"
+		if ctx == activeCtx {
+			cls += " active"
+		}
+		href := "/?" + url.Values{"cluster": {ctx}}.Encode()
+		label := displayName(ctx)
+		// Truncate long context names so they fit the sidebar width.
+		if len(label) > 22 {
+			label = label[:21] + "…"
+		}
+		sb.WriteString(fmt.Sprintf(
+			`<a class="%s" href="%s" style="text-decoration:none">🔵 %s</a>`,
+			cls, href, label,
+		))
+	}
+	sb.WriteString(`</div>`)
+
+	// Insert just before the cluster-info block at the bottom of the sidebar.
+	return strings.Replace(html, `<div class="cluster-info">`, sb.String()+`<div class="cluster-info">`, 1)
+}
+
+// injectAutoRefresh appends CSS + JS before </body> that:
+//   - renders a fixed "Last updated: X seconds ago" badge (bottom-right)
+//   - every 60s calls POST /refresh?cluster=<ctx> then reloads the page
+func injectAutoRefresh(html string, scannedAt time.Time, activeCtx string) string {
+	// Build the refresh URL: include ?cluster= only when a named context is set.
+	refreshURL := "/refresh"
+	if activeCtx != "" {
+		refreshURL = "/refresh?cluster=" + url.QueryEscape(activeCtx)
+	}
+
 	script := fmt.Sprintf(`
 <style>
 #oc-refresh-badge {
-  position: fixed;
-  bottom: 1.25rem;
-  right: 1.25rem;
-  background: #1e293b;
-  border: 1px solid #334155;
-  border-radius: 10px;
+  position: fixed; bottom: 1.25rem; right: 1.25rem;
+  background: #1e293b; border: 1px solid #334155; border-radius: 10px;
   padding: 0.5rem 1rem;
-  font-family: 'Inter', system-ui, sans-serif;
-  font-size: 0.75rem;
-  color: #94a3b8;
-  z-index: 9999;
-  display: flex;
-  align-items: center;
-  gap: 0.5rem;
-  box-shadow: 0 4px 12px rgba(0,0,0,0.4);
-  transition: border-color 0.3s;
+  font-family: 'Inter', system-ui, sans-serif; font-size: 0.75rem; color: #94a3b8;
+  z-index: 9999; display: flex; align-items: center; gap: 0.5rem;
+  box-shadow: 0 4px 12px rgba(0,0,0,0.4); transition: border-color 0.3s;
 }
 #oc-refresh-badge.refreshing { border-color: #6366f1; }
 #oc-dot {
-  width: 8px;
-  height: 8px;
-  border-radius: 50%%;
-  background: #10b981;
-  flex-shrink: 0;
-  transition: background 0.3s;
+  width: 8px; height: 8px; border-radius: 50%%; background: #10b981;
+  flex-shrink: 0; transition: background 0.3s;
 }
 #oc-refresh-badge.refreshing #oc-dot { background: #6366f1; animation: oc-pulse 1s infinite; }
 @keyframes oc-pulse { 0%%,100%%{opacity:1} 50%%{opacity:0.3} }
@@ -195,15 +368,16 @@ func injectAutoRefresh(html string, scannedAt time.Time) string {
 <script>
 (function () {
   var SCAN_TS = %d;
+  var REFRESH_URL = %q;
   var REFRESH_INTERVAL = 60000;
   var badge = document.getElementById('oc-refresh-badge');
-  var ageEl  = document.getElementById('oc-age');
+  var ageEl = document.getElementById('oc-age');
 
   function updateAge() {
     var secs = Math.floor((Date.now() - SCAN_TS) / 1000);
-    if (secs < 5)        ageEl.textContent = 'just now';
-    else if (secs < 60)  ageEl.textContent = secs + 's ago';
-    else                 ageEl.textContent = Math.floor(secs / 60) + 'm ago';
+    if (secs < 5)       ageEl.textContent = 'just now';
+    else if (secs < 60) ageEl.textContent = secs + 's ago';
+    else                ageEl.textContent = Math.floor(secs / 60) + 'm ago';
   }
 
   setInterval(updateAge, 1000);
@@ -212,25 +386,27 @@ func injectAutoRefresh(html string, scannedAt time.Time) string {
   function doRefresh() {
     badge.classList.add('refreshing');
     ageEl.textContent = 'refreshing…';
-    fetch('/refresh', { method: 'POST' })
+    fetch(REFRESH_URL, { method: 'POST' })
       .then(function () { location.reload(); })
       .catch(function () {
         badge.classList.remove('refreshing');
         updateAge();
-        setTimeout(doRefresh, 10000);
+        setTimeout(doRefresh, 10000); // retry after 10s on network error
       });
   }
 
   setTimeout(doRefresh, REFRESH_INTERVAL);
 })();
 </script>
-`, scannedAt.UnixMilli())
+`, scannedAt.UnixMilli(), refreshURL)
 
 	return strings.Replace(html, "</body>", script+"</body>", 1)
 }
 
-func buildReport() (*models.CloudCostReport, error) {
-	clientset, err := kubeClient()
+// ── Cluster scan ──────────────────────────────────────────────────────────────
+
+func buildReport(ctx string) (*models.CloudCostReport, error) {
+	clientset, err := kubeClient(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -272,7 +448,7 @@ func buildReport() (*models.CloudCostReport, error) {
 
 	return &models.CloudCostReport{
 		Timestamp:             time.Now(),
-		ClusterName:           resolveClusterName(),
+		ClusterName:           displayName(ctx),
 		Region:                detectedRegion,
 		Provider:              "azure",
 		NodePoolCosts:         poolCosts,
@@ -299,20 +475,14 @@ func buildReport() (*models.CloudCostReport, error) {
 	}, nil
 }
 
-func kubeClient() (*kubernetes.Clientset, error) {
+func kubeClient(ctx string) (*kubernetes.Clientset, error) {
 	loadingRules := clientcmd.NewDefaultClientConfigLoadingRules()
-	configOverrides := &clientcmd.ConfigOverrides{CurrentContext: cluster}
+	// Empty ctx means "use kubeconfig's current context".
+	configOverrides := &clientcmd.ConfigOverrides{CurrentContext: ctx}
 	kubeConfig := clientcmd.NewNonInteractiveDeferredLoadingClientConfig(loadingRules, configOverrides)
 	cfg, err := kubeConfig.ClientConfig()
 	if err != nil {
-		return nil, fmt.Errorf("loading kubeconfig: %w", err)
+		return nil, fmt.Errorf("loading kubeconfig for %q: %w", displayName(ctx), err)
 	}
 	return kubernetes.NewForConfig(cfg)
-}
-
-func resolveClusterName() string {
-	if cluster != "" {
-		return cluster
-	}
-	return "current-context"
 }
