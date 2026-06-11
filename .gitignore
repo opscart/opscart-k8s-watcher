@@ -1,5 +1,6 @@
-# Binaries (only in root, not cmd/opscart-scan/)
+# Binaries (only in root, not cmd/)
 /opscart-scan
+/opscart-dashboard
 *.exe
 *.exe~
 *.dll
