@@ -197,6 +197,11 @@ func printCloudCostHTML(report *models.CloudCostReport) error {
 	return nil
 }
 
+// GenerateCloudCostHTML returns the full HTML for the cloud cost dashboard.
+func GenerateCloudCostHTML(report *models.CloudCostReport) string {
+	return generateCloudCostHTML(report)
+}
+
 func generateCloudCostHTML(report *models.CloudCostReport) string {
 	var sb strings.Builder
 
