@@ -1,0 +1,126 @@
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: opscart-system
+
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: opscart-dashboard
+  namespace: opscart-system
+
+---
+# Read-only access to the resources the analyzers inspect.
+# nodes + pods       — nodepool_costs.go, resources.go
+# deployments +
+#   statefulsets +
+#   daemonsets        — deployment_costs.go (breakdown=deployment mode)
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: opscart-dashboard
+rules:
+  - apiGroups: [""]
+    resources: ["nodes", "pods"]
+    verbs: ["get", "list"]
+  - apiGroups: ["apps"]
+    resources: ["deployments", "statefulsets", "daemonsets", "replicasets"]
+    verbs: ["get", "list"]
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: opscart-dashboard
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: opscart-dashboard
+subjects:
+  - kind: ServiceAccount
+    name: opscart-dashboard
+    namespace: opscart-system
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: opscart-dashboard
+  namespace: opscart-system
+  labels:
+    app: opscart-dashboard
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: opscart-dashboard
+  template:
+    metadata:
+      labels:
+        app: opscart-dashboard
+    spec:
+      serviceAccountName: opscart-dashboard
+
+      # In-cluster: client-go auto-detects the service account token and
+      # cluster CA at /var/run/secrets/kubernetes.io/serviceaccount/
+      # No kubeconfig flag needed.
+
+      containers:
+        - name: dashboard
+          image: opscart-dashboard:v0.8.0
+          imagePullPolicy: Always
+          args:
+            - "--port=8080"
+            - "--breakdown=deployment"
+          ports:
+            - name: http
+              containerPort: 8080
+              protocol: TCP
+          resources:
+            requests:
+              cpu: 100m
+              memory: 64Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 8080
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            failureThreshold: 3
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8080
+            initialDelaySeconds: 20
+            periodSeconds: 30
+            failureThreshold: 3
+
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65534   # nobody — matches USER in Dockerfile
+        runAsGroup: 65534
+        seccompProfile:
+          type: RuntimeDefault
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: opscart-dashboard
+  namespace: opscart-system
+  labels:
+    app: opscart-dashboard
+spec:
+  type: ClusterIP
+  selector:
+    app: opscart-dashboard
+  ports:
+    - name: http
+      port: 80
+      targetPort: 8080
+      protocol: TCP
