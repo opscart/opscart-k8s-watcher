@@ -41,6 +41,7 @@ build/
 
 # Temporary files
 tmp/
-temp/reports/
+
+# Generated reports (never commit - may contain sensitive cluster data)
 reports/
-reports/
+*.html
