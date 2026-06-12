@@ -69,7 +69,7 @@ spec:
 
       containers:
         - name: dashboard
-          image: oghcr.io/opscart/opscart-dashboard:v0.8.0
+          image: ghcr.io/opscart/opscart-dashboard:v0.8.0
           imagePullPolicy: Always
           args:
             - "--port=8080"
