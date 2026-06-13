@@ -18,7 +18,7 @@ import (
 // ================================================================
 
 type WasteAuditor struct {
-	clientset  *kubernetes.Clientset
+	clientset  kubernetes.Interface
 	ctx        context.Context
 	minAgeDays int
 }
@@ -189,7 +189,7 @@ type MisconfiguredHPA struct {
 // Constructor
 // ================================================================
 
-func NewWasteAuditor(clientset *kubernetes.Clientset, minAgeDays int) (*WasteAuditor, context.CancelFunc) {
+func NewWasteAuditor(clientset kubernetes.Interface, minAgeDays int) (*WasteAuditor, context.CancelFunc) {
 	// 60-second timeout per cluster - prevents hanging on corporate networks
 	// Caller should defer the cancel function for proper cleanup
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
