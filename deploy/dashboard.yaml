@@ -12,21 +12,39 @@ metadata:
   namespace: opscart-system
 
 ---
-# Read-only access to the resources the analyzers inspect.
-# nodes + pods       — nodepool_costs.go, resources.go
-# deployments +
-#   statefulsets +
-#   daemonsets        — deployment_costs.go (breakdown=deployment mode)
+# Read-only access to all resources the analyzers inspect.
+# nodes + pods + namespaces — nodepool_costs.go, resources.go, security.go, waste.go
+# deployments etc.          — deployment_costs.go (breakdown=deployment mode)
+# jobs / cronjobs           — waste.go (stale batch workloads)
+# networkpolicies           — network.go (unprotected namespace detection)
+# persistentvolumeclaims    — waste.go (unbound PVC detection)
+# horizontalpodautoscalers  — waste.go
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
   name: opscart-dashboard
 rules:
   - apiGroups: [""]
-    resources: ["nodes", "pods"]
+    resources:
+      - nodes
+      - pods
+      - namespaces
+      - services
+      - endpoints
+      - persistentvolumeclaims
+      - replicationcontrollers
     verbs: ["get", "list"]
   - apiGroups: ["apps"]
     resources: ["deployments", "statefulsets", "daemonsets", "replicasets"]
+    verbs: ["get", "list"]
+  - apiGroups: ["batch"]
+    resources: ["jobs", "cronjobs"]
+    verbs: ["get", "list"]
+  - apiGroups: ["autoscaling"]
+    resources: ["horizontalpodautoscalers"]
+    verbs: ["get", "list"]
+  - apiGroups: ["networking.k8s.io"]
+    resources: ["networkpolicies", "ingresses"]
     verbs: ["get", "list"]
 
 ---

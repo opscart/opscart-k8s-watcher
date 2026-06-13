@@ -209,7 +209,7 @@ func (b *nodePoolBuilder) build(region string) models.NodePoolCost {
 	var pricePerHour, pricePerMonth float64
 	var cpuPerNode, memPerNode float64
 	var spotDiscount float64
-	var riSavings float64
+	var riSavings, riSavings3yr float64
 
 	pricing, found := LookupVMPrice(vmSize, region)
 	if found {
@@ -225,8 +225,13 @@ func (b *nodePoolBuilder) build(region string) models.NodePoolCost {
 			pricePerMonth = pricing.PayAsYouGoMonth
 		}
 		// RI savings potential (if not already spot)
-		if !strings.EqualFold(b.priority, "spot") && pricing.OneYearRI > 0 {
-			riSavings = (pricing.PayAsYouGoMonth - pricing.OneYearRI) * float64(nodeCount)
+		if !strings.EqualFold(b.priority, "spot") {
+			if pricing.OneYearRI > 0 {
+				riSavings = (pricing.PayAsYouGoMonth - pricing.OneYearRI) * float64(nodeCount)
+			}
+			if pricing.ThreeYearRI > 0 {
+				riSavings3yr = (pricing.PayAsYouGoMonth - pricing.ThreeYearRI) * float64(nodeCount)
+			}
 		}
 	} else {
 		// Fallback: estimate from node capacity
@@ -288,6 +293,7 @@ func (b *nodePoolBuilder) build(region string) models.NodePoolCost {
 		CPUUtilizationPct:    cpuUtil,
 		MemoryUtilizationPct: memUtil,
 		RISavings:            riSavings,
+		RISavings3yr:         riSavings3yr,
 	}
 }
 
