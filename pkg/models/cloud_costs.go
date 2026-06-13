@@ -58,7 +58,8 @@ type NodePoolCost struct {
 	MemoryUtilizationPct float64 `json:"memory_utilization_pct"`
 
 	// Reserved Instance potential
-	RISavings            float64 `json:"ri_savings"` // potential savings with 1-year RI
+	RISavings    float64 `json:"ri_savings"`     // monthly savings with 1-year RI vs PAYG
+	RISavings3yr float64 `json:"ri_savings_3yr"` // monthly savings with 3-year RI vs PAYG
 }
 
 // CostBreakdown shows where money is spent
