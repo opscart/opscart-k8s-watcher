@@ -419,12 +419,15 @@ func collectWarRoomIssues(scan *clusterScan, limit int) []warRoomIssue {
 	if scan.wasteAudit != nil {
 		for _, pod := range scan.wasteAudit.StalePods {
 			if pod.Kind == analyzer.StalePodZombie {
+				itype := zombieTypeForStatus(pod.Status)
 				issues = append(issues, warRoomIssue{
-					Severity:  "critical",
-					Type:      "crash_loop",
-					Namespace: pod.Namespace,
-					Resource:  pod.Name,
-					Message:   fmt.Sprintf("%s — %d restarts, %d days old", pod.Status, pod.RestartCount, pod.AgeDays),
+					Severity:   "critical",
+					Type:       itype,
+					Namespace:  pod.Namespace,
+					Resource:   pod.Name,
+					Message:    fmt.Sprintf("%s — %d restarts, %d days old", pod.Status, pod.RestartCount, pod.AgeDays),
+					AgeDays:    pod.AgeDays,
+					KubectlCmd: kubectlCmdForIssue(itype, pod.Name, pod.Namespace),
 				})
 			}
 		}
@@ -435,11 +438,12 @@ func collectWarRoomIssues(scan *clusterScan, limit int) []warRoomIssue {
 		for _, issue := range scan.secAudit.Issues {
 			if issue.Type == "privileged_container" && issue.Severity == "critical" {
 				issues = append(issues, warRoomIssue{
-					Severity:  "critical",
-					Type:      "privileged_container",
-					Namespace: issue.Namespace,
-					Resource:  issue.Name,
-					Message:   issue.Description,
+					Severity:   "critical",
+					Type:       "privileged_container",
+					Namespace:  issue.Namespace,
+					Resource:   issue.Name,
+					Message:    issue.Description,
+					KubectlCmd: fmt.Sprintf("kubectl describe pod %s -n %s", issue.Name, issue.Namespace),
 				})
 			}
 		}
@@ -450,11 +454,12 @@ func collectWarRoomIssues(scan *clusterScan, limit int) []warRoomIssue {
 		for _, ns := range scan.netAudit.UnprotectedNamespaces {
 			if ns.RiskLevel == "HIGH" {
 				issues = append(issues, warRoomIssue{
-					Severity:  "high",
-					Type:      "unprotected_namespace",
-					Namespace: ns.Name,
-					Resource:  "namespace",
-					Message:   fmt.Sprintf("No NetworkPolicy — %d pods exposed", ns.PodCount),
+					Severity:   "high",
+					Type:       "unprotected_namespace",
+					Namespace:  ns.Name,
+					Resource:   "namespace",
+					Message:    fmt.Sprintf("No NetworkPolicy — %d pods exposed", ns.PodCount),
+					KubectlCmd: fmt.Sprintf("kubectl get networkpolicies -n %s", ns.Name),
 				})
 			}
 		}
@@ -466,7 +471,8 @@ func collectWarRoomIssues(scan *clusterScan, limit int) []warRoomIssue {
 		return severityOrder[issues[i].Severity] < severityOrder[issues[j].Severity]
 	})
 
-	if len(issues) > limit {
+	// limit=0 means no cap (used by the HTML page to show all issues)
+	if limit > 0 && len(issues) > limit {
 		return issues[:limit]
 	}
 	return issues
@@ -497,7 +503,16 @@ func (srv *server) handleWarRoomPage(w http.ResponseWriter, r *http.Request) {
 }
 
 func renderWarRoomPage(scan *clusterScan, activeCtx string, clusterList []string) string {
-	critical, warnings := collectPageWarRoomIssues(scan)
+	// Same data source as /api/warroom — single path, guaranteed parity.
+	allIssues := collectWarRoomIssues(scan, 0) // 0 = no limit
+	var critical, warnings []warRoomIssue
+	for _, issue := range allIssues {
+		if issue.Severity == "critical" {
+			critical = append(critical, issue)
+		} else {
+			warnings = append(warnings, issue)
+		}
+	}
 
 	scannedAt := time.Now()
 	clusterName := displayName(activeCtx)
@@ -1051,82 +1066,6 @@ func kubectlCmdForIssue(issueType, resource, namespace string) string {
 	default:
 		return fmt.Sprintf("kubectl describe pod %s -n %s", resource, namespace)
 	}
-}
-
-// collectPageWarRoomIssues returns all critical and warning issues for the full
-// War Room page. Unlike collectWarRoomIssues it has no cap and covers all types.
-func collectPageWarRoomIssues(scan *clusterScan) (critical, warnings []warRoomIssue) {
-	if scan == nil {
-		return nil, nil
-	}
-
-	// Critical: zombie pods split by actual status
-	if scan.wasteAudit != nil {
-		for _, pod := range scan.wasteAudit.StalePods {
-			if pod.Kind != analyzer.StalePodZombie {
-				continue
-			}
-			itype := zombieTypeForStatus(pod.Status)
-			critical = append(critical, warRoomIssue{
-				Severity:   "critical",
-				Type:       itype,
-				Namespace:  pod.Namespace,
-				Resource:   pod.Name,
-				Message:    pod.Reason,
-				AgeDays:    pod.AgeDays,
-				KubectlCmd: kubectlCmdForIssue(itype, pod.Name, pod.Namespace),
-			})
-		}
-	}
-
-	// Warnings: unprotected namespaces (all risk levels)
-	if scan.netAudit != nil {
-		for _, ns := range scan.netAudit.UnprotectedNamespaces {
-			warnings = append(warnings, warRoomIssue{
-				Severity:   "warning",
-				Type:       "unprotected_namespace",
-				Namespace:  ns.Name,
-				Resource:   "namespace",
-				Message:    ns.RiskReason,
-				KubectlCmd: fmt.Sprintf("kubectl get networkpolicies -n %s", ns.Name),
-			})
-		}
-	}
-
-	if scan.wasteAudit != nil {
-		// Warnings: orphaned PVCs with cost estimate
-		for _, pvc := range scan.wasteAudit.OrphanedPVCs {
-			msg := pvc.Reason
-			if pvc.SizeGB > 0 {
-				msg = fmt.Sprintf("%dGB idle (~$%.0f/mo). %s", pvc.SizeGB, float64(pvc.SizeGB)*0.10, pvc.Reason)
-			}
-			warnings = append(warnings, warRoomIssue{
-				Severity:   "warning",
-				Type:       "orphaned_pvc",
-				Namespace:  pvc.Namespace,
-				Resource:   pvc.Name,
-				Message:    msg,
-				AgeDays:    pvc.AgeDays,
-				KubectlCmd: fmt.Sprintf("kubectl describe pvc %s -n %s", pvc.Name, pvc.Namespace),
-			})
-		}
-
-		// Warnings: zero-replica workloads
-		for _, wrk := range scan.wasteAudit.ZeroReplicaWorkloads {
-			kind := strings.ToLower(wrk.Kind)
-			warnings = append(warnings, warRoomIssue{
-				Severity:   "warning",
-				Type:       "zero_replica",
-				Namespace:  wrk.Namespace,
-				Resource:   wrk.Name,
-				Message:    wrk.Reason,
-				AgeDays:    wrk.AgeDays,
-				KubectlCmd: fmt.Sprintf("kubectl get %s %s -n %s", kind, wrk.Name, wrk.Namespace),
-			})
-		}
-	}
-
-	return critical, warnings
 }
 
 // injectAutoRefresh appends the live-update badge and 60s auto-refresh script.

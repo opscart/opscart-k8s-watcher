@@ -278,6 +278,11 @@ func (w *WasteAuditor) detectAbandonedNamespaces(audit *WasteAudit, filterNamesp
 	for _, ns := range nsList.Items {
 		nsName := ns.Name
 
+		// default always exists even when empty — not a candidate for abandonment.
+		if nsName == "default" {
+			continue
+		}
+
 		// Skip infrastructure namespaces (reuse same logic as network command)
 		if isInfraPattern(nsName) {
 			continue
@@ -355,11 +360,10 @@ func (w *WasteAuditor) detectStalePods(audit *WasteAudit, filterNamespace string
 		}
 
 		ageDays := int(now.Sub(pod.CreationTimestamp.Time).Hours() / 24)
-		if ageDays < w.minAgeDays {
-			continue
-		}
 
 		// ── ZOMBIE detection: CrashLoopBackOff / OOMKilled ──────────
+		// Age gate is deliberately skipped — a crashing pod is a problem
+		// on day 0. The minAgeDays filter only applies to idle pod detection.
 		for _, cs := range pod.Status.ContainerStatuses {
 			if cs.State.Waiting != nil {
 				reason := cs.State.Waiting.Reason
@@ -388,6 +392,11 @@ func (w *WasteAuditor) detectStalePods(audit *WasteAudit, filterNamespace string
 		}
 
 		// ── IDLE detection: old pod, no recent restart activity ──────
+		// Age gate applies here: we only flag idle pods that have been
+		// sitting around longer than minAgeDays.
+		if ageDays < w.minAgeDays {
+			goto nextPod
+		}
 		{
 			// Key insight: creationTimestamp never resets on restart.
 			// We check LAST restart time to exclude recently-active pods.
@@ -1528,16 +1537,15 @@ func printWasteSummary(audit *WasteAudit) {
 // Helpers
 // ================================================================
 
-// isInfraPattern checks well-known infrastructure namespace prefixes and exact names.
-// Reuses the same logic as the network command for consistency.
+// isInfraPattern returns true for Kubernetes system/infrastructure namespaces
+// whose pods and resources should be excluded from waste and zombie detection.
+// Note: "default" is intentionally NOT excluded here — users regularly run
+// workloads there and crash-looping pods must be visible. The abandoned-namespace
+// detector handles "default" separately.
 func isInfraPattern(name string) bool {
-	// Exact name matches — system namespaces that are always present but often empty.
-	// These should never be flagged as abandoned regardless of pod count.
-	infraExact := map[string]bool{
-		"default":     true, // Kubernetes built-in, always exists
-		"aks-command": true, // Azure AKS internal namespace (az aks command invoke)
-	}
-	if infraExact[name] {
+	// aks-command is an AKS internal namespace used by "az aks command invoke".
+	// It creates ephemeral pods that look like zombies but are system-managed.
+	if name == "aks-command" {
 		return true
 	}
 
