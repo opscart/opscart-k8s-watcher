@@ -1181,15 +1181,11 @@ func renderOptimizationsPage(scan *clusterScan, activeCtx string, clusterList []
 	// ── Data ─────────────────────────────────────────────────────────────────
 	var pools []models.NodePoolCost
 	var nsCosts []models.NamespaceCostInfo
-	var wa *analyzer.WasteAudit
 	clusterName := displayName(activeCtx)
-	if scan != nil {
-		if scan.report != nil {
-			pools = scan.report.NodePoolCosts
-			nsCosts = scan.report.NamespaceCosts
-			clusterName = scan.report.ClusterName
-		}
-		wa = scan.wasteAudit
+	if scan != nil && scan.report != nil {
+		pools = scan.report.NodePoolCosts
+		nsCosts = scan.report.NamespaceCosts
+		clusterName = scan.report.ClusterName
 	}
 
 	// RI opportunities
@@ -1204,14 +1200,16 @@ func renderOptimizationsPage(scan *clusterScan, activeCtx string, clusterList []
 	}
 	sort.Slice(riPools, func(i, j int) bool { return riPools[i].RISavings > riPools[j].RISavings })
 
-	// Waste counts and cost
+	// Waste counts — same data path as collectWarRoomIssues
 	var zombieCount, idleCount, zeroReplicaCount, abandonedCount, pvcCount, pvcStorageGB int
 	var pvcCostEst float64
-	if wa != nil {
+	if scan != nil && scan.wasteAudit != nil {
+		wa := scan.wasteAudit
 		for _, p := range wa.StalePods {
-			if p.Kind == analyzer.StalePodZombie {
+			switch p.Kind {
+			case analyzer.StalePodZombie:
 				zombieCount++
-			} else {
+			case analyzer.StalePodIdle:
 				idleCount++
 			}
 		}
@@ -1351,8 +1349,8 @@ body{font-family:'Inter',system-ui,sans-serif;background:var(--bg);color:var(--t
 		sb.WriteString(fmt.Sprintf(`<div class="kpi-chip"><div class="kpi-chip-val warn">$%s</div><div class="kpi-chip-lbl">PVC Waste/mo</div></div>`, formatMoney(pvcCostEst)))
 	}
 	wasteTotal := 0
-	if wa != nil {
-		wasteTotal = wa.TotalWasteItems
+	if scan != nil && scan.wasteAudit != nil {
+		wasteTotal = scan.wasteAudit.TotalWasteItems
 	}
 	sb.WriteString(fmt.Sprintf(`<div class="kpi-chip"><div class="kpi-chip-val">%d</div><div class="kpi-chip-lbl">Total Waste Items</div></div>`, wasteTotal))
 	sb.WriteString(`</div>`)
