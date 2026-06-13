@@ -2,7 +2,7 @@
 
 **Your Kubernetes cluster is hiding things. This finds them.**
 
-[![Version](https://img.shields.io/badge/version-v0.8.0-blue)](https://github.com/opscart/opscart-k8s-watcher/releases)
+[![Version](https://img.shields.io/badge/version-v0.9.0-blue)](https://github.com/opscart/opscart-k8s-watcher/releases)
 [![Go](https://img.shields.io/badge/go-1.21+-00ADD8)](https://go.dev)
 [![License](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 [![Docker](https://img.shields.io/badge/docker-ghcr.io%2Fopscart-blue)](https://ghcr.io/opscart/opscart-dashboard)
@@ -38,6 +38,21 @@ open http://localhost:8080
 ./opscart-dashboard --cluster my-cluster --port 8080
 ```
 
+
+## What's New in v0.9.0
+
+### Full Dashboard with 5 Working Tabs
+- **Infrastructure** — Node pool table with VM SKU, utilization bars, RI savings
+- **Namespaces** — Cost + Network Policy + Waste items per namespace (cross-referenced)
+- **Optimizations** — RI opportunities, waste by category, right-sizing candidates
+- **War Room** — Full page: critical pods, unprotected namespaces, orphaned PVCs
+- **Cost Overview** — Enhanced KPI bar + War Room panel sidebar
+
+### Bug Fixes
+- War Room was silently returning empty results (limit=0 bug)
+- Default namespace pods were skipped in waste detector
+- Zombie pods now bypass minAgeDays filter
+- Optimizations tab now reads correct waste data
 ---
 
 ## 📦 Installation
