@@ -372,11 +372,11 @@ func (srv *server) handleSummary(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]any{
-		"monthly_cost":    scan.report.TotalMonthlyCost,
-		"waste_total":     scan.wasteTotal(),
-		"security_score":  scan.securityScore(),
-		"cluster_count":   len(srv.clusterList),
-		"pod_count":       scan.monthlyPodCount(),
+		"monthly_cost":   scan.report.TotalMonthlyCost,
+		"waste_total":    scan.wasteTotal(),
+		"security_score": scan.securityScore(),
+		"cluster_count":  len(srv.clusterList),
+		"pod_count":      scan.monthlyPodCount(),
 	})
 }
 
@@ -418,6 +418,18 @@ type warRoomIssue struct {
 	Message    string `json:"message"`
 	AgeDays    int    `json:"age_days,omitempty"`
 	KubectlCmd string `json:"kubectl_cmd,omitempty"`
+}
+
+type warRoomPageData struct {
+	ClusterName   string
+	StatusDesc    string
+	DashURL       string
+	CritChipClass string
+	WarnChipClass string
+	Critical      []warRoomIssue
+	Warnings      []warRoomIssue
+	ScannedAtMs   int64
+	Sidebar       template.HTML
 }
 
 func collectWarRoomIssues(scan *clusterScan, limit int) []warRoomIssue {
@@ -1622,8 +1634,7 @@ func (srv *server) handleWarRoomPage(w http.ResponseWriter, r *http.Request) {
 }
 
 func renderWarRoomPage(scan *clusterScan, activeCtx string, clusterList []string) string {
-	// Same data source as /api/warroom — single path, guaranteed parity.
-	allIssues := collectWarRoomIssues(scan, 0) // 0 = no limit
+	allIssues := collectWarRoomIssues(scan, 0)
 	var critical, warnings []warRoomIssue
 	for _, issue := range allIssues {
 		if issue.Severity == "critical" {
@@ -1644,119 +1655,6 @@ func renderWarRoomPage(scan *clusterScan, activeCtx string, clusterList []string
 	if activeCtx != "" {
 		q = "?cluster=" + url.QueryEscape(activeCtx)
 	}
-	dashURL := "/" + q
-
-	var sb strings.Builder
-
-	sb.WriteString(`<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width,initial-scale=1.0">
-<title>War Room — ` + clusterName + `</title>
-<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
-<style>
-*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
-:root{
-  --bg:#0f172a;--surface:#1e293b;--surface-hover:#334155;--border:#334155;
-  --text:#f1f5f9;--text-secondary:#94a3b8;--text-muted:#64748b;
-  --primary:#6366f1;--primary-light:#818cf8;--primary-bg:rgba(99,102,241,0.1);
-  --success:#10b981;--warning:#f59e0b;--danger:#ef4444;
-  --radius:12px;--radius-sm:8px;--radius-xs:6px;
-}
-body{font-family:'Inter',system-ui,sans-serif;background:var(--bg);color:var(--text);line-height:1.6;min-height:100vh}
-.layout{display:grid;grid-template-columns:260px 1fr;min-height:100vh}
-.sidebar{background:var(--surface);border-right:1px solid var(--border);padding:2rem 1.5rem;position:sticky;top:0;height:100vh;overflow-y:auto}
-.main{padding:2rem 2.5rem;overflow-y:auto}
-.logo{display:flex;align-items:center;gap:0.75rem;margin-bottom:2.5rem}
-.logo-icon{width:40px;height:40px;background:var(--primary);border-radius:10px;display:flex;align-items:center;justify-content:center;font-size:1.2rem}
-.logo-text{font-size:1.1rem;font-weight:700}
-.logo-sub{font-size:0.7rem;color:var(--text-muted);text-transform:uppercase;letter-spacing:1px}
-.nav-section{margin-bottom:1.5rem}
-.nav-label{font-size:0.7rem;text-transform:uppercase;letter-spacing:1.5px;color:var(--text-muted);margin-bottom:0.75rem;padding-left:0.75rem}
-.nav-item{display:flex;align-items:center;gap:0.75rem;padding:0.7rem 0.75rem;border-radius:var(--radius-sm);color:var(--text-secondary);font-size:0.9rem;cursor:pointer;transition:all 0.15s;text-decoration:none}
-.nav-item:hover{background:var(--surface-hover);color:var(--text)}
-.nav-item.active{background:rgba(239,68,68,0.12);color:#f87171;font-weight:600}
-.cluster-info{margin-top:auto;padding-top:2rem;border-top:1px solid var(--border)}
-.cluster-badge{background:var(--primary-bg);border:1px solid rgba(99,102,241,0.2);border-radius:var(--radius-sm);padding:0.85rem;margin-bottom:0.75rem}
-.cluster-badge h4{font-size:0.7rem;color:var(--primary-light);margin-bottom:0.3rem;text-transform:uppercase;letter-spacing:0.8px}
-.cluster-badge p{font-size:0.75rem;color:var(--text-muted);word-break:break-all}
-.page-hdr{display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:1.75rem;flex-wrap:wrap;gap:1rem}
-.page-hdr h1{font-size:1.75rem;font-weight:800}
-.page-hdr p{color:var(--text-muted);font-size:0.85rem;margin-top:0.25rem}
-.page-meta{text-align:right;font-size:0.78rem;color:var(--text-muted)}
-.page-meta strong{color:var(--text-secondary)}
-.back-link{display:block;margin-top:0.5rem;color:var(--primary-light);font-size:0.75rem;text-decoration:none}
-.back-link:hover{text-decoration:underline}
-.summary-bar{display:flex;gap:1rem;margin-bottom:2rem;flex-wrap:wrap}
-.summary-chip{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius-sm);padding:0.75rem 1.25rem;display:flex;align-items:center;gap:0.75rem;min-width:160px}
-.summary-chip.c{border-color:rgba(239,68,68,0.35)}
-.summary-chip.w{border-color:rgba(245,158,11,0.35)}
-.summary-chip.ok{border-color:rgba(16,185,129,0.35)}
-.summary-num{font-size:1.6rem;font-weight:800;line-height:1}
-.c .summary-num{color:var(--danger)}
-.w .summary-num{color:var(--warning)}
-.ok .summary-num{color:var(--success)}
-.summary-lbl{font-size:0.72rem;color:var(--text-muted);text-transform:uppercase;letter-spacing:0.5px;line-height:1.3}
-.wr-section{margin-bottom:2.5rem}
-.wr-section-hdr{display:flex;align-items:center;gap:0.75rem;margin-bottom:1rem;padding-bottom:0.75rem;border-bottom:1px solid var(--border)}
-.wr-section-hdr h2{font-size:1rem;font-weight:700}
-.cnt-chip{padding:3px 10px;border-radius:20px;font-size:0.7rem;font-weight:700}
-.cnt-chip.c{background:rgba(239,68,68,0.15);color:#f87171}
-.cnt-chip.w{background:rgba(245,158,11,0.15);color:#fbbf24}
-.wr-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(340px,1fr));gap:1rem}
-.wr-card{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:1.25rem;display:flex;flex-direction:column;gap:0.55rem;transition:border-color 0.2s;animation:fadeIn 0.3s ease both}
-.wr-card.c{border-color:rgba(239,68,68,0.3);background:rgba(239,68,68,0.025)}
-.wr-card.w{border-color:rgba(245,158,11,0.25);background:rgba(245,158,11,0.02)}
-.wr-card:hover{border-color:var(--primary)}
-.wr-top{display:flex;align-items:center;gap:0.5rem;flex-wrap:wrap}
-.badge{padding:2px 8px;border-radius:20px;font-size:0.64rem;font-weight:700;letter-spacing:0.5px}
-.badge.c{background:rgba(239,68,68,0.15);color:#f87171}
-.badge.w{background:rgba(245,158,11,0.15);color:#fbbf24}
-.type-lbl{font-size:0.72rem;color:var(--text-muted)}
-.age-lbl{margin-left:auto;font-size:0.7rem;color:var(--text-muted);white-space:nowrap;background:rgba(255,255,255,0.05);padding:1px 7px;border-radius:4px}
-.wr-name{font-size:0.93rem;font-weight:700;color:var(--text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.wr-ns{font-size:0.73rem;color:var(--text-muted)}
-.wr-reason{font-size:0.78rem;color:var(--text-secondary);line-height:1.55;display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden}
-.wr-cmd{display:flex;align-items:center;gap:0.5rem;background:rgba(0,0,0,0.3);border:1px solid var(--border);border-radius:var(--radius-xs);padding:0.5rem 0.75rem;margin-top:auto}
-.wr-cmd code{font-family:'Consolas','Monaco',monospace;font-size:0.7rem;color:var(--primary-light);flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.copy-btn{background:transparent;border:1px solid var(--border);border-radius:4px;color:var(--text-muted);cursor:pointer;font-size:0.64rem;padding:2px 7px;white-space:nowrap;transition:all 0.15s;flex-shrink:0}
-.copy-btn:hover{background:var(--surface-hover);color:var(--text)}
-.all-clear-box{background:var(--surface);border:1px solid rgba(16,185,129,0.25);border-radius:var(--radius);padding:2.5rem;text-align:center;color:var(--text-muted)}
-.all-clear-box .icon{font-size:2.5rem;margin-bottom:0.5rem}
-.footer{text-align:center;padding:1.5rem 0;color:var(--text-muted);font-size:0.75rem;border-top:1px solid var(--border);margin-top:1rem}
-@keyframes fadeIn{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:translateY(0)}}
-@media(max-width:1024px){.layout{grid-template-columns:1fr}.sidebar{display:none}}
-@media(max-width:640px){.wr-grid{grid-template-columns:1fr}.summary-bar{flex-direction:column}}
-</style>
-</head>
-<body>
-<div class="layout">
-`)
-
-	// ── Sidebar ────────────────────────────────────────────────────────────────
-	sb.WriteString(buildSidebar("warroom", activeCtx, clusterName, clusterList))
-
-	// ── Main content ───────────────────────────────────────────────────────────
-	sb.WriteString(`<main class="main">`)
-
-	totalIssues := len(critical) + len(warnings)
-	statusDesc := "No issues detected"
-	if totalIssues > 0 {
-		statusDesc = fmt.Sprintf("%d issue(s) detected", totalIssues)
-	}
-
-	sb.WriteString(fmt.Sprintf(`<div class="page-hdr">
-<div>
-  <h1>🚨 War Room</h1>
-  <p>%s &mdash; %s</p>
-</div>
-<div class="page-meta">
-  <div>Last scanned: <strong id="wr-age">just now</strong></div>
-  <a class="back-link" href="%s">← Back to Dashboard</a>
-</div>
-</div>
-`, clusterName, statusDesc, dashURL))
 
 	critChipClass := "ok"
 	if len(critical) > 0 {
@@ -1766,59 +1664,41 @@ body{font-family:'Inter',system-ui,sans-serif;background:var(--bg);color:var(--t
 	if len(warnings) > 0 {
 		warnChipClass = "w"
 	}
-	sb.WriteString(fmt.Sprintf(`<div class="summary-bar">
-<div class="summary-chip %s"><div class="summary-num">%d</div><div class="summary-lbl">Critical<br>Issues</div></div>
-<div class="summary-chip %s"><div class="summary-num">%d</div><div class="summary-lbl">Warnings</div></div>
-</div>
-`, critChipClass, len(critical), warnChipClass, len(warnings)))
 
-	// ── Critical section ───────────────────────────────────────────────────────
-	sb.WriteString(`<div class="wr-section">`)
-	sb.WriteString(fmt.Sprintf(`<div class="wr-section-hdr"><h2>🔴 Critical Issues</h2><span class="cnt-chip c">%d</span></div>`, len(critical)))
-	if len(critical) == 0 {
-		sb.WriteString(`<div class="all-clear-box"><div class="icon">✅</div><div>No crash-looping, OOMKilled, or ImagePullBackOff pods detected</div></div>`)
-	} else {
-		sb.WriteString(`<div class="wr-grid">`)
-		for _, issue := range critical {
-			sb.WriteString(renderWarRoomCard(issue))
-		}
-		sb.WriteString(`</div>`)
+	data := warRoomPageData{
+		ClusterName:   clusterName,
+		StatusDesc:    fmt.Sprintf("%d issue(s) detected", len(critical)+len(warnings)),
+		DashURL:       "/" + q,
+		CritChipClass: critChipClass,
+		WarnChipClass: warnChipClass,
+		Critical:      critical,
+		Warnings:      warnings,
+		ScannedAtMs:   scannedAt.UnixMilli(),
+		Sidebar:       template.HTML(buildSidebar("warroom", activeCtx, clusterName, clusterList)),
 	}
-	sb.WriteString(`</div>`)
 
-	// ── Warnings section ───────────────────────────────────────────────────────
-	sb.WriteString(`<div class="wr-section">`)
-	sb.WriteString(fmt.Sprintf(`<div class="wr-section-hdr"><h2>🟡 Warnings</h2><span class="cnt-chip w">%d</span></div>`, len(warnings)))
-	if len(warnings) == 0 {
-		sb.WriteString(`<div class="all-clear-box"><div class="icon">✅</div><div>No unprotected namespaces, orphaned PVCs, or zero-replica workloads detected</div></div>`)
-	} else {
-		sb.WriteString(`<div class="wr-grid">`)
-		for _, issue := range warnings {
-			sb.WriteString(renderWarRoomCard(issue))
-		}
-		sb.WriteString(`</div>`)
+	var buf strings.Builder
+	if err := getWarRoomTmpl().Execute(&buf, data); err != nil {
+		log.Printf("warroom template: %v", err)
+		return ""
 	}
-	sb.WriteString(`</div>`)
+	return buf.String()
+}
 
-	sb.WriteString(`<div class="footer">OpsCart FinOps Engine &middot; War Room &middot; Suggestions only &mdash; verify with owners before acting</div>`)
-	sb.WriteString(`</main>`)
-	sb.WriteString(`</div>`) // .layout
+var warRoomTmplOnce sync.Once
+var warRoomTmpl *template.Template
 
-	sb.WriteString(fmt.Sprintf(`<script>
-(function(){
-  var TS=%d,el=document.getElementById('wr-age'),sb=document.getElementById('wr-age-sb');
-  function upd(){
-    var s=Math.floor((Date.now()-TS)/1000);
-    var t=s<5?'just now':s<60?s+'s ago':Math.floor(s/60)+'m ago';
-    if(el)el.textContent=t;if(sb)sb.textContent=t;
-  }
-  setInterval(upd,1000);upd();
-})();
-</script>
-</body>
-</html>`, scannedAt.UnixMilli()))
-
-	return sb.String()
+func getWarRoomTmpl() *template.Template {
+	warRoomTmplOnce.Do(func() {
+		warRoomTmpl = template.Must(
+			template.New("warroom.html").Funcs(template.FuncMap{
+				"renderCard": func(issue warRoomIssue) template.HTML {
+					return template.HTML(renderWarRoomCard(issue))
+				},
+			}).ParseFS(templateFS, "templates/base.html", "templates/warroom.html"),
+		)
+	})
+	return warRoomTmpl
 }
 
 func renderWarRoomCard(issue warRoomIssue) string {
@@ -1897,9 +1777,9 @@ type costPageData struct {
 	PoolRows       []costPoolRow
 	TotalRISavings float64
 
-	NSRows      []costNSRow
-	Scenarios   []models.OptimizationScenario
-	Disclaimers []string
+	NSRows        []costNSRow
+	Scenarios     []models.OptimizationScenario
+	Disclaimers   []string
 	PricingSource string
 
 	WRIssues []costWRIssue
@@ -1913,21 +1793,21 @@ type costClusterLink struct {
 }
 
 type costPoolRow struct {
-	Name         string
-	VMSize       string
-	NodeCount    int
-	TagClass     string
-	TagLabel     string
-	CPUColor     string
-	MemColor     string
-	CPUUtilPct   float64
-	MemUtilPct   float64
+	Name          string
+	VMSize        string
+	NodeCount     int
+	TagClass      string
+	TagLabel      string
+	CPUColor      string
+	MemColor      string
+	CPUUtilPct    float64
+	MemUtilPct    float64
 	CPUWidthStyle template.CSS
 	MemWidthStyle template.CSS
-	PricePerNode string
-	PoolTotal    string
-	RISavingsFmt string
-	RISavings    float64
+	PricePerNode  string
+	PoolTotal     string
+	RISavingsFmt  string
+	RISavings     float64
 }
 
 type costNSRow struct {
@@ -2238,57 +2118,6 @@ func kubectlCmdForIssue(issueType, resource, namespace string) string {
 	default:
 		return fmt.Sprintf("kubectl describe pod %s -n %s", resource, namespace)
 	}
-}
-
-// injectAutoRefresh appends the live-update badge and 60s auto-refresh script.
-func injectAutoRefresh(html string, scannedAt time.Time, activeCtx string) string {
-	refreshURL := "/refresh"
-	if activeCtx != "" {
-		refreshURL = "/refresh?cluster=" + url.QueryEscape(activeCtx)
-	}
-
-	script := fmt.Sprintf(`
-<style>
-#oc-refresh-badge {
-  position:fixed;bottom:1.25rem;right:1.25rem;
-  background:#1e293b;border:1px solid #334155;border-radius:10px;
-  padding:0.5rem 1rem;
-  font-family:'Inter',system-ui,sans-serif;font-size:0.75rem;color:#94a3b8;
-  z-index:9999;display:flex;align-items:center;gap:0.5rem;
-  box-shadow:0 4px 12px rgba(0,0,0,0.4);transition:border-color 0.3s;
-}
-#oc-refresh-badge.refreshing{border-color:#6366f1}
-#oc-dot{width:8px;height:8px;border-radius:50%%;background:#10b981;flex-shrink:0;transition:background 0.3s}
-#oc-refresh-badge.refreshing #oc-dot{background:#6366f1;animation:oc-pulse 1s infinite}
-@keyframes oc-pulse{0%%,100%%{opacity:1}50%%{opacity:0.3}}
-</style>
-<div id="oc-refresh-badge">
-  <span id="oc-dot"></span>
-  <span>Last updated: <strong id="oc-age">just now</strong></span>
-</div>
-<script>
-(function(){
-  var SCAN_TS=%d, REFRESH_URL=%q, REFRESH_INTERVAL=60000;
-  var badge=document.getElementById('oc-refresh-badge');
-  var ageEl=document.getElementById('oc-age');
-  function updateAge(){
-    var s=Math.floor((Date.now()-SCAN_TS)/1000);
-    if(s<5) ageEl.textContent='just now';
-    else if(s<60) ageEl.textContent=s+'s ago';
-    else ageEl.textContent=Math.floor(s/60)+'m ago';
-  }
-  setInterval(updateAge,1000); updateAge();
-  function doRefresh(){
-    badge.classList.add('refreshing'); ageEl.textContent='refreshing…';
-    fetch(REFRESH_URL,{method:'POST'})
-      .then(function(){location.reload();})
-      .catch(function(){badge.classList.remove('refreshing');updateAge();setTimeout(doRefresh,10000);});
-  }
-  setTimeout(doRefresh,REFRESH_INTERVAL);
-})();
-</script>`, scannedAt.UnixMilli(), refreshURL)
-
-	return strings.Replace(html, "</body>", script+"</body>", 1)
 }
 
 // formatMoney formats a float as comma-grouped integer string.
