@@ -893,9 +893,40 @@ func (srv *server) handleNamespacesPage(w http.ResponseWriter, r *http.Request) 
 	fmt.Fprint(w, renderNamespacesPage(scan, ctx, srv.clusterList))
 }
 
+type namespacesPageData struct {
+	ClusterName      string
+	DashURL          string
+	NamespaceCount   int
+	ProtectedCount   int
+	UnprotectedCount int
+	TotalCost        float64
+	NSRows           []namespacesNSRow
+	TotalCostCell    template.HTML
+	TotalPods        int
+	TotalCPU         float64
+	TotalMem         float64
+	Sidebar          template.HTML
+}
+
+type namespacesNSRow struct {
+	Name      string
+	CostCell  template.HTML
+	PodCount  int
+	CPUCores  float64
+	MemoryGB  float64
+	NetCell   template.HTML
+	WasteCell template.HTML
+}
+
+var getNamespacesTmpl = sync.OnceValue(func() *template.Template {
+	return template.Must(
+		template.New("namespaces.html").
+			Funcs(template.FuncMap{"money": formatMoney}).
+			ParseFS(templateFS, "templates/base.html", "templates/namespaces.html"))
+})
+
 func renderNamespacesPage(scan *clusterScan, activeCtx string, clusterList []string) string {
 	var nsCosts []models.NamespaceCostInfo
-	scannedAt := time.Now()
 	clusterName := displayName(activeCtx)
 	if scan != nil && scan.report != nil {
 		nsCosts = make([]models.NamespaceCostInfo, len(scan.report.NamespaceCosts))
@@ -903,7 +934,6 @@ func renderNamespacesPage(scan *clusterScan, activeCtx string, clusterList []str
 		sort.Slice(nsCosts, func(i, j int) bool {
 			return nsCosts[i].EstimatedCost.Best > nsCosts[j].EstimatedCost.Best
 		})
-		scannedAt = scan.report.Timestamp
 		clusterName = scan.report.ClusterName
 	}
 
@@ -914,213 +944,84 @@ func renderNamespacesPage(scan *clusterScan, activeCtx string, clusterList []str
 	for _, ns := range nsCosts {
 		totalCost += ns.EstimatedCost.Best
 	}
-	protectedCount := len(protectedSet)
-	unprotectedCount := len(unprotectedSet)
 
 	q := ""
 	if activeCtx != "" {
 		q = "?cluster=" + url.QueryEscape(activeCtx)
 	}
-	dashURL := "/" + q
 
-	_ = scannedAt
+	var totalPods int
+	var totalCPU, totalMem float64
+	var nsRows []namespacesNSRow
+	for _, ns := range nsCosts {
+		totalPods += ns.PodCount
+		totalCPU += ns.CPUCores
+		totalMem += ns.MemoryGB
 
-	var sb strings.Builder
-
-	sb.WriteString(`<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width,initial-scale=1.0">
-<title>Namespaces — ` + clusterName + `</title>
-<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
-<style>
-*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
-:root{
-  --bg:#0f172a;--surface:#1e293b;--surface-hover:#334155;--border:#334155;
-  --text:#f1f5f9;--text-secondary:#94a3b8;--text-muted:#64748b;
-  --primary:#6366f1;--primary-light:#818cf8;--primary-bg:rgba(99,102,241,0.1);
-  --success:#10b981;--warning:#f59e0b;--danger:#ef4444;--info:#06b6d4;
-  --radius:12px;--radius-sm:8px;--radius-xs:6px;
-}
-body{font-family:'Inter',system-ui,sans-serif;background:var(--bg);color:var(--text);line-height:1.6;min-height:100vh}
-.layout{display:grid;grid-template-columns:260px 1fr;min-height:100vh}
-.sidebar{background:var(--surface);border-right:1px solid var(--border);padding:2rem 1.5rem;position:sticky;top:0;height:100vh;overflow-y:auto}
-.main{padding:2rem 2.5rem;overflow-y:auto}
-.logo{display:flex;align-items:center;gap:0.75rem;margin-bottom:2.5rem}
-.logo-icon{width:40px;height:40px;background:var(--primary);border-radius:10px;display:flex;align-items:center;justify-content:center;font-size:1.2rem}
-.logo-text{font-size:1.1rem;font-weight:700}
-.logo-sub{font-size:0.7rem;color:var(--text-muted);text-transform:uppercase;letter-spacing:1px}
-.nav-section{margin-bottom:1.5rem}
-.nav-label{font-size:0.7rem;text-transform:uppercase;letter-spacing:1.5px;color:var(--text-muted);margin-bottom:0.75rem;padding-left:0.75rem}
-.nav-item{display:flex;align-items:center;gap:0.75rem;padding:0.7rem 0.75rem;border-radius:var(--radius-sm);color:var(--text-secondary);font-size:0.9rem;cursor:pointer;transition:all 0.15s;text-decoration:none}
-.nav-item:hover{background:var(--surface-hover);color:var(--text)}
-.nav-item.active{background:var(--primary-bg);color:var(--primary-light);font-weight:600}
-.cluster-info{margin-top:auto;padding-top:2rem;border-top:1px solid var(--border)}
-.cluster-badge{background:var(--primary-bg);border:1px solid rgba(99,102,241,0.2);border-radius:var(--radius-sm);padding:0.85rem;margin-bottom:0.75rem}
-.cluster-badge h4{font-size:0.7rem;color:var(--primary-light);margin-bottom:0.3rem;text-transform:uppercase;letter-spacing:0.8px}
-.cluster-badge p{font-size:0.75rem;color:var(--text-muted);word-break:break-all}
-.page-hdr{display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:1.75rem;flex-wrap:wrap;gap:1rem}
-.page-hdr h1{font-size:1.75rem;font-weight:800}
-.page-hdr p{color:var(--text-muted);font-size:0.85rem;margin-top:0.25rem}
-.page-meta{text-align:right;font-size:0.78rem;color:var(--text-muted)}
-.page-meta strong{color:var(--text-secondary)}
-.back-link{display:block;margin-top:0.5rem;color:var(--primary-light);font-size:0.75rem;text-decoration:none}
-.back-link:hover{text-decoration:underline}
-.summary-bar{display:flex;gap:1rem;margin-bottom:2rem;flex-wrap:wrap}
-.kpi-chip{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius-sm);padding:0.75rem 1.25rem;min-width:130px}
-.kpi-chip-val{font-size:1.4rem;font-weight:800;line-height:1;margin-bottom:0.2rem}
-.kpi-chip-val.cost{color:var(--danger)}
-.kpi-chip-val.ok{color:var(--success)}
-.kpi-chip-val.warn{color:var(--warning)}
-.kpi-chip-lbl{font-size:0.7rem;color:var(--text-muted);text-transform:uppercase;letter-spacing:0.5px}
-.section{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:1.5rem;margin-bottom:1.5rem}
-.section-hdr{display:flex;justify-content:space-between;align-items:center;margin-bottom:1.25rem}
-.section-title{font-size:1rem;font-weight:700}
-.ns-wrap{overflow-x:auto;border:1px solid var(--border);border-radius:var(--radius-sm)}
-.ns-table{width:100%;border-collapse:collapse;min-width:760px}
-.ns-table th{background:rgba(0,0,0,0.35);padding:0.6rem 0.85rem;text-align:left;font-size:0.67rem;text-transform:uppercase;letter-spacing:0.8px;color:var(--text-muted);font-weight:600;border-bottom:1px solid var(--border);white-space:nowrap}
-.ns-table td{padding:0.75rem 0.85rem;border-bottom:1px solid var(--border);font-size:0.83rem;vertical-align:middle}
-.ns-table tbody tr:last-child td{border-bottom:none}
-.ns-table tbody tr:hover td{background:rgba(99,102,241,0.03)}
-.ns-table tfoot td{background:rgba(0,0,0,0.25);font-weight:700;border-top:2px solid var(--border);font-size:0.83rem;padding:0.75rem 0.85rem}
-.ns-name{font-weight:600;color:var(--text)}
-.money{font-variant-numeric:tabular-nums;font-weight:600}
-.badge{display:inline-flex;align-items:center;padding:2px 9px;border-radius:20px;font-size:0.7rem;font-weight:600;white-space:nowrap}
-.badge-ok{background:rgba(16,185,129,0.12);color:#34d399;border:1px solid rgba(16,185,129,0.2)}
-.badge-warn{background:rgba(245,158,11,0.12);color:#fbbf24;border:1px solid rgba(245,158,11,0.2)}
-.badge-danger{background:rgba(239,68,68,0.12);color:#f87171;border:1px solid rgba(239,68,68,0.2)}
-.muted{color:var(--text-muted)}
-.empty-state{text-align:center;padding:3rem 1rem;color:var(--text-muted)}
-.empty-state .icon{font-size:2.5rem;margin-bottom:0.75rem}
-@keyframes fadeIn{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:translateY(0)}}
-.section{animation:fadeIn 0.3s ease both}
-@media(max-width:1024px){.layout{grid-template-columns:1fr}.sidebar{display:none}}
-</style>
-</head>
-<body>
-<div class="layout">
-`)
-
-	// ── Sidebar ────────────────────────────────────────────────────────────────
-	sb.WriteString(buildSidebar("namespaces", activeCtx, clusterName, clusterList))
-
-	// ── Main ──────────────────────────────────────────────────────────────────
-	sb.WriteString(`<main class="main">`)
-
-	sb.WriteString(fmt.Sprintf(`<div class="page-hdr">
-<div>
-  <h1>📦 Namespaces</h1>
-  <p>%s &mdash; %d namespace(s), sorted by cost</p>
-</div>
-<div class="page-meta">
-  <a class="back-link" href="%s">← Back to Dashboard</a>
-</div>
-</div>
-`, clusterName, len(nsCosts), dashURL))
-
-	// Summary KPI chips
-	sb.WriteString(`<div class="summary-bar">`)
-	sb.WriteString(fmt.Sprintf(`<div class="kpi-chip"><div class="kpi-chip-val">%d</div><div class="kpi-chip-lbl">Namespaces</div></div>`, len(nsCosts)))
-	sb.WriteString(fmt.Sprintf(`<div class="kpi-chip"><div class="kpi-chip-val ok">%d</div><div class="kpi-chip-lbl">Protected</div></div>`, protectedCount))
-	if unprotectedCount > 0 {
-		sb.WriteString(fmt.Sprintf(`<div class="kpi-chip"><div class="kpi-chip-val warn">%d</div><div class="kpi-chip-lbl">Unprotected</div></div>`, unprotectedCount))
-	}
-	if totalCost > 0 {
-		sb.WriteString(fmt.Sprintf(`<div class="kpi-chip"><div class="kpi-chip-val cost">$%s</div><div class="kpi-chip-lbl">Total Cost/mo</div></div>`, formatMoney(totalCost)))
-	}
-	sb.WriteString(`</div>`)
-
-	// Namespace table
-	sb.WriteString(`<div class="section">`)
-	sb.WriteString(`<div class="section-hdr"><div class="section-title">Namespace Breakdown</div></div>`)
-
-	if len(nsCosts) == 0 {
-		sb.WriteString(`<div class="empty-state"><div class="icon">📦</div><div>No namespace data available</div></div>`)
-	} else {
-		sb.WriteString(`<div class="ns-wrap"><table class="ns-table">`)
-		sb.WriteString(`<thead><tr>
-<th>Namespace</th>
-<th style="text-align:right">$/mo</th>
-<th style="text-align:center">Pods</th>
-<th style="text-align:right">CPU (cores)</th>
-<th style="text-align:right">Memory (GB)</th>
-<th>Net Policy</th>
-<th style="text-align:center">Waste Items</th>
-</tr></thead>`)
-		sb.WriteString(`<tbody>`)
-
-		var totalPods int
-		var totalCPU, totalMem float64
-		for _, ns := range nsCosts {
-			totalPods += ns.PodCount
-			totalCPU += ns.CPUCores
-			totalMem += ns.MemoryGB
-
-			// Cost cell
-			costCell := `<span class="muted">—</span>`
-			if ns.EstimatedCost.Best >= 1 {
-				costCell = fmt.Sprintf(`<span class="money">$%s</span>`, formatMoney(ns.EstimatedCost.Best))
-			} else if ns.EstimatedCost.Best > 0 {
-				costCell = `<span class="money">&lt;$1</span>`
-			}
-
-			// Network policy cell
-			var netCell string
-			if protectedSet[ns.Name] {
-				netCell = `<span class="badge badge-ok">✅ Protected</span>`
-			} else if unprotectedSet[ns.Name] {
-				netCell = `<span class="badge badge-danger">❌ Unprotected</span>`
-			} else {
-				netCell = `<span class="muted">—</span>`
-			}
-
-			// Waste cell
-			wc := wasteCounts[ns.Name]
-			var wasteCell string
-			switch {
-			case wc == 0:
-				wasteCell = `<span class="muted">—</span>`
-			case wc <= 2:
-				wasteCell = fmt.Sprintf(`<span class="badge badge-warn">⚠ %d</span>`, wc)
-			default:
-				wasteCell = fmt.Sprintf(`<span class="badge badge-danger">⚠ %d</span>`, wc)
-			}
-
-			sb.WriteString(fmt.Sprintf(`<tr>
-<td><span class="ns-name">%s</span></td>
-<td style="text-align:right">%s</td>
-<td style="text-align:center">%d</td>
-<td style="text-align:right">%.2f</td>
-<td style="text-align:right">%.1f</td>
-<td>%s</td>
-<td style="text-align:center">%s</td>
-</tr>`, ns.Name, costCell, ns.PodCount, ns.CPUCores, ns.MemoryGB, netCell, wasteCell))
+		costCell := template.HTML(`<span class="muted">—</span>`)
+		if ns.EstimatedCost.Best >= 1 {
+			costCell = template.HTML(`<span class="money">$` + formatMoney(ns.EstimatedCost.Best) + `</span>`)
+		} else if ns.EstimatedCost.Best > 0 {
+			costCell = `<span class="money">&lt;$1</span>`
 		}
 
-		sb.WriteString(`</tbody>`)
-
-		// Footer totals row
-		totalCostCell := `<span class="muted">—</span>`
-		if totalCost >= 1 {
-			totalCostCell = fmt.Sprintf(`$%s`, formatMoney(totalCost))
+		var netCell template.HTML
+		if protectedSet[ns.Name] {
+			netCell = `<span class="badge badge-ok">✅ Protected</span>`
+		} else if unprotectedSet[ns.Name] {
+			netCell = `<span class="badge badge-danger">❌ Unprotected</span>`
+		} else {
+			netCell = `<span class="muted">—</span>`
 		}
-		sb.WriteString(fmt.Sprintf(`<tfoot><tr>
-<td style="color:var(--text-muted);font-size:0.75rem;text-transform:uppercase;letter-spacing:0.5px">Total</td>
-<td style="text-align:right">%s</td>
-<td style="text-align:center">%d</td>
-<td style="text-align:right">%.2f</td>
-<td style="text-align:right">%.1f</td>
-<td></td>
-<td></td>
-</tr></tfoot>`, totalCostCell, totalPods, totalCPU, totalMem))
 
-		sb.WriteString(`</table></div>`)
+		wc := wasteCounts[ns.Name]
+		var wasteCell template.HTML
+		switch {
+		case wc == 0:
+			wasteCell = `<span class="muted">—</span>`
+		case wc <= 2:
+			wasteCell = template.HTML(fmt.Sprintf(`<span class="badge badge-warn">⚠ %d</span>`, wc))
+		default:
+			wasteCell = template.HTML(fmt.Sprintf(`<span class="badge badge-danger">⚠ %d</span>`, wc))
+		}
+
+		nsRows = append(nsRows, namespacesNSRow{
+			Name:      ns.Name,
+			CostCell:  costCell,
+			PodCount:  ns.PodCount,
+			CPUCores:  ns.CPUCores,
+			MemoryGB:  ns.MemoryGB,
+			NetCell:   netCell,
+			WasteCell: wasteCell,
+		})
 	}
 
-	sb.WriteString(`</div>`) // section
-	sb.WriteString(`</main></div></body></html>`)
-	return sb.String()
+	totalCostCell := template.HTML(`<span class="muted">—</span>`)
+	if totalCost >= 1 {
+		totalCostCell = template.HTML(`$` + formatMoney(totalCost))
+	}
+
+	data := namespacesPageData{
+		ClusterName:      clusterName,
+		DashURL:          "/" + q,
+		NamespaceCount:   len(nsCosts),
+		ProtectedCount:   len(protectedSet),
+		UnprotectedCount: len(unprotectedSet),
+		TotalCost:        totalCost,
+		NSRows:           nsRows,
+		TotalCostCell:    totalCostCell,
+		TotalPods:        totalPods,
+		TotalCPU:         totalCPU,
+		TotalMem:         totalMem,
+		Sidebar:          template.HTML(buildSidebar("namespaces", activeCtx, clusterName, clusterList)),
+	}
+
+	var buf strings.Builder
+	if err := getNamespacesTmpl().Execute(&buf, data); err != nil {
+		log.Printf("namespaces template: %v", err)
+		return ""
+	}
+	return buf.String()
 }
 
 // nsNetPolicySets returns two maps of namespace names: one protected, one unprotected.
