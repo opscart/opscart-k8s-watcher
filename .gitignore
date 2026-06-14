@@ -45,3 +45,4 @@ tmp/
 # Generated reports (never commit - may contain sensitive cluster data)
 reports/
 *.html
+!cmd/opscart-dashboard/templates/*.html
