@@ -4,6 +4,7 @@ import (
 	"embed"
 	"encoding/json"
 	"fmt"
+	"html/template"
 	"log"
 	"net/http"
 	"net/url"
@@ -1596,48 +1597,6 @@ func buildSidebar(activePage, activeCtx, clusterName string, clusterList []strin
 	return sb.String()
 }
 
-// injectInfrastructureSidebarLink converts the static "Infrastructure" nav item
-// in the main dashboard sidebar into a real link.
-func injectInfrastructureSidebarLink(html, activeCtx string) string {
-	infraURL := "/infrastructure"
-	if activeCtx != "" {
-		infraURL = "/infrastructure?cluster=" + url.QueryEscape(activeCtx)
-	}
-	return strings.Replace(html,
-		`<div class="nav-item">🖥️ Infrastructure</div>`,
-		`<a class="nav-item" href="`+infraURL+`" style="text-decoration:none">🖥️ Infrastructure</a>`,
-		1,
-	)
-}
-
-// injectNamespacesSidebarLink converts the static "Namespaces" nav item
-// in the main dashboard sidebar into a real link.
-func injectNamespacesSidebarLink(html, activeCtx string) string {
-	nsURL := "/namespaces"
-	if activeCtx != "" {
-		nsURL = "/namespaces?cluster=" + url.QueryEscape(activeCtx)
-	}
-	return strings.Replace(html,
-		`<div class="nav-item">📦 Namespaces</div>`,
-		`<a class="nav-item" href="`+nsURL+`" style="text-decoration:none">📦 Namespaces</a>`,
-		1,
-	)
-}
-
-// injectOptimizationsSidebarLink converts the static "Optimizations" nav item
-// in the main dashboard sidebar into a real link.
-func injectOptimizationsSidebarLink(html, activeCtx string) string {
-	optURL := "/optimizations"
-	if activeCtx != "" {
-		optURL = "/optimizations?cluster=" + url.QueryEscape(activeCtx)
-	}
-	return strings.Replace(html,
-		`<div class="nav-item">🎯 Optimizations</div>`,
-		`<a class="nav-item" href="`+optURL+`" style="text-decoration:none">💡 Optimizations</a>`,
-		1,
-	)
-}
-
 // ── War Room page ─────────────────────────────────────────────────────────────
 
 func (srv *server) handleWarRoomPage(w http.ResponseWriter, r *http.Request) {
@@ -1902,251 +1861,340 @@ func renderWarRoomCard(issue warRoomIssue) string {
 	return sb.String()
 }
 
-// injectWarRoomSidebarLink injects an "Ops → War Room" nav section into the
-// existing dashboard sidebar, before the cluster-info block.
-func injectWarRoomSidebarLink(html, activeCtx string) string {
-	warRoomURL := "/warroom"
-	if activeCtx != "" {
-		warRoomURL = "/warroom?cluster=" + url.QueryEscape(activeCtx)
-	}
-	navSection := `<div class="nav-section">` +
-		`<div class="nav-label">Ops</div>` +
-		`<a class="nav-item" href="` + warRoomURL + `" style="text-decoration:none">🚨 War Room</a>` +
-		`</div>`
-	return strings.Replace(html, `<div class="cluster-info">`, navSection+`<div class="cluster-info">`, 1)
-}
-
 // ── HTML rendering pipeline ───────────────────────────────────────────────────
 
-func renderHTML(scan *clusterScan, activeCtx string, clusterList []string) string {
-	html := analyzer.GenerateCloudCostHTML(scan.report)
-	html = injectWarRoomSidebarLink(html, activeCtx)
-	html = injectInfrastructureSidebarLink(html, activeCtx)
-	html = injectNamespacesSidebarLink(html, activeCtx)
-	html = injectOptimizationsSidebarLink(html, activeCtx)
-	if len(clusterList) > 1 {
-		html = injectClusterSelector(html, clusterList, activeCtx)
-	}
-	html = injectDashboardEnhancements(html, scan, len(clusterList))
-	return injectAutoRefresh(html, scan.report.Timestamp, activeCtx)
+// costPageData holds all data needed to render the cost overview template.
+type costPageData struct {
+	ClusterName string
+	ActiveCtx   string
+	ClusterList []costClusterLink
+	DashURL     string
+	InfraURL    string
+	NSsURL      string
+	OptURL      string
+	WrURL       string
+	RefreshURL  string
+	ScannedAtMS int64
+	Timestamp   time.Time
+
+	MonthlyCost      float64
+	SavingsPotential float64
+	SecurityColor    string
+	SecurityDisplay  string
+	WasteColor       string
+	WasteDisplay     string
+	PodCount         int
+	ClusterCount     int
+
+	AccuracyPct     int
+	KnownVMs        int
+	UnknownVMs      int
+	TotalVMs        int
+	ConfidenceLabel string
+	ConfRingStyle   template.CSS
+	ConfPctStyle    template.CSS
+
+	PoolRows       []costPoolRow
+	TotalRISavings float64
+
+	NSRows      []costNSRow
+	Scenarios   []models.OptimizationScenario
+	Disclaimers []string
+	PricingSource string
+
+	WRIssues []costWRIssue
 }
 
-// injectClusterSelector adds a "Clusters" nav section to the sidebar.
-func injectClusterSelector(html string, clusterList []string, activeCtx string) string {
-	var sb strings.Builder
-	sb.WriteString(`<div class="nav-section">`)
-	sb.WriteString(`<div class="nav-label">Clusters</div>`)
-	for _, ctx := range clusterList {
-		cls := "nav-item"
-		if ctx == activeCtx {
-			cls += " active"
+type costClusterLink struct {
+	Ctx      string
+	Label    string
+	Href     string
+	IsActive bool
+}
+
+type costPoolRow struct {
+	Name         string
+	VMSize       string
+	NodeCount    int
+	TagClass     string
+	TagLabel     string
+	CPUColor     string
+	MemColor     string
+	CPUUtilPct   float64
+	MemUtilPct   float64
+	CPUWidthStyle template.CSS
+	MemWidthStyle template.CSS
+	PricePerNode string
+	PoolTotal    string
+	RISavingsFmt string
+	RISavings    float64
+}
+
+type costNSRow struct {
+	Name     string
+	PodCount int
+	CPUCores float64
+	MemoryGB float64
+	NSShare  float64
+	CostFmt  string
+	GroupID  string
+	Deps     []costDepRow
+}
+
+type costDepRow struct {
+	Name       string
+	Kind       string
+	KindTag    string
+	CPUCores   float64
+	MemoryGB   float64
+	Replicas   int
+	NSSharePct float64
+	CostFmt    string
+}
+
+type costWRIssue struct {
+	warRoomIssue
+	CardClass  string
+	BadgeLabel string
+	Icon       string
+	TypeLabel  string
+	AgeLbl     string
+	ShortName  string
+	ShortMsg   string
+}
+
+var getCostTmpl = sync.OnceValue(func() *template.Template {
+	return template.Must(
+		template.New("cost.html").
+			Funcs(template.FuncMap{"money": formatMoney}).
+			ParseFS(templateFS, "templates/base.html", "templates/cost.html"))
+})
+
+func buildCostPageData(scan *clusterScan, activeCtx string, clusterList []string) costPageData {
+	q := ""
+	if activeCtx != "" {
+		q = "?cluster=" + url.QueryEscape(activeCtx)
+	}
+	data := costPageData{
+		ActiveCtx:    activeCtx,
+		ClusterCount: len(clusterList),
+		DashURL:      "/" + q,
+		InfraURL:     "/infrastructure" + q,
+		NSsURL:       "/namespaces" + q,
+		OptURL:       "/optimizations" + q,
+		WrURL:        "/warroom" + q,
+		RefreshURL:   "/refresh" + q,
+	}
+
+	if scan != nil && scan.report != nil {
+		r := scan.report
+		data.ClusterName = r.ClusterName
+		data.MonthlyCost = r.TotalMonthlyCost
+		data.SavingsPotential = r.TotalSavingsPotential.Best
+		data.Scenarios = r.OptimizationScenarios
+		data.Disclaimers = r.Disclaimers
+		data.PricingSource = r.PricingSource
+		data.Timestamp = r.Timestamp
+		data.ScannedAtMS = r.Timestamp.UnixMilli()
+
+		known, unknown := 0, 0
+		for _, p := range r.NodePoolCosts {
+			if p.PricePerNodeMonth > 0 {
+				known++
+			} else {
+				unknown++
+			}
 		}
-		href := "/?" + url.Values{"cluster": {ctx}}.Encode()
+		total := known + unknown
+		if total > 0 {
+			data.AccuracyPct = known * 100 / total
+		}
+		data.KnownVMs, data.UnknownVMs, data.TotalVMs = known, unknown, total
+		data.ConfidenceLabel = "High"
+		if data.AccuracyPct < 80 {
+			data.ConfidenceLabel = "Medium"
+		}
+		if data.AccuracyPct < 50 {
+			data.ConfidenceLabel = "Low"
+		}
+		colorHex := confidenceColorHex(data.AccuracyPct)
+		circ := 226
+		offset := circ - (circ * data.AccuracyPct / 100)
+		data.ConfRingStyle = template.CSS(fmt.Sprintf("stroke:%s;stroke-dasharray:%d;stroke-dashoffset:%d", colorHex, circ, offset))
+		data.ConfPctStyle = template.CSS("color:" + colorHex)
+
+		for _, p := range r.NodePoolCosts {
+			data.TotalRISavings += p.RISavings
+			row := costPoolRow{
+				Name:          p.Name,
+				VMSize:        p.VMSize,
+				NodeCount:     p.NodeCount,
+				CPUUtilPct:    p.CPUUtilizationPct,
+				MemUtilPct:    p.MemoryUtilizationPct,
+				CPUWidthStyle: template.CSS(fmt.Sprintf("width:%.0f%%", p.CPUUtilizationPct)),
+				MemWidthStyle: template.CSS(fmt.Sprintf("width:%.0f%%", p.MemoryUtilizationPct)),
+				PricePerNode:  formatMoney(p.PricePerNodeMonth),
+				PoolTotal:     formatMoney(p.TotalMonthly),
+				RISavings:     p.RISavings,
+			}
+			if strings.EqualFold(p.Priority, "spot") {
+				row.TagClass, row.TagLabel = "tag-spot", "⚡ Spot"
+			} else {
+				row.TagClass, row.TagLabel = "tag-regular", "On-Demand"
+			}
+			row.CPUColor = utilColorClass(p.CPUUtilizationPct)
+			row.MemColor = utilColorClass(p.MemoryUtilizationPct)
+			if p.RISavings > 0 {
+				row.RISavingsFmt = "$" + formatMoney(p.RISavings)
+			} else {
+				row.RISavingsFmt = "—"
+			}
+			data.PoolRows = append(data.PoolRows, row)
+		}
+
+		for i, ns := range r.NamespaceCosts {
+			row := costNSRow{
+				Name:     ns.Name,
+				PodCount: ns.PodCount,
+				CPUCores: ns.CPUCores,
+				MemoryGB: ns.MemoryGB,
+				NSShare:  ns.WeightedShare * 100,
+				CostFmt:  fmtCostRange(ns.EstimatedCost),
+				GroupID:  fmt.Sprintf("ns-%d", i),
+			}
+			for _, dep := range ns.Deployments {
+				kindTag := "tag-deploy"
+				if dep.Kind == "StatefulSet" {
+					kindTag = "tag-sts"
+				} else if dep.Kind == "DaemonSet" {
+					kindTag = "tag-ds"
+				}
+				row.Deps = append(row.Deps, costDepRow{
+					Name:       dep.Name,
+					Kind:       dep.Kind,
+					KindTag:    kindTag,
+					CPUCores:   dep.CPUCores,
+					MemoryGB:   dep.MemoryGB,
+					Replicas:   dep.Replicas,
+					NSSharePct: dep.NSShare * 100,
+					CostFmt:    fmtCostRange(dep.EstimatedCost),
+				})
+			}
+			data.NSRows = append(data.NSRows, row)
+		}
+	} else {
+		data.ClusterName = displayName(activeCtx)
+		data.Timestamp = time.Now()
+		data.ScannedAtMS = data.Timestamp.UnixMilli()
+		data.ConfRingStyle = template.CSS("stroke:#64748b;stroke-dasharray:226;stroke-dashoffset:226")
+		data.ConfPctStyle = template.CSS("color:#64748b")
+	}
+
+	cisScore := scan.securityScore()
+	data.SecurityColor = "green"
+	if cisScore < 0 {
+		data.SecurityDisplay, data.SecurityColor = "N/A", "blue"
+	} else {
+		data.SecurityDisplay = fmt.Sprintf("%d/100", cisScore)
+		if cisScore < 60 {
+			data.SecurityColor = "red"
+		} else if cisScore < 80 {
+			data.SecurityColor = "yellow"
+		}
+	}
+
+	wasteItems := scan.wasteTotal()
+	data.WasteColor = "green"
+	if wasteItems < 0 {
+		data.WasteDisplay, data.WasteColor = "N/A", "blue"
+	} else {
+		data.WasteDisplay = fmt.Sprintf("%d", wasteItems)
+		if wasteItems > 10 {
+			data.WasteColor = "red"
+		} else if wasteItems > 0 {
+			data.WasteColor = "yellow"
+		}
+	}
+
+	data.PodCount = scan.monthlyPodCount()
+
+	for _, ctx := range clusterList {
 		label := displayName(ctx)
 		if len(label) > 22 {
 			label = label[:21] + "…"
 		}
-		sb.WriteString(fmt.Sprintf(
-			`<a class="%s" href="%s" style="text-decoration:none">🔵 %s</a>`,
-			cls, href, label,
-		))
-	}
-	sb.WriteString(`</div>`)
-	return strings.Replace(html, `<div class="cluster-info">`, sb.String()+`<div class="cluster-info">`, 1)
-}
-
-// injectDashboardEnhancements injects:
-//  1. An enhanced 6-metric KPI bar (replacing the existing one)
-//  2. A two-column grid layout: left = existing cost sections, right = War Room panel
-func injectDashboardEnhancements(html string, scan *clusterScan, clusterCount int) string {
-	kpiBar := buildEnhancedKPIBar(scan, clusterCount)
-	warRoom := buildWarRoomPanel(scan)
-
-	// Hide the original auto-generated kpi-row; inject our replacement + open grid.
-	// The left column of the grid contains all existing sections.
-	beforeKPI := `<style>.kpi-row{display:none!important}` +
-		`.oc-kpi-row{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:1rem;margin-bottom:1.5rem}` +
-		`</style>` +
-		kpiBar +
-		`<div style="display:grid;grid-template-columns:1fr 340px;gap:1.5rem;align-items:start">` +
-		`<div>` // open left column
-
-	html = strings.Replace(html, `<div class="kpi-row">`, beforeKPI+`<div class="kpi-row">`, 1)
-
-	// Close left column, inject war room as sticky right column, close grid.
-	beforeDisclaimer := `</div>` + // close left column
-		`<div style="position:sticky;top:2rem">` + warRoom + `</div>` +
-		`</div>` // close grid
-
-	html = strings.Replace(html, `<div class="disclaimer-bar">`, beforeDisclaimer+`<div class="disclaimer-bar">`, 1)
-	return html
-}
-
-// buildEnhancedKPIBar renders 6 KPI cards: monthly cost, savings, security
-// score, waste items, pod count, and cluster count.
-func buildEnhancedKPIBar(scan *clusterScan, clusterCount int) string {
-	monthlyCost := 0.0
-	savings := 0.0
-	if scan != nil && scan.report != nil {
-		monthlyCost = scan.report.TotalMonthlyCost
-		savings = scan.report.TotalSavingsPotential.Best
+		data.ClusterList = append(data.ClusterList, costClusterLink{
+			Ctx:      ctx,
+			Label:    label,
+			Href:     "/?" + url.Values{"cluster": {ctx}}.Encode(),
+			IsActive: ctx == activeCtx,
+		})
 	}
 
-	cisScore := scan.securityScore()
-	wasteItems := scan.wasteTotal()
-	pods := scan.monthlyPodCount()
-
-	cisColor := "green"
-	cisDisplay := fmt.Sprintf("%d/100", cisScore)
-	if cisScore < 0 {
-		cisDisplay = "N/A"
-		cisColor = "blue"
-	} else if cisScore < 60 {
-		cisColor = "red"
-	} else if cisScore < 80 {
-		cisColor = "yellow"
-	}
-
-	wasteColor := "green"
-	wasteDisplay := fmt.Sprintf("%d", wasteItems)
-	if wasteItems < 0 {
-		wasteDisplay = "N/A"
-		wasteColor = "blue"
-	} else if wasteItems > 10 {
-		wasteColor = "red"
-	} else if wasteItems > 0 {
-		wasteColor = "yellow"
-	}
-
-	var sb strings.Builder
-	sb.WriteString(`<div class="oc-kpi-row">`)
-
-	// Monthly cost
-	sb.WriteString(fmt.Sprintf(`<div class="kpi">
-		<div class="kpi-top"><div class="kpi-icon red">💰</div></div>
-		<h3 class="money red">$%s</h3><p>Monthly Cost</p></div>`, formatMoney(monthlyCost)))
-
-	// Savings potential
-	sb.WriteString(fmt.Sprintf(`<div class="kpi">
-		<div class="kpi-top"><div class="kpi-icon green">💡</div><span class="kpi-trend down">↓ Save</span></div>
-		<h3 class="money green">$%s</h3><p>Savings Potential</p></div>`, formatMoney(savings)))
-
-	// Security score
-	sb.WriteString(fmt.Sprintf(`<div class="kpi">
-		<div class="kpi-top"><div class="kpi-icon %s">🔐</div></div>
-		<h3>%s</h3><p>Security Score</p></div>`, cisColor, cisDisplay))
-
-	// Waste items
-	sb.WriteString(fmt.Sprintf(`<div class="kpi">
-		<div class="kpi-top"><div class="kpi-icon %s">🗑️</div></div>
-		<h3>%s</h3><p>Waste Items</p></div>`, wasteColor, wasteDisplay))
-
-	// Pod count
-	sb.WriteString(fmt.Sprintf(`<div class="kpi">
-		<div class="kpi-top"><div class="kpi-icon blue">🐳</div></div>
-		<h3>%d</h3><p>Running Pods</p></div>`, pods))
-
-	// Cluster count
-	sb.WriteString(fmt.Sprintf(`<div class="kpi">
-		<div class="kpi-top"><div class="kpi-icon cyan">☸️</div></div>
-		<h3>%d</h3><p>Clusters</p></div>`, clusterCount))
-
-	sb.WriteString(`</div>`)
-	return sb.String()
-}
-
-// buildWarRoomPanel renders the right-side critical issues panel.
-func buildWarRoomPanel(scan *clusterScan) string {
-	issues := collectWarRoomIssues(scan, 5)
-
-	var sb strings.Builder
-	sb.WriteString(`<div class="section" style="border-color:rgba(239,68,68,0.4)">`)
-	sb.WriteString(`<div class="section-header">`)
-	sb.WriteString(`<div class="section-title">🚨 War Room</div>`)
-
-	if len(issues) > 0 {
-		sb.WriteString(fmt.Sprintf(
-			`<span style="background:rgba(239,68,68,0.12);color:#ef4444;padding:3px 10px;`+
-				`border-radius:20px;font-size:0.72rem;font-weight:700">%d issues</span>`,
-			len(issues),
-		))
-	} else {
-		sb.WriteString(`<span style="background:rgba(16,185,129,0.12);color:#10b981;padding:3px 10px;` +
-			`border-radius:20px;font-size:0.72rem;font-weight:700">All clear</span>`)
-	}
-	sb.WriteString(`</div>`) // section-header
-
-	if len(issues) == 0 {
-		sb.WriteString(`<div style="text-align:center;padding:2rem 1rem;color:#64748b">` +
-			`<div style="font-size:2rem;margin-bottom:0.5rem">✅</div>` +
-			`<div style="font-size:0.85rem">No critical issues detected</div>` +
-			`</div>`)
-	} else {
-		for _, issue := range issues {
-			issueCardColor, issueBg, badgeBg, badgeText := warRoomColors(issue.Severity)
-			typeIcon, typeLabel := warRoomTypeLabel(issue.Type)
-
-			sb.WriteString(fmt.Sprintf(
-				`<div style="border:1px solid %s;border-radius:8px;padding:0.75rem;margin-bottom:0.75rem;background:%s">`,
-				issueCardColor, issueBg,
-			))
-
-			// Header row: severity badge + type
-			sb.WriteString(fmt.Sprintf(
-				`<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:0.4rem">`+
-					`<span style="background:%s;color:%s;padding:2px 8px;border-radius:20px;font-size:0.68rem;font-weight:700">%s</span>`+
-					`<span style="font-size:0.7rem;color:#64748b">%s %s</span>`+
-					`</div>`,
-				badgeBg, badgeText, strings.ToUpper(issue.Severity),
-				typeIcon, typeLabel,
-			))
-
-			// Resource name
-			resource := issue.Resource
-			if len(resource) > 28 {
-				resource = resource[:27] + "…"
-			}
-			sb.WriteString(fmt.Sprintf(
-				`<div style="font-size:0.82rem;font-weight:600;color:#f1f5f9;margin-bottom:0.2rem">%s</div>`,
-				resource,
-			))
-
-			// Namespace
-			sb.WriteString(fmt.Sprintf(
-				`<div style="font-size:0.72rem;color:#64748b;margin-bottom:0.35rem">ns: %s</div>`,
-				issue.Namespace,
-			))
-
-			// Message (truncated)
-			msg := issue.Message
-			if len(msg) > 80 {
-				msg = msg[:79] + "…"
-			}
-			sb.WriteString(fmt.Sprintf(
-				`<div style="font-size:0.75rem;color:#94a3b8">%s</div>`,
-				msg,
-			))
-
-			sb.WriteString(`</div>`) // issue card
+	for _, issue := range collectWarRoomIssues(scan, 5) {
+		wi := costWRIssue{warRoomIssue: issue}
+		if issue.Severity == "critical" {
+			wi.CardClass, wi.BadgeLabel = "c", "CRITICAL"
+		} else {
+			wi.CardClass, wi.BadgeLabel = "w", strings.ToUpper(issue.Severity)
 		}
+		wi.Icon, wi.TypeLabel = warRoomTypeLabel(issue.Type)
+		if issue.AgeDays > 0 {
+			wi.AgeLbl = fmt.Sprintf("%dd", issue.AgeDays)
+		}
+		wi.ShortName = issue.Resource
+		if len(wi.ShortName) > 28 {
+			wi.ShortName = wi.ShortName[:27] + "…"
+		}
+		wi.ShortMsg = issue.Message
+		if len(wi.ShortMsg) > 80 {
+			wi.ShortMsg = wi.ShortMsg[:79] + "…"
+		}
+		data.WRIssues = append(data.WRIssues, wi)
 	}
 
-	sb.WriteString(`</div>`) // section
-	return sb.String()
+	return data
 }
 
-func warRoomColors(severity string) (border, bg, badgeBg, badgeText string) {
-	switch severity {
-	case "critical":
-		return "rgba(239,68,68,0.35)", "rgba(239,68,68,0.04)",
-			"rgba(239,68,68,0.15)", "#ef4444"
-	case "high":
-		return "rgba(245,158,11,0.35)", "rgba(245,158,11,0.04)",
-			"rgba(245,158,11,0.15)", "#f59e0b"
-	default:
-		return "rgba(99,102,241,0.35)", "rgba(99,102,241,0.04)",
-			"rgba(99,102,241,0.15)", "#818cf8"
+func renderCostPage(scan *clusterScan, activeCtx string, clusterList []string) string {
+	data := buildCostPageData(scan, activeCtx, clusterList)
+	var buf strings.Builder
+	if err := getCostTmpl().Execute(&buf, data); err != nil {
+		log.Printf("cost template: %v", err)
+		return ""
 	}
+	return buf.String()
+}
+
+func renderHTML(scan *clusterScan, activeCtx string, clusterList []string) string {
+	return renderCostPage(scan, activeCtx, clusterList)
+}
+
+func confidenceColorHex(pct int) string {
+	if pct < 50 {
+		return "#ef4444"
+	}
+	if pct < 80 {
+		return "#f59e0b"
+	}
+	return "#10b981"
+}
+
+func utilColorClass(pct float64) string {
+	if pct > 85 {
+		return "red"
+	}
+	if pct > 65 {
+		return "yellow"
+	}
+	return "green"
+}
+
+func fmtCostRange(cr models.CostRange) string {
+	if cr.Best == 0 {
+		return "—"
+	}
+	return fmt.Sprintf("$%.0f", cr.Best)
 }
 
 func warRoomTypeLabel(t string) (icon, label string) {
