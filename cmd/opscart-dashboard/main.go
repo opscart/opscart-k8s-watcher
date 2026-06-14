@@ -1,6 +1,7 @@
 package main
 
 import (
+	"embed"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -19,6 +20,9 @@ import (
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/tools/clientcmd"
 )
+
+//go:embed templates
+var templateFS embed.FS
 
 var (
 	port         string
