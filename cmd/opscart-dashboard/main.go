@@ -1095,8 +1095,47 @@ func (srv *server) handleOptimizationsPage(w http.ResponseWriter, r *http.Reques
 	fmt.Fprint(w, renderOptimizationsPage(scan, ctx, srv.clusterList))
 }
 
+type optimizationsPageData struct {
+	ClusterName string
+	DashURL     string
+	Sidebar     template.HTML
+	// RI section
+	RIPools    []riPoolRow
+	TotalRI1yr string // pre-formatted "$1,234"
+	TotalRI3yr string // pre-formatted or ""
+	HasRI      bool
+	// Waste section
+	PVCCount         int
+	PVCCostCell      string // pre-formatted HTML
+	PVCNote          string
+	ZeroReplicaCount int
+	AbandonedCount   int
+	ZombieCount      int
+	IdleCount        int
+	WasteTotal       int
+	TotalWasteCost   string
+	// Right-sizing
+	RSCandidates []rsCandidateRow
+}
+
+type riPoolRow struct {
+	Name      string
+	VMSize    string
+	NodeCount int
+	PayGMo    string // "$9,811"
+	RI1yr     string // "$3,200"
+	RI3yr     string // "$2,100" or ""
+}
+
+type rsCandidateRow struct {
+	Name     string
+	PodCount int
+	CPUCores string // "0.200"
+	MemoryGB string // "0.2"
+	CostCell string // pre-formatted HTML
+}
+
 func renderOptimizationsPage(scan *clusterScan, activeCtx string, clusterList []string) string {
-	// ── Data ─────────────────────────────────────────────────────────────────
 	var pools []models.NodePoolCost
 	var nsCosts []models.NamespaceCostInfo
 	clusterName := displayName(activeCtx)
@@ -1107,20 +1146,32 @@ func renderOptimizationsPage(scan *clusterScan, activeCtx string, clusterList []
 	}
 
 	// RI opportunities
-	var riPools []models.NodePoolCost
+	var riPoolRows []riPoolRow
 	var totalRI1yr, totalRI3yr float64
 	for _, p := range pools {
 		if p.RISavings > 0 {
-			riPools = append(riPools, p)
+			ri3yr := ""
+			if p.RISavings3yr > 0 {
+				ri3yr = "$" + formatMoney(p.RISavings3yr)
+			}
+			riPoolRows = append(riPoolRows, riPoolRow{
+				Name:      p.Name,
+				VMSize:    p.VMSize,
+				NodeCount: p.NodeCount,
+				PayGMo:    "$" + formatMoney(p.TotalMonthly),
+				RI1yr:     "$" + formatMoney(p.RISavings),
+				RI3yr:     ri3yr,
+			})
 			totalRI1yr += p.RISavings
 			totalRI3yr += p.RISavings3yr
 		}
 	}
-	sort.Slice(riPools, func(i, j int) bool { return riPools[i].RISavings > riPools[j].RISavings })
+	sort.Slice(riPoolRows, func(i, j int) bool { return riPoolRows[i].RI1yr > riPoolRows[j].RI1yr })
 
-	// Waste counts — same data path as collectWarRoomIssues
+	// Waste counts
 	var zombieCount, idleCount, zeroReplicaCount, abandonedCount, pvcCount, pvcStorageGB int
 	var pvcCostEst float64
+	var wasteTotal int
 	if scan != nil && scan.wasteAudit != nil {
 		wa := scan.wasteAudit
 		for _, p := range wa.StalePods {
@@ -1140,297 +1191,84 @@ func renderOptimizationsPage(scan *clusterScan, activeCtx string, clusterList []
 		} else if pvcStorageGB > 0 {
 			pvcCostEst = float64(pvcStorageGB) * 0.10
 		}
+		wasteTotal = wa.TotalWasteItems
 	}
 
-	// Right-sizing: namespaces with < 0.5 CPU cores requested but running pods
-	var rsNS []models.NamespaceCostInfo
+	pvcNote := fmt.Sprintf("%d GB unattached storage", pvcStorageGB)
+	if pvcStorageGB == 0 {
+		pvcNote = "no size data"
+	}
+	pvcCostCell := ""
+	if pvcCostEst > 0 {
+		pvcCostCell = "$" + formatMoney(pvcCostEst)
+	}
+	totalWasteCost := ""
+	if pvcCostEst > 0 {
+		totalWasteCost = "$" + formatMoney(pvcCostEst)
+	}
+
+	// Right-sizing
+	var rsRows []rsCandidateRow
 	for _, ns := range nsCosts {
 		if ns.CPUCores < 0.5 && ns.PodCount > 0 {
-			rsNS = append(rsNS, ns)
+			costCell := ""
+			if ns.EstimatedCost.Best >= 1 {
+				costCell = "$" + formatMoney(ns.EstimatedCost.Best)
+			} else if ns.EstimatedCost.Best > 0 {
+				costCell = "<$1"
+			}
+			rsRows = append(rsRows, rsCandidateRow{
+				Name:     ns.Name,
+				PodCount: ns.PodCount,
+				CPUCores: fmt.Sprintf("%.3f", ns.CPUCores),
+				MemoryGB: fmt.Sprintf("%.1f", ns.MemoryGB),
+				CostCell: costCell,
+			})
 		}
 	}
-	sort.Slice(rsNS, func(i, j int) bool {
-		return rsNS[i].EstimatedCost.Best > rsNS[j].EstimatedCost.Best
-	})
-	if len(rsNS) > 10 {
-		rsNS = rsNS[:10]
+	sort.Slice(rsRows, func(i, j int) bool { return rsRows[i].Name < rsRows[j].Name })
+	if len(rsRows) > 10 {
+		rsRows = rsRows[:10]
 	}
 
 	q := ""
 	if activeCtx != "" {
 		q = "?cluster=" + url.QueryEscape(activeCtx)
 	}
-	dashURL := "/" + q
 
-	var sb strings.Builder
+	data := optimizationsPageData{
+		ClusterName:      clusterName,
+		DashURL:          "/" + q,
+		Sidebar:          template.HTML(buildSidebar("optimizations", activeCtx, clusterName, clusterList)),
+		RIPools:          riPoolRows,
+		TotalRI1yr:       pvcCostCell,
+		HasRI:            len(riPoolRows) > 0,
+		PVCCount:         pvcCount,
+		PVCCostCell:      pvcCostCell,
+		PVCNote:          pvcNote,
+		ZeroReplicaCount: zeroReplicaCount,
+		AbandonedCount:   abandonedCount,
+		ZombieCount:      zombieCount,
+		IdleCount:        idleCount,
+		WasteTotal:       wasteTotal,
+		TotalWasteCost:   totalWasteCost,
+		RSCandidates:     rsRows,
+	}
 
-	// ── Head ─────────────────────────────────────────────────────────────────
-	sb.WriteString(`<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width,initial-scale=1.0">
-<title>Optimizations — ` + clusterName + `</title>
-<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
-<style>
-*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
-:root{
-  --bg:#0f172a;--surface:#1e293b;--surface-hover:#334155;--border:#334155;
-  --text:#f1f5f9;--text-secondary:#94a3b8;--text-muted:#64748b;
-  --primary:#6366f1;--primary-light:#818cf8;--primary-bg:rgba(99,102,241,0.1);
-  --success:#10b981;--warning:#f59e0b;--danger:#ef4444;--info:#06b6d4;
-  --radius:12px;--radius-sm:8px;--radius-xs:6px;
+	var buf strings.Builder
+	if err := getOptimizationsTmpl().Execute(&buf, data); err != nil {
+		log.Printf("optimizations template: %v", err)
+		return ""
+	}
+	return buf.String()
 }
-body{font-family:'Inter',system-ui,sans-serif;background:var(--bg);color:var(--text);line-height:1.6;min-height:100vh}
-.layout{display:grid;grid-template-columns:260px 1fr;min-height:100vh}
-.sidebar{background:var(--surface);border-right:1px solid var(--border);padding:2rem 1.5rem;position:sticky;top:0;height:100vh;overflow-y:auto}
-.main{padding:2rem 2.5rem;overflow-y:auto}
-.logo{display:flex;align-items:center;gap:0.75rem;margin-bottom:2.5rem}
-.logo-icon{width:40px;height:40px;background:var(--primary);border-radius:10px;display:flex;align-items:center;justify-content:center;font-size:1.2rem}
-.logo-text{font-size:1.1rem;font-weight:700}
-.logo-sub{font-size:0.7rem;color:var(--text-muted);text-transform:uppercase;letter-spacing:1px}
-.nav-section{margin-bottom:1.5rem}
-.nav-label{font-size:0.7rem;text-transform:uppercase;letter-spacing:1.5px;color:var(--text-muted);margin-bottom:0.75rem;padding-left:0.75rem}
-.nav-item{display:flex;align-items:center;gap:0.75rem;padding:0.7rem 0.75rem;border-radius:var(--radius-sm);color:var(--text-secondary);font-size:0.9rem;cursor:pointer;transition:all 0.15s;text-decoration:none}
-.nav-item:hover{background:var(--surface-hover);color:var(--text)}
-.nav-item.active{background:var(--primary-bg);color:var(--primary-light);font-weight:600}
-.cluster-info{margin-top:auto;padding-top:2rem;border-top:1px solid var(--border)}
-.cluster-badge{background:var(--primary-bg);border:1px solid rgba(99,102,241,0.2);border-radius:var(--radius-sm);padding:0.85rem;margin-bottom:0.75rem}
-.cluster-badge h4{font-size:0.7rem;color:var(--primary-light);margin-bottom:0.3rem;text-transform:uppercase;letter-spacing:0.8px}
-.cluster-badge p{font-size:0.75rem;color:var(--text-muted);word-break:break-all}
-.page-hdr{display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:1.75rem;flex-wrap:wrap;gap:1rem}
-.page-hdr h1{font-size:1.75rem;font-weight:800}
-.page-hdr p{color:var(--text-muted);font-size:0.85rem;margin-top:0.25rem}
-.page-meta{text-align:right;font-size:0.78rem;color:var(--text-muted)}
-.back-link{display:block;margin-top:0.5rem;color:var(--primary-light);font-size:0.75rem;text-decoration:none}
-.back-link:hover{text-decoration:underline}
-.summary-bar{display:flex;gap:1rem;margin-bottom:2rem;flex-wrap:wrap}
-.kpi-chip{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius-sm);padding:0.75rem 1.25rem;min-width:140px}
-.kpi-chip-val{font-size:1.4rem;font-weight:800;line-height:1;margin-bottom:0.2rem}
-.kpi-chip-val.save{color:var(--success)}
-.kpi-chip-val.warn{color:var(--warning)}
-.kpi-chip-lbl{font-size:0.7rem;color:var(--text-muted);text-transform:uppercase;letter-spacing:0.5px}
-.section{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:1.5rem;margin-bottom:1.5rem}
-.section-hdr{display:flex;justify-content:space-between;align-items:center;margin-bottom:1.25rem}
-.section-title{font-size:1rem;font-weight:700}
-.section-sub{font-size:0.78rem;color:var(--text-muted)}
-.opt-wrap{overflow-x:auto;border:1px solid var(--border);border-radius:var(--radius-sm)}
-.opt-table{width:100%;border-collapse:collapse}
-.opt-table th{background:rgba(0,0,0,0.35);padding:0.6rem 0.85rem;text-align:left;font-size:0.67rem;text-transform:uppercase;letter-spacing:0.8px;color:var(--text-muted);font-weight:600;border-bottom:1px solid var(--border);white-space:nowrap}
-.opt-table td{padding:0.75rem 0.85rem;border-bottom:1px solid var(--border);font-size:0.83rem;vertical-align:middle}
-.opt-table tbody tr:last-child td{border-bottom:none}
-.opt-table tbody tr:hover td{background:rgba(99,102,241,0.03)}
-.opt-table tfoot td{background:rgba(0,0,0,0.25);font-weight:700;border-top:2px solid var(--border);font-size:0.83rem;padding:0.75rem 0.85rem}
-.sku{font-family:'Consolas','Monaco',monospace;font-size:0.75rem;color:var(--primary-light)}
-.money{font-variant-numeric:tabular-nums;font-weight:600}
-.save{color:var(--success);font-weight:600}
-.muted{color:var(--text-muted)}
-.badge{display:inline-flex;align-items:center;padding:2px 9px;border-radius:20px;font-size:0.7rem;font-weight:600;white-space:nowrap}
-.badge-warn{background:rgba(245,158,11,0.12);color:#fbbf24;border:1px solid rgba(245,158,11,0.2)}
-.empty-state{text-align:center;padding:2.5rem 1rem;color:var(--text-muted)}
-.empty-state .icon{font-size:2rem;margin-bottom:0.5rem}
-@keyframes fadeIn{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:translateY(0)}}
-.section{animation:fadeIn 0.3s ease both}
-@media(max-width:1024px){.layout{grid-template-columns:1fr}.sidebar{display:none}}
-</style>
-</head>
-<body>
-<div class="layout">
-`)
 
-	// ── Sidebar ───────────────────────────────────────────────────────────────
-	sb.WriteString(buildSidebar("optimizations", activeCtx, clusterName, clusterList))
-
-	// ── Main ─────────────────────────────────────────────────────────────────
-	sb.WriteString(`<main class="main">`)
-
-	sb.WriteString(fmt.Sprintf(`<div class="page-hdr">
-<div>
-  <h1>💡 Optimizations</h1>
-  <p>%s &mdash; cost-saving opportunities</p>
-</div>
-<div class="page-meta">
-  <a class="back-link" href="%s">← Back to Dashboard</a>
-</div>
-</div>
-`, clusterName, dashURL))
-
-	// Summary KPI chips
-	sb.WriteString(`<div class="summary-bar">`)
-	if totalRI1yr > 0 {
-		sb.WriteString(fmt.Sprintf(`<div class="kpi-chip"><div class="kpi-chip-val save">$%s</div><div class="kpi-chip-lbl">1yr RI Savings/mo</div></div>`, formatMoney(totalRI1yr)))
-	}
-	if totalRI3yr > 0 {
-		sb.WriteString(fmt.Sprintf(`<div class="kpi-chip"><div class="kpi-chip-val save">$%s</div><div class="kpi-chip-lbl">3yr RI Savings/mo</div></div>`, formatMoney(totalRI3yr)))
-	}
-	if pvcCostEst > 0 {
-		sb.WriteString(fmt.Sprintf(`<div class="kpi-chip"><div class="kpi-chip-val warn">$%s</div><div class="kpi-chip-lbl">PVC Waste/mo</div></div>`, formatMoney(pvcCostEst)))
-	}
-	wasteTotal := 0
-	if scan != nil && scan.wasteAudit != nil {
-		wasteTotal = scan.wasteAudit.TotalWasteItems
-	}
-	sb.WriteString(fmt.Sprintf(`<div class="kpi-chip"><div class="kpi-chip-val">%d</div><div class="kpi-chip-lbl">Total Waste Items</div></div>`, wasteTotal))
-	sb.WriteString(`</div>`)
-
-	// ── Section 1: Reserved Instance Opportunities ────────────────────────────
-	sb.WriteString(`<div class="section">`)
-	sb.WriteString(`<div class="section-hdr">
-<div class="section-title">💰 Reserved Instance Opportunities</div>
-<div class="section-sub">Savings vs. Pay-As-You-Go for On-Demand pools</div>
-</div>`)
-	if len(riPools) == 0 {
-		sb.WriteString(`<div class="empty-state"><div class="icon">💰</div><div>No RI opportunities — all pools are Spot or pricing data unavailable</div></div>`)
-	} else {
-		sb.WriteString(`<div class="opt-wrap"><table class="opt-table">
-<thead><tr>
-<th>Pool</th>
-<th class="sku">VM SKU</th>
-<th style="text-align:center">Nodes</th>
-<th style="text-align:right">PAYG/mo</th>
-<th style="text-align:right">1yr RI Save/mo</th>
-<th style="text-align:right">3yr RI Save/mo</th>
-</tr></thead>
-<tbody>`)
-		for _, p := range riPools {
-			ri3Cell := `<span class="muted">—</span>`
-			if p.RISavings3yr > 0 {
-				ri3Cell = fmt.Sprintf(`<span class="save">$%s</span>`, formatMoney(p.RISavings3yr))
-			}
-			sb.WriteString(fmt.Sprintf(`<tr>
-<td><strong>%s</strong></td>
-<td><span class="sku">%s</span></td>
-<td style="text-align:center">%d</td>
-<td style="text-align:right"><span class="money">$%s</span></td>
-<td style="text-align:right"><span class="save">$%s</span></td>
-<td style="text-align:right">%s</td>
-</tr>`, p.Name, p.VMSize, p.NodeCount, formatMoney(p.TotalMonthly), formatMoney(p.RISavings), ri3Cell))
-		}
-		sb.WriteString(`</tbody>`)
-		ri3TotalCell := `<span class="muted">—</span>`
-		if totalRI3yr > 0 {
-			ri3TotalCell = fmt.Sprintf(`<span class="save">$%s</span>`, formatMoney(totalRI3yr))
-		}
-		sb.WriteString(fmt.Sprintf(`<tfoot><tr>
-<td colspan="4" style="color:var(--text-muted);font-size:0.75rem;text-transform:uppercase;letter-spacing:0.5px">Total potential savings</td>
-<td style="text-align:right"><span class="save">$%s</span></td>
-<td style="text-align:right">%s</td>
-</tr></tfoot>`, formatMoney(totalRI1yr), ri3TotalCell))
-		sb.WriteString(`</table></div>`)
-	}
-	sb.WriteString(`</div>`)
-
-	// ── Section 2: Waste Items by Category ───────────────────────────────────
-	sb.WriteString(`<div class="section">`)
-	sb.WriteString(`<div class="section-hdr">
-<div class="section-title">🗑️ Waste Items by Category</div>
-<div class="section-sub">Resources consuming cost or capacity without business value</div>
-</div>`)
-	sb.WriteString(`<div class="opt-wrap"><table class="opt-table">
-<thead><tr>
-<th>Category</th>
-<th style="text-align:center">Count</th>
-<th style="text-align:right">Est. $/mo</th>
-<th>Notes</th>
-</tr></thead>
-<tbody>`)
-
-	pvcCostCell := `<span class="muted">—</span>`
-	if pvcCostEst > 0 {
-		pvcCostCell = fmt.Sprintf(`<span class="save">$%s</span>`, formatMoney(pvcCostEst))
-	}
-	pvcNote := fmt.Sprintf("%d GB unattached storage", pvcStorageGB)
-	if pvcStorageGB == 0 {
-		pvcNote = "no size data"
-	}
-	sb.WriteString(fmt.Sprintf(`<tr>
-<td><strong>Orphaned PVCs</strong></td>
-<td style="text-align:center">%d</td>
-<td style="text-align:right">%s</td>
-<td class="muted">%s</td>
-</tr>`, pvcCount, pvcCostCell, pvcNote))
-
-	sb.WriteString(fmt.Sprintf(`<tr>
-<td><strong>Zero-Replica Workloads</strong></td>
-<td style="text-align:center">%d</td>
-<td style="text-align:right"><span class="muted">—</span></td>
-<td class="muted">Deployments/StatefulSets scaled to 0</td>
-</tr>`, zeroReplicaCount))
-
-	sb.WriteString(fmt.Sprintf(`<tr>
-<td><strong>Abandoned Namespaces</strong></td>
-<td style="text-align:center">%d</td>
-<td style="text-align:right"><span class="muted">—</span></td>
-<td class="muted">All pods idle, no recent activity</td>
-</tr>`, abandonedCount))
-
-	sb.WriteString(fmt.Sprintf(`<tr>
-<td><strong>Zombie Pods</strong></td>
-<td style="text-align:center">%d</td>
-<td style="text-align:right"><span class="muted">—</span></td>
-<td class="muted">CrashLoopBackOff / OOMKilled consuming node capacity</td>
-</tr>`, zombieCount))
-
-	sb.WriteString(fmt.Sprintf(`<tr>
-<td><strong>Idle Pods</strong></td>
-<td style="text-align:center">%d</td>
-<td style="text-align:right"><span class="muted">—</span></td>
-<td class="muted">Running but no activity for extended period</td>
-</tr>`, idleCount))
-
-	sb.WriteString(`</tbody>`)
-	totalWasteCostCell := `<span class="muted">—</span>`
-	if pvcCostEst > 0 {
-		totalWasteCostCell = fmt.Sprintf(`<span class="save">$%s</span>`, formatMoney(pvcCostEst))
-	}
-	sb.WriteString(fmt.Sprintf(`<tfoot><tr>
-<td colspan="2" style="color:var(--text-muted);font-size:0.75rem;text-transform:uppercase;letter-spacing:0.5px">Total potential savings</td>
-<td style="text-align:right">%s</td>
-<td></td>
-</tr></tfoot>`, totalWasteCostCell))
-	sb.WriteString(`</table></div>`)
-	sb.WriteString(`</div>`)
-
-	// ── Section 3: Right-sizing ───────────────────────────────────────────────
-	sb.WriteString(`<div class="section">`)
-	sb.WriteString(`<div class="section-hdr">
-<div class="section-title">📐 Right-Sizing Candidates</div>
-<div class="section-sub">Namespaces with pods running but &lt;0.5 CPU cores requested — potential over-provisioning</div>
-</div>`)
-	if len(rsNS) == 0 {
-		sb.WriteString(`<div class="empty-state"><div class="icon">📐</div><div>No right-sizing candidates identified</div></div>`)
-	} else {
-		sb.WriteString(`<div class="opt-wrap"><table class="opt-table">
-<thead><tr>
-<th>Namespace</th>
-<th style="text-align:center">Pods</th>
-<th style="text-align:right">CPU Cores</th>
-<th style="text-align:right">Memory (GB)</th>
-<th style="text-align:right">Est. Cost/mo</th>
-</tr></thead>
-<tbody>`)
-		for _, ns := range rsNS {
-			costCell := `<span class="muted">—</span>`
-			if ns.EstimatedCost.Best >= 1 {
-				costCell = fmt.Sprintf(`<span class="money">$%s</span>`, formatMoney(ns.EstimatedCost.Best))
-			} else if ns.EstimatedCost.Best > 0 {
-				costCell = `<span class="money">&lt;$1</span>`
-			}
-			sb.WriteString(fmt.Sprintf(`<tr>
-<td><strong>%s</strong></td>
-<td style="text-align:center">%d</td>
-<td style="text-align:right">%.3f</td>
-<td style="text-align:right">%.1f</td>
-<td style="text-align:right">%s</td>
-</tr>`, ns.Name, ns.PodCount, ns.CPUCores, ns.MemoryGB, costCell))
-		}
-		sb.WriteString(`</tbody></table></div>`)
-	}
-	sb.WriteString(`</div>`)
-
-	sb.WriteString(`</main></div></body></html>`)
-	return sb.String()
-}
+var getOptimizationsTmpl = sync.OnceValue(func() *template.Template {
+	return template.Must(
+		template.New("optimizations.html").
+			ParseFS(templateFS, "templates/base.html", "templates/optimizations.html"),
+	)
+})
 
 // buildSidebar returns a complete <aside>…</aside> sidebar, shared by all sub-pages.
 // activePage is one of: "dashboard", "infrastructure", "namespaces", "optimizations", "warroom".
