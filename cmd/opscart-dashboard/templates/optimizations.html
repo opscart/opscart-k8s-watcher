@@ -1,0 +1,146 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1.0">
+<title>Optimizations — {{.ClusterName}}</title>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+{{template "base" .}}
+<style>
+.summary-bar{display:flex;gap:1rem;margin-bottom:2rem;flex-wrap:wrap}
+.kpi-chip{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius-sm);padding:0.75rem 1.25rem;min-width:140px}
+.kpi-chip-val{font-size:1.4rem;font-weight:800;line-height:1;margin-bottom:0.2rem}
+.kpi-chip-val.save{color:var(--success)}
+.kpi-chip-val.warn{color:var(--warning)}
+.kpi-chip-lbl{font-size:0.7rem;color:var(--text-muted);text-transform:uppercase;letter-spacing:0.5px}
+.section{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:1.5rem;margin-bottom:1.5rem;animation:fadeIn 0.3s ease both}
+.section-hdr{display:flex;justify-content:space-between;align-items:center;margin-bottom:1.25rem}
+.section-title{font-size:1rem;font-weight:700}
+.section-sub{font-size:0.78rem;color:var(--text-muted)}
+.opt-wrap{overflow-x:auto;border:1px solid var(--border);border-radius:var(--radius-sm)}
+.opt-table{width:100%;border-collapse:collapse}
+.opt-table th{background:rgba(0,0,0,0.35);padding:0.6rem 0.85rem;text-align:left;font-size:0.67rem;text-transform:uppercase;letter-spacing:0.8px;color:var(--text-muted);font-weight:600;border-bottom:1px solid var(--border);white-space:nowrap}
+.opt-table td{padding:0.75rem 0.85rem;border-bottom:1px solid var(--border);font-size:0.83rem;vertical-align:middle}
+.opt-table tbody tr:last-child td{border-bottom:none}
+.opt-table tbody tr:hover td{background:rgba(99,102,241,0.03)}
+.opt-table tfoot td{background:rgba(0,0,0,0.25);font-weight:700;border-top:2px solid var(--border);font-size:0.83rem;padding:0.75rem 0.85rem}
+.sku{font-family:'Consolas','Monaco',monospace;font-size:0.75rem;color:var(--primary-light)}
+.money{font-variant-numeric:tabular-nums;font-weight:600}
+.save{color:var(--success);font-weight:600}
+.muted{color:var(--text-muted)}
+.empty-state{text-align:center;padding:2.5rem 1rem;color:var(--text-muted)}
+.empty-state .icon{font-size:2rem;margin-bottom:0.5rem}
+</style>
+</head>
+<body>
+<div class="layout">
+{{.Sidebar}}
+<main class="main">
+  <div class="page-hdr">
+    <div>
+      <h1>💡 Optimizations</h1>
+      <p>{{.ClusterName}} &mdash; cost-saving opportunities</p>
+    </div>
+    <div class="page-meta">
+      <a class="back-link" href="{{.DashURL}}">← Back to Dashboard</a>
+    </div>
+  </div>
+
+  <div class="summary-bar">
+    {{if .PVCCostCell}}<div class="kpi-chip"><div class="kpi-chip-val warn">{{.PVCCostCell}}</div><div class="kpi-chip-lbl">PVC Waste/mo</div></div>{{end}}
+    <div class="kpi-chip"><div class="kpi-chip-val">{{.WasteTotal}}</div><div class="kpi-chip-lbl">Total Waste Items</div></div>
+  </div>
+
+  <!-- RI Opportunities -->
+  <div class="section">
+    <div class="section-hdr">
+      <div class="section-title">💰 Reserved Instance Opportunities</div>
+      <div class="section-sub">Savings vs. Pay-As-You-Go for On-Demand pools</div>
+    </div>
+    {{if not .HasRI}}
+    <div class="empty-state"><div class="icon">💰</div><div>No RI opportunities — all pools are Spot or pricing data unavailable</div></div>
+    {{else}}
+    <div class="opt-wrap"><table class="opt-table">
+      <thead><tr>
+        <th>Pool</th><th>VM SKU</th><th style="text-align:center">Nodes</th>
+        <th style="text-align:right">PAYG/mo</th>
+        <th style="text-align:right">1yr RI Save/mo</th>
+        <th style="text-align:right">3yr RI Save/mo</th>
+      </tr></thead>
+      <tbody>
+        {{range .RIPools}}
+        <tr>
+          <td><strong>{{.Name}}</strong></td>
+          <td><span class="sku">{{.VMSize}}</span></td>
+          <td style="text-align:center">{{.NodeCount}}</td>
+          <td style="text-align:right"><span class="money">{{.PayGMo}}</span></td>
+          <td style="text-align:right"><span class="save">{{.RI1yr}}</span></td>
+          <td style="text-align:right">{{if .RI3yr}}<span class="save">{{.RI3yr}}</span>{{else}}<span class="muted">—</span>{{end}}</td>
+        </tr>
+        {{end}}
+      </tbody>
+    </table></div>
+    {{end}}
+  </div>
+
+  <!-- Waste by Category -->
+  <div class="section">
+    <div class="section-hdr">
+      <div class="section-title">🗑️ Waste Items by Category</div>
+      <div class="section-sub">Resources consuming cost or capacity without business value</div>
+    </div>
+    <div class="opt-wrap"><table class="opt-table">
+      <thead><tr>
+        <th>Category</th><th style="text-align:center">Count</th>
+        <th style="text-align:right">Est. $/mo</th><th>Notes</th>
+      </tr></thead>
+      <tbody>
+        <tr><td><strong>Orphaned PVCs</strong></td><td style="text-align:center">{{.PVCCount}}</td><td style="text-align:right">{{if .PVCCostCell}}<span class="save">{{.PVCCostCell}}</span>{{else}}<span class="muted">—</span>{{end}}</td><td class="muted">{{.PVCNote}}</td></tr>
+        <tr><td><strong>Zero-Replica Workloads</strong></td><td style="text-align:center">{{.ZeroReplicaCount}}</td><td style="text-align:right"><span class="muted">—</span></td><td class="muted">Deployments/StatefulSets scaled to 0</td></tr>
+        <tr><td><strong>Abandoned Namespaces</strong></td><td style="text-align:center">{{.AbandonedCount}}</td><td style="text-align:right"><span class="muted">—</span></td><td class="muted">All pods idle, no recent activity</td></tr>
+        <tr><td><strong>Zombie Pods</strong></td><td style="text-align:center">{{.ZombieCount}}</td><td style="text-align:right"><span class="muted">—</span></td><td class="muted">CrashLoopBackOff / OOMKilled consuming node capacity</td></tr>
+        <tr><td><strong>Idle Pods</strong></td><td style="text-align:center">{{.IdleCount}}</td><td style="text-align:right"><span class="muted">—</span></td><td class="muted">Running but no activity for extended period</td></tr>
+      </tbody>
+      <tfoot><tr>
+        <td colspan="2" style="color:var(--text-muted);font-size:0.75rem;text-transform:uppercase;letter-spacing:0.5px">Total potential savings</td>
+        <td style="text-align:right">{{if .TotalWasteCost}}<span class="save">{{.TotalWasteCost}}</span>{{else}}<span class="muted">—</span>{{end}}</td>
+        <td></td>
+      </tr></tfoot>
+    </table></div>
+  </div>
+
+  <!-- Right-Sizing -->
+  <div class="section">
+    <div class="section-hdr">
+      <div class="section-title">📐 Right-Sizing Candidates</div>
+      <div class="section-sub">Namespaces with pods running but &lt;0.5 CPU cores requested</div>
+    </div>
+    {{if not .RSCandidates}}
+    <div class="empty-state"><div class="icon">📐</div><div>No right-sizing candidates identified</div></div>
+    {{else}}
+    <div class="opt-wrap"><table class="opt-table">
+      <thead><tr>
+        <th>Namespace</th><th style="text-align:center">Pods</th>
+        <th style="text-align:right">CPU Cores</th>
+        <th style="text-align:right">Memory (GB)</th>
+        <th style="text-align:right">Est. Cost/mo</th>
+      </tr></thead>
+      <tbody>
+        {{range .RSCandidates}}
+        <tr>
+          <td><strong>{{.Name}}</strong></td>
+          <td style="text-align:center">{{.PodCount}}</td>
+          <td style="text-align:right">{{.CPUCores}}</td>
+          <td style="text-align:right">{{.MemoryGB}}</td>
+          <td style="text-align:right">{{if .CostCell}}<span class="money">{{.CostCell}}</span>{{else}}<span class="muted">—</span>{{end}}</td>
+        </tr>
+        {{end}}
+      </tbody>
+    </table></div>
+    {{end}}
+  </div>
+
+</main>
+</div>
+</body>
+</html>
