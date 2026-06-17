@@ -1145,6 +1145,23 @@ var getOptimizationsTmpl = sync.OnceValue(func() *template.Template {
 	)
 })
 
+type sidebarData struct {
+	DashHref    string
+	InfraHref   string
+	NsHref      string
+	OptHref     string
+	WrHref      string
+	ActivePage  string
+	ClusterName string
+	Clusters    []sidebarCluster
+}
+
+type sidebarCluster struct {
+	Href     string
+	Label    string
+	IsActive bool
+}
+
 // buildSidebar returns a complete <aside>…</aside> sidebar, shared by all sub-pages.
 // activePage is one of: "dashboard", "infrastructure", "namespaces", "optimizations", "warroom".
 func buildSidebar(activePage, activeCtx, clusterName string, clusterList []string) string {
@@ -1152,20 +1169,7 @@ func buildSidebar(activePage, activeCtx, clusterName string, clusterList []strin
 	if activeCtx != "" {
 		q = "?cluster=" + url.QueryEscape(activeCtx)
 	}
-	dashHref := "/" + q
-	infraHref := "/infrastructure" + q
-	nsHref := "/namespaces" + q
-	optHref := "/optimizations" + q
-	wrHref := "/warroom" + q
 
-	active := func(page string) string {
-		if page == activePage {
-			return " active"
-		}
-		return ""
-	}
-
-	// Cluster switcher links stay on the current page
 	basePath := "/"
 	switch activePage {
 	case "infrastructure":
@@ -1178,50 +1182,46 @@ func buildSidebar(activePage, activeCtx, clusterName string, clusterList []strin
 		basePath = "/warroom"
 	}
 
-	var sb strings.Builder
-	sb.WriteString(`<aside class="sidebar">
-<div class="logo">
-  <div class="logo-icon">⚡</div>
-  <div><div class="logo-text">OpsCart</div><div class="logo-sub">FinOps Engine</div></div>
-</div>
-<div class="nav-section">
-  <div class="nav-label">Analysis</div>
-  <a class="nav-item` + active("dashboard") + `" href="` + dashHref + `">📊 Cost Overview</a>
-  <a class="nav-item` + active("infrastructure") + `" href="` + infraHref + `">🖥️ Infrastructure</a>
-  <a class="nav-item` + active("namespaces") + `" href="` + nsHref + `">📦 Namespaces</a>
-  <a class="nav-item` + active("optimizations") + `" href="` + optHref + `">💡 Optimizations</a>
-</div>
-<div class="nav-section">
-  <div class="nav-label">Ops</div>
-  <a class="nav-item` + active("warroom") + `" href="` + wrHref + `">🚨 War Room</a>
-</div>
-`)
-
+	var clusters []sidebarCluster
 	if len(clusterList) > 1 {
-		sb.WriteString(`<div class="nav-section"><div class="nav-label">Clusters</div>`)
 		for _, ctx := range clusterList {
-			cls := "nav-item"
-			if ctx == activeCtx {
-				cls += " active"
-			}
-			href := basePath + "?" + url.Values{"cluster": {ctx}}.Encode()
 			label := displayName(ctx)
 			if len(label) > 22 {
 				label = label[:21] + "…"
 			}
-			sb.WriteString(fmt.Sprintf(`<a class="%s" href="%s">🔵 %s</a>`, cls, href, label))
+			clusters = append(clusters, sidebarCluster{
+				Href:     basePath + "?" + url.Values{"cluster": {ctx}}.Encode(),
+				Label:    label,
+				IsActive: ctx == activeCtx,
+			})
 		}
-		sb.WriteString(`</div>`)
 	}
 
-	sb.WriteString(fmt.Sprintf(`<div class="cluster-info">
-<div class="cluster-badge"><h4>Cluster</h4><p>%s</p></div>
-</div>
-</aside>
-`, clusterName))
+	data := sidebarData{
+		DashHref:    "/" + q,
+		InfraHref:   "/infrastructure" + q,
+		NsHref:      "/namespaces" + q,
+		OptHref:     "/optimizations" + q,
+		WrHref:      "/warroom" + q,
+		ActivePage:  activePage,
+		ClusterName: clusterName,
+		Clusters:    clusters,
+	}
 
-	return sb.String()
+	var buf strings.Builder
+	if err := getSidebarTmpl().Execute(&buf, data); err != nil {
+		log.Printf("sidebar template: %v", err)
+		return ""
+	}
+	return buf.String()
 }
+
+var getSidebarTmpl = sync.OnceValue(func() *template.Template {
+	return template.Must(
+		template.New("sidebar.html").
+			ParseFS(templateFS, "templates/sidebar.html"),
+	)
+})
 
 // ── War Room page ─────────────────────────────────────────────────────────────
 
