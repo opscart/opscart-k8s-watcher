@@ -1,8 +1,10 @@
 package main
 
 import (
+	"embed"
 	"encoding/json"
 	"fmt"
+	"html/template"
 	"log"
 	"net/http"
 	"net/url"
@@ -19,6 +21,9 @@ import (
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/tools/clientcmd"
 )
+
+//go:embed templates
+var templateFS embed.FS
 
 var (
 	port         string
@@ -367,11 +372,11 @@ func (srv *server) handleSummary(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]any{
-		"monthly_cost":    scan.report.TotalMonthlyCost,
-		"waste_total":     scan.wasteTotal(),
-		"security_score":  scan.securityScore(),
-		"cluster_count":   len(srv.clusterList),
-		"pod_count":       scan.monthlyPodCount(),
+		"monthly_cost":   scan.report.TotalMonthlyCost,
+		"waste_total":    scan.wasteTotal(),
+		"security_score": scan.securityScore(),
+		"cluster_count":  len(srv.clusterList),
+		"pod_count":      scan.monthlyPodCount(),
 	})
 }
 
@@ -413,6 +418,18 @@ type warRoomIssue struct {
 	Message    string `json:"message"`
 	AgeDays    int    `json:"age_days,omitempty"`
 	KubectlCmd string `json:"kubectl_cmd,omitempty"`
+}
+
+type warRoomPageData struct {
+	ClusterName   string
+	StatusDesc    string
+	DashURL       string
+	CritChipClass string
+	WarnChipClass string
+	Critical      []warRoomIssue
+	Warnings      []warRoomIssue
+	ScannedAtMs   int64
+	Sidebar       template.HTML
 }
 
 func collectWarRoomIssues(scan *clusterScan, limit int) []warRoomIssue {
@@ -505,6 +522,26 @@ func (srv *server) handleInfrastructurePage(w http.ResponseWriter, r *http.Reque
 	fmt.Fprint(w, renderInfrastructurePage(scan, ctx, srv.clusterList))
 }
 
+type infrastructurePageData struct {
+	ClusterName string
+	DashURL     string
+	Sidebar     template.HTML
+	PoolCount   int
+	TotalNodes  int
+	TotalCores  string
+	TotalMemGB  string
+	TotalCost   string
+	TotalRI1yr  string
+	HasRI       bool
+	HasPools    bool
+	PoolRows    []template.HTML
+	CPUReqStr   string
+	MemReqStr   string
+	RI1yrCell   template.HTML
+	RI3yrCell   template.HTML
+	ScannedAtMs int64
+}
+
 func renderInfrastructurePage(scan *clusterScan, activeCtx string, clusterList []string) string {
 	var pools []models.NodePoolCost
 	scannedAt := time.Now()
@@ -515,7 +552,6 @@ func renderInfrastructurePage(scan *clusterScan, activeCtx string, clusterList [
 		clusterName = scan.report.ClusterName
 	}
 
-	// Totals for summary row
 	var totalNodes int
 	var totalCores, totalMemGB, totalCost, totalRI1yr, totalRI3yr float64
 	for _, p := range pools {
@@ -531,205 +567,61 @@ func renderInfrastructurePage(scan *clusterScan, activeCtx string, clusterList [
 	if activeCtx != "" {
 		q = "?cluster=" + url.QueryEscape(activeCtx)
 	}
-	dashURL := "/" + q
 
-	var sb strings.Builder
+	// Pre-render pool rows
+	var poolRows []template.HTML
+	for _, p := range pools {
+		poolRows = append(poolRows, template.HTML(renderInfraPoolRow(p)))
+	}
 
-	// ── Head ──────────────────────────────────────────────────────────────────
-	sb.WriteString(`<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width,initial-scale=1.0">
-<title>Infrastructure — ` + clusterName + `</title>
-<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
-<style>
-*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
-:root{
-  --bg:#0f172a;--surface:#1e293b;--surface-hover:#334155;--border:#334155;
-  --text:#f1f5f9;--text-secondary:#94a3b8;--text-muted:#64748b;
-  --primary:#6366f1;--primary-light:#818cf8;--primary-bg:rgba(99,102,241,0.1);
-  --success:#10b981;--warning:#f59e0b;--danger:#ef4444;--info:#06b6d4;
-  --radius:12px;--radius-sm:8px;--radius-xs:6px;
-}
-body{font-family:'Inter',system-ui,sans-serif;background:var(--bg);color:var(--text);line-height:1.6;min-height:100vh}
-.layout{display:grid;grid-template-columns:260px 1fr;min-height:100vh}
-.sidebar{background:var(--surface);border-right:1px solid var(--border);padding:2rem 1.5rem;position:sticky;top:0;height:100vh;overflow-y:auto}
-.main{padding:2rem 2.5rem;overflow-y:auto}
-.logo{display:flex;align-items:center;gap:0.75rem;margin-bottom:2.5rem}
-.logo-icon{width:40px;height:40px;background:var(--primary);border-radius:10px;display:flex;align-items:center;justify-content:center;font-size:1.2rem}
-.logo-text{font-size:1.1rem;font-weight:700}
-.logo-sub{font-size:0.7rem;color:var(--text-muted);text-transform:uppercase;letter-spacing:1px}
-.nav-section{margin-bottom:1.5rem}
-.nav-label{font-size:0.7rem;text-transform:uppercase;letter-spacing:1.5px;color:var(--text-muted);margin-bottom:0.75rem;padding-left:0.75rem}
-.nav-item{display:flex;align-items:center;gap:0.75rem;padding:0.7rem 0.75rem;border-radius:var(--radius-sm);color:var(--text-secondary);font-size:0.9rem;cursor:pointer;transition:all 0.15s;text-decoration:none}
-.nav-item:hover{background:var(--surface-hover);color:var(--text)}
-.nav-item.active{background:var(--primary-bg);color:var(--primary-light);font-weight:600}
-.cluster-info{margin-top:auto;padding-top:2rem;border-top:1px solid var(--border)}
-.cluster-badge{background:var(--primary-bg);border:1px solid rgba(99,102,241,0.2);border-radius:var(--radius-sm);padding:0.85rem;margin-bottom:0.75rem}
-.cluster-badge h4{font-size:0.7rem;color:var(--primary-light);margin-bottom:0.3rem;text-transform:uppercase;letter-spacing:0.8px}
-.cluster-badge p{font-size:0.75rem;color:var(--text-muted);word-break:break-all}
-.page-hdr{display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:1.75rem;flex-wrap:wrap;gap:1rem}
-.page-hdr h1{font-size:1.75rem;font-weight:800}
-.page-hdr p{color:var(--text-muted);font-size:0.85rem;margin-top:0.25rem}
-.page-meta{text-align:right;font-size:0.78rem;color:var(--text-muted)}
-.page-meta strong{color:var(--text-secondary)}
-.back-link{display:block;margin-top:0.5rem;color:var(--primary-light);font-size:0.75rem;text-decoration:none}
-.back-link:hover{text-decoration:underline}
-.summary-bar{display:flex;gap:1rem;margin-bottom:2rem;flex-wrap:wrap}
-.kpi-chip{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius-sm);padding:0.75rem 1.25rem;min-width:140px}
-.kpi-chip-val{font-size:1.4rem;font-weight:800;line-height:1;margin-bottom:0.2rem}
-.kpi-chip-val.cost{color:var(--danger)}
-.kpi-chip-val.save{color:var(--success)}
-.kpi-chip-lbl{font-size:0.7rem;color:var(--text-muted);text-transform:uppercase;letter-spacing:0.5px}
-.section{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:1.5rem;margin-bottom:1.5rem}
-.section-hdr{display:flex;justify-content:space-between;align-items:center;margin-bottom:1.25rem}
-.section-title{font-size:1rem;font-weight:700}
-.inf-wrap{overflow-x:auto;border:1px solid var(--border);border-radius:var(--radius-sm)}
-.inf-table{width:100%;border-collapse:collapse;min-width:860px}
-.inf-table th{background:rgba(0,0,0,0.35);padding:0.6rem 0.85rem;text-align:left;font-size:0.67rem;text-transform:uppercase;letter-spacing:0.8px;color:var(--text-muted);font-weight:600;border-bottom:1px solid var(--border);white-space:nowrap}
-.inf-table td{padding:0.75rem 0.85rem;border-bottom:1px solid var(--border);font-size:0.83rem;vertical-align:middle}
-.inf-table tbody tr:last-child td{border-bottom:none}
-.inf-table tbody tr:hover td{background:rgba(99,102,241,0.03)}
-.inf-table tfoot td{background:rgba(0,0,0,0.25);font-weight:700;border-top:2px solid var(--border);font-size:0.83rem;padding:0.75rem 0.85rem}
-.pool-name{font-weight:600;color:var(--text);margin-bottom:0.3rem}
-.badge-row{display:flex;gap:4px;flex-wrap:wrap}
-.tag{display:inline-flex;align-items:center;padding:1px 7px;border-radius:20px;font-size:0.63rem;font-weight:600;white-space:nowrap}
-.tag-spot{background:#422006;color:#fbbf24;border:1px solid rgba(251,191,36,0.2)}
-.tag-regular{background:#172554;color:#60a5fa;border:1px solid rgba(96,165,250,0.2)}
-.tag-system{background:rgba(99,102,241,0.15);color:var(--primary-light);border:1px solid rgba(99,102,241,0.25)}
-.tag-user{background:rgba(100,116,139,0.12);color:#94a3b8;border:1px solid rgba(100,116,139,0.2)}
-.tag-windows{background:rgba(6,182,212,0.1);color:#22d3ee;border:1px solid rgba(6,182,212,0.15)}
-.sku{font-family:'Consolas','Monaco',monospace;font-size:0.75rem;color:var(--primary-light)}
-.sub{color:var(--text-muted);font-size:0.7rem;margin-top:2px}
-.util-cell{min-width:130px}
-.util-nums{font-size:0.75rem;color:var(--text-secondary);margin-bottom:3px}
-.util-bar{display:flex;align-items:center;gap:6px}
-.util-track{flex:1;height:5px;background:rgba(255,255,255,0.06);border-radius:3px;overflow:hidden}
-.util-fill{height:100%;border-radius:3px;transition:width 0.4s ease}
-.fill-green{background:var(--success)}
-.fill-yellow{background:var(--warning)}
-.fill-red{background:var(--danger)}
-.util-pct{font-size:0.72rem;color:var(--text-secondary);min-width:32px;text-align:right}
-.money{font-variant-numeric:tabular-nums;font-weight:600}
-.ri-val{color:var(--success);font-weight:600;font-size:0.8rem}
-.ri-na{color:var(--text-muted);font-size:0.78rem}
-.empty-state{text-align:center;padding:3rem 1rem;color:var(--text-muted)}
-.empty-state .icon{font-size:2.5rem;margin-bottom:0.75rem}
-.footer{text-align:center;padding:1.5rem 0;color:var(--text-muted);font-size:0.75rem;border-top:1px solid var(--border);margin-top:1rem}
-@keyframes fadeIn{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:translateY(0)}}
-.section{animation:fadeIn 0.3s ease both}
-@media(max-width:1024px){.layout{grid-template-columns:1fr}.sidebar{display:none}}
-</style>
-</head>
-<body>
-<div class="layout">
-`)
-
-	// ── Sidebar ────────────────────────────────────────────────────────────────
-	sb.WriteString(buildSidebar("infrastructure", activeCtx, clusterName, clusterList))
-
-	// ── Main ──────────────────────────────────────────────────────────────────
-	sb.WriteString(`<main class="main">`)
-
-	sb.WriteString(fmt.Sprintf(`<div class="page-hdr">
-<div>
-  <h1>🖥️ Infrastructure</h1>
-  <p>%s &mdash; %d node pool(s), %d node(s)</p>
-</div>
-<div class="page-meta">
-  <div>Last scanned: <strong id="infra-age">just now</strong></div>
-  <a class="back-link" href="%s">← Back to Dashboard</a>
-</div>
-</div>
-`, clusterName, len(pools), totalNodes, dashURL))
-
-	// Summary KPI chips
-	sb.WriteString(`<div class="summary-bar">`)
-	sb.WriteString(fmt.Sprintf(`<div class="kpi-chip"><div class="kpi-chip-val">%d</div><div class="kpi-chip-lbl">Node Pools</div></div>`, len(pools)))
-	sb.WriteString(fmt.Sprintf(`<div class="kpi-chip"><div class="kpi-chip-val">%d</div><div class="kpi-chip-lbl">Total Nodes</div></div>`, totalNodes))
-	sb.WriteString(fmt.Sprintf(`<div class="kpi-chip"><div class="kpi-chip-val">%.0f</div><div class="kpi-chip-lbl">Total vCPUs</div></div>`, totalCores))
-	sb.WriteString(fmt.Sprintf(`<div class="kpi-chip"><div class="kpi-chip-val">%.0f GB</div><div class="kpi-chip-lbl">Total Memory</div></div>`, totalMemGB))
-	sb.WriteString(fmt.Sprintf(`<div class="kpi-chip"><div class="kpi-chip-val cost">$%s</div><div class="kpi-chip-lbl">Monthly Cost</div></div>`, formatMoney(totalCost)))
+	ri1yrCell := template.HTML(`<span class="ri-na">—</span>`)
 	if totalRI1yr > 0 {
-		sb.WriteString(fmt.Sprintf(`<div class="kpi-chip"><div class="kpi-chip-val save">$%s</div><div class="kpi-chip-lbl">1yr RI Potential</div></div>`, formatMoney(totalRI1yr)))
+		ri1yrCell = template.HTML(fmt.Sprintf(`<span class="ri-val">$%s</span>`, formatMoney(totalRI1yr)))
 	}
-	sb.WriteString(`</div>`)
-
-	// Node pool table
-	sb.WriteString(`<div class="section">`)
-	sb.WriteString(`<div class="section-hdr"><div class="section-title">Node Pools</div></div>`)
-
-	if len(pools) == 0 {
-		sb.WriteString(`<div class="empty-state"><div class="icon">🖥️</div><div>No node pool data available</div></div>`)
-	} else {
-		sb.WriteString(`<div class="inf-wrap"><table class="inf-table">`)
-		sb.WriteString(`<thead><tr>
-<th>Pool</th>
-<th>VM SKU</th>
-<th style="text-align:center">Nodes</th>
-<th>CPU Utilization</th>
-<th>Memory Utilization</th>
-<th style="text-align:right">$/Node/mo</th>
-<th style="text-align:right">Pool/mo</th>
-<th style="text-align:right">1yr RI Save</th>
-<th style="text-align:right">3yr RI Save</th>
-</tr></thead>`)
-		sb.WriteString(`<tbody>`)
-		for _, p := range pools {
-			sb.WriteString(renderInfraPoolRow(p))
-		}
-		sb.WriteString(`</tbody>`)
-
-		// Summary / totals footer row
-		ri1yrCell := `<span class="ri-na">—</span>`
-		if totalRI1yr > 0 {
-			ri1yrCell = fmt.Sprintf(`<span class="ri-val">$%s</span>`, formatMoney(totalRI1yr))
-		}
-		ri3yrCell := `<span class="ri-na">—</span>`
-		if totalRI3yr > 0 {
-			ri3yrCell = fmt.Sprintf(`<span class="ri-val">$%s</span>`, formatMoney(totalRI3yr))
-		}
-		sb.WriteString(fmt.Sprintf(`<tfoot><tr>
-<td colspan="2" style="color:var(--text-muted);font-size:0.75rem;text-transform:uppercase;letter-spacing:0.5px">Total</td>
-<td style="text-align:center">%d</td>
-<td><span style="font-size:0.78rem;color:var(--text-muted)">%.1f / %.1f cores</span></td>
-<td><span style="font-size:0.78rem;color:var(--text-muted)">%.1f / %.1f GB</span></td>
-<td style="text-align:right">—</td>
-<td style="text-align:right" class="money">$%s</td>
-<td style="text-align:right">%s</td>
-<td style="text-align:right">%s</td>
-</tr></tfoot>`,
-			totalNodes,
-			sumCPUReq(pools), totalCores,
-			sumMemReq(pools), totalMemGB,
-			formatMoney(totalCost),
-			ri1yrCell, ri3yrCell,
-		))
-		sb.WriteString(`</table></div>`)
+	ri3yrCell := template.HTML(`<span class="ri-na">—</span>`)
+	if totalRI3yr > 0 {
+		ri3yrCell = template.HTML(fmt.Sprintf(`<span class="ri-val">$%s</span>`, formatMoney(totalRI3yr)))
 	}
-	sb.WriteString(`</div>`) // section
 
-	sb.WriteString(`<div class="footer">OpsCart FinOps Engine &middot; Infrastructure &middot; Pricing from embedded Azure catalog &mdash; actual costs may vary</div>`)
-	sb.WriteString(`</main>`)
-	sb.WriteString(`</div>`) // layout
+	data := infrastructurePageData{
+		ClusterName: clusterName,
+		DashURL:     "/" + q,
+		Sidebar:     template.HTML(buildSidebar("infrastructure", activeCtx, clusterName, clusterList)),
+		PoolCount:   len(pools),
+		TotalNodes:  totalNodes,
+		TotalCores:  fmt.Sprintf("%.0f", totalCores),
+		TotalMemGB:  fmt.Sprintf("%.0f GB", totalMemGB),
+		TotalCost:   "$" + formatMoney(totalCost),
+		TotalRI1yr: func() string {
+			if totalRI1yr > 0 {
+				return "$" + formatMoney(totalRI1yr)
+			}
+			return ""
+		}(),
+		HasRI:       totalRI1yr > 0,
+		HasPools:    len(pools) > 0,
+		PoolRows:    poolRows,
+		CPUReqStr:   fmt.Sprintf("%.1f / %.1f cores", sumCPUReq(pools), totalCores),
+		MemReqStr:   fmt.Sprintf("%.1f / %.1f GB", sumMemReq(pools), totalMemGB),
+		RI1yrCell:   ri1yrCell,
+		RI3yrCell:   ri3yrCell,
+		ScannedAtMs: scannedAt.UnixMilli(),
+	}
 
-	sb.WriteString(fmt.Sprintf(`<script>
-(function(){
-  var TS=%d,el=document.getElementById('infra-age'),sb=document.getElementById('infra-age-sb');
-  function upd(){
-    var s=Math.floor((Date.now()-TS)/1000);
-    var t=s<5?'just now':s<60?s+'s ago':Math.floor(s/60)+'m ago';
-    if(el)el.textContent=t;if(sb)sb.textContent=t;
-  }
-  setInterval(upd,1000);upd();
-})();
-</script>
-</body>
-</html>`, scannedAt.UnixMilli()))
-
-	return sb.String()
+	var buf strings.Builder
+	if err := getInfrastructureTmpl().Execute(&buf, data); err != nil {
+		log.Printf("infrastructure template: %v", err)
+		return ""
+	}
+	return buf.String()
 }
+
+var getInfrastructureTmpl = sync.OnceValue(func() *template.Template {
+	return template.Must(
+		template.New("infrastructure.html").
+			ParseFS(templateFS, "templates/base.html", "templates/infrastructure.html"),
+	)
+})
 
 func renderInfraPoolRow(p models.NodePoolCost) string {
 	// Priority badge
@@ -876,9 +768,40 @@ func (srv *server) handleNamespacesPage(w http.ResponseWriter, r *http.Request) 
 	fmt.Fprint(w, renderNamespacesPage(scan, ctx, srv.clusterList))
 }
 
+type namespacesPageData struct {
+	ClusterName      string
+	DashURL          string
+	NamespaceCount   int
+	ProtectedCount   int
+	UnprotectedCount int
+	TotalCost        float64
+	NSRows           []namespacesNSRow
+	TotalCostCell    template.HTML
+	TotalPods        int
+	TotalCPU         float64
+	TotalMem         float64
+	Sidebar          template.HTML
+}
+
+type namespacesNSRow struct {
+	Name      string
+	CostCell  template.HTML
+	PodCount  int
+	CPUCores  float64
+	MemoryGB  float64
+	NetCell   template.HTML
+	WasteCell template.HTML
+}
+
+var getNamespacesTmpl = sync.OnceValue(func() *template.Template {
+	return template.Must(
+		template.New("namespaces.html").
+			Funcs(template.FuncMap{"money": formatMoney}).
+			ParseFS(templateFS, "templates/base.html", "templates/namespaces.html"))
+})
+
 func renderNamespacesPage(scan *clusterScan, activeCtx string, clusterList []string) string {
 	var nsCosts []models.NamespaceCostInfo
-	scannedAt := time.Now()
 	clusterName := displayName(activeCtx)
 	if scan != nil && scan.report != nil {
 		nsCosts = make([]models.NamespaceCostInfo, len(scan.report.NamespaceCosts))
@@ -886,7 +809,6 @@ func renderNamespacesPage(scan *clusterScan, activeCtx string, clusterList []str
 		sort.Slice(nsCosts, func(i, j int) bool {
 			return nsCosts[i].EstimatedCost.Best > nsCosts[j].EstimatedCost.Best
 		})
-		scannedAt = scan.report.Timestamp
 		clusterName = scan.report.ClusterName
 	}
 
@@ -897,213 +819,84 @@ func renderNamespacesPage(scan *clusterScan, activeCtx string, clusterList []str
 	for _, ns := range nsCosts {
 		totalCost += ns.EstimatedCost.Best
 	}
-	protectedCount := len(protectedSet)
-	unprotectedCount := len(unprotectedSet)
 
 	q := ""
 	if activeCtx != "" {
 		q = "?cluster=" + url.QueryEscape(activeCtx)
 	}
-	dashURL := "/" + q
 
-	_ = scannedAt
+	var totalPods int
+	var totalCPU, totalMem float64
+	var nsRows []namespacesNSRow
+	for _, ns := range nsCosts {
+		totalPods += ns.PodCount
+		totalCPU += ns.CPUCores
+		totalMem += ns.MemoryGB
 
-	var sb strings.Builder
-
-	sb.WriteString(`<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width,initial-scale=1.0">
-<title>Namespaces — ` + clusterName + `</title>
-<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
-<style>
-*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
-:root{
-  --bg:#0f172a;--surface:#1e293b;--surface-hover:#334155;--border:#334155;
-  --text:#f1f5f9;--text-secondary:#94a3b8;--text-muted:#64748b;
-  --primary:#6366f1;--primary-light:#818cf8;--primary-bg:rgba(99,102,241,0.1);
-  --success:#10b981;--warning:#f59e0b;--danger:#ef4444;--info:#06b6d4;
-  --radius:12px;--radius-sm:8px;--radius-xs:6px;
-}
-body{font-family:'Inter',system-ui,sans-serif;background:var(--bg);color:var(--text);line-height:1.6;min-height:100vh}
-.layout{display:grid;grid-template-columns:260px 1fr;min-height:100vh}
-.sidebar{background:var(--surface);border-right:1px solid var(--border);padding:2rem 1.5rem;position:sticky;top:0;height:100vh;overflow-y:auto}
-.main{padding:2rem 2.5rem;overflow-y:auto}
-.logo{display:flex;align-items:center;gap:0.75rem;margin-bottom:2.5rem}
-.logo-icon{width:40px;height:40px;background:var(--primary);border-radius:10px;display:flex;align-items:center;justify-content:center;font-size:1.2rem}
-.logo-text{font-size:1.1rem;font-weight:700}
-.logo-sub{font-size:0.7rem;color:var(--text-muted);text-transform:uppercase;letter-spacing:1px}
-.nav-section{margin-bottom:1.5rem}
-.nav-label{font-size:0.7rem;text-transform:uppercase;letter-spacing:1.5px;color:var(--text-muted);margin-bottom:0.75rem;padding-left:0.75rem}
-.nav-item{display:flex;align-items:center;gap:0.75rem;padding:0.7rem 0.75rem;border-radius:var(--radius-sm);color:var(--text-secondary);font-size:0.9rem;cursor:pointer;transition:all 0.15s;text-decoration:none}
-.nav-item:hover{background:var(--surface-hover);color:var(--text)}
-.nav-item.active{background:var(--primary-bg);color:var(--primary-light);font-weight:600}
-.cluster-info{margin-top:auto;padding-top:2rem;border-top:1px solid var(--border)}
-.cluster-badge{background:var(--primary-bg);border:1px solid rgba(99,102,241,0.2);border-radius:var(--radius-sm);padding:0.85rem;margin-bottom:0.75rem}
-.cluster-badge h4{font-size:0.7rem;color:var(--primary-light);margin-bottom:0.3rem;text-transform:uppercase;letter-spacing:0.8px}
-.cluster-badge p{font-size:0.75rem;color:var(--text-muted);word-break:break-all}
-.page-hdr{display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:1.75rem;flex-wrap:wrap;gap:1rem}
-.page-hdr h1{font-size:1.75rem;font-weight:800}
-.page-hdr p{color:var(--text-muted);font-size:0.85rem;margin-top:0.25rem}
-.page-meta{text-align:right;font-size:0.78rem;color:var(--text-muted)}
-.page-meta strong{color:var(--text-secondary)}
-.back-link{display:block;margin-top:0.5rem;color:var(--primary-light);font-size:0.75rem;text-decoration:none}
-.back-link:hover{text-decoration:underline}
-.summary-bar{display:flex;gap:1rem;margin-bottom:2rem;flex-wrap:wrap}
-.kpi-chip{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius-sm);padding:0.75rem 1.25rem;min-width:130px}
-.kpi-chip-val{font-size:1.4rem;font-weight:800;line-height:1;margin-bottom:0.2rem}
-.kpi-chip-val.cost{color:var(--danger)}
-.kpi-chip-val.ok{color:var(--success)}
-.kpi-chip-val.warn{color:var(--warning)}
-.kpi-chip-lbl{font-size:0.7rem;color:var(--text-muted);text-transform:uppercase;letter-spacing:0.5px}
-.section{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:1.5rem;margin-bottom:1.5rem}
-.section-hdr{display:flex;justify-content:space-between;align-items:center;margin-bottom:1.25rem}
-.section-title{font-size:1rem;font-weight:700}
-.ns-wrap{overflow-x:auto;border:1px solid var(--border);border-radius:var(--radius-sm)}
-.ns-table{width:100%;border-collapse:collapse;min-width:760px}
-.ns-table th{background:rgba(0,0,0,0.35);padding:0.6rem 0.85rem;text-align:left;font-size:0.67rem;text-transform:uppercase;letter-spacing:0.8px;color:var(--text-muted);font-weight:600;border-bottom:1px solid var(--border);white-space:nowrap}
-.ns-table td{padding:0.75rem 0.85rem;border-bottom:1px solid var(--border);font-size:0.83rem;vertical-align:middle}
-.ns-table tbody tr:last-child td{border-bottom:none}
-.ns-table tbody tr:hover td{background:rgba(99,102,241,0.03)}
-.ns-table tfoot td{background:rgba(0,0,0,0.25);font-weight:700;border-top:2px solid var(--border);font-size:0.83rem;padding:0.75rem 0.85rem}
-.ns-name{font-weight:600;color:var(--text)}
-.money{font-variant-numeric:tabular-nums;font-weight:600}
-.badge{display:inline-flex;align-items:center;padding:2px 9px;border-radius:20px;font-size:0.7rem;font-weight:600;white-space:nowrap}
-.badge-ok{background:rgba(16,185,129,0.12);color:#34d399;border:1px solid rgba(16,185,129,0.2)}
-.badge-warn{background:rgba(245,158,11,0.12);color:#fbbf24;border:1px solid rgba(245,158,11,0.2)}
-.badge-danger{background:rgba(239,68,68,0.12);color:#f87171;border:1px solid rgba(239,68,68,0.2)}
-.muted{color:var(--text-muted)}
-.empty-state{text-align:center;padding:3rem 1rem;color:var(--text-muted)}
-.empty-state .icon{font-size:2.5rem;margin-bottom:0.75rem}
-@keyframes fadeIn{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:translateY(0)}}
-.section{animation:fadeIn 0.3s ease both}
-@media(max-width:1024px){.layout{grid-template-columns:1fr}.sidebar{display:none}}
-</style>
-</head>
-<body>
-<div class="layout">
-`)
-
-	// ── Sidebar ────────────────────────────────────────────────────────────────
-	sb.WriteString(buildSidebar("namespaces", activeCtx, clusterName, clusterList))
-
-	// ── Main ──────────────────────────────────────────────────────────────────
-	sb.WriteString(`<main class="main">`)
-
-	sb.WriteString(fmt.Sprintf(`<div class="page-hdr">
-<div>
-  <h1>📦 Namespaces</h1>
-  <p>%s &mdash; %d namespace(s), sorted by cost</p>
-</div>
-<div class="page-meta">
-  <a class="back-link" href="%s">← Back to Dashboard</a>
-</div>
-</div>
-`, clusterName, len(nsCosts), dashURL))
-
-	// Summary KPI chips
-	sb.WriteString(`<div class="summary-bar">`)
-	sb.WriteString(fmt.Sprintf(`<div class="kpi-chip"><div class="kpi-chip-val">%d</div><div class="kpi-chip-lbl">Namespaces</div></div>`, len(nsCosts)))
-	sb.WriteString(fmt.Sprintf(`<div class="kpi-chip"><div class="kpi-chip-val ok">%d</div><div class="kpi-chip-lbl">Protected</div></div>`, protectedCount))
-	if unprotectedCount > 0 {
-		sb.WriteString(fmt.Sprintf(`<div class="kpi-chip"><div class="kpi-chip-val warn">%d</div><div class="kpi-chip-lbl">Unprotected</div></div>`, unprotectedCount))
-	}
-	if totalCost > 0 {
-		sb.WriteString(fmt.Sprintf(`<div class="kpi-chip"><div class="kpi-chip-val cost">$%s</div><div class="kpi-chip-lbl">Total Cost/mo</div></div>`, formatMoney(totalCost)))
-	}
-	sb.WriteString(`</div>`)
-
-	// Namespace table
-	sb.WriteString(`<div class="section">`)
-	sb.WriteString(`<div class="section-hdr"><div class="section-title">Namespace Breakdown</div></div>`)
-
-	if len(nsCosts) == 0 {
-		sb.WriteString(`<div class="empty-state"><div class="icon">📦</div><div>No namespace data available</div></div>`)
-	} else {
-		sb.WriteString(`<div class="ns-wrap"><table class="ns-table">`)
-		sb.WriteString(`<thead><tr>
-<th>Namespace</th>
-<th style="text-align:right">$/mo</th>
-<th style="text-align:center">Pods</th>
-<th style="text-align:right">CPU (cores)</th>
-<th style="text-align:right">Memory (GB)</th>
-<th>Net Policy</th>
-<th style="text-align:center">Waste Items</th>
-</tr></thead>`)
-		sb.WriteString(`<tbody>`)
-
-		var totalPods int
-		var totalCPU, totalMem float64
-		for _, ns := range nsCosts {
-			totalPods += ns.PodCount
-			totalCPU += ns.CPUCores
-			totalMem += ns.MemoryGB
-
-			// Cost cell
-			costCell := `<span class="muted">—</span>`
-			if ns.EstimatedCost.Best >= 1 {
-				costCell = fmt.Sprintf(`<span class="money">$%s</span>`, formatMoney(ns.EstimatedCost.Best))
-			} else if ns.EstimatedCost.Best > 0 {
-				costCell = `<span class="money">&lt;$1</span>`
-			}
-
-			// Network policy cell
-			var netCell string
-			if protectedSet[ns.Name] {
-				netCell = `<span class="badge badge-ok">✅ Protected</span>`
-			} else if unprotectedSet[ns.Name] {
-				netCell = `<span class="badge badge-danger">❌ Unprotected</span>`
-			} else {
-				netCell = `<span class="muted">—</span>`
-			}
-
-			// Waste cell
-			wc := wasteCounts[ns.Name]
-			var wasteCell string
-			switch {
-			case wc == 0:
-				wasteCell = `<span class="muted">—</span>`
-			case wc <= 2:
-				wasteCell = fmt.Sprintf(`<span class="badge badge-warn">⚠ %d</span>`, wc)
-			default:
-				wasteCell = fmt.Sprintf(`<span class="badge badge-danger">⚠ %d</span>`, wc)
-			}
-
-			sb.WriteString(fmt.Sprintf(`<tr>
-<td><span class="ns-name">%s</span></td>
-<td style="text-align:right">%s</td>
-<td style="text-align:center">%d</td>
-<td style="text-align:right">%.2f</td>
-<td style="text-align:right">%.1f</td>
-<td>%s</td>
-<td style="text-align:center">%s</td>
-</tr>`, ns.Name, costCell, ns.PodCount, ns.CPUCores, ns.MemoryGB, netCell, wasteCell))
+		costCell := template.HTML(`<span class="muted">—</span>`)
+		if ns.EstimatedCost.Best >= 1 {
+			costCell = template.HTML(`<span class="money">$` + formatMoney(ns.EstimatedCost.Best) + `</span>`)
+		} else if ns.EstimatedCost.Best > 0 {
+			costCell = `<span class="money">&lt;$1</span>`
 		}
 
-		sb.WriteString(`</tbody>`)
-
-		// Footer totals row
-		totalCostCell := `<span class="muted">—</span>`
-		if totalCost >= 1 {
-			totalCostCell = fmt.Sprintf(`$%s`, formatMoney(totalCost))
+		var netCell template.HTML
+		if protectedSet[ns.Name] {
+			netCell = `<span class="badge badge-ok">✅ Protected</span>`
+		} else if unprotectedSet[ns.Name] {
+			netCell = `<span class="badge badge-danger">❌ Unprotected</span>`
+		} else {
+			netCell = `<span class="muted">—</span>`
 		}
-		sb.WriteString(fmt.Sprintf(`<tfoot><tr>
-<td style="color:var(--text-muted);font-size:0.75rem;text-transform:uppercase;letter-spacing:0.5px">Total</td>
-<td style="text-align:right">%s</td>
-<td style="text-align:center">%d</td>
-<td style="text-align:right">%.2f</td>
-<td style="text-align:right">%.1f</td>
-<td></td>
-<td></td>
-</tr></tfoot>`, totalCostCell, totalPods, totalCPU, totalMem))
 
-		sb.WriteString(`</table></div>`)
+		wc := wasteCounts[ns.Name]
+		var wasteCell template.HTML
+		switch {
+		case wc == 0:
+			wasteCell = `<span class="muted">—</span>`
+		case wc <= 2:
+			wasteCell = template.HTML(fmt.Sprintf(`<span class="badge badge-warn">⚠ %d</span>`, wc))
+		default:
+			wasteCell = template.HTML(fmt.Sprintf(`<span class="badge badge-danger">⚠ %d</span>`, wc))
+		}
+
+		nsRows = append(nsRows, namespacesNSRow{
+			Name:      ns.Name,
+			CostCell:  costCell,
+			PodCount:  ns.PodCount,
+			CPUCores:  ns.CPUCores,
+			MemoryGB:  ns.MemoryGB,
+			NetCell:   netCell,
+			WasteCell: wasteCell,
+		})
 	}
 
-	sb.WriteString(`</div>`) // section
-	sb.WriteString(`</main></div></body></html>`)
-	return sb.String()
+	totalCostCell := template.HTML(`<span class="muted">—</span>`)
+	if totalCost >= 1 {
+		totalCostCell = template.HTML(`$` + formatMoney(totalCost))
+	}
+
+	data := namespacesPageData{
+		ClusterName:      clusterName,
+		DashURL:          "/" + q,
+		NamespaceCount:   len(nsCosts),
+		ProtectedCount:   len(protectedSet),
+		UnprotectedCount: len(unprotectedSet),
+		TotalCost:        totalCost,
+		NSRows:           nsRows,
+		TotalCostCell:    totalCostCell,
+		TotalPods:        totalPods,
+		TotalCPU:         totalCPU,
+		TotalMem:         totalMem,
+		Sidebar:          template.HTML(buildSidebar("namespaces", activeCtx, clusterName, clusterList)),
+	}
+
+	var buf strings.Builder
+	if err := getNamespacesTmpl().Execute(&buf, data); err != nil {
+		log.Printf("namespaces template: %v", err)
+		return ""
+	}
+	return buf.String()
 }
 
 // nsNetPolicySets returns two maps of namespace names: one protected, one unprotected.
@@ -1177,8 +970,47 @@ func (srv *server) handleOptimizationsPage(w http.ResponseWriter, r *http.Reques
 	fmt.Fprint(w, renderOptimizationsPage(scan, ctx, srv.clusterList))
 }
 
+type optimizationsPageData struct {
+	ClusterName string
+	DashURL     string
+	Sidebar     template.HTML
+	// RI section
+	RIPools    []riPoolRow
+	TotalRI1yr string // pre-formatted "$1,234"
+	TotalRI3yr string // pre-formatted or ""
+	HasRI      bool
+	// Waste section
+	PVCCount         int
+	PVCCostCell      string // pre-formatted HTML
+	PVCNote          string
+	ZeroReplicaCount int
+	AbandonedCount   int
+	ZombieCount      int
+	IdleCount        int
+	WasteTotal       int
+	TotalWasteCost   string
+	// Right-sizing
+	RSCandidates []rsCandidateRow
+}
+
+type riPoolRow struct {
+	Name      string
+	VMSize    string
+	NodeCount int
+	PayGMo    string // "$9,811"
+	RI1yr     string // "$3,200"
+	RI3yr     string // "$2,100" or ""
+}
+
+type rsCandidateRow struct {
+	Name     string
+	PodCount int
+	CPUCores string // "0.200"
+	MemoryGB string // "0.2"
+	CostCell string // pre-formatted HTML
+}
+
 func renderOptimizationsPage(scan *clusterScan, activeCtx string, clusterList []string) string {
-	// ── Data ─────────────────────────────────────────────────────────────────
 	var pools []models.NodePoolCost
 	var nsCosts []models.NamespaceCostInfo
 	clusterName := displayName(activeCtx)
@@ -1189,20 +1021,32 @@ func renderOptimizationsPage(scan *clusterScan, activeCtx string, clusterList []
 	}
 
 	// RI opportunities
-	var riPools []models.NodePoolCost
+	var riPoolRows []riPoolRow
 	var totalRI1yr, totalRI3yr float64
 	for _, p := range pools {
 		if p.RISavings > 0 {
-			riPools = append(riPools, p)
+			ri3yr := ""
+			if p.RISavings3yr > 0 {
+				ri3yr = "$" + formatMoney(p.RISavings3yr)
+			}
+			riPoolRows = append(riPoolRows, riPoolRow{
+				Name:      p.Name,
+				VMSize:    p.VMSize,
+				NodeCount: p.NodeCount,
+				PayGMo:    "$" + formatMoney(p.TotalMonthly),
+				RI1yr:     "$" + formatMoney(p.RISavings),
+				RI3yr:     ri3yr,
+			})
 			totalRI1yr += p.RISavings
 			totalRI3yr += p.RISavings3yr
 		}
 	}
-	sort.Slice(riPools, func(i, j int) bool { return riPools[i].RISavings > riPools[j].RISavings })
+	sort.Slice(riPoolRows, func(i, j int) bool { return riPoolRows[i].RI1yr > riPoolRows[j].RI1yr })
 
-	// Waste counts — same data path as collectWarRoomIssues
+	// Waste counts
 	var zombieCount, idleCount, zeroReplicaCount, abandonedCount, pvcCount, pvcStorageGB int
 	var pvcCostEst float64
+	var wasteTotal int
 	if scan != nil && scan.wasteAudit != nil {
 		wa := scan.wasteAudit
 		for _, p := range wa.StalePods {
@@ -1222,296 +1066,100 @@ func renderOptimizationsPage(scan *clusterScan, activeCtx string, clusterList []
 		} else if pvcStorageGB > 0 {
 			pvcCostEst = float64(pvcStorageGB) * 0.10
 		}
+		wasteTotal = wa.TotalWasteItems
 	}
 
-	// Right-sizing: namespaces with < 0.5 CPU cores requested but running pods
-	var rsNS []models.NamespaceCostInfo
+	pvcNote := fmt.Sprintf("%d GB unattached storage", pvcStorageGB)
+	if pvcStorageGB == 0 {
+		pvcNote = "no size data"
+	}
+	pvcCostCell := ""
+	if pvcCostEst > 0 {
+		pvcCostCell = "$" + formatMoney(pvcCostEst)
+	}
+	totalWasteCost := ""
+	if pvcCostEst > 0 {
+		totalWasteCost = "$" + formatMoney(pvcCostEst)
+	}
+
+	// Right-sizing
+	var rsRows []rsCandidateRow
 	for _, ns := range nsCosts {
 		if ns.CPUCores < 0.5 && ns.PodCount > 0 {
-			rsNS = append(rsNS, ns)
+			costCell := ""
+			if ns.EstimatedCost.Best >= 1 {
+				costCell = "$" + formatMoney(ns.EstimatedCost.Best)
+			} else if ns.EstimatedCost.Best > 0 {
+				costCell = "<$1"
+			}
+			rsRows = append(rsRows, rsCandidateRow{
+				Name:     ns.Name,
+				PodCount: ns.PodCount,
+				CPUCores: fmt.Sprintf("%.3f", ns.CPUCores),
+				MemoryGB: fmt.Sprintf("%.1f", ns.MemoryGB),
+				CostCell: costCell,
+			})
 		}
 	}
-	sort.Slice(rsNS, func(i, j int) bool {
-		return rsNS[i].EstimatedCost.Best > rsNS[j].EstimatedCost.Best
-	})
-	if len(rsNS) > 10 {
-		rsNS = rsNS[:10]
+	sort.Slice(rsRows, func(i, j int) bool { return rsRows[i].Name < rsRows[j].Name })
+	if len(rsRows) > 10 {
+		rsRows = rsRows[:10]
 	}
 
 	q := ""
 	if activeCtx != "" {
 		q = "?cluster=" + url.QueryEscape(activeCtx)
 	}
-	dashURL := "/" + q
 
-	var sb strings.Builder
+	data := optimizationsPageData{
+		ClusterName:      clusterName,
+		DashURL:          "/" + q,
+		Sidebar:          template.HTML(buildSidebar("optimizations", activeCtx, clusterName, clusterList)),
+		RIPools:          riPoolRows,
+		TotalRI1yr:       pvcCostCell,
+		HasRI:            len(riPoolRows) > 0,
+		PVCCount:         pvcCount,
+		PVCCostCell:      pvcCostCell,
+		PVCNote:          pvcNote,
+		ZeroReplicaCount: zeroReplicaCount,
+		AbandonedCount:   abandonedCount,
+		ZombieCount:      zombieCount,
+		IdleCount:        idleCount,
+		WasteTotal:       wasteTotal,
+		TotalWasteCost:   totalWasteCost,
+		RSCandidates:     rsRows,
+	}
 
-	// ── Head ─────────────────────────────────────────────────────────────────
-	sb.WriteString(`<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width,initial-scale=1.0">
-<title>Optimizations — ` + clusterName + `</title>
-<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
-<style>
-*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
-:root{
-  --bg:#0f172a;--surface:#1e293b;--surface-hover:#334155;--border:#334155;
-  --text:#f1f5f9;--text-secondary:#94a3b8;--text-muted:#64748b;
-  --primary:#6366f1;--primary-light:#818cf8;--primary-bg:rgba(99,102,241,0.1);
-  --success:#10b981;--warning:#f59e0b;--danger:#ef4444;--info:#06b6d4;
-  --radius:12px;--radius-sm:8px;--radius-xs:6px;
+	var buf strings.Builder
+	if err := getOptimizationsTmpl().Execute(&buf, data); err != nil {
+		log.Printf("optimizations template: %v", err)
+		return ""
+	}
+	return buf.String()
 }
-body{font-family:'Inter',system-ui,sans-serif;background:var(--bg);color:var(--text);line-height:1.6;min-height:100vh}
-.layout{display:grid;grid-template-columns:260px 1fr;min-height:100vh}
-.sidebar{background:var(--surface);border-right:1px solid var(--border);padding:2rem 1.5rem;position:sticky;top:0;height:100vh;overflow-y:auto}
-.main{padding:2rem 2.5rem;overflow-y:auto}
-.logo{display:flex;align-items:center;gap:0.75rem;margin-bottom:2.5rem}
-.logo-icon{width:40px;height:40px;background:var(--primary);border-radius:10px;display:flex;align-items:center;justify-content:center;font-size:1.2rem}
-.logo-text{font-size:1.1rem;font-weight:700}
-.logo-sub{font-size:0.7rem;color:var(--text-muted);text-transform:uppercase;letter-spacing:1px}
-.nav-section{margin-bottom:1.5rem}
-.nav-label{font-size:0.7rem;text-transform:uppercase;letter-spacing:1.5px;color:var(--text-muted);margin-bottom:0.75rem;padding-left:0.75rem}
-.nav-item{display:flex;align-items:center;gap:0.75rem;padding:0.7rem 0.75rem;border-radius:var(--radius-sm);color:var(--text-secondary);font-size:0.9rem;cursor:pointer;transition:all 0.15s;text-decoration:none}
-.nav-item:hover{background:var(--surface-hover);color:var(--text)}
-.nav-item.active{background:var(--primary-bg);color:var(--primary-light);font-weight:600}
-.cluster-info{margin-top:auto;padding-top:2rem;border-top:1px solid var(--border)}
-.cluster-badge{background:var(--primary-bg);border:1px solid rgba(99,102,241,0.2);border-radius:var(--radius-sm);padding:0.85rem;margin-bottom:0.75rem}
-.cluster-badge h4{font-size:0.7rem;color:var(--primary-light);margin-bottom:0.3rem;text-transform:uppercase;letter-spacing:0.8px}
-.cluster-badge p{font-size:0.75rem;color:var(--text-muted);word-break:break-all}
-.page-hdr{display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:1.75rem;flex-wrap:wrap;gap:1rem}
-.page-hdr h1{font-size:1.75rem;font-weight:800}
-.page-hdr p{color:var(--text-muted);font-size:0.85rem;margin-top:0.25rem}
-.page-meta{text-align:right;font-size:0.78rem;color:var(--text-muted)}
-.back-link{display:block;margin-top:0.5rem;color:var(--primary-light);font-size:0.75rem;text-decoration:none}
-.back-link:hover{text-decoration:underline}
-.summary-bar{display:flex;gap:1rem;margin-bottom:2rem;flex-wrap:wrap}
-.kpi-chip{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius-sm);padding:0.75rem 1.25rem;min-width:140px}
-.kpi-chip-val{font-size:1.4rem;font-weight:800;line-height:1;margin-bottom:0.2rem}
-.kpi-chip-val.save{color:var(--success)}
-.kpi-chip-val.warn{color:var(--warning)}
-.kpi-chip-lbl{font-size:0.7rem;color:var(--text-muted);text-transform:uppercase;letter-spacing:0.5px}
-.section{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:1.5rem;margin-bottom:1.5rem}
-.section-hdr{display:flex;justify-content:space-between;align-items:center;margin-bottom:1.25rem}
-.section-title{font-size:1rem;font-weight:700}
-.section-sub{font-size:0.78rem;color:var(--text-muted)}
-.opt-wrap{overflow-x:auto;border:1px solid var(--border);border-radius:var(--radius-sm)}
-.opt-table{width:100%;border-collapse:collapse}
-.opt-table th{background:rgba(0,0,0,0.35);padding:0.6rem 0.85rem;text-align:left;font-size:0.67rem;text-transform:uppercase;letter-spacing:0.8px;color:var(--text-muted);font-weight:600;border-bottom:1px solid var(--border);white-space:nowrap}
-.opt-table td{padding:0.75rem 0.85rem;border-bottom:1px solid var(--border);font-size:0.83rem;vertical-align:middle}
-.opt-table tbody tr:last-child td{border-bottom:none}
-.opt-table tbody tr:hover td{background:rgba(99,102,241,0.03)}
-.opt-table tfoot td{background:rgba(0,0,0,0.25);font-weight:700;border-top:2px solid var(--border);font-size:0.83rem;padding:0.75rem 0.85rem}
-.sku{font-family:'Consolas','Monaco',monospace;font-size:0.75rem;color:var(--primary-light)}
-.money{font-variant-numeric:tabular-nums;font-weight:600}
-.save{color:var(--success);font-weight:600}
-.muted{color:var(--text-muted)}
-.badge{display:inline-flex;align-items:center;padding:2px 9px;border-radius:20px;font-size:0.7rem;font-weight:600;white-space:nowrap}
-.badge-warn{background:rgba(245,158,11,0.12);color:#fbbf24;border:1px solid rgba(245,158,11,0.2)}
-.empty-state{text-align:center;padding:2.5rem 1rem;color:var(--text-muted)}
-.empty-state .icon{font-size:2rem;margin-bottom:0.5rem}
-@keyframes fadeIn{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:translateY(0)}}
-.section{animation:fadeIn 0.3s ease both}
-@media(max-width:1024px){.layout{grid-template-columns:1fr}.sidebar{display:none}}
-</style>
-</head>
-<body>
-<div class="layout">
-`)
 
-	// ── Sidebar ───────────────────────────────────────────────────────────────
-	sb.WriteString(buildSidebar("optimizations", activeCtx, clusterName, clusterList))
+var getOptimizationsTmpl = sync.OnceValue(func() *template.Template {
+	return template.Must(
+		template.New("optimizations.html").
+			ParseFS(templateFS, "templates/base.html", "templates/optimizations.html"),
+	)
+})
 
-	// ── Main ─────────────────────────────────────────────────────────────────
-	sb.WriteString(`<main class="main">`)
+type sidebarData struct {
+	DashHref    string
+	InfraHref   string
+	NsHref      string
+	OptHref     string
+	WrHref      string
+	ActivePage  string
+	ClusterName string
+	Clusters    []sidebarCluster
+}
 
-	sb.WriteString(fmt.Sprintf(`<div class="page-hdr">
-<div>
-  <h1>💡 Optimizations</h1>
-  <p>%s &mdash; cost-saving opportunities</p>
-</div>
-<div class="page-meta">
-  <a class="back-link" href="%s">← Back to Dashboard</a>
-</div>
-</div>
-`, clusterName, dashURL))
-
-	// Summary KPI chips
-	sb.WriteString(`<div class="summary-bar">`)
-	if totalRI1yr > 0 {
-		sb.WriteString(fmt.Sprintf(`<div class="kpi-chip"><div class="kpi-chip-val save">$%s</div><div class="kpi-chip-lbl">1yr RI Savings/mo</div></div>`, formatMoney(totalRI1yr)))
-	}
-	if totalRI3yr > 0 {
-		sb.WriteString(fmt.Sprintf(`<div class="kpi-chip"><div class="kpi-chip-val save">$%s</div><div class="kpi-chip-lbl">3yr RI Savings/mo</div></div>`, formatMoney(totalRI3yr)))
-	}
-	if pvcCostEst > 0 {
-		sb.WriteString(fmt.Sprintf(`<div class="kpi-chip"><div class="kpi-chip-val warn">$%s</div><div class="kpi-chip-lbl">PVC Waste/mo</div></div>`, formatMoney(pvcCostEst)))
-	}
-	wasteTotal := 0
-	if scan != nil && scan.wasteAudit != nil {
-		wasteTotal = scan.wasteAudit.TotalWasteItems
-	}
-	sb.WriteString(fmt.Sprintf(`<div class="kpi-chip"><div class="kpi-chip-val">%d</div><div class="kpi-chip-lbl">Total Waste Items</div></div>`, wasteTotal))
-	sb.WriteString(`</div>`)
-
-	// ── Section 1: Reserved Instance Opportunities ────────────────────────────
-	sb.WriteString(`<div class="section">`)
-	sb.WriteString(`<div class="section-hdr">
-<div class="section-title">💰 Reserved Instance Opportunities</div>
-<div class="section-sub">Savings vs. Pay-As-You-Go for On-Demand pools</div>
-</div>`)
-	if len(riPools) == 0 {
-		sb.WriteString(`<div class="empty-state"><div class="icon">💰</div><div>No RI opportunities — all pools are Spot or pricing data unavailable</div></div>`)
-	} else {
-		sb.WriteString(`<div class="opt-wrap"><table class="opt-table">
-<thead><tr>
-<th>Pool</th>
-<th class="sku">VM SKU</th>
-<th style="text-align:center">Nodes</th>
-<th style="text-align:right">PAYG/mo</th>
-<th style="text-align:right">1yr RI Save/mo</th>
-<th style="text-align:right">3yr RI Save/mo</th>
-</tr></thead>
-<tbody>`)
-		for _, p := range riPools {
-			ri3Cell := `<span class="muted">—</span>`
-			if p.RISavings3yr > 0 {
-				ri3Cell = fmt.Sprintf(`<span class="save">$%s</span>`, formatMoney(p.RISavings3yr))
-			}
-			sb.WriteString(fmt.Sprintf(`<tr>
-<td><strong>%s</strong></td>
-<td><span class="sku">%s</span></td>
-<td style="text-align:center">%d</td>
-<td style="text-align:right"><span class="money">$%s</span></td>
-<td style="text-align:right"><span class="save">$%s</span></td>
-<td style="text-align:right">%s</td>
-</tr>`, p.Name, p.VMSize, p.NodeCount, formatMoney(p.TotalMonthly), formatMoney(p.RISavings), ri3Cell))
-		}
-		sb.WriteString(`</tbody>`)
-		ri3TotalCell := `<span class="muted">—</span>`
-		if totalRI3yr > 0 {
-			ri3TotalCell = fmt.Sprintf(`<span class="save">$%s</span>`, formatMoney(totalRI3yr))
-		}
-		sb.WriteString(fmt.Sprintf(`<tfoot><tr>
-<td colspan="4" style="color:var(--text-muted);font-size:0.75rem;text-transform:uppercase;letter-spacing:0.5px">Total potential savings</td>
-<td style="text-align:right"><span class="save">$%s</span></td>
-<td style="text-align:right">%s</td>
-</tr></tfoot>`, formatMoney(totalRI1yr), ri3TotalCell))
-		sb.WriteString(`</table></div>`)
-	}
-	sb.WriteString(`</div>`)
-
-	// ── Section 2: Waste Items by Category ───────────────────────────────────
-	sb.WriteString(`<div class="section">`)
-	sb.WriteString(`<div class="section-hdr">
-<div class="section-title">🗑️ Waste Items by Category</div>
-<div class="section-sub">Resources consuming cost or capacity without business value</div>
-</div>`)
-	sb.WriteString(`<div class="opt-wrap"><table class="opt-table">
-<thead><tr>
-<th>Category</th>
-<th style="text-align:center">Count</th>
-<th style="text-align:right">Est. $/mo</th>
-<th>Notes</th>
-</tr></thead>
-<tbody>`)
-
-	pvcCostCell := `<span class="muted">—</span>`
-	if pvcCostEst > 0 {
-		pvcCostCell = fmt.Sprintf(`<span class="save">$%s</span>`, formatMoney(pvcCostEst))
-	}
-	pvcNote := fmt.Sprintf("%d GB unattached storage", pvcStorageGB)
-	if pvcStorageGB == 0 {
-		pvcNote = "no size data"
-	}
-	sb.WriteString(fmt.Sprintf(`<tr>
-<td><strong>Orphaned PVCs</strong></td>
-<td style="text-align:center">%d</td>
-<td style="text-align:right">%s</td>
-<td class="muted">%s</td>
-</tr>`, pvcCount, pvcCostCell, pvcNote))
-
-	sb.WriteString(fmt.Sprintf(`<tr>
-<td><strong>Zero-Replica Workloads</strong></td>
-<td style="text-align:center">%d</td>
-<td style="text-align:right"><span class="muted">—</span></td>
-<td class="muted">Deployments/StatefulSets scaled to 0</td>
-</tr>`, zeroReplicaCount))
-
-	sb.WriteString(fmt.Sprintf(`<tr>
-<td><strong>Abandoned Namespaces</strong></td>
-<td style="text-align:center">%d</td>
-<td style="text-align:right"><span class="muted">—</span></td>
-<td class="muted">All pods idle, no recent activity</td>
-</tr>`, abandonedCount))
-
-	sb.WriteString(fmt.Sprintf(`<tr>
-<td><strong>Zombie Pods</strong></td>
-<td style="text-align:center">%d</td>
-<td style="text-align:right"><span class="muted">—</span></td>
-<td class="muted">CrashLoopBackOff / OOMKilled consuming node capacity</td>
-</tr>`, zombieCount))
-
-	sb.WriteString(fmt.Sprintf(`<tr>
-<td><strong>Idle Pods</strong></td>
-<td style="text-align:center">%d</td>
-<td style="text-align:right"><span class="muted">—</span></td>
-<td class="muted">Running but no activity for extended period</td>
-</tr>`, idleCount))
-
-	sb.WriteString(`</tbody>`)
-	totalWasteCostCell := `<span class="muted">—</span>`
-	if pvcCostEst > 0 {
-		totalWasteCostCell = fmt.Sprintf(`<span class="save">$%s</span>`, formatMoney(pvcCostEst))
-	}
-	sb.WriteString(fmt.Sprintf(`<tfoot><tr>
-<td colspan="2" style="color:var(--text-muted);font-size:0.75rem;text-transform:uppercase;letter-spacing:0.5px">Total potential savings</td>
-<td style="text-align:right">%s</td>
-<td></td>
-</tr></tfoot>`, totalWasteCostCell))
-	sb.WriteString(`</table></div>`)
-	sb.WriteString(`</div>`)
-
-	// ── Section 3: Right-sizing ───────────────────────────────────────────────
-	sb.WriteString(`<div class="section">`)
-	sb.WriteString(`<div class="section-hdr">
-<div class="section-title">📐 Right-Sizing Candidates</div>
-<div class="section-sub">Namespaces with pods running but &lt;0.5 CPU cores requested — potential over-provisioning</div>
-</div>`)
-	if len(rsNS) == 0 {
-		sb.WriteString(`<div class="empty-state"><div class="icon">📐</div><div>No right-sizing candidates identified</div></div>`)
-	} else {
-		sb.WriteString(`<div class="opt-wrap"><table class="opt-table">
-<thead><tr>
-<th>Namespace</th>
-<th style="text-align:center">Pods</th>
-<th style="text-align:right">CPU Cores</th>
-<th style="text-align:right">Memory (GB)</th>
-<th style="text-align:right">Est. Cost/mo</th>
-</tr></thead>
-<tbody>`)
-		for _, ns := range rsNS {
-			costCell := `<span class="muted">—</span>`
-			if ns.EstimatedCost.Best >= 1 {
-				costCell = fmt.Sprintf(`<span class="money">$%s</span>`, formatMoney(ns.EstimatedCost.Best))
-			} else if ns.EstimatedCost.Best > 0 {
-				costCell = `<span class="money">&lt;$1</span>`
-			}
-			sb.WriteString(fmt.Sprintf(`<tr>
-<td><strong>%s</strong></td>
-<td style="text-align:center">%d</td>
-<td style="text-align:right">%.3f</td>
-<td style="text-align:right">%.1f</td>
-<td style="text-align:right">%s</td>
-</tr>`, ns.Name, ns.PodCount, ns.CPUCores, ns.MemoryGB, costCell))
-		}
-		sb.WriteString(`</tbody></table></div>`)
-	}
-	sb.WriteString(`</div>`)
-
-	sb.WriteString(`</main></div></body></html>`)
-	return sb.String()
+type sidebarCluster struct {
+	Href     string
+	Label    string
+	IsActive bool
 }
 
 // buildSidebar returns a complete <aside>…</aside> sidebar, shared by all sub-pages.
@@ -1521,20 +1169,7 @@ func buildSidebar(activePage, activeCtx, clusterName string, clusterList []strin
 	if activeCtx != "" {
 		q = "?cluster=" + url.QueryEscape(activeCtx)
 	}
-	dashHref := "/" + q
-	infraHref := "/infrastructure" + q
-	nsHref := "/namespaces" + q
-	optHref := "/optimizations" + q
-	wrHref := "/warroom" + q
 
-	active := func(page string) string {
-		if page == activePage {
-			return " active"
-		}
-		return ""
-	}
-
-	// Cluster switcher links stay on the current page
 	basePath := "/"
 	switch activePage {
 	case "infrastructure":
@@ -1547,92 +1182,46 @@ func buildSidebar(activePage, activeCtx, clusterName string, clusterList []strin
 		basePath = "/warroom"
 	}
 
-	var sb strings.Builder
-	sb.WriteString(`<aside class="sidebar">
-<div class="logo">
-  <div class="logo-icon">⚡</div>
-  <div><div class="logo-text">OpsCart</div><div class="logo-sub">FinOps Engine</div></div>
-</div>
-<div class="nav-section">
-  <div class="nav-label">Analysis</div>
-  <a class="nav-item` + active("dashboard") + `" href="` + dashHref + `">📊 Cost Overview</a>
-  <a class="nav-item` + active("infrastructure") + `" href="` + infraHref + `">🖥️ Infrastructure</a>
-  <a class="nav-item` + active("namespaces") + `" href="` + nsHref + `">📦 Namespaces</a>
-  <a class="nav-item` + active("optimizations") + `" href="` + optHref + `">💡 Optimizations</a>
-</div>
-<div class="nav-section">
-  <div class="nav-label">Ops</div>
-  <a class="nav-item` + active("warroom") + `" href="` + wrHref + `">🚨 War Room</a>
-</div>
-`)
-
+	var clusters []sidebarCluster
 	if len(clusterList) > 1 {
-		sb.WriteString(`<div class="nav-section"><div class="nav-label">Clusters</div>`)
 		for _, ctx := range clusterList {
-			cls := "nav-item"
-			if ctx == activeCtx {
-				cls += " active"
-			}
-			href := basePath + "?" + url.Values{"cluster": {ctx}}.Encode()
 			label := displayName(ctx)
 			if len(label) > 22 {
 				label = label[:21] + "…"
 			}
-			sb.WriteString(fmt.Sprintf(`<a class="%s" href="%s">🔵 %s</a>`, cls, href, label))
+			clusters = append(clusters, sidebarCluster{
+				Href:     basePath + "?" + url.Values{"cluster": {ctx}}.Encode(),
+				Label:    label,
+				IsActive: ctx == activeCtx,
+			})
 		}
-		sb.WriteString(`</div>`)
 	}
 
-	sb.WriteString(fmt.Sprintf(`<div class="cluster-info">
-<div class="cluster-badge"><h4>Cluster</h4><p>%s</p></div>
-</div>
-</aside>
-`, clusterName))
+	data := sidebarData{
+		DashHref:    "/" + q,
+		InfraHref:   "/infrastructure" + q,
+		NsHref:      "/namespaces" + q,
+		OptHref:     "/optimizations" + q,
+		WrHref:      "/warroom" + q,
+		ActivePage:  activePage,
+		ClusterName: clusterName,
+		Clusters:    clusters,
+	}
 
-	return sb.String()
+	var buf strings.Builder
+	if err := getSidebarTmpl().Execute(&buf, data); err != nil {
+		log.Printf("sidebar template: %v", err)
+		return ""
+	}
+	return buf.String()
 }
 
-// injectInfrastructureSidebarLink converts the static "Infrastructure" nav item
-// in the main dashboard sidebar into a real link.
-func injectInfrastructureSidebarLink(html, activeCtx string) string {
-	infraURL := "/infrastructure"
-	if activeCtx != "" {
-		infraURL = "/infrastructure?cluster=" + url.QueryEscape(activeCtx)
-	}
-	return strings.Replace(html,
-		`<div class="nav-item">🖥️ Infrastructure</div>`,
-		`<a class="nav-item" href="`+infraURL+`" style="text-decoration:none">🖥️ Infrastructure</a>`,
-		1,
+var getSidebarTmpl = sync.OnceValue(func() *template.Template {
+	return template.Must(
+		template.New("sidebar.html").
+			ParseFS(templateFS, "templates/sidebar.html"),
 	)
-}
-
-// injectNamespacesSidebarLink converts the static "Namespaces" nav item
-// in the main dashboard sidebar into a real link.
-func injectNamespacesSidebarLink(html, activeCtx string) string {
-	nsURL := "/namespaces"
-	if activeCtx != "" {
-		nsURL = "/namespaces?cluster=" + url.QueryEscape(activeCtx)
-	}
-	return strings.Replace(html,
-		`<div class="nav-item">📦 Namespaces</div>`,
-		`<a class="nav-item" href="`+nsURL+`" style="text-decoration:none">📦 Namespaces</a>`,
-		1,
-	)
-}
-
-// injectOptimizationsSidebarLink converts the static "Optimizations" nav item
-// in the main dashboard sidebar into a real link.
-func injectOptimizationsSidebarLink(html, activeCtx string) string {
-	optURL := "/optimizations"
-	if activeCtx != "" {
-		optURL = "/optimizations?cluster=" + url.QueryEscape(activeCtx)
-	}
-	return strings.Replace(html,
-		`<div class="nav-item">🎯 Optimizations</div>`,
-		`<a class="nav-item" href="`+optURL+`" style="text-decoration:none">💡 Optimizations</a>`,
-		1,
-	)
-}
+})
 
 // ── War Room page ─────────────────────────────────────────────────────────────
 
@@ -1659,8 +1248,7 @@ func (srv *server) handleWarRoomPage(w http.ResponseWriter, r *http.Request) {
 }
 
 func renderWarRoomPage(scan *clusterScan, activeCtx string, clusterList []string) string {
-	// Same data source as /api/warroom — single path, guaranteed parity.
-	allIssues := collectWarRoomIssues(scan, 0) // 0 = no limit
+	allIssues := collectWarRoomIssues(scan, 0)
 	var critical, warnings []warRoomIssue
 	for _, issue := range allIssues {
 		if issue.Severity == "critical" {
@@ -1681,119 +1269,6 @@ func renderWarRoomPage(scan *clusterScan, activeCtx string, clusterList []string
 	if activeCtx != "" {
 		q = "?cluster=" + url.QueryEscape(activeCtx)
 	}
-	dashURL := "/" + q
-
-	var sb strings.Builder
-
-	sb.WriteString(`<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width,initial-scale=1.0">
-<title>War Room — ` + clusterName + `</title>
-<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
-<style>
-*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
-:root{
-  --bg:#0f172a;--surface:#1e293b;--surface-hover:#334155;--border:#334155;
-  --text:#f1f5f9;--text-secondary:#94a3b8;--text-muted:#64748b;
-  --primary:#6366f1;--primary-light:#818cf8;--primary-bg:rgba(99,102,241,0.1);
-  --success:#10b981;--warning:#f59e0b;--danger:#ef4444;
-  --radius:12px;--radius-sm:8px;--radius-xs:6px;
-}
-body{font-family:'Inter',system-ui,sans-serif;background:var(--bg);color:var(--text);line-height:1.6;min-height:100vh}
-.layout{display:grid;grid-template-columns:260px 1fr;min-height:100vh}
-.sidebar{background:var(--surface);border-right:1px solid var(--border);padding:2rem 1.5rem;position:sticky;top:0;height:100vh;overflow-y:auto}
-.main{padding:2rem 2.5rem;overflow-y:auto}
-.logo{display:flex;align-items:center;gap:0.75rem;margin-bottom:2.5rem}
-.logo-icon{width:40px;height:40px;background:var(--primary);border-radius:10px;display:flex;align-items:center;justify-content:center;font-size:1.2rem}
-.logo-text{font-size:1.1rem;font-weight:700}
-.logo-sub{font-size:0.7rem;color:var(--text-muted);text-transform:uppercase;letter-spacing:1px}
-.nav-section{margin-bottom:1.5rem}
-.nav-label{font-size:0.7rem;text-transform:uppercase;letter-spacing:1.5px;color:var(--text-muted);margin-bottom:0.75rem;padding-left:0.75rem}
-.nav-item{display:flex;align-items:center;gap:0.75rem;padding:0.7rem 0.75rem;border-radius:var(--radius-sm);color:var(--text-secondary);font-size:0.9rem;cursor:pointer;transition:all 0.15s;text-decoration:none}
-.nav-item:hover{background:var(--surface-hover);color:var(--text)}
-.nav-item.active{background:rgba(239,68,68,0.12);color:#f87171;font-weight:600}
-.cluster-info{margin-top:auto;padding-top:2rem;border-top:1px solid var(--border)}
-.cluster-badge{background:var(--primary-bg);border:1px solid rgba(99,102,241,0.2);border-radius:var(--radius-sm);padding:0.85rem;margin-bottom:0.75rem}
-.cluster-badge h4{font-size:0.7rem;color:var(--primary-light);margin-bottom:0.3rem;text-transform:uppercase;letter-spacing:0.8px}
-.cluster-badge p{font-size:0.75rem;color:var(--text-muted);word-break:break-all}
-.page-hdr{display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:1.75rem;flex-wrap:wrap;gap:1rem}
-.page-hdr h1{font-size:1.75rem;font-weight:800}
-.page-hdr p{color:var(--text-muted);font-size:0.85rem;margin-top:0.25rem}
-.page-meta{text-align:right;font-size:0.78rem;color:var(--text-muted)}
-.page-meta strong{color:var(--text-secondary)}
-.back-link{display:block;margin-top:0.5rem;color:var(--primary-light);font-size:0.75rem;text-decoration:none}
-.back-link:hover{text-decoration:underline}
-.summary-bar{display:flex;gap:1rem;margin-bottom:2rem;flex-wrap:wrap}
-.summary-chip{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius-sm);padding:0.75rem 1.25rem;display:flex;align-items:center;gap:0.75rem;min-width:160px}
-.summary-chip.c{border-color:rgba(239,68,68,0.35)}
-.summary-chip.w{border-color:rgba(245,158,11,0.35)}
-.summary-chip.ok{border-color:rgba(16,185,129,0.35)}
-.summary-num{font-size:1.6rem;font-weight:800;line-height:1}
-.c .summary-num{color:var(--danger)}
-.w .summary-num{color:var(--warning)}
-.ok .summary-num{color:var(--success)}
-.summary-lbl{font-size:0.72rem;color:var(--text-muted);text-transform:uppercase;letter-spacing:0.5px;line-height:1.3}
-.wr-section{margin-bottom:2.5rem}
-.wr-section-hdr{display:flex;align-items:center;gap:0.75rem;margin-bottom:1rem;padding-bottom:0.75rem;border-bottom:1px solid var(--border)}
-.wr-section-hdr h2{font-size:1rem;font-weight:700}
-.cnt-chip{padding:3px 10px;border-radius:20px;font-size:0.7rem;font-weight:700}
-.cnt-chip.c{background:rgba(239,68,68,0.15);color:#f87171}
-.cnt-chip.w{background:rgba(245,158,11,0.15);color:#fbbf24}
-.wr-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(340px,1fr));gap:1rem}
-.wr-card{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:1.25rem;display:flex;flex-direction:column;gap:0.55rem;transition:border-color 0.2s;animation:fadeIn 0.3s ease both}
-.wr-card.c{border-color:rgba(239,68,68,0.3);background:rgba(239,68,68,0.025)}
-.wr-card.w{border-color:rgba(245,158,11,0.25);background:rgba(245,158,11,0.02)}
-.wr-card:hover{border-color:var(--primary)}
-.wr-top{display:flex;align-items:center;gap:0.5rem;flex-wrap:wrap}
-.badge{padding:2px 8px;border-radius:20px;font-size:0.64rem;font-weight:700;letter-spacing:0.5px}
-.badge.c{background:rgba(239,68,68,0.15);color:#f87171}
-.badge.w{background:rgba(245,158,11,0.15);color:#fbbf24}
-.type-lbl{font-size:0.72rem;color:var(--text-muted)}
-.age-lbl{margin-left:auto;font-size:0.7rem;color:var(--text-muted);white-space:nowrap;background:rgba(255,255,255,0.05);padding:1px 7px;border-radius:4px}
-.wr-name{font-size:0.93rem;font-weight:700;color:var(--text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.wr-ns{font-size:0.73rem;color:var(--text-muted)}
-.wr-reason{font-size:0.78rem;color:var(--text-secondary);line-height:1.55;display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden}
-.wr-cmd{display:flex;align-items:center;gap:0.5rem;background:rgba(0,0,0,0.3);border:1px solid var(--border);border-radius:var(--radius-xs);padding:0.5rem 0.75rem;margin-top:auto}
-.wr-cmd code{font-family:'Consolas','Monaco',monospace;font-size:0.7rem;color:var(--primary-light);flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.copy-btn{background:transparent;border:1px solid var(--border);border-radius:4px;color:var(--text-muted);cursor:pointer;font-size:0.64rem;padding:2px 7px;white-space:nowrap;transition:all 0.15s;flex-shrink:0}
-.copy-btn:hover{background:var(--surface-hover);color:var(--text)}
-.all-clear-box{background:var(--surface);border:1px solid rgba(16,185,129,0.25);border-radius:var(--radius);padding:2.5rem;text-align:center;color:var(--text-muted)}
-.all-clear-box .icon{font-size:2.5rem;margin-bottom:0.5rem}
-.footer{text-align:center;padding:1.5rem 0;color:var(--text-muted);font-size:0.75rem;border-top:1px solid var(--border);margin-top:1rem}
-@keyframes fadeIn{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:translateY(0)}}
-@media(max-width:1024px){.layout{grid-template-columns:1fr}.sidebar{display:none}}
-@media(max-width:640px){.wr-grid{grid-template-columns:1fr}.summary-bar{flex-direction:column}}
-</style>
-</head>
-<body>
-<div class="layout">
-`)
-
-	// ── Sidebar ────────────────────────────────────────────────────────────────
-	sb.WriteString(buildSidebar("warroom", activeCtx, clusterName, clusterList))
-
-	// ── Main content ───────────────────────────────────────────────────────────
-	sb.WriteString(`<main class="main">`)
-
-	totalIssues := len(critical) + len(warnings)
-	statusDesc := "No issues detected"
-	if totalIssues > 0 {
-		statusDesc = fmt.Sprintf("%d issue(s) detected", totalIssues)
-	}
-
-	sb.WriteString(fmt.Sprintf(`<div class="page-hdr">
-<div>
-  <h1>🚨 War Room</h1>
-  <p>%s &mdash; %s</p>
-</div>
-<div class="page-meta">
-  <div>Last scanned: <strong id="wr-age">just now</strong></div>
-  <a class="back-link" href="%s">← Back to Dashboard</a>
-</div>
-</div>
-`, clusterName, statusDesc, dashURL))
 
 	critChipClass := "ok"
 	if len(critical) > 0 {
@@ -1803,59 +1278,41 @@ body{font-family:'Inter',system-ui,sans-serif;background:var(--bg);color:var(--t
 	if len(warnings) > 0 {
 		warnChipClass = "w"
 	}
-	sb.WriteString(fmt.Sprintf(`<div class="summary-bar">
-<div class="summary-chip %s"><div class="summary-num">%d</div><div class="summary-lbl">Critical<br>Issues</div></div>
-<div class="summary-chip %s"><div class="summary-num">%d</div><div class="summary-lbl">Warnings</div></div>
-</div>
-`, critChipClass, len(critical), warnChipClass, len(warnings)))
 
-	// ── Critical section ───────────────────────────────────────────────────────
-	sb.WriteString(`<div class="wr-section">`)
-	sb.WriteString(fmt.Sprintf(`<div class="wr-section-hdr"><h2>🔴 Critical Issues</h2><span class="cnt-chip c">%d</span></div>`, len(critical)))
-	if len(critical) == 0 {
-		sb.WriteString(`<div class="all-clear-box"><div class="icon">✅</div><div>No crash-looping, OOMKilled, or ImagePullBackOff pods detected</div></div>`)
-	} else {
-		sb.WriteString(`<div class="wr-grid">`)
-		for _, issue := range critical {
-			sb.WriteString(renderWarRoomCard(issue))
-		}
-		sb.WriteString(`</div>`)
+	data := warRoomPageData{
+		ClusterName:   clusterName,
+		StatusDesc:    fmt.Sprintf("%d issue(s) detected", len(critical)+len(warnings)),
+		DashURL:       "/" + q,
+		CritChipClass: critChipClass,
+		WarnChipClass: warnChipClass,
+		Critical:      critical,
+		Warnings:      warnings,
+		ScannedAtMs:   scannedAt.UnixMilli(),
+		Sidebar:       template.HTML(buildSidebar("warroom", activeCtx, clusterName, clusterList)),
 	}
-	sb.WriteString(`</div>`)
 
-	// ── Warnings section ───────────────────────────────────────────────────────
-	sb.WriteString(`<div class="wr-section">`)
-	sb.WriteString(fmt.Sprintf(`<div class="wr-section-hdr"><h2>🟡 Warnings</h2><span class="cnt-chip w">%d</span></div>`, len(warnings)))
-	if len(warnings) == 0 {
-		sb.WriteString(`<div class="all-clear-box"><div class="icon">✅</div><div>No unprotected namespaces, orphaned PVCs, or zero-replica workloads detected</div></div>`)
-	} else {
-		sb.WriteString(`<div class="wr-grid">`)
-		for _, issue := range warnings {
-			sb.WriteString(renderWarRoomCard(issue))
-		}
-		sb.WriteString(`</div>`)
+	var buf strings.Builder
+	if err := getWarRoomTmpl().Execute(&buf, data); err != nil {
+		log.Printf("warroom template: %v", err)
+		return ""
 	}
-	sb.WriteString(`</div>`)
+	return buf.String()
+}
 
-	sb.WriteString(`<div class="footer">OpsCart FinOps Engine &middot; War Room &middot; Suggestions only &mdash; verify with owners before acting</div>`)
-	sb.WriteString(`</main>`)
-	sb.WriteString(`</div>`) // .layout
+var warRoomTmplOnce sync.Once
+var warRoomTmpl *template.Template
 
-	sb.WriteString(fmt.Sprintf(`<script>
-(function(){
-  var TS=%d,el=document.getElementById('wr-age'),sb=document.getElementById('wr-age-sb');
-  function upd(){
-    var s=Math.floor((Date.now()-TS)/1000);
-    var t=s<5?'just now':s<60?s+'s ago':Math.floor(s/60)+'m ago';
-    if(el)el.textContent=t;if(sb)sb.textContent=t;
-  }
-  setInterval(upd,1000);upd();
-})();
-</script>
-</body>
-</html>`, scannedAt.UnixMilli()))
-
-	return sb.String()
+func getWarRoomTmpl() *template.Template {
+	warRoomTmplOnce.Do(func() {
+		warRoomTmpl = template.Must(
+			template.New("warroom.html").Funcs(template.FuncMap{
+				"renderCard": func(issue warRoomIssue) template.HTML {
+					return template.HTML(renderWarRoomCard(issue))
+				},
+			}).ParseFS(templateFS, "templates/base.html", "templates/warroom.html"),
+		)
+	})
+	return warRoomTmpl
 }
 
 func renderWarRoomCard(issue warRoomIssue) string {
@@ -1898,251 +1355,340 @@ func renderWarRoomCard(issue warRoomIssue) string {
 	return sb.String()
 }
 
-// injectWarRoomSidebarLink injects an "Ops → War Room" nav section into the
-// existing dashboard sidebar, before the cluster-info block.
-func injectWarRoomSidebarLink(html, activeCtx string) string {
-	warRoomURL := "/warroom"
-	if activeCtx != "" {
-		warRoomURL = "/warroom?cluster=" + url.QueryEscape(activeCtx)
-	}
-	navSection := `<div class="nav-section">` +
-		`<div class="nav-label">Ops</div>` +
-		`<a class="nav-item" href="` + warRoomURL + `" style="text-decoration:none">🚨 War Room</a>` +
-		`</div>`
-	return strings.Replace(html, `<div class="cluster-info">`, navSection+`<div class="cluster-info">`, 1)
-}
-
 // ── HTML rendering pipeline ───────────────────────────────────────────────────
 
-func renderHTML(scan *clusterScan, activeCtx string, clusterList []string) string {
-	html := analyzer.GenerateCloudCostHTML(scan.report)
-	html = injectWarRoomSidebarLink(html, activeCtx)
-	html = injectInfrastructureSidebarLink(html, activeCtx)
-	html = injectNamespacesSidebarLink(html, activeCtx)
-	html = injectOptimizationsSidebarLink(html, activeCtx)
-	if len(clusterList) > 1 {
-		html = injectClusterSelector(html, clusterList, activeCtx)
-	}
-	html = injectDashboardEnhancements(html, scan, len(clusterList))
-	return injectAutoRefresh(html, scan.report.Timestamp, activeCtx)
+// costPageData holds all data needed to render the cost overview template.
+type costPageData struct {
+	ClusterName string
+	ActiveCtx   string
+	ClusterList []costClusterLink
+	DashURL     string
+	InfraURL    string
+	NSsURL      string
+	OptURL      string
+	WrURL       string
+	RefreshURL  string
+	ScannedAtMS int64
+	Timestamp   time.Time
+
+	MonthlyCost      float64
+	SavingsPotential float64
+	SecurityColor    string
+	SecurityDisplay  string
+	WasteColor       string
+	WasteDisplay     string
+	PodCount         int
+	ClusterCount     int
+
+	AccuracyPct     int
+	KnownVMs        int
+	UnknownVMs      int
+	TotalVMs        int
+	ConfidenceLabel string
+	ConfRingStyle   template.CSS
+	ConfPctStyle    template.CSS
+
+	PoolRows       []costPoolRow
+	TotalRISavings float64
+
+	NSRows        []costNSRow
+	Scenarios     []models.OptimizationScenario
+	Disclaimers   []string
+	PricingSource string
+
+	WRIssues []costWRIssue
 }
 
-// injectClusterSelector adds a "Clusters" nav section to the sidebar.
-func injectClusterSelector(html string, clusterList []string, activeCtx string) string {
-	var sb strings.Builder
-	sb.WriteString(`<div class="nav-section">`)
-	sb.WriteString(`<div class="nav-label">Clusters</div>`)
-	for _, ctx := range clusterList {
-		cls := "nav-item"
-		if ctx == activeCtx {
-			cls += " active"
+type costClusterLink struct {
+	Ctx      string
+	Label    string
+	Href     string
+	IsActive bool
+}
+
+type costPoolRow struct {
+	Name          string
+	VMSize        string
+	NodeCount     int
+	TagClass      string
+	TagLabel      string
+	CPUColor      string
+	MemColor      string
+	CPUUtilPct    float64
+	MemUtilPct    float64
+	CPUWidthStyle template.CSS
+	MemWidthStyle template.CSS
+	PricePerNode  string
+	PoolTotal     string
+	RISavingsFmt  string
+	RISavings     float64
+}
+
+type costNSRow struct {
+	Name     string
+	PodCount int
+	CPUCores float64
+	MemoryGB float64
+	NSShare  float64
+	CostFmt  string
+	GroupID  string
+	Deps     []costDepRow
+}
+
+type costDepRow struct {
+	Name       string
+	Kind       string
+	KindTag    string
+	CPUCores   float64
+	MemoryGB   float64
+	Replicas   int
+	NSSharePct float64
+	CostFmt    string
+}
+
+type costWRIssue struct {
+	warRoomIssue
+	CardClass  string
+	BadgeLabel string
+	Icon       string
+	TypeLabel  string
+	AgeLbl     string
+	ShortName  string
+	ShortMsg   string
+}
+
+var getCostTmpl = sync.OnceValue(func() *template.Template {
+	return template.Must(
+		template.New("cost.html").
+			Funcs(template.FuncMap{"money": formatMoney}).
+			ParseFS(templateFS, "templates/base.html", "templates/cost.html"))
+})
+
+func buildCostPageData(scan *clusterScan, activeCtx string, clusterList []string) costPageData {
+	q := ""
+	if activeCtx != "" {
+		q = "?cluster=" + url.QueryEscape(activeCtx)
+	}
+	data := costPageData{
+		ActiveCtx:    activeCtx,
+		ClusterCount: len(clusterList),
+		DashURL:      "/" + q,
+		InfraURL:     "/infrastructure" + q,
+		NSsURL:       "/namespaces" + q,
+		OptURL:       "/optimizations" + q,
+		WrURL:        "/warroom" + q,
+		RefreshURL:   "/refresh" + q,
+	}
+
+	if scan != nil && scan.report != nil {
+		r := scan.report
+		data.ClusterName = r.ClusterName
+		data.MonthlyCost = r.TotalMonthlyCost
+		data.SavingsPotential = r.TotalSavingsPotential.Best
+		data.Scenarios = r.OptimizationScenarios
+		data.Disclaimers = r.Disclaimers
+		data.PricingSource = r.PricingSource
+		data.Timestamp = r.Timestamp
+		data.ScannedAtMS = r.Timestamp.UnixMilli()
+
+		known, unknown := 0, 0
+		for _, p := range r.NodePoolCosts {
+			if p.PricePerNodeMonth > 0 {
+				known++
+			} else {
+				unknown++
+			}
 		}
-		href := "/?" + url.Values{"cluster": {ctx}}.Encode()
+		total := known + unknown
+		if total > 0 {
+			data.AccuracyPct = known * 100 / total
+		}
+		data.KnownVMs, data.UnknownVMs, data.TotalVMs = known, unknown, total
+		data.ConfidenceLabel = "High"
+		if data.AccuracyPct < 80 {
+			data.ConfidenceLabel = "Medium"
+		}
+		if data.AccuracyPct < 50 {
+			data.ConfidenceLabel = "Low"
+		}
+		colorHex := confidenceColorHex(data.AccuracyPct)
+		circ := 226
+		offset := circ - (circ * data.AccuracyPct / 100)
+		data.ConfRingStyle = template.CSS(fmt.Sprintf("stroke:%s;stroke-dasharray:%d;stroke-dashoffset:%d", colorHex, circ, offset))
+		data.ConfPctStyle = template.CSS("color:" + colorHex)
+
+		for _, p := range r.NodePoolCosts {
+			data.TotalRISavings += p.RISavings
+			row := costPoolRow{
+				Name:          p.Name,
+				VMSize:        p.VMSize,
+				NodeCount:     p.NodeCount,
+				CPUUtilPct:    p.CPUUtilizationPct,
+				MemUtilPct:    p.MemoryUtilizationPct,
+				CPUWidthStyle: template.CSS(fmt.Sprintf("width:%.0f%%", p.CPUUtilizationPct)),
+				MemWidthStyle: template.CSS(fmt.Sprintf("width:%.0f%%", p.MemoryUtilizationPct)),
+				PricePerNode:  formatMoney(p.PricePerNodeMonth),
+				PoolTotal:     formatMoney(p.TotalMonthly),
+				RISavings:     p.RISavings,
+			}
+			if strings.EqualFold(p.Priority, "spot") {
+				row.TagClass, row.TagLabel = "tag-spot", "⚡ Spot"
+			} else {
+				row.TagClass, row.TagLabel = "tag-regular", "On-Demand"
+			}
+			row.CPUColor = utilColorClass(p.CPUUtilizationPct)
+			row.MemColor = utilColorClass(p.MemoryUtilizationPct)
+			if p.RISavings > 0 {
+				row.RISavingsFmt = "$" + formatMoney(p.RISavings)
+			} else {
+				row.RISavingsFmt = "—"
+			}
+			data.PoolRows = append(data.PoolRows, row)
+		}
+
+		for i, ns := range r.NamespaceCosts {
+			row := costNSRow{
+				Name:     ns.Name,
+				PodCount: ns.PodCount,
+				CPUCores: ns.CPUCores,
+				MemoryGB: ns.MemoryGB,
+				NSShare:  ns.WeightedShare * 100,
+				CostFmt:  fmtCostRange(ns.EstimatedCost),
+				GroupID:  fmt.Sprintf("ns-%d", i),
+			}
+			for _, dep := range ns.Deployments {
+				kindTag := "tag-deploy"
+				if dep.Kind == "StatefulSet" {
+					kindTag = "tag-sts"
+				} else if dep.Kind == "DaemonSet" {
+					kindTag = "tag-ds"
+				}
+				row.Deps = append(row.Deps, costDepRow{
+					Name:       dep.Name,
+					Kind:       dep.Kind,
+					KindTag:    kindTag,
+					CPUCores:   dep.CPUCores,
+					MemoryGB:   dep.MemoryGB,
+					Replicas:   dep.Replicas,
+					NSSharePct: dep.NSShare * 100,
+					CostFmt:    fmtCostRange(dep.EstimatedCost),
+				})
+			}
+			data.NSRows = append(data.NSRows, row)
+		}
+	} else {
+		data.ClusterName = displayName(activeCtx)
+		data.Timestamp = time.Now()
+		data.ScannedAtMS = data.Timestamp.UnixMilli()
+		data.ConfRingStyle = template.CSS("stroke:#64748b;stroke-dasharray:226;stroke-dashoffset:226")
+		data.ConfPctStyle = template.CSS("color:#64748b")
+	}
+
+	cisScore := scan.securityScore()
+	data.SecurityColor = "green"
+	if cisScore < 0 {
+		data.SecurityDisplay, data.SecurityColor = "N/A", "blue"
+	} else {
+		data.SecurityDisplay = fmt.Sprintf("%d/100", cisScore)
+		if cisScore < 60 {
+			data.SecurityColor = "red"
+		} else if cisScore < 80 {
+			data.SecurityColor = "yellow"
+		}
+	}
+
+	wasteItems := scan.wasteTotal()
+	data.WasteColor = "green"
+	if wasteItems < 0 {
+		data.WasteDisplay, data.WasteColor = "N/A", "blue"
+	} else {
+		data.WasteDisplay = fmt.Sprintf("%d", wasteItems)
+		if wasteItems > 10 {
+			data.WasteColor = "red"
+		} else if wasteItems > 0 {
+			data.WasteColor = "yellow"
+		}
+	}
+
+	data.PodCount = scan.monthlyPodCount()
+
+	for _, ctx := range clusterList {
 		label := displayName(ctx)
 		if len(label) > 22 {
 			label = label[:21] + "…"
 		}
-		sb.WriteString(fmt.Sprintf(
-			`<a class="%s" href="%s" style="text-decoration:none">🔵 %s</a>`,
-			cls, href, label,
-		))
-	}
-	sb.WriteString(`</div>`)
-	return strings.Replace(html, `<div class="cluster-info">`, sb.String()+`<div class="cluster-info">`, 1)
-}
-
-// injectDashboardEnhancements injects:
-//  1. An enhanced 6-metric KPI bar (replacing the existing one)
-//  2. A two-column grid layout: left = existing cost sections, right = War Room panel
-func injectDashboardEnhancements(html string, scan *clusterScan, clusterCount int) string {
-	kpiBar := buildEnhancedKPIBar(scan, clusterCount)
-	warRoom := buildWarRoomPanel(scan)
-
-	// Hide the original auto-generated kpi-row; inject our replacement + open grid.
-	// The left column of the grid contains all existing sections.
-	beforeKPI := `<style>.kpi-row{display:none!important}` +
-		`.oc-kpi-row{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:1rem;margin-bottom:1.5rem}` +
-		`</style>` +
-		kpiBar +
-		`<div style="display:grid;grid-template-columns:1fr 340px;gap:1.5rem;align-items:start">` +
-		`<div>` // open left column
-
-	html = strings.Replace(html, `<div class="kpi-row">`, beforeKPI+`<div class="kpi-row">`, 1)
-
-	// Close left column, inject war room as sticky right column, close grid.
-	beforeDisclaimer := `</div>` + // close left column
-		`<div style="position:sticky;top:2rem">` + warRoom + `</div>` +
-		`</div>` // close grid
-
-	html = strings.Replace(html, `<div class="disclaimer-bar">`, beforeDisclaimer+`<div class="disclaimer-bar">`, 1)
-	return html
-}
-
-// buildEnhancedKPIBar renders 6 KPI cards: monthly cost, savings, security
-// score, waste items, pod count, and cluster count.
-func buildEnhancedKPIBar(scan *clusterScan, clusterCount int) string {
-	monthlyCost := 0.0
-	savings := 0.0
-	if scan != nil && scan.report != nil {
-		monthlyCost = scan.report.TotalMonthlyCost
-		savings = scan.report.TotalSavingsPotential.Best
+		data.ClusterList = append(data.ClusterList, costClusterLink{
+			Ctx:      ctx,
+			Label:    label,
+			Href:     "/?" + url.Values{"cluster": {ctx}}.Encode(),
+			IsActive: ctx == activeCtx,
+		})
 	}
 
-	cisScore := scan.securityScore()
-	wasteItems := scan.wasteTotal()
-	pods := scan.monthlyPodCount()
-
-	cisColor := "green"
-	cisDisplay := fmt.Sprintf("%d/100", cisScore)
-	if cisScore < 0 {
-		cisDisplay = "N/A"
-		cisColor = "blue"
-	} else if cisScore < 60 {
-		cisColor = "red"
-	} else if cisScore < 80 {
-		cisColor = "yellow"
-	}
-
-	wasteColor := "green"
-	wasteDisplay := fmt.Sprintf("%d", wasteItems)
-	if wasteItems < 0 {
-		wasteDisplay = "N/A"
-		wasteColor = "blue"
-	} else if wasteItems > 10 {
-		wasteColor = "red"
-	} else if wasteItems > 0 {
-		wasteColor = "yellow"
-	}
-
-	var sb strings.Builder
-	sb.WriteString(`<div class="oc-kpi-row">`)
-
-	// Monthly cost
-	sb.WriteString(fmt.Sprintf(`<div class="kpi">
-		<div class="kpi-top"><div class="kpi-icon red">💰</div></div>
-		<h3 class="money red">$%s</h3><p>Monthly Cost</p></div>`, formatMoney(monthlyCost)))
-
-	// Savings potential
-	sb.WriteString(fmt.Sprintf(`<div class="kpi">
-		<div class="kpi-top"><div class="kpi-icon green">💡</div><span class="kpi-trend down">↓ Save</span></div>
-		<h3 class="money green">$%s</h3><p>Savings Potential</p></div>`, formatMoney(savings)))
-
-	// Security score
-	sb.WriteString(fmt.Sprintf(`<div class="kpi">
-		<div class="kpi-top"><div class="kpi-icon %s">🔐</div></div>
-		<h3>%s</h3><p>Security Score</p></div>`, cisColor, cisDisplay))
-
-	// Waste items
-	sb.WriteString(fmt.Sprintf(`<div class="kpi">
-		<div class="kpi-top"><div class="kpi-icon %s">🗑️</div></div>
-		<h3>%s</h3><p>Waste Items</p></div>`, wasteColor, wasteDisplay))
-
-	// Pod count
-	sb.WriteString(fmt.Sprintf(`<div class="kpi">
-		<div class="kpi-top"><div class="kpi-icon blue">🐳</div></div>
-		<h3>%d</h3><p>Running Pods</p></div>`, pods))
-
-	// Cluster count
-	sb.WriteString(fmt.Sprintf(`<div class="kpi">
-		<div class="kpi-top"><div class="kpi-icon cyan">☸️</div></div>
-		<h3>%d</h3><p>Clusters</p></div>`, clusterCount))
-
-	sb.WriteString(`</div>`)
-	return sb.String()
-}
-
-// buildWarRoomPanel renders the right-side critical issues panel.
-func buildWarRoomPanel(scan *clusterScan) string {
-	issues := collectWarRoomIssues(scan, 5)
-
-	var sb strings.Builder
-	sb.WriteString(`<div class="section" style="border-color:rgba(239,68,68,0.4)">`)
-	sb.WriteString(`<div class="section-header">`)
-	sb.WriteString(`<div class="section-title">🚨 War Room</div>`)
-
-	if len(issues) > 0 {
-		sb.WriteString(fmt.Sprintf(
-			`<span style="background:rgba(239,68,68,0.12);color:#ef4444;padding:3px 10px;`+
-				`border-radius:20px;font-size:0.72rem;font-weight:700">%d issues</span>`,
-			len(issues),
-		))
-	} else {
-		sb.WriteString(`<span style="background:rgba(16,185,129,0.12);color:#10b981;padding:3px 10px;` +
-			`border-radius:20px;font-size:0.72rem;font-weight:700">All clear</span>`)
-	}
-	sb.WriteString(`</div>`) // section-header
-
-	if len(issues) == 0 {
-		sb.WriteString(`<div style="text-align:center;padding:2rem 1rem;color:#64748b">` +
-			`<div style="font-size:2rem;margin-bottom:0.5rem">✅</div>` +
-			`<div style="font-size:0.85rem">No critical issues detected</div>` +
-			`</div>`)
-	} else {
-		for _, issue := range issues {
-			issueCardColor, issueBg, badgeBg, badgeText := warRoomColors(issue.Severity)
-			typeIcon, typeLabel := warRoomTypeLabel(issue.Type)
-
-			sb.WriteString(fmt.Sprintf(
-				`<div style="border:1px solid %s;border-radius:8px;padding:0.75rem;margin-bottom:0.75rem;background:%s">`,
-				issueCardColor, issueBg,
-			))
-
-			// Header row: severity badge + type
-			sb.WriteString(fmt.Sprintf(
-				`<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:0.4rem">`+
-					`<span style="background:%s;color:%s;padding:2px 8px;border-radius:20px;font-size:0.68rem;font-weight:700">%s</span>`+
-					`<span style="font-size:0.7rem;color:#64748b">%s %s</span>`+
-					`</div>`,
-				badgeBg, badgeText, strings.ToUpper(issue.Severity),
-				typeIcon, typeLabel,
-			))
-
-			// Resource name
-			resource := issue.Resource
-			if len(resource) > 28 {
-				resource = resource[:27] + "…"
-			}
-			sb.WriteString(fmt.Sprintf(
-				`<div style="font-size:0.82rem;font-weight:600;color:#f1f5f9;margin-bottom:0.2rem">%s</div>`,
-				resource,
-			))
-
-			// Namespace
-			sb.WriteString(fmt.Sprintf(
-				`<div style="font-size:0.72rem;color:#64748b;margin-bottom:0.35rem">ns: %s</div>`,
-				issue.Namespace,
-			))
-
-			// Message (truncated)
-			msg := issue.Message
-			if len(msg) > 80 {
-				msg = msg[:79] + "…"
-			}
-			sb.WriteString(fmt.Sprintf(
-				`<div style="font-size:0.75rem;color:#94a3b8">%s</div>`,
-				msg,
-			))
-
-			sb.WriteString(`</div>`) // issue card
+	for _, issue := range collectWarRoomIssues(scan, 5) {
+		wi := costWRIssue{warRoomIssue: issue}
+		if issue.Severity == "critical" {
+			wi.CardClass, wi.BadgeLabel = "c", "CRITICAL"
+		} else {
+			wi.CardClass, wi.BadgeLabel = "w", strings.ToUpper(issue.Severity)
 		}
+		wi.Icon, wi.TypeLabel = warRoomTypeLabel(issue.Type)
+		if issue.AgeDays > 0 {
+			wi.AgeLbl = fmt.Sprintf("%dd", issue.AgeDays)
+		}
+		wi.ShortName = issue.Resource
+		if len(wi.ShortName) > 28 {
+			wi.ShortName = wi.ShortName[:27] + "…"
+		}
+		wi.ShortMsg = issue.Message
+		if len(wi.ShortMsg) > 80 {
+			wi.ShortMsg = wi.ShortMsg[:79] + "…"
+		}
+		data.WRIssues = append(data.WRIssues, wi)
 	}
 
-	sb.WriteString(`</div>`) // section
-	return sb.String()
+	return data
 }
 
-func warRoomColors(severity string) (border, bg, badgeBg, badgeText string) {
-	switch severity {
-	case "critical":
-		return "rgba(239,68,68,0.35)", "rgba(239,68,68,0.04)",
-			"rgba(239,68,68,0.15)", "#ef4444"
-	case "high":
-		return "rgba(245,158,11,0.35)", "rgba(245,158,11,0.04)",
-			"rgba(245,158,11,0.15)", "#f59e0b"
-	default:
-		return "rgba(99,102,241,0.35)", "rgba(99,102,241,0.04)",
-			"rgba(99,102,241,0.15)", "#818cf8"
+func renderCostPage(scan *clusterScan, activeCtx string, clusterList []string) string {
+	data := buildCostPageData(scan, activeCtx, clusterList)
+	var buf strings.Builder
+	if err := getCostTmpl().Execute(&buf, data); err != nil {
+		log.Printf("cost template: %v", err)
+		return ""
 	}
+	return buf.String()
+}
+
+func renderHTML(scan *clusterScan, activeCtx string, clusterList []string) string {
+	return renderCostPage(scan, activeCtx, clusterList)
+}
+
+func confidenceColorHex(pct int) string {
+	if pct < 50 {
+		return "#ef4444"
+	}
+	if pct < 80 {
+		return "#f59e0b"
+	}
+	return "#10b981"
+}
+
+func utilColorClass(pct float64) string {
+	if pct > 85 {
+		return "red"
+	}
+	if pct > 65 {
+		return "yellow"
+	}
+	return "green"
+}
+
+func fmtCostRange(cr models.CostRange) string {
+	if cr.Best == 0 {
+		return "—"
+	}
+	return fmt.Sprintf("$%.0f", cr.Best)
 }
 
 func warRoomTypeLabel(t string) (icon, label string) {
@@ -2186,57 +1732,6 @@ func kubectlCmdForIssue(issueType, resource, namespace string) string {
 	default:
 		return fmt.Sprintf("kubectl describe pod %s -n %s", resource, namespace)
 	}
-}
-
-// injectAutoRefresh appends the live-update badge and 60s auto-refresh script.
-func injectAutoRefresh(html string, scannedAt time.Time, activeCtx string) string {
-	refreshURL := "/refresh"
-	if activeCtx != "" {
-		refreshURL = "/refresh?cluster=" + url.QueryEscape(activeCtx)
-	}
-
-	script := fmt.Sprintf(`
-<style>
-#oc-refresh-badge {
-  position:fixed;bottom:1.25rem;right:1.25rem;
-  background:#1e293b;border:1px solid #334155;border-radius:10px;
-  padding:0.5rem 1rem;
-  font-family:'Inter',system-ui,sans-serif;font-size:0.75rem;color:#94a3b8;
-  z-index:9999;display:flex;align-items:center;gap:0.5rem;
-  box-shadow:0 4px 12px rgba(0,0,0,0.4);transition:border-color 0.3s;
-}
-#oc-refresh-badge.refreshing{border-color:#6366f1}
-#oc-dot{width:8px;height:8px;border-radius:50%%;background:#10b981;flex-shrink:0;transition:background 0.3s}
-#oc-refresh-badge.refreshing #oc-dot{background:#6366f1;animation:oc-pulse 1s infinite}
-@keyframes oc-pulse{0%%,100%%{opacity:1}50%%{opacity:0.3}}
-</style>
-<div id="oc-refresh-badge">
-  <span id="oc-dot"></span>
-  <span>Last updated: <strong id="oc-age">just now</strong></span>
-</div>
-<script>
-(function(){
-  var SCAN_TS=%d, REFRESH_URL=%q, REFRESH_INTERVAL=60000;
-  var badge=document.getElementById('oc-refresh-badge');
-  var ageEl=document.getElementById('oc-age');
-  function updateAge(){
-    var s=Math.floor((Date.now()-SCAN_TS)/1000);
-    if(s<5) ageEl.textContent='just now';
-    else if(s<60) ageEl.textContent=s+'s ago';
-    else ageEl.textContent=Math.floor(s/60)+'m ago';
-  }
-  setInterval(updateAge,1000); updateAge();
-  function doRefresh(){
-    badge.classList.add('refreshing'); ageEl.textContent='refreshing…';
-    fetch(REFRESH_URL,{method:'POST'})
-      .then(function(){location.reload();})
-      .catch(function(){badge.classList.remove('refreshing');updateAge();setTimeout(doRefresh,10000);});
-  }
-  setTimeout(doRefresh,REFRESH_INTERVAL);
-})();
-</script>`, scannedAt.UnixMilli(), refreshURL)
-
-	return strings.Replace(html, "</body>", script+"</body>", 1)
 }
 
 // formatMoney formats a float as comma-grouped integer string.
