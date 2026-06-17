@@ -1,0 +1,38 @@
+<aside class="sidebar">
+<div class="logo">
+  <div class="logo-icon">⚡</div>
+  <div>
+    <div class="logo-text">OpsCart</div>
+    <div class="logo-sub">FinOps Engine</div>
+  </div>
+</div>
+
+<div class="nav-section">
+  <div class="nav-label">Analysis</div>
+  <a class="nav-item{{if eq .ActivePage "dashboard"}} active{{end}}" href="{{.DashHref}}">📊 Cost Overview</a>
+  <a class="nav-item{{if eq .ActivePage "infrastructure"}} active{{end}}" href="{{.InfraHref}}">🖥️ Infrastructure</a>
+  <a class="nav-item{{if eq .ActivePage "namespaces"}} active{{end}}" href="{{.NsHref}}">📦 Namespaces</a>
+  <a class="nav-item{{if eq .ActivePage "optimizations"}} active{{end}}" href="{{.OptHref}}">💡 Optimizations</a>
+</div>
+
+<div class="nav-section">
+  <div class="nav-label">Ops</div>
+  <a class="nav-item{{if eq .ActivePage "warroom"}} active{{end}}" href="{{.WrHref}}">🚨 War Room</a>
+</div>
+
+{{if .Clusters}}
+<div class="nav-section">
+  <div class="nav-label">Clusters</div>
+  {{range .Clusters}}
+  <a class="nav-item{{if .IsActive}} active{{end}}" href="{{.Href}}">🔵 {{.Label}}</a>
+  {{end}}
+</div>
+{{end}}
+
+<div class="cluster-info">
+  <div class="cluster-badge">
+    <h4>Cluster</h4>
+    <p>{{.ClusterName}}</p>
+  </div>
+</div>
+</aside>

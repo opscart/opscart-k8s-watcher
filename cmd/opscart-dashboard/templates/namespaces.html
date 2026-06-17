@@ -1,0 +1,90 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1.0">
+<title>Namespaces — {{.ClusterName}}</title>
+{{template "base" .}}
+<style>
+.kpi-chip{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius-sm);padding:0.75rem 1.25rem;min-width:130px}
+.kpi-chip-val{font-size:1.4rem;font-weight:800;line-height:1;margin-bottom:0.2rem}
+.kpi-chip-val.cost{color:var(--danger)}
+.kpi-chip-val.ok{color:var(--success)}
+.kpi-chip-val.warn{color:var(--warning)}
+.kpi-chip-lbl{font-size:0.7rem;color:var(--text-muted);text-transform:uppercase;letter-spacing:0.5px}
+.ns-wrap{overflow-x:auto;border:1px solid var(--border);border-radius:var(--radius-sm)}
+.ns-table{width:100%;border-collapse:collapse;min-width:760px}
+.ns-table th{background:rgba(0,0,0,0.35);padding:0.6rem 0.85rem;text-align:left;font-size:0.67rem;text-transform:uppercase;letter-spacing:0.8px;color:var(--text-muted);font-weight:600;border-bottom:1px solid var(--border);white-space:nowrap}
+.ns-table td{padding:0.75rem 0.85rem;border-bottom:1px solid var(--border);font-size:0.83rem;vertical-align:middle}
+.ns-table tbody tr:last-child td{border-bottom:none}
+.ns-table tbody tr:hover td{background:rgba(99,102,241,0.03)}
+.ns-table tfoot td{background:rgba(0,0,0,0.25);font-weight:700;border-top:2px solid var(--border);font-size:0.83rem;padding:0.75rem 0.85rem}
+.ns-name{font-weight:600;color:var(--text)}
+.badge-ok{background:rgba(16,185,129,0.12);color:#34d399;border:1px solid rgba(16,185,129,0.2)}
+.badge-warn{background:rgba(245,158,11,0.12);color:#fbbf24;border:1px solid rgba(245,158,11,0.2)}
+.badge-danger{background:rgba(239,68,68,0.12);color:#f87171;border:1px solid rgba(239,68,68,0.2)}
+</style>
+</head>
+<body>
+<div class="layout">
+{{.Sidebar}}
+<main class="main">
+<div class="page-hdr">
+<div>
+  <h1>📦 Namespaces</h1>
+  <p>{{.ClusterName}} &mdash; {{.NamespaceCount}} namespace(s), sorted by cost</p>
+</div>
+<div class="page-meta">
+  <a class="back-link" href="{{.DashURL}}">← Back to Dashboard</a>
+</div>
+</div>
+<div class="summary-bar">
+<div class="kpi-chip"><div class="kpi-chip-val">{{.NamespaceCount}}</div><div class="kpi-chip-lbl">Namespaces</div></div>
+<div class="kpi-chip"><div class="kpi-chip-val ok">{{.ProtectedCount}}</div><div class="kpi-chip-lbl">Protected</div></div>
+{{if gt .UnprotectedCount 0}}<div class="kpi-chip"><div class="kpi-chip-val warn">{{.UnprotectedCount}}</div><div class="kpi-chip-lbl">Unprotected</div></div>{{end}}
+{{if gt .TotalCost 0.0}}<div class="kpi-chip"><div class="kpi-chip-val cost">${{money .TotalCost}}</div><div class="kpi-chip-lbl">Total Cost/mo</div></div>{{end}}
+</div>
+<div class="section">
+<div class="section-hdr"><div class="section-title">Namespace Breakdown</div></div>
+{{if .NSRows}}
+<div class="ns-wrap"><table class="ns-table">
+<thead><tr>
+<th>Namespace</th>
+<th style="text-align:right">$/mo</th>
+<th style="text-align:center">Pods</th>
+<th style="text-align:right">CPU (cores)</th>
+<th style="text-align:right">Memory (GB)</th>
+<th>Net Policy</th>
+<th style="text-align:center">Waste Items</th>
+</tr></thead>
+<tbody>
+{{range .NSRows}}
+<tr>
+<td><span class="ns-name">{{.Name}}</span></td>
+<td style="text-align:right">{{.CostCell}}</td>
+<td style="text-align:center">{{.PodCount}}</td>
+<td style="text-align:right">{{printf "%.2f" .CPUCores}}</td>
+<td style="text-align:right">{{printf "%.1f" .MemoryGB}}</td>
+<td>{{.NetCell}}</td>
+<td style="text-align:center">{{.WasteCell}}</td>
+</tr>
+{{end}}
+</tbody>
+<tfoot><tr>
+<td style="color:var(--text-muted);font-size:0.75rem;text-transform:uppercase;letter-spacing:0.5px">Total</td>
+<td style="text-align:right">{{.TotalCostCell}}</td>
+<td style="text-align:center">{{.TotalPods}}</td>
+<td style="text-align:right">{{printf "%.2f" .TotalCPU}}</td>
+<td style="text-align:right">{{printf "%.1f" .TotalMem}}</td>
+<td></td>
+<td></td>
+</tr></tfoot>
+</table></div>
+{{else}}
+<div class="empty-state"><div class="icon">📦</div><div>No namespace data available</div></div>
+{{end}}
+</div>
+</main>
+</div>
+</body>
+</html>
