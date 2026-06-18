@@ -728,39 +728,6 @@ Examples:
 	}
 }
 
-func runEmergencyScan(clusterContext string) error {
-	fmt.Printf("\n🔍 Cluster: %s\n", clusterContext)
-	s, err := scanner.NewScanner(clusterContext)
-	if err != nil {
-		return fmt.Errorf("connecting to cluster: %w", err)
-	}
-
-	issues, err := s.FindEmergencyIssues(namespace)
-	if err != nil {
-		return fmt.Errorf("scanning cluster: %w", err)
-	}
-
-	scanner.PrintEmergencyIssues(issues)
-	return nil
-}
-
-func runResourcesScan(clusterContext string) error {
-	fmt.Printf("\n🔍 Cluster: %s\n", clusterContext)
-	clientset, err := getKubernetesClient(clusterContext)
-	if err != nil {
-		return fmt.Errorf("connecting to cluster: %w", err)
-	}
-
-	ra := analyzer.NewResourceAnalyzer(clientset)
-	analysis, err := ra.AnalyzeClusterResources(namespace)
-	if err != nil {
-		return fmt.Errorf("analyzing resources: %w", err)
-	}
-
-	analyzer.PrintResourceAnalysis(analysis, format)
-	return nil
-}
-
 func runOptimizeScan(clusterContext string) error {
 	fmt.Printf("\n🔍 Cluster: %s\n", clusterContext)
 	clientset, err := getKubernetesClient(clusterContext)
@@ -902,52 +869,6 @@ func runCloudCostsScan(clusterContext string) error {
 
 	// ── Step 9: Render output ────────────────────────────────────────────
 	return analyzer.PrintCloudCostReport(report, costFormat)
-}
-
-func runSnapshotScan(clusterContext string) error {
-	fmt.Printf("\n🔍 Cluster: %s\n", clusterContext)
-	s, err := scanner.NewScanner(clusterContext)
-	if err != nil {
-		return fmt.Errorf("connecting to cluster: %w", err)
-	}
-
-	if enhanced {
-		// Enhanced snapshot with services, ingresses, PVCs
-		snapshot, err := s.TakeEnhancedSnapshot(namespace)
-		if err != nil {
-			return fmt.Errorf("taking enhanced snapshot: %w", err)
-		}
-		scanner.PrintEnhancedSnapshot(snapshot, format)
-	} else {
-		// Basic snapshot
-		snapshot, err := s.TakeSnapshot(namespace)
-		if err != nil {
-			return fmt.Errorf("taking snapshot: %w", err)
-		}
-
-		if format == "json" {
-			scanner.PrintSnapshotJSON(snapshot)
-		} else {
-			scanner.PrintSnapshotTable(snapshot)
-		}
-	}
-	return nil
-}
-
-func runIdleScan(clusterContext string) error {
-	fmt.Printf("\n🔍 Cluster: %s\n", clusterContext)
-	s, err := scanner.NewScanner(clusterContext)
-	if err != nil {
-		return fmt.Errorf("connecting to cluster: %w", err)
-	}
-
-	idle, err := s.FindIdleResources(namespace)
-	if err != nil {
-		return fmt.Errorf("finding idle resources: %w", err)
-	}
-
-	scanner.PrintIdleResources(idle)
-	return nil
 }
 
 func runReportGeneration(clusterContext string, clusterName string) error {
@@ -1286,56 +1207,4 @@ func deriveCostConfidence(weightedSharePct float64) string {
 		return "Low"
 	}
 	return "Medium"
-}
-
-func runNetworkScan(clusterContext string) error {
-	fmt.Printf("\n🔍 Cluster: %s\n", clusterContext)
-
-	clientset, err := getKubernetesClient(clusterContext)
-	if err != nil {
-		return fmt.Errorf("connecting to cluster: %w", err)
-	}
-
-	npa := analyzer.NewNetworkPolicyAuditor(clientset).
-		WithSkipNamespaces(skipNamespacesFlag)
-	audit, err := npa.AuditNetworkPolicies(namespace)
-	if err != nil {
-		return fmt.Errorf("auditing network policies: %w", err)
-	}
-
-	analyzer.PrintNetworkPolicyAudit(audit)
-	return nil
-}
-
-func runWasteScan(clusterContext string) error {
-	fmt.Printf("\n🔍 Cluster: %s\n", clusterContext)
-	fmt.Printf("   Minimum age: %d days\n", minAgeDays)
-	if wasteFormat == "html" {
-		fmt.Printf("   Format: HTML report\n")
-	}
-
-	clientset, err := getKubernetesClient(clusterContext)
-	if err != nil {
-		return fmt.Errorf("connecting to cluster: %w", err)
-	}
-
-	wa, cancel := analyzer.NewWasteAuditor(clientset, minAgeDays)
-	defer cancel() // Ensure context cleanup even if we exit early
-
-	audit, err := wa.AuditWaste(namespace)
-	if err != nil {
-		return fmt.Errorf("auditing waste: %w", err)
-	}
-
-	// Output based on format
-	switch wasteFormat {
-	case "html":
-		if err := report.GenerateWasteHTML(audit, clusterContext, minAgeDays); err != nil {
-			return fmt.Errorf("generating HTML report: %w", err)
-		}
-	default:
-		analyzer.PrintWasteAudit(audit, minAgeDays)
-	}
-
-	return nil
 }
