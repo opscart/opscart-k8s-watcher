@@ -224,6 +224,38 @@ func (srv *server) startBackgroundRefresh(interval time.Duration) {
 	}
 }
 
+func (srv *server) handleOverviewPage(w http.ResponseWriter, r *http.Request) {
+	ctx := srv.activeCtx(r)
+	state := srv.getState(ctx)
+
+	state.mu.RLock()
+	scan := state.scan
+	state.mu.RUnlock()
+
+	if scan == nil {
+		if err := state.refresh(srv.clusterList); err != nil {
+			http.Error(w, "scan failed: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+		state.mu.RLock()
+		scan = state.scan
+		state.mu.RUnlock()
+	}
+
+	data := buildOverviewData(scan, ctx, srv.clusterList)
+
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-cache, no-store, must-revalidate")
+
+	var buf strings.Builder
+	if err := getOverviewTmpl().Execute(&buf, data); err != nil {
+		log.Printf("overview template: %v", err)
+		http.Error(w, "template error", http.StatusInternalServerError)
+		return
+	}
+	w.Write([]byte(buf.String()))
+}
+
 // ── runDashboard ──────────────────────────────────────────────────────────────
 
 func runDashboard(_ *cobra.Command, _ []string) error {
@@ -238,7 +270,8 @@ func runDashboard(_ *cobra.Command, _ []string) error {
 	go srv.startBackgroundRefresh(60 * time.Second)
 
 	mux := http.NewServeMux()
-	mux.HandleFunc("/", srv.handleDashboard)
+	mux.HandleFunc("/", srv.handleOverviewPage)
+	mux.HandleFunc("/costs", srv.handleDashboard)
 	mux.HandleFunc("/refresh", srv.handleRefresh)
 	mux.HandleFunc("/api/report", srv.handleReportJSON)
 	mux.HandleFunc("/api/overview", srv.handleOverview)
@@ -258,7 +291,7 @@ func runDashboard(_ *cobra.Command, _ []string) error {
 // ── HTTP handlers ─────────────────────────────────────────────────────────────
 
 func (srv *server) handleDashboard(w http.ResponseWriter, r *http.Request) {
-	if r.URL.Path != "/" {
+	if r.URL.Path != "/" && r.URL.Path != "/costs" {
 		http.NotFound(w, r)
 		return
 	}
@@ -1147,6 +1180,7 @@ var getOptimizationsTmpl = sync.OnceValue(func() *template.Template {
 
 type sidebarData struct {
 	DashHref      string
+	CostsHref     string
 	InfraHref     string
 	NsHref        string
 	OptHref       string
@@ -1217,6 +1251,7 @@ func buildSidebar(activePage, activeCtx, clusterName string, clusterList []strin
 
 	data := sidebarData{
 		DashHref:      "/" + q,
+		CostsHref:     "/costs" + q,
 		InfraHref:     "/infrastructure" + q,
 		NsHref:        "/namespaces" + q,
 		OptHref:       "/optimizations" + q,
@@ -1417,6 +1452,344 @@ type costPageData struct {
 
 	WRIssues      []costWRIssue
 	CriticalCount int
+	CostsURL      string
+}
+
+// ── Overview page (executive summary) ─────────────────────────────────────────
+
+type overviewPageData struct {
+	ClusterName string
+	ActiveCtx   string
+	ClusterList []costClusterLink
+	DashURL     string
+	InfraURL    string
+	NSsURL      string
+	OptURL      string
+	WrURL       string
+	CostsURL    string
+	ScannedAtMS int64
+	CostsHref   string
+
+	// Sidebar aliases (matches sidebar.html template)
+	DashHref   string
+	InfraHref  string
+	NsHref     string
+	OptHref    string
+	WrHref     string
+	ActivePage string
+	Clusters   []sidebarCluster
+
+	// KPI bar
+	CriticalCount    int
+	SavingsPotential float64
+	SecurityScore    int
+	SecurityColor    string
+	WasteCount       int
+	MonthlyCost      float64
+
+	// Top 5 Things to Fix
+	TopIssues []topIssue
+
+	// War Room featured issue
+	FeaturedIssue *warRoomIssue
+	HasFeatured   bool
+
+	// Cluster Summary
+	NodePoolCount  int
+	PodCount       int
+	CPUUtilization int
+	MemUtilization int
+	NamespaceCount int
+
+	// Version + branding
+	Version string
+}
+
+type topIssue struct {
+	Rank        int
+	Title       string
+	Subtitle    string
+	Severity    string // "critical" | "high" | "medium" | "low"
+	SeverityLbl string // "CRITICAL" | "HIGH" | "MEDIUM" | "LOW"
+	CountText   string // "8 pods", "~$40/mo", "14 checks"
+	URL         string
+}
+
+func convertToSidebarClusters(clusterList []string, activeCtx, basePath string) []sidebarCluster {
+	if len(clusterList) <= 1 {
+		return nil
+	}
+	var out []sidebarCluster
+	for _, ctx := range clusterList {
+		label := displayName(ctx)
+		if len(label) > 22 {
+			label = label[:21] + "…"
+		}
+		out = append(out, sidebarCluster{
+			Href:     basePath + "?" + url.Values{"cluster": {ctx}}.Encode(),
+			Label:    label,
+			IsActive: ctx == activeCtx,
+		})
+	}
+	return out
+}
+
+func buildOverviewData(scan *clusterScan, activeCtx string, clusterList []string) overviewPageData {
+	clusterName := displayName(activeCtx)
+	var monthlyCost, savings float64
+	var podCount, nsCount, nodePoolCount int
+	var cpuUtil, memUtil int
+	var wasteCount, securityScore, secFailed int
+	var wrIssues []warRoomIssue
+	var featured *warRoomIssue
+	var criticalCount int
+
+	if scan != nil {
+		wrIssues = collectWarRoomIssues(scan, 0)
+		for _, w := range wrIssues {
+			if w.Severity == "critical" {
+				criticalCount++
+				if featured == nil {
+					tmp := w
+					featured = &tmp
+				}
+			}
+		}
+		// If no critical, feature highest-severity warning
+		if featured == nil && len(wrIssues) > 0 {
+			tmp := wrIssues[0]
+			featured = &tmp
+		}
+
+		if scan.report != nil {
+			monthlyCost = scan.report.TotalMonthlyCost
+			savings = scan.report.TotalSavingsPotential.Best
+			clusterName = scan.report.ClusterName
+			nodePoolCount = len(scan.report.NodePoolCosts)
+			nsCount = len(scan.report.NamespaceCosts)
+
+			// Aggregate CPU/Mem utilization across pools
+			var totalCPU, usedCPU, totalMem, usedMem float64
+			for _, p := range scan.report.NodePoolCosts {
+				totalCPU += p.TotalCPUCapacity
+				usedCPU += p.CPURequested
+				totalMem += p.TotalMemoryCapacity
+				usedMem += p.MemoryRequested
+				podCount += p.NodeCount // fallback; real pod count below
+			}
+			if totalCPU > 0 {
+				cpuUtil = int((usedCPU / totalCPU) * 100)
+			}
+			if totalMem > 0 {
+				memUtil = int((usedMem / totalMem) * 100)
+			}
+		}
+
+		if scan.secAudit != nil {
+			podCount = scan.secAudit.TotalPodsAudited
+		}
+
+		if scan.cisResult != nil {
+			securityScore = scan.cisResult.Score
+			secFailed = scan.cisResult.FailedChecks
+		}
+
+		if scan.wasteAudit != nil {
+			wasteCount = scan.wasteAudit.TotalWasteItems
+		}
+	}
+	_ = secFailed // reserved for future use
+
+	q := ""
+	if activeCtx != "" {
+		q = "?cluster=" + url.QueryEscape(activeCtx)
+	}
+
+	var clusters []costClusterLink
+	if len(clusterList) > 1 {
+		for _, ctx := range clusterList {
+			label := displayName(ctx)
+			if len(label) > 22 {
+				label = label[:21] + "…"
+			}
+			clusters = append(clusters, costClusterLink{
+				Href:     "/?" + url.Values{"cluster": {ctx}}.Encode(),
+				Label:    label,
+				IsActive: ctx == activeCtx,
+			})
+		}
+	}
+
+	return overviewPageData{
+		ClusterName:      clusterName,
+		ActiveCtx:        activeCtx,
+		ClusterList:      clusters,
+		DashURL:          "/" + q,
+		InfraURL:         "/infrastructure" + q,
+		NSsURL:           "/namespaces" + q,
+		OptURL:           "/optimizations" + q,
+		WrURL:            "/warroom" + q,
+		CostsURL:         "/costs" + q,
+		ScannedAtMS:      time.Now().UnixMilli(),
+		CriticalCount:    criticalCount,
+		SavingsPotential: savings,
+		SecurityScore:    securityScore,
+		WasteCount:       wasteCount,
+		MonthlyCost:      monthlyCost,
+		TopIssues:        buildTopIssues(scan, wrIssues),
+		FeaturedIssue:    featured,
+		HasFeatured:      featured != nil,
+		NodePoolCount:    nodePoolCount,
+		PodCount:         podCount,
+		CPUUtilization:   cpuUtil,
+		MemUtilization:   memUtil,
+		NamespaceCount:   nsCount,
+		Version:          "v0.9.3",
+		DashHref:         "/" + q,
+		CostsHref:        "/costs" + q,
+		InfraHref:        "/infrastructure" + q,
+		NsHref:           "/namespaces" + q,
+		OptHref:          "/optimizations" + q,
+		WrHref:           "/warroom" + q,
+		ActivePage:       "dashboard",
+		Clusters:         convertToSidebarClusters(clusterList, activeCtx, "/"),
+	}
+}
+
+// buildTopIssues aggregates the 5 most important issues across analyzers,
+// prioritized by severity then by potential impact.
+func buildTopIssues(scan *clusterScan, wrIssues []warRoomIssue) []topIssue {
+	var issues []topIssue
+
+	// Critical war room issues first (crash pods, OOMKilled, etc.)
+	for _, wr := range wrIssues {
+		if wr.Severity != "critical" {
+			continue
+		}
+		if len(issues) >= 5 {
+			break
+		}
+		issues = append(issues, topIssue{
+			Title:       fmt.Sprintf("%s in %s namespace", humanizeWRType(wr.Type), wr.Namespace),
+			Subtitle:    wr.Message,
+			Severity:    "critical",
+			SeverityLbl: "CRITICAL",
+			CountText:   wr.Resource,
+			URL:         "/warroom",
+		})
+	}
+
+	// Then high-severity warnings (unprotected namespaces, etc.)
+	for _, wr := range wrIssues {
+		if wr.Severity != "high" {
+			continue
+		}
+		if len(issues) >= 5 {
+			break
+		}
+		issues = append(issues, topIssue{
+			Title:       fmt.Sprintf("%s missing NetworkPolicy", wr.Namespace),
+			Subtitle:    wr.Message,
+			Severity:    "high",
+			SeverityLbl: "HIGH",
+			CountText:   wr.Resource,
+			URL:         "/warroom",
+		})
+	}
+
+	// Waste with cost impact
+	if scan != nil && scan.wasteAudit != nil {
+		wa := scan.wasteAudit
+		if len(wa.OrphanedPVCs) > 0 && len(issues) < 5 {
+			cost := ""
+			if wa.EstimatedMonthlyWaste > 0 {
+				cost = fmt.Sprintf("~$%.0f/mo", wa.EstimatedMonthlyWaste)
+			} else {
+				cost = fmt.Sprintf("%d items", len(wa.OrphanedPVCs))
+			}
+			issues = append(issues, topIssue{
+				Title:       fmt.Sprintf("%d orphaned PVCs wasting money", len(wa.OrphanedPVCs)),
+				Subtitle:    "Unused PVCs are costing you money",
+				Severity:    "medium",
+				SeverityLbl: "MEDIUM",
+				CountText:   cost,
+				URL:         "/optimizations",
+			})
+		}
+	}
+
+	// Security score below threshold
+	if scan != nil && scan.cisResult != nil && scan.cisResult.Score < 70 && len(issues) < 5 {
+		issues = append(issues, topIssue{
+			Title:       "Security score below recommended threshold",
+			Subtitle:    fmt.Sprintf("%d security checks failed", scan.cisResult.FailedChecks),
+			Severity:    "medium",
+			SeverityLbl: "MEDIUM",
+			CountText:   fmt.Sprintf("%d checks", scan.cisResult.FailedChecks),
+			URL:         "/warroom",
+		})
+	}
+
+	// Zombie pods
+	if scan != nil && scan.wasteAudit != nil {
+		zombieCount := 0
+		for _, p := range scan.wasteAudit.StalePods {
+			if p.Kind == analyzer.StalePodZombie {
+				zombieCount++
+			}
+		}
+		if zombieCount > 0 && len(issues) < 5 {
+			issues = append(issues, topIssue{
+				Title:       fmt.Sprintf("%d zombie pod(s) detected", zombieCount),
+				Subtitle:    "CrashLoopBackOff or OOMKilled pods consuming capacity",
+				Severity:    "low",
+				SeverityLbl: "LOW",
+				CountText:   fmt.Sprintf("%d pod%s", zombieCount, pluralS(zombieCount)),
+				URL:         "/warroom",
+			})
+		}
+	}
+
+	// Zero-replica workloads
+	if scan != nil && scan.wasteAudit != nil && len(scan.wasteAudit.ZeroReplicaWorkloads) > 0 && len(issues) < 5 {
+		count := len(scan.wasteAudit.ZeroReplicaWorkloads)
+		issues = append(issues, topIssue{
+			Title:       fmt.Sprintf("%d unused deployment(s) scaled to zero", count),
+			Subtitle:    "Workloads with 0 replicas still consuming cluster resources",
+			Severity:    "low",
+			SeverityLbl: "LOW",
+			CountText:   fmt.Sprintf("%d workload%s", count, pluralS(count)),
+			URL:         "/optimizations",
+		})
+	}
+
+	// Number them
+	for i := range issues {
+		issues[i].Rank = i + 1
+	}
+	return issues
+}
+
+func humanizeWRType(t string) string {
+	switch t {
+	case "crash_loop":
+		return "Pod crash looping"
+	case "oom_killed":
+		return "Pod OOMKilled"
+	case "image_pull":
+		return "Image pull failure"
+	case "unprotected_namespace":
+		return "Namespace"
+	default:
+		return t
+	}
+}
+
+func pluralS(n int) string {
+	if n == 1 {
+		return ""
+	}
+	return "s"
 }
 
 type costClusterLink struct {
@@ -1477,6 +1850,14 @@ type costWRIssue struct {
 	ShortMsg   string
 }
 
+var getOverviewTmpl = sync.OnceValue(func() *template.Template {
+	return template.Must(
+		template.New("overview.html").
+			Funcs(template.FuncMap{"money": formatMoney}).
+			ParseFS(templateFS, "templates/base.html", "templates/sidebar.html", "templates/overview.html"),
+	)
+})
+
 var getCostTmpl = sync.OnceValue(func() *template.Template {
 	return template.Must(
 		template.New("cost.html").
@@ -1499,6 +1880,7 @@ func buildCostPageData(scan *clusterScan, activeCtx string, clusterList []string
 		WrURL:         "/warroom" + q,
 		RefreshURL:    "/refresh" + q,
 		CriticalCount: countCriticalIssues(scan),
+		CostsURL:      "/costs" + q,
 	}
 
 	if scan != nil && scan.report != nil {
