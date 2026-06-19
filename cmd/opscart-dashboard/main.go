@@ -1656,51 +1656,60 @@ func buildOverviewData(scan *clusterScan, activeCtx string, clusterList []string
 	}
 }
 
-// buildTopIssues aggregates the 5 most important issues across analyzers,
-// prioritized by severity then by potential impact.
 func buildTopIssues(scan *clusterScan, wrIssues []warRoomIssue) []topIssue {
 	var issues []topIssue
 
-	// Critical war room issues first (crash pods, OOMKilled, etc.)
+	// Group war room issues by Severity + Type
+	type groupKey struct {
+		severity string
+		issueTyp string
+	}
+	groups := make(map[groupKey][]warRoomIssue)
+	keyOrder := []groupKey{} // preserve insertion order
 	for _, wr := range wrIssues {
-		if wr.Severity != "critical" {
-			continue
+		k := groupKey{severity: wr.Severity, issueTyp: wr.Type}
+		if _, exists := groups[k]; !exists {
+			keyOrder = append(keyOrder, k)
 		}
+		groups[k] = append(groups[k], wr)
+	}
+
+	// Severity rank for sorting
+	sevRank := map[string]int{"critical": 0, "high": 1, "medium": 2, "low": 3, "warning": 2}
+	sort.Slice(keyOrder, func(i, j int) bool {
+		if sevRank[keyOrder[i].severity] != sevRank[keyOrder[j].severity] {
+			return sevRank[keyOrder[i].severity] < sevRank[keyOrder[j].severity]
+		}
+		// Same severity → larger group first
+		return len(groups[keyOrder[i]]) > len(groups[keyOrder[j]])
+	})
+
+	// Convert grouped war room issues into topIssue rows
+	for _, k := range keyOrder {
 		if len(issues) >= 5 {
 			break
 		}
+		grp := groups[k]
+		count := len(grp)
+		sevLbl := strings.ToUpper(k.severity)
+
+		title, subtitle, countText := formatGroupedIssue(k.issueTyp, k.severity, grp)
+
 		issues = append(issues, topIssue{
-			Title:       fmt.Sprintf("%s in %s namespace", humanizeWRType(wr.Type), wr.Namespace),
-			Subtitle:    wr.Message,
-			Severity:    "critical",
-			SeverityLbl: "CRITICAL",
-			CountText:   wr.Resource,
+			Title:       title,
+			Subtitle:    subtitle,
+			Severity:    k.severity,
+			SeverityLbl: sevLbl,
+			CountText:   countText,
 			URL:         "/warroom",
 		})
+		_ = count
 	}
 
-	// Then high-severity warnings (unprotected namespaces, etc.)
-	for _, wr := range wrIssues {
-		if wr.Severity != "high" {
-			continue
-		}
-		if len(issues) >= 5 {
-			break
-		}
-		issues = append(issues, topIssue{
-			Title:       fmt.Sprintf("%s missing NetworkPolicy", wr.Namespace),
-			Subtitle:    wr.Message,
-			Severity:    "high",
-			SeverityLbl: "HIGH",
-			CountText:   wr.Resource,
-			URL:         "/warroom",
-		})
-	}
-
-	// Waste with cost impact
-	if scan != nil && scan.wasteAudit != nil {
+	// Waste: orphaned PVCs (single aggregated row)
+	if scan != nil && scan.wasteAudit != nil && len(issues) < 5 {
 		wa := scan.wasteAudit
-		if len(wa.OrphanedPVCs) > 0 && len(issues) < 5 {
+		if len(wa.OrphanedPVCs) > 0 {
 			cost := ""
 			if wa.EstimatedMonthlyWaste > 0 {
 				cost = fmt.Sprintf("~$%.0f/mo", wa.EstimatedMonthlyWaste)
@@ -1709,7 +1718,7 @@ func buildTopIssues(scan *clusterScan, wrIssues []warRoomIssue) []topIssue {
 			}
 			issues = append(issues, topIssue{
 				Title:       fmt.Sprintf("%d orphaned PVCs wasting money", len(wa.OrphanedPVCs)),
-				Subtitle:    "Unused PVCs are costing you money",
+				Subtitle:    "Unused PVCs costing you money each month",
 				Severity:    "medium",
 				SeverityLbl: "MEDIUM",
 				CountText:   cost,
@@ -1718,44 +1727,24 @@ func buildTopIssues(scan *clusterScan, wrIssues []warRoomIssue) []topIssue {
 		}
 	}
 
-	// Security score below threshold
+	// Security score row
 	if scan != nil && scan.cisResult != nil && scan.cisResult.Score < 70 && len(issues) < 5 {
 		issues = append(issues, topIssue{
 			Title:       "Security score below recommended threshold",
-			Subtitle:    fmt.Sprintf("%d security checks failed", scan.cisResult.FailedChecks),
+			Subtitle:    fmt.Sprintf("%d of %d CIS Pod Security checks failed", scan.cisResult.FailedChecks, scan.cisResult.TotalChecks),
 			Severity:    "medium",
 			SeverityLbl: "MEDIUM",
-			CountText:   fmt.Sprintf("%d checks", scan.cisResult.FailedChecks),
+			CountText:   fmt.Sprintf("%d/%d failed", scan.cisResult.FailedChecks, scan.cisResult.TotalChecks),
 			URL:         "/warroom",
 		})
 	}
 
-	// Zombie pods
-	if scan != nil && scan.wasteAudit != nil {
-		zombieCount := 0
-		for _, p := range scan.wasteAudit.StalePods {
-			if p.Kind == analyzer.StalePodZombie {
-				zombieCount++
-			}
-		}
-		if zombieCount > 0 && len(issues) < 5 {
-			issues = append(issues, topIssue{
-				Title:       fmt.Sprintf("%d zombie pod(s) detected", zombieCount),
-				Subtitle:    "CrashLoopBackOff or OOMKilled pods consuming capacity",
-				Severity:    "low",
-				SeverityLbl: "LOW",
-				CountText:   fmt.Sprintf("%d pod%s", zombieCount, pluralS(zombieCount)),
-				URL:         "/warroom",
-			})
-		}
-	}
-
-	// Zero-replica workloads
+	// Zero-replica workloads (aggregated)
 	if scan != nil && scan.wasteAudit != nil && len(scan.wasteAudit.ZeroReplicaWorkloads) > 0 && len(issues) < 5 {
 		count := len(scan.wasteAudit.ZeroReplicaWorkloads)
 		issues = append(issues, topIssue{
-			Title:       fmt.Sprintf("%d unused deployment(s) scaled to zero", count),
-			Subtitle:    "Workloads with 0 replicas still consuming cluster resources",
+			Title:       fmt.Sprintf("%d unused deployment%s scaled to zero", count, pluralS(count)),
+			Subtitle:    "Workloads with 0 replicas — clean up or restore",
 			Severity:    "low",
 			SeverityLbl: "LOW",
 			CountText:   fmt.Sprintf("%d workload%s", count, pluralS(count)),
@@ -1768,6 +1757,64 @@ func buildTopIssues(scan *clusterScan, wrIssues []warRoomIssue) []topIssue {
 		issues[i].Rank = i + 1
 	}
 	return issues
+}
+
+// formatGroupedIssue produces title/subtitle/count for a grouped batch of issues.
+func formatGroupedIssue(issueType, severity string, grp []warRoomIssue) (title, subtitle, countText string) {
+	count := len(grp)
+	// Collect first 3 sample resources for subtitle
+	samples := []string{}
+	namespaces := map[string]bool{}
+	for i, wr := range grp {
+		if i < 3 {
+			samples = append(samples, wr.Resource)
+		}
+		namespaces[wr.Namespace] = true
+	}
+	nsCount := len(namespaces)
+	moreThan3 := count - 3
+
+	switch issueType {
+	case "crash_loop":
+		title = fmt.Sprintf("%d pod%s crash-looping", count, pluralS(count))
+		if count == 1 {
+			subtitle = fmt.Sprintf("%s in %s", samples[0], grp[0].Namespace)
+		} else if moreThan3 > 0 {
+			subtitle = fmt.Sprintf("%s, %s, %s + %d more across %d namespace%s",
+				samples[0], samples[1], samples[2], moreThan3, nsCount, pluralS(nsCount))
+		} else {
+			subtitle = fmt.Sprintf("Across %d namespace%s", nsCount, pluralS(nsCount))
+		}
+		countText = fmt.Sprintf("%d pod%s", count, pluralS(count))
+	case "oom_killed":
+		title = fmt.Sprintf("%d pod%s OOMKilled", count, pluralS(count))
+		subtitle = fmt.Sprintf("Out of memory across %d namespace%s", nsCount, pluralS(nsCount))
+		countText = fmt.Sprintf("%d pod%s", count, pluralS(count))
+	case "image_pull":
+		title = fmt.Sprintf("%d ImagePullBackOff failure%s", count, pluralS(count))
+		subtitle = fmt.Sprintf("Image pull failures across %d namespace%s", nsCount, pluralS(nsCount))
+		countText = fmt.Sprintf("%d pod%s", count, pluralS(count))
+	case "unprotected_namespace":
+		title = fmt.Sprintf("%d namespace%s missing NetworkPolicy", count, pluralS(count))
+		if count == 1 {
+			subtitle = fmt.Sprintf("%s has no network isolation", grp[0].Namespace)
+		} else {
+			nsList := []string{}
+			for ns := range namespaces {
+				nsList = append(nsList, ns)
+				if len(nsList) >= 3 {
+					break
+				}
+			}
+			subtitle = fmt.Sprintf("Including %s", strings.Join(nsList, ", "))
+		}
+		countText = fmt.Sprintf("%d ns", count)
+	default:
+		title = fmt.Sprintf("%d %s issue%s", count, humanizeWRType(issueType), pluralS(count))
+		subtitle = fmt.Sprintf("Across %d namespace%s", nsCount, pluralS(nsCount))
+		countText = fmt.Sprintf("%d item%s", count, pluralS(count))
+	}
+	return
 }
 
 func humanizeWRType(t string) string {
