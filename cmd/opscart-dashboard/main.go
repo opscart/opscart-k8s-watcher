@@ -278,8 +278,8 @@ func (srv *server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 		page = state.htmlPage
 		state.mu.RUnlock()
 	}
-
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-cache, no-store, must-revalidate")
 	fmt.Fprint(w, page)
 }
 
@@ -586,7 +586,7 @@ func renderInfrastructurePage(scan *clusterScan, activeCtx string, clusterList [
 	data := infrastructurePageData{
 		ClusterName: clusterName,
 		DashURL:     "/" + q,
-		Sidebar:     template.HTML(buildSidebar("infrastructure", activeCtx, clusterName, clusterList)),
+		Sidebar:     template.HTML(buildSidebar("infrastructure", activeCtx, clusterName, clusterList, countCriticalIssues(scan))),
 		PoolCount:   len(pools),
 		TotalNodes:  totalNodes,
 		TotalCores:  fmt.Sprintf("%.0f", totalCores),
@@ -888,7 +888,7 @@ func renderNamespacesPage(scan *clusterScan, activeCtx string, clusterList []str
 		TotalPods:        totalPods,
 		TotalCPU:         totalCPU,
 		TotalMem:         totalMem,
-		Sidebar:          template.HTML(buildSidebar("namespaces", activeCtx, clusterName, clusterList)),
+		Sidebar:          template.HTML(buildSidebar("namespaces", activeCtx, clusterName, clusterList, countCriticalIssues(scan))),
 	}
 
 	var buf strings.Builder
@@ -1114,7 +1114,7 @@ func renderOptimizationsPage(scan *clusterScan, activeCtx string, clusterList []
 	data := optimizationsPageData{
 		ClusterName:      clusterName,
 		DashURL:          "/" + q,
-		Sidebar:          template.HTML(buildSidebar("optimizations", activeCtx, clusterName, clusterList)),
+		Sidebar:          template.HTML(buildSidebar("optimizations", activeCtx, clusterName, clusterList, countCriticalIssues(scan))),
 		RIPools:          riPoolRows,
 		TotalRI1yr:       pvcCostCell,
 		HasRI:            len(riPoolRows) > 0,
@@ -1146,14 +1146,15 @@ var getOptimizationsTmpl = sync.OnceValue(func() *template.Template {
 })
 
 type sidebarData struct {
-	DashHref    string
-	InfraHref   string
-	NsHref      string
-	OptHref     string
-	WrHref      string
-	ActivePage  string
-	ClusterName string
-	Clusters    []sidebarCluster
+	DashHref      string
+	InfraHref     string
+	NsHref        string
+	OptHref       string
+	WrHref        string
+	ActivePage    string
+	ClusterName   string
+	Clusters      []sidebarCluster
+	CriticalCount int
 }
 
 type sidebarCluster struct {
@@ -1162,9 +1163,26 @@ type sidebarCluster struct {
 	IsActive bool
 }
 
+// countCriticalIssues returns the number of critical issues in War Room data.
+// Used by buildSidebar to display the red badge on the War Room nav item.
+func countCriticalIssues(scan *clusterScan) int {
+	if scan == nil {
+		return 0
+	}
+	issues := collectWarRoomIssues(scan, 0)
+	count := 0
+	for _, issue := range issues {
+		if issue.Severity == "critical" {
+			count++
+		}
+	}
+	return count
+}
+
 // buildSidebar returns a complete <aside>…</aside> sidebar, shared by all sub-pages.
 // activePage is one of: "dashboard", "infrastructure", "namespaces", "optimizations", "warroom".
-func buildSidebar(activePage, activeCtx, clusterName string, clusterList []string) string {
+func buildSidebar(activePage, activeCtx, clusterName string, clusterList []string, criticalCount int) string {
+
 	q := ""
 	if activeCtx != "" {
 		q = "?cluster=" + url.QueryEscape(activeCtx)
@@ -1198,14 +1216,15 @@ func buildSidebar(activePage, activeCtx, clusterName string, clusterList []strin
 	}
 
 	data := sidebarData{
-		DashHref:    "/" + q,
-		InfraHref:   "/infrastructure" + q,
-		NsHref:      "/namespaces" + q,
-		OptHref:     "/optimizations" + q,
-		WrHref:      "/warroom" + q,
-		ActivePage:  activePage,
-		ClusterName: clusterName,
-		Clusters:    clusters,
+		DashHref:      "/" + q,
+		InfraHref:     "/infrastructure" + q,
+		NsHref:        "/namespaces" + q,
+		OptHref:       "/optimizations" + q,
+		WrHref:        "/warroom" + q,
+		ActivePage:    activePage,
+		ClusterName:   clusterName,
+		Clusters:      clusters,
+		CriticalCount: criticalCount,
 	}
 
 	var buf strings.Builder
@@ -1288,7 +1307,7 @@ func renderWarRoomPage(scan *clusterScan, activeCtx string, clusterList []string
 		Critical:      critical,
 		Warnings:      warnings,
 		ScannedAtMs:   scannedAt.UnixMilli(),
-		Sidebar:       template.HTML(buildSidebar("warroom", activeCtx, clusterName, clusterList)),
+		Sidebar:       template.HTML(buildSidebar("warroom", activeCtx, clusterName, clusterList, countCriticalIssues(scan))),
 	}
 
 	var buf strings.Builder
@@ -1396,7 +1415,8 @@ type costPageData struct {
 	Disclaimers   []string
 	PricingSource string
 
-	WRIssues []costWRIssue
+	WRIssues      []costWRIssue
+	CriticalCount int
 }
 
 type costClusterLink struct {
@@ -1470,14 +1490,15 @@ func buildCostPageData(scan *clusterScan, activeCtx string, clusterList []string
 		q = "?cluster=" + url.QueryEscape(activeCtx)
 	}
 	data := costPageData{
-		ActiveCtx:    activeCtx,
-		ClusterCount: len(clusterList),
-		DashURL:      "/" + q,
-		InfraURL:     "/infrastructure" + q,
-		NSsURL:       "/namespaces" + q,
-		OptURL:       "/optimizations" + q,
-		WrURL:        "/warroom" + q,
-		RefreshURL:   "/refresh" + q,
+		ActiveCtx:     activeCtx,
+		ClusterCount:  len(clusterList),
+		DashURL:       "/" + q,
+		InfraURL:      "/infrastructure" + q,
+		NSsURL:        "/namespaces" + q,
+		OptURL:        "/optimizations" + q,
+		WrURL:         "/warroom" + q,
+		RefreshURL:    "/refresh" + q,
+		CriticalCount: countCriticalIssues(scan),
 	}
 
 	if scan != nil && scan.report != nil {
