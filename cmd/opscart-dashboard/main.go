@@ -1509,6 +1509,7 @@ type topIssue struct {
 	Rank        int
 	Title       string
 	Subtitle    string
+	Action      string
 	Severity    string // "critical" | "high" | "medium" | "low"
 	SeverityLbl string // "CRITICAL" | "HIGH" | "MEDIUM" | "LOW"
 	CountText   string // "8 pods", "~$40/mo", "14 checks"
@@ -1693,11 +1694,12 @@ func buildTopIssues(scan *clusterScan, wrIssues []warRoomIssue) []topIssue {
 		count := len(grp)
 		sevLbl := strings.ToUpper(k.severity)
 
-		title, subtitle, countText := formatGroupedIssue(k.issueTyp, k.severity, grp)
+		title, subtitle, countText, action := formatGroupedIssue(k.issueTyp, k.severity, grp)
 
 		issues = append(issues, topIssue{
 			Title:       title,
 			Subtitle:    subtitle,
+			Action:      action,
 			Severity:    k.severity,
 			SeverityLbl: sevLbl,
 			CountText:   countText,
@@ -1760,7 +1762,7 @@ func buildTopIssues(scan *clusterScan, wrIssues []warRoomIssue) []topIssue {
 }
 
 // formatGroupedIssue produces title/subtitle/count for a grouped batch of issues.
-func formatGroupedIssue(issueType, severity string, grp []warRoomIssue) (title, subtitle, countText string) {
+func formatGroupedIssue(issueType, severity string, grp []warRoomIssue) (title, subtitle, countText, action string) {
 	count := len(grp)
 	// Collect first 3 sample resources for subtitle
 	samples := []string{}
@@ -1786,6 +1788,7 @@ func formatGroupedIssue(issueType, severity string, grp []warRoomIssue) (title, 
 			subtitle = fmt.Sprintf("Across %d namespace%s", nsCount, pluralS(nsCount))
 		}
 		countText = fmt.Sprintf("%d pod%s", count, pluralS(count))
+		action = fmt.Sprintf("kubectl logs %s -n %s", samples[0], grp[0].Namespace)
 	case "oom_killed":
 		title = fmt.Sprintf("%d pod%s OOMKilled", count, pluralS(count))
 		subtitle = fmt.Sprintf("Out of memory across %d namespace%s", nsCount, pluralS(nsCount))
@@ -1794,6 +1797,7 @@ func formatGroupedIssue(issueType, severity string, grp []warRoomIssue) (title, 
 		title = fmt.Sprintf("%d ImagePullBackOff failure%s", count, pluralS(count))
 		subtitle = fmt.Sprintf("Image pull failures across %d namespace%s", nsCount, pluralS(nsCount))
 		countText = fmt.Sprintf("%d pod%s", count, pluralS(count))
+		action = fmt.Sprintf("kubectl describe pod %s -n %s", samples[0], grp[0].Namespace)
 	case "unprotected_namespace":
 		title = fmt.Sprintf("%d namespace%s missing NetworkPolicy", count, pluralS(count))
 		if count == 1 {
@@ -1809,6 +1813,7 @@ func formatGroupedIssue(issueType, severity string, grp []warRoomIssue) (title, 
 			subtitle = fmt.Sprintf("Including %s", strings.Join(nsList, ", "))
 		}
 		countText = fmt.Sprintf("%d ns", count)
+		action = "kubectl apply default-deny NetworkPolicy"
 	default:
 		title = fmt.Sprintf("%d %s issue%s", count, humanizeWRType(issueType), pluralS(count))
 		subtitle = fmt.Sprintf("Across %d namespace%s", nsCount, pluralS(nsCount))
