@@ -93,7 +93,49 @@ go build -o opscart-scan ./cmd/opscart-scan
 ```
 
 ---
+## 🛡️ Security & Trust
 
+OpsCart is designed to deploy in security-sensitive environments without raising eyebrows from your platform team.
+
+**Container Image**
+- **Scratch base** — no OS, no shell, no package manager, no CVE surface beyond the Go binary
+- **~15 MB image size** — smaller than most app icons
+- **Non-root user** (UID 65534)
+- **Statically compiled** — `CGO_ENABLED=0`, no libc dependency
+- **Stripped binary** — `-ldflags="-s -w" -trimpath` removes debug symbols and build paths
+
+**Cluster Permissions**
+- **Read-only ClusterRole** — `get` and `list` verbs only on resources that need inspection
+- **No cluster mutations** — OpsCart cannot create, update, patch, or delete any resource
+- **No exec into pods** — no `pods/exec` or `pods/log` permissions
+- **No secrets access** — Secrets are listed (count) but never read
+
+**No External Dependencies**
+- No outbound network calls to OpsCart, Anthropic, or any third party
+- No telemetry, no analytics, no phone-home
+- No cloud provider API calls — Azure pricing is embedded in the binary at build time
+- No agents, no sidecars, no CRDs
+
+**Audit the Image Yourself**
+```bash
+# Scan for CVEs
+trivy image ghcr.io/opscart/opscart-dashboard:v1.0.0
+
+# Inspect layers
+docker history ghcr.io/opscart/opscart-dashboard:v1.0.0
+
+# View RBAC permissions
+kubectl describe clusterrole opscart-dashboard
+```
+---
+**CLEAN. ZERO VULNERABILITIES. 🎉**
+┌───────────────────┬──────────┬─────────────────┬─────────┐
+│      Target       │   Type   │ Vulnerabilities │ Secrets │
+├───────────────────┼──────────┼─────────────────┼─────────┤
+│ opscart-dashboard │ gobinary │        0        │    -    │
+└───────────────────┴──────────┴─────────────────┴─────────┘
+
+----
 ## 🧠 What It Detects
 
 ### 🚨 War Room — Operational Risk
