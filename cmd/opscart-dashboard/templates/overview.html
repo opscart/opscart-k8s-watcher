@@ -176,6 +176,7 @@
         <div>
           <div class="top-issue-title">{{.Title}}</div>
           <div class="top-issue-sub">{{.Subtitle}}</div>
+          {{if .Action}}<div class="top-issue-action">▸ {{.Action}}</div>{{end}}
         </div>
         <span class="sev-badge {{.Severity}}">{{.SeverityLbl}}</span>
         <span class="top-issue-count">{{.CountText}}</span>
