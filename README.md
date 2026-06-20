@@ -1,49 +1,69 @@
 # OpsCart Kubernetes Watcher
 
-**Kubectl shows resources. OpsCart shows what deserves your attention.**
+**Kubectl shows resources. Lens shows state. OpsCart shows what deserves your attention.**
 
 [![Version](https://img.shields.io/badge/version-v1.0.0-blue)](https://github.com/opscart/opscart-k8s-watcher/releases)
 [![Go](https://img.shields.io/badge/go-1.21+-00ADD8)](https://go.dev)
 [![License](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 [![Docker](https://img.shields.io/badge/docker-ghcr.io%2Fopscart-blue)](https://ghcr.io/opscart/opscart-dashboard)
+[![Trivy](https://img.shields.io/badge/trivy-0%20CVEs-success)](https://trivy.dev)
 
 ✅ **Read-only** &nbsp;·&nbsp; ✅ **No agents** &nbsp;·&nbsp; ✅ **No cloud credentials** &nbsp;·&nbsp; ✅ **Deploy in 30 seconds**
 
-Kubernetes operational intelligence for incident response, cost visibility, and security posture. Aggregates risk across your cluster and tells you what to fix first — without touching production.
+- ① Critical Issues
+- ② Top 5 Things To Fix
+- ③ War Room
+- ④ Cost Analysis
 
-![Dashboard Preview](https://raw.githubusercontent.com/opscart/opscart-k8s-watcher/main/docs/dashboard-preview.png)
-
----
-
-## What OpsCart Does
-
-OpsCart answers one question:
-
-> **"What deserves my attention right now?"**
-
-Every Kubernetes engineer wakes up wondering what's broken, what's wasting money, and what to fix first. OpsCart aggregates issues across operational risk, cost, security, and waste — then surfaces the top 5 things to fix, prioritized by impact.
-
-### The War Room
-
-The flagship feature. One screen showing every critical issue across your cluster:
-
-- 🔴 CrashLoopBackOff pods with restart counts and age
-- 🟠 ImagePullBackOff failures with `kubectl describe` commands
-- 🔴 OOMKilled containers
-- 🟡 Unprotected namespaces (no NetworkPolicy)
-- 🟡 Orphaned PVCs wasting storage cost
-
-Each issue includes severity, impact, and a `kubectl` command you can copy-paste.
+![Dashboard Preview](docs/dashboard-preview.png)
 
 ---
 
-## 🚀 Deployment Options
+## What is broken? What is wasting money? What should I fix first?
 
-Three ways to run OpsCart. Pick what fits your workflow.
+OpsCart continuously analyzes your Kubernetes clusters and surfaces the operational risks that deserve attention — without touching production.
 
-### Option 1: Deploy In-Cluster (Recommended)
+Most Kubernetes tools show cluster state.
 
-The fastest path to running production OpsCart. Read-only ClusterRole, scratch image, non-root.
+OpsCart continuously analyzes operational risk across cost, security, waste, and reliability, then prioritizes what deserves attention first.
+
+### Why OpsCart?
+```
+Lens shows resources.
+Grafana shows metrics.
+kubectl shows objects.
+OpsCart shows what deserves attention.
+```
+
+OpsCart is the operational intelligence layer between `kubectl` and full observability platforms. It aggregates risk across operations, cost, security, and waste — then prioritizes what to fix first.
+
+---
+**Used on real clusters with:**
+
+- 200+ running pods
+- 25+ namespaces
+- Multi-node pools
+- Enterprise RBAC environments
+
+---
+
+## The War Room
+
+The flagship feature. One screen showing every critical incident in your cluster:
+
+- 🔴 **CrashLoopBackOff pods** — with restart counts and age
+- 🟠 **ImagePullBackOff failures** — with `kubectl describe` ready to copy
+- 🔴 **OOMKilled containers** — out-of-memory incidents
+- 🟡 **Unprotected namespaces** — no NetworkPolicy defined
+- 🟡 **Orphaned PVCs** — storage charging with no consuming pod
+
+Each issue includes severity, namespace, age, and a `kubectl` command to investigate.
+
+---
+
+## 🚀 Deploy in 30 Seconds
+
+### In-Cluster (Recommended)
 
 ```bash
 kubectl apply -f https://raw.githubusercontent.com/opscart/opscart-k8s-watcher/main/deploy/dashboard.yaml
@@ -51,27 +71,18 @@ kubectl port-forward -n opscart-system svc/opscart-dashboard 8080:80
 open http://localhost:8080
 ```
 
-**What this gives you:**
-- Auto-refreshes every 60 seconds
-- Multi-cluster aware
-- No external dependencies (no Prometheus, no metrics-server required)
-- Removable in one command: `kubectl delete -f deploy/dashboard.yaml`
+Runs as a Deployment with read-only ClusterRole. Removable in one command: `kubectl delete -f deploy/dashboard.yaml`.
 
-### Option 2: Local Binary
-
-Useful for testing OpsCart against a cluster from your laptop. Uses your local kubeconfig.
+### Local Binary
 
 ```bash
 git clone https://github.com/opscart/opscart-k8s-watcher.git
 cd opscart-k8s-watcher
 go build -o opscart-dashboard ./cmd/opscart-dashboard
 ./opscart-dashboard --cluster my-cluster --port 8080
-open http://localhost:8080
 ```
 
-### Option 3: Docker
-
-Cross-platform, no Go installation required.
+### Docker
 
 ```bash
 docker run -p 8080:8080 \
@@ -79,9 +90,7 @@ docker run -p 8080:8080 \
   ghcr.io/opscart/opscart-dashboard:v1.0.0
 ```
 
-### Option 4: CLI Scanner
-
-If you prefer the terminal or want to integrate OpsCart into pipelines:
+### CLI for Terminal Workflows
 
 ```bash
 go build -o opscart-scan ./cmd/opscart-scan
@@ -93,100 +102,82 @@ go build -o opscart-scan ./cmd/opscart-scan
 ```
 
 ---
-## 🛡️ Security & Trust
 
-OpsCart is designed to deploy in security-sensitive environments without raising eyebrows from your platform team.
+## 🛡️ Built for Security-Sensitive Environments
 
-**Container Image**
-- **Scratch base** — no OS, no shell, no package manager, no CVE surface beyond the Go binary
-- **~15 MB image size** — smaller than most app icons
-- **Non-root user** (UID 65534)
-- **Statically compiled** — `CGO_ENABLED=0`, no libc dependency
-- **Stripped binary** — `-ldflags="-s -w" -trimpath` removes debug symbols and build paths
+OpsCart is designed to deploy in production without raising eyebrows from your platform team.
 
-**Cluster Permissions**
-- **Read-only ClusterRole** — `get` and `list` verbs only on resources that need inspection
-- **No cluster mutations** — OpsCart cannot create, update, patch, or delete any resource
-- **No exec into pods** — no `pods/exec` or `pods/log` permissions
-- **No secrets access** — Secrets are listed (count) but never read
+| Property | Detail |
+|----------|--------|
+| **Base image** | `scratch` — no OS, no shell, no package manager |
+| **Image size** | ~50 MB |
+| **User** | Non-root (UID 65534) |
+| **Binary** | Statically compiled, `CGO_ENABLED=0`, `-trimpath` |
+| **CVE scan** | 0 vulnerabilities (Trivy) |
+| **Cluster permissions** | Read-only ClusterRole (`get`, `list` only) |
+| **Pod exec access** | None |
+| **Secret access** | None |
+| **External calls** | None (no telemetry, no phone-home) |
+| **Cloud API calls** | None (Azure pricing embedded at build time) |
 
-**No External Dependencies**
-- No outbound network calls to OpsCart, Anthropic, or any third party
-- No telemetry, no analytics, no phone-home
-- No cloud provider API calls — Azure pricing is embedded in the binary at build time
-- No agents, no sidecars, no CRDs
+**Audit it yourself:**
 
-**Audit the Image Yourself**
 ```bash
-# Scan for CVEs
 trivy image ghcr.io/opscart/opscart-dashboard:v1.0.0
-
-# Inspect layers
-docker history ghcr.io/opscart/opscart-dashboard:v1.0.0
-
-# View RBAC permissions
 kubectl describe clusterrole opscart-dashboard
+docker history ghcr.io/opscart/opscart-dashboard:v1.0.0
 ```
+
 ---
-**CLEAN. ZERO VULNERABILITIES. 🎉**
-┌───────────────────┬──────────┬─────────────────┬─────────┐
-│      Target       │   Type   │ Vulnerabilities │ Secrets │
-├───────────────────┼──────────┼─────────────────┼─────────┤
-│ opscart-dashboard │ gobinary │        0        │    -    │
-└───────────────────┴──────────┴─────────────────┴─────────┘
 
-----
-## 🧠 What It Detects
+## 🧠 What OpsCart Detects
 
-### 🚨 War Room — Operational Risk
+### Operational Risk (War Room)
 
-Every issue that needs human attention, surfaced and grouped by type:
+Every issue that needs human attention, grouped by type and prioritized:
 
-- **CrashLoopBackOff** — pod identity, namespace, restart count, age
-- **OOMKilled** — out-of-memory containers
-- **ImagePullBackOff** — image pull failures with `describe` commands
-- **Unprotected Namespaces** — no NetworkPolicy defined
-- **Orphaned PVCs** — storage charging with no consuming pod
-- **Zero-Replica Workloads** — deployments scaled to 0
+- CrashLoopBackOff, OOMKilled, ImagePullBackOff pods
+- Unprotected namespaces (missing NetworkPolicy)
+- Orphaned PVCs (storage with no consuming pod)
+- Zero-replica deployments
+- Stale jobs and batch workloads
 
-### 💰 Cloud Costs
+### Cost Intelligence
 
-Reads Kubernetes node labels, looks up Azure retail pricing, allocates costs to namespaces proportionally. **No Azure credentials, no API calls — fully offline.**
+Reads Kubernetes node labels, looks up Azure retail pricing, allocates costs to namespaces proportionally.
 
 - 40+ VM SKUs (B/D/E/F/L series), Spot and On-Demand
-- Reserved Instance savings potential (1yr/3yr)
+- Reserved Instance savings (1yr/3yr)
 - Per-deployment cost breakdown
 - 15+ Azure region multipliers
 
-### 🔒 Security Posture
+**No Azure credentials needed.** Pricing is embedded in the binary.
 
-CIS Kubernetes Benchmark v1.8 scoring with environment-aware analysis.
+### Security Posture
 
-- Separates **actionable issues** from **expected infrastructure** configs
-- Privileged container whitelist (CNI/CSI/monitoring distinguished from unexpected)
-- 50+ infrastructure namespace patterns recognized (calico, tigera, gatekeeper, etc.)
+CIS Kubernetes Benchmark v1.8 scoring with environment-aware analysis. Separates **actionable issues** from **expected infrastructure** configs (CNI, CSI, monitoring).
 
-### 🗑️ Waste & Drift
+### Waste Detection
 
-9 resource types — **never modifies the cluster**, suggestions only.
-
-| Type | What It Catches |
-|------|-----------------|
-| Abandoned Namespaces | No running pods for N days |
-| Zombie Pods | CrashLoopBackOff, OOMKilled lingering |
-| Orphaned PVCs | Unbound or pod-less storage still charging |
-| Stale Jobs | Completed jobs not cleaned up |
-| Zero-Replica Workloads | Deployments scaled to 0 |
-| Broken Ingresses | Backends pointing to missing services |
-| Misconfigured HPAs | Stuck at minReplicas, scaling disabled |
-
-### 🌐 Network Policy Gaps
-
-Which namespaces have zero network isolation — before an attacker finds out first.
+9 resource types analyzed, suggestions only — **never modifies the cluster**.
 
 ---
 
-## 📋 CLI Commands
+## 🆚 vs. Other Tools
+
+| Tool | Shows | OpsCart's Difference |
+|------|-------|---------------------|
+| **kubectl** | Resources | OpsCart prioritizes |
+| **Lens** | Cluster state | OpsCart aggregates risk |
+| **k9s** | Real-time pods | OpsCart explains impact |
+| **Datadog / New Relic** | Metrics + logs | OpsCart needs no agents |
+| **Kubecost** | Detailed cost only | OpsCart correlates cost + risk |
+
+OpsCart isn't a replacement for these tools — it's the operational triage layer that tells you what to look at first.
+
+---
+
+## 📋 CLI Reference
 
 | Command | Description |
 |---------|-------------|
@@ -198,7 +189,6 @@ Which namespaces have zero network isolation — before an attacker finds out fi
 | `costs` | Resource-share cost allocation |
 | `report` | Comprehensive cluster health HTML report |
 | `resources` | Cluster resource inventory |
-| `config` | Multi-cluster configuration |
 
 **Common flags:**
 
@@ -211,40 +201,32 @@ Which namespaces have zero network isolation — before an attacker finds out fi
 
 ---
 
-## 🏗️ Architecture
+## 🗺️ Roadmap
 
-opscart-k8s-watcher/
-├── cmd/
-│   ├── opscart-scan/       ← CLI scanner binary
-│   └── opscart-dashboard/  ← Live dashboard server
-└── pkg/
-├── analyzer/           ← Detection engines (security, waste, cost, network)
-├── models/             ← Data structures
-├── report/             ← HTML report generators
-└── scanner/            ← Multi-cluster orchestration
+**v1.0** ✅ — Operational intelligence dashboard
+- Top 5 Things to Fix
+- War Room featured panel
+- Critical Issues as primary KPI
+- Sidebar: Overview → Operations → Analysis
+- Trust-first architecture
 
-**Dashboard runtime:**
+**v1.1** — Triage depth
+- Issue grouping with expand/collapse
+- War Room drill-downs (filter by namespace, severity, type)
+- Recommended actions with one-click investigation
+- Lucide icons replacing emojis
 
-opscart-system namespace
+**v1.2** — Historical intelligence
+- SQLite-backed history (Critical Issues over time, cost trends)
+- 7/30/90 day comparison views
+- "Cost increased 18% this week" trend signals
+- Slack/Teams alerts for new critical issues
 
-└── opscart-dashboard pod
-├── ClusterRole: read-only (nodes, pods, deployments, NetworkPolicies, PVCs)
-├── Polls cluster every 60 seconds
-├── REST API: /api/overview, /api/warroom, /api/report
-└── Scratch image (~15MB), non-root (UID 65534)
----
-
-## 🆚 vs. Other Tools
-
-| Tool | Shows | OpsCart Difference |
-|------|-------|---------------------|
-| **kubectl** | Resources | OpsCart prioritizes |
-| **Lens** | Cluster state | OpsCart aggregates risk |
-| **k9s** | Real-time pods | OpsCart explains impact |
-| **Datadog/New Relic** | Metrics + logs | OpsCart needs no agents |
-| **Kubecost** | Detailed cost only | OpsCart correlates cost + risk |
-
-OpsCart isn't a replacement — it's the operational intelligence layer between `kubectl` and full observability platforms.
+**v2.0** — Multi-cloud + ecosystem
+- AWS and GCP cost analysis
+- Helm chart distribution
+- Prometheus integration (optional)
+- Multi-tenancy and RBAC for dashboard users
 
 ---
 
@@ -252,38 +234,28 @@ OpsCart isn't a replacement — it's the operational intelligence layer between 
 
 | Version | Date | Highlights |
 |---------|------|------------|
-| **v1.0.0** | Jun 2026 | **New Overview page**, Top 5 Things to Fix, War Room featured panel, sidebar restructure (Operations as own category), trust-first positioning, complete code refactor |
-| v0.9.0 | Jun 2026 | Full dashboard with 5 tabs (Infrastructure, Namespaces, Optimizations, War Room, Cost Overview) |
-| v0.8.0 | Jun 2026 | Live in-cluster FinOps dashboard, 60s background polling, multi-cluster UI |
-| v0.7.0 | Jun 2026 | `cloud-costs` command, embedded Azure pricing catalog |
-| v0.6.0 | May 2026 | `costs` command, resource-share allocation |
+| **v1.0.0** | Jun 2026 | **Operational intelligence dashboard** — Top 5 Things to Fix, War Room featured panel, trust-first positioning, complete refactor |
+| v0.9.0 | Jun 2026 | Full dashboard with 5 tabs |
+| v0.8.0 | Jun 2026 | Live in-cluster FinOps dashboard |
+| v0.7.0 | Jun 2026 | `cloud-costs` command with embedded Azure pricing |
+| v0.6.0 | May 2026 | Resource-share cost allocation |
 | v0.5.x | Feb 2026 | Waste detection (9 types), HTML reports |
 | v0.4.0 | Feb 2026 | Network policy gap analysis |
-| v0.3.0 | Feb 2026 | HTML report generation |
+| v0.3.0 | Feb 2026 | HTML report generation, CIS scoring |
 | v0.2.0 | Feb 2026 | Multi-cluster support |
-| v0.1.0 | Jan 2026 | Initial release — security auditing |
-
----
-
-## 🗺️ Roadmap
-
-**v1.1** — SQLite history, trend charts (Critical Issues ↑/↓, Cost trend), per-issue detail pages, recommended actions section, light theme
-
-**v1.2** — AWS/GCP cost analysis, Helm chart, Prometheus integration
-
-**v2.0** — Slack/Teams alerts, multi-tenancy, RBAC for dashboard users
+| v0.1.0 | Jan 2026 | Initial release |
 
 ---
 
 ## ⚠️ Disclaimer
 
-Security awareness tool — **not for formal compliance auditing**. Use [kube-bench](https://github.com/aquasecurity/kube-bench) for official CIS compliance. Cost estimates based on Azure public retail pricing — actual costs vary with EA/MACC agreements.
+Security awareness tool — **not for formal compliance auditing**. Use [kube-bench](https://github.com/aquasecurity/kube-bench) for official CIS compliance. Cost estimates are based on Azure public retail pricing — actual costs vary with EA/MACC agreements.
 
 ---
 
 ## 🤝 Contributing
 
-Issues, PRs, and feature requests welcome.
+Issues, PRs, and feature requests welcome. Built for the Kubernetes community.
 
 **Author:** Shamsher Khan — [IEEE Senior Member](https://ieee.org) · [opscart.com](https://opscart.com) · [DZone Core Member](https://dzone.com/users/shamsher_khan)
 
