@@ -108,19 +108,27 @@ tbody tr{transition:background 0.1s}
 <aside class="sidebar">
 <div class="logo">
 <div class="logo-icon">⚡</div>
-<div><div class="logo-text">OpsCart</div><div class="logo-sub">FinOps Engine</div></div>
+<div><div class="logo-text">OpsCart</div><div class="logo-sub">K8s Operational Intelligence</div></div>
 </div>
+
+<div class="nav-section">
+<div class="nav-label">Overview</div>
+<a class="nav-item active" href="{{.DashURL}}">📊 Overview</a>
+</div>
+
+<div class="nav-section">
+<div class="nav-label">Operations</div>
+<a class="nav-item" href="{{.WrURL}}">🚨 War Room{{if .CriticalCount}} <span class="nav-badge">{{.CriticalCount}}</span>{{end}}</a>
+</div>
+
 <div class="nav-section">
 <div class="nav-label">Analysis</div>
-<a class="nav-item active" href="{{.DashURL}}">📊 Cost Overview</a>
+<a class="nav-item" href="{{.CostsURL}}">💰 Costs</a>
 <a class="nav-item" href="{{.InfraURL}}">🖥️ Infrastructure</a>
 <a class="nav-item" href="{{.NSsURL}}">📦 Namespaces</a>
 <a class="nav-item" href="{{.OptURL}}">💡 Optimizations</a>
 </div>
-<div class="nav-section">
-<div class="nav-label">Ops</div>
-<a class="nav-item" href="{{.WrURL}}">🚨 War Room</a>
-</div>
+
 {{if gt (len .ClusterList) 1}}
 <div class="nav-section">
 <div class="nav-label">Clusters</div>
@@ -128,17 +136,18 @@ tbody tr{transition:background 0.1s}
 {{end}}
 </div>
 {{end}}
+
 <div class="cluster-info">
 <div class="cluster-badge"><h4>Cluster</h4><p>{{.ClusterName}}</p></div>
 </div>
 </aside>
 <main class="main">
 <div class="oc-kpi-row">
-<div class="kpi"><div class="kpi-top"><div class="kpi-icon red">💰</div></div><h3 class="money red">${{money .MonthlyCost}}</h3><p>Monthly Cost</p></div>
-<div class="kpi"><div class="kpi-top"><div class="kpi-icon green">💡</div><span class="kpi-trend down">↓ Save</span></div><h3 class="money green">${{money .SavingsPotential}}</h3><p>Savings Potential</p></div>
+<div class="kpi"><div class="kpi-top"><div class="kpi-icon {{if .CriticalCount}}red{{else}}green{{end}}">🚨</div></div><h3 class="money {{if .CriticalCount}}red{{else}}green{{end}}">{{.CriticalCount}}</h3><p>{{if .CriticalCount}}Critical Issues{{else}}All Clear{{end}}</p></div>
+<div class="kpi"><div class="kpi-top"><div class="kpi-icon green">💡</div><span class="kpi-trend down">↓ Save</span></div><h3 class="money green">${{money .SavingsPotential}}</h3><p>Potential Savings</p></div>
 <div class="kpi"><div class="kpi-top"><div class="kpi-icon {{.SecurityColor}}">🔐</div></div><h3>{{.SecurityDisplay}}</h3><p>Security Score</p></div>
-<div class="kpi"><div class="kpi-top"><div class="kpi-icon {{.WasteColor}}">🗑️</div></div><h3>{{.WasteDisplay}}</h3><p>Waste Items</p></div>
-<div class="kpi"><div class="kpi-top"><div class="kpi-icon blue">🐳</div></div><h3>{{.PodCount}}</h3><p>Running Pods</p></div>
+<div class="kpi"><div class="kpi-top"><div class="kpi-icon {{.WasteColor}}">🗑️</div></div><h3>{{.WasteDisplay}}</h3><p>Waste Resources</p></div>
+<div class="kpi"><div class="kpi-top"><div class="kpi-icon red">💰</div></div><h3 class="money red">${{money .MonthlyCost}}</h3><p>Monthly Cost</p></div>
 <div class="kpi"><div class="kpi-top"><div class="kpi-icon cyan">☸️</div></div><h3>{{.ClusterCount}}</h3><p>Clusters</p></div>
 </div>
 <div style="display:grid;grid-template-columns:1fr 340px;gap:1.5rem;align-items:start">

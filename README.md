@@ -1,119 +1,131 @@
-# OpsCart-K8s-Watcher
+# OpsCart Kubernetes Watcher
 
-**Your Kubernetes cluster is hiding things. This finds them.**
+**Kubectl shows resources. OpsCart shows what deserves your attention.**
 
-[![Version](https://img.shields.io/badge/version-v0.9.0-blue)](https://github.com/opscart/opscart-k8s-watcher/releases)
+[![Version](https://img.shields.io/badge/version-v1.0.0-blue)](https://github.com/opscart/opscart-k8s-watcher/releases)
 [![Go](https://img.shields.io/badge/go-1.21+-00ADD8)](https://go.dev)
 [![License](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 [![Docker](https://img.shields.io/badge/docker-ghcr.io%2Fopscart-blue)](https://ghcr.io/opscart/opscart-dashboard)
 
-Production-grade Kubernetes intelligence — security posture, cloud costs, waste detection, and network policy analysis. Built from real Fortune 500 AKS cluster experience.
+✅ **Read-only** &nbsp;·&nbsp; ✅ **No agents** &nbsp;·&nbsp; ✅ **No cloud credentials** &nbsp;·&nbsp; ✅ **Deploy in 30 seconds**
+
+Kubernetes operational intelligence for incident response, cost visibility, and security posture. Aggregates risk across your cluster and tells you what to fix first — without touching production.
+
+![Dashboard Preview](https://raw.githubusercontent.com/opscart/opscart-k8s-watcher/main/docs/dashboard-preview.png)
 
 ---
 
-## 🚀 What's New in v0.8.0 — Live FinOps Dashboard
+## What OpsCart Does
 
-**OpsCart moves from CLI scanner to always-on in-cluster daemon.**
+OpsCart answers one question:
+
+> **"What deserves my attention right now?"**
+
+Every Kubernetes engineer wakes up wondering what's broken, what's wasting money, and what to fix first. OpsCart aggregates issues across operational risk, cost, security, and waste — then surfaces the top 5 things to fix, prioritized by impact.
+
+### The War Room
+
+The flagship feature. One screen showing every critical issue across your cluster:
+
+- 🔴 CrashLoopBackOff pods with restart counts and age
+- 🟠 ImagePullBackOff failures with `kubectl describe` commands
+- 🔴 OOMKilled containers
+- 🟡 Unprotected namespaces (no NetworkPolicy)
+- 🟡 Orphaned PVCs wasting storage cost
+
+Each issue includes severity, impact, and a `kubectl` command you can copy-paste.
+
+---
+
+## 🚀 Deployment Options
+
+Three ways to run OpsCart. Pick what fits your workflow.
+
+### Option 1: Deploy In-Cluster (Recommended)
+
+The fastest path to running production OpsCart. Read-only ClusterRole, scratch image, non-root.
 
 ```bash
-# Deploy the live dashboard to your cluster
 kubectl apply -f https://raw.githubusercontent.com/opscart/opscart-k8s-watcher/main/deploy/dashboard.yaml
-
-# Access it
 kubectl port-forward -n opscart-system svc/opscart-dashboard 8080:80
 open http://localhost:8080
 ```
 
-![Dashboard Preview](https://raw.githubusercontent.com/opscart/opscart-k8s-watcher/main/docs/dashboard-preview.png)
+**What this gives you:**
+- Auto-refreshes every 60 seconds
+- Multi-cluster aware
+- No external dependencies (no Prometheus, no metrics-server required)
+- Removable in one command: `kubectl delete -f deploy/dashboard.yaml`
 
-**The dashboard gives you:**
-- 💰 **Real-time cost tracking** — Node pool costs from actual VM SKUs, updated every 60 seconds
-- 📊 **Namespace cost allocation** — See exactly which teams are spending what
-- 🔍 **Confidence scoring** — 100% SKU match confidence with embedded Azure pricing catalog
-- 🔄 **Multi-cluster selector** — Switch between clusters in the sidebar
-- ⚡ **Live refresh** — Auto-refreshes every 60s with "last updated" badge
+### Option 2: Local Binary
 
-**Or run it locally:**
-```bash
-./opscart-dashboard --cluster my-cluster --port 8080
-```
-
-
-## What's New in v0.9.0
-
-### Full Dashboard with 5 Working Tabs
-- **Infrastructure** — Node pool table with VM SKU, utilization bars, RI savings
-- **Namespaces** — Cost + Network Policy + Waste items per namespace (cross-referenced)
-- **Optimizations** — RI opportunities, waste by category, right-sizing candidates
-- **War Room** — Full page: critical pods, unprotected namespaces, orphaned PVCs
-- **Cost Overview** — Enhanced KPI bar + War Room panel sidebar
-
-### Bug Fixes
-- War Room was silently returning empty results (limit=0 bug)
-- Default namespace pods were skipped in waste detector
-- Zombie pods now bypass minAgeDays filter
-- Optimizations tab now reads correct waste data
----
-
-## 📦 Installation
+Useful for testing OpsCart against a cluster from your laptop. Uses your local kubeconfig.
 
 ```bash
 git clone https://github.com/opscart/opscart-k8s-watcher.git
 cd opscart-k8s-watcher
-go build -o opscart-scan cmd/opscart-scan/main.go
-./opscart-scan config init
+go build -o opscart-dashboard ./cmd/opscart-dashboard
+./opscart-dashboard --cluster my-cluster --port 8080
+open http://localhost:8080
 ```
 
----
+### Option 3: Docker
 
-## ⚡ Quick Start
+Cross-platform, no Go installation required.
 
 ```bash
-# ☁️ Cloud costs — real pricing from node labels, no API keys needed
-./opscart-scan cloud-costs --cluster prod
-./opscart-scan cloud-costs --cluster prod --format html
-
-# 🔒 Security posture — CIS Benchmark scoring
-./opscart-scan security --cluster prod
-./opscart-scan security --cluster prod --format html
-
-# 🗑️ Waste detection — find orphaned, idle, and zombie resources
-./opscart-scan waste --cluster prod
-./opscart-scan waste --cluster prod --format html
-
-# 🌐 Network policy gaps — unprotected namespaces
-./opscart-scan network --cluster prod
-
-# 🚨 War room — what's broken right now
-./opscart-scan emergency --cluster prod
-
-# 📊 All clusters at once
-./opscart-scan cloud-costs --all-clusters
-./opscart-scan security --all-clusters
+docker run -p 8080:8080 \
+  -v ~/.kube:/root/.kube \
+  ghcr.io/opscart/opscart-dashboard:v1.0.0
 ```
 
-> 💡 **Corporate AKS clusters:** Append `2>/dev/null` to suppress harmless klog warnings.
+### Option 4: CLI Scanner
+
+If you prefer the terminal or want to integrate OpsCart into pipelines:
+
+```bash
+go build -o opscart-scan ./cmd/opscart-scan
+
+./opscart-scan emergency --cluster prod      # War Room from terminal
+./opscart-scan security --cluster prod       # CIS scoring
+./opscart-scan waste --cluster prod          # Find idle resources
+./opscart-scan cloud-costs --cluster prod    # Azure cost analysis
+```
 
 ---
 
 ## 🧠 What It Detects
 
-### ☁️ Cloud Costs
-Reads Kubernetes node labels → looks up Azure retail pricing → allocates costs to namespaces proportionally. No Azure credentials, no API calls — fully offline.
+### 🚨 War Room — Operational Risk
+
+Every issue that needs human attention, surfaced and grouped by type:
+
+- **CrashLoopBackOff** — pod identity, namespace, restart count, age
+- **OOMKilled** — out-of-memory containers
+- **ImagePullBackOff** — image pull failures with `describe` commands
+- **Unprotected Namespaces** — no NetworkPolicy defined
+- **Orphaned PVCs** — storage charging with no consuming pod
+- **Zero-Replica Workloads** — deployments scaled to 0
+
+### 💰 Cloud Costs
+
+Reads Kubernetes node labels, looks up Azure retail pricing, allocates costs to namespaces proportionally. **No Azure credentials, no API calls — fully offline.**
 
 - 40+ VM SKUs (B/D/E/F/L series), Spot and On-Demand
 - Reserved Instance savings potential (1yr/3yr)
-- Per-deployment cost breakdown with `--breakdown deployment`
+- Per-deployment cost breakdown
 - 15+ Azure region multipliers
 
 ### 🔒 Security Posture
+
 CIS Kubernetes Benchmark v1.8 scoring with environment-aware analysis.
 
 - Separates **actionable issues** from **expected infrastructure** configs
-- Privileged container whitelist — distinguishes CNI/CSI/monitoring from unexpected
-- 50+ infrastructure namespace patterns (calico, tigera, ama-logs, gatekeeper, etc.)
+- Privileged container whitelist (CNI/CSI/monitoring distinguished from unexpected)
+- 50+ infrastructure namespace patterns recognized (calico, tigera, gatekeeper, etc.)
 
 ### 🗑️ Waste & Drift
+
 9 resource types — **never modifies the cluster**, suggestions only.
 
 | Type | What It Catches |
@@ -126,30 +138,31 @@ CIS Kubernetes Benchmark v1.8 scoring with environment-aware analysis.
 | Broken Ingresses | Backends pointing to missing services |
 | Misconfigured HPAs | Stuck at minReplicas, scaling disabled |
 
-### 🌐 Network Policies
+### 🌐 Network Policy Gaps
+
 Which namespaces have zero network isolation — before an attacker finds out first.
 
 ---
 
-## 📋 Commands
+## 📋 CLI Commands
 
 | Command | Description |
 |---------|-------------|
-| `cloud-costs` | Real-time Azure cost analysis from node labels |
-| `security` | CIS Benchmark security posture scoring |
-| `waste` | Orphaned, idle, and zombie resource detection |
+| `emergency` | War Room — what's broken right now |
+| `security` | CIS Benchmark security posture |
+| `waste` | Orphaned, idle, and zombie resources |
+| `cloud-costs` | Real-time Azure cost analysis |
 | `network` | Network policy gap analysis |
-| `emergency` | War room — crash loops, pending pods, pull failures |
-| `costs` | Resource-share cost allocation (manual monthly cost) |
-| `report` | Comprehensive cluster health report |
+| `costs` | Resource-share cost allocation |
+| `report` | Comprehensive cluster health HTML report |
 | `resources` | Cluster resource inventory |
-| `config` | Multi-cluster configuration management |
+| `config` | Multi-cluster configuration |
 
 **Common flags:**
+
 ```bash
 --cluster CLUSTER         # Target cluster context
 --all-clusters            # Scan all configured clusters
---cluster-group GROUP     # Scan a named group
 --format html|json|table  # Output format
 --namespace NS            # Scope to single namespace
 ```
@@ -158,27 +171,38 @@ Which namespaces have zero network isolation — before an attacker finds out fi
 
 ## 🏗️ Architecture
 
-```
 opscart-k8s-watcher/
 ├── cmd/
 │   ├── opscart-scan/       ← CLI scanner binary
-│   └── opscart-dashboard/  ← Live dashboard server (v0.8)
+│   └── opscart-dashboard/  ← Live dashboard server
 └── pkg/
-    ├── analyzer/           ← Detection engines
-    ├── models/             ← Data structures
-    ├── report/             ← HTML report generators
-    └── scanner/            ← Multi-cluster orchestration
-```
+├── analyzer/           ← Detection engines (security, waste, cost, network)
+├── models/             ← Data structures
+├── report/             ← HTML report generators
+└── scanner/            ← Multi-cluster orchestration
 
-**Dashboard deployment:**
-```
+**Dashboard runtime:**
+
 opscart-system namespace
+
 └── opscart-dashboard pod
-    ├── ClusterRole: read-only (nodes, pods, deployments)
-    ├── Polls cluster every 60 seconds
-    ├── REST API: /api/overview, /api/report
-    └── Scratch image (~15MB), non-root (UID 65534)
-```
+├── ClusterRole: read-only (nodes, pods, deployments, NetworkPolicies, PVCs)
+├── Polls cluster every 60 seconds
+├── REST API: /api/overview, /api/warroom, /api/report
+└── Scratch image (~15MB), non-root (UID 65534)
+---
+
+## 🆚 vs. Other Tools
+
+| Tool | Shows | OpsCart Difference |
+|------|-------|---------------------|
+| **kubectl** | Resources | OpsCart prioritizes |
+| **Lens** | Cluster state | OpsCart aggregates risk |
+| **k9s** | Real-time pods | OpsCart explains impact |
+| **Datadog/New Relic** | Metrics + logs | OpsCart needs no agents |
+| **Kubecost** | Detailed cost only | OpsCart correlates cost + risk |
+
+OpsCart isn't a replacement — it's the operational intelligence layer between `kubectl` and full observability platforms.
 
 ---
 
@@ -186,33 +210,38 @@ opscart-system namespace
 
 | Version | Date | Highlights |
 |---------|------|------------|
-| **v0.8.0** | Jun 2026 | Live in-cluster FinOps dashboard, 60s background polling, multi-cluster UI |
-| v0.7.0 | Jun 2026 | `cloud-costs` command, embedded Azure pricing catalog, enterprise HTML dashboard |
-| v0.6.0 | May 2026 | `costs` command, resource-share allocation, FinOps-grade output |
-| v0.5.x | Feb 2026 | Waste detection (9 types), HTML reports, bug fixes |
-| v0.4.0 | Feb 2026 | Network policy gap analysis, infrastructure filtering |
-| v0.3.0 | Feb 2026 | HTML report generation, CIS scoring improvements |
-| v0.2.0 | Feb 2026 | Multi-cluster support, cluster groups, comparison |
-| v0.1.0 | Jan 2026 | Initial release — security auditing, CIS Benchmark |
+| **v1.0.0** | Jun 2026 | **New Overview page**, Top 5 Things to Fix, War Room featured panel, sidebar restructure (Operations as own category), trust-first positioning, complete code refactor |
+| v0.9.0 | Jun 2026 | Full dashboard with 5 tabs (Infrastructure, Namespaces, Optimizations, War Room, Cost Overview) |
+| v0.8.0 | Jun 2026 | Live in-cluster FinOps dashboard, 60s background polling, multi-cluster UI |
+| v0.7.0 | Jun 2026 | `cloud-costs` command, embedded Azure pricing catalog |
+| v0.6.0 | May 2026 | `costs` command, resource-share allocation |
+| v0.5.x | Feb 2026 | Waste detection (9 types), HTML reports |
+| v0.4.0 | Feb 2026 | Network policy gap analysis |
+| v0.3.0 | Feb 2026 | HTML report generation |
+| v0.2.0 | Feb 2026 | Multi-cluster support |
+| v0.1.0 | Jan 2026 | Initial release — security auditing |
 
 ---
 
 ## 🗺️ Roadmap
 
-- **v0.9** — SQLite cost history, trend charts, security + waste tabs in dashboard
-- **v1.0** — Helm chart, AWS/GCP pricing, Slack/Teams alerts, Prometheus integration
+**v1.1** — SQLite history, trend charts (Critical Issues ↑/↓, Cost trend), per-issue detail pages, recommended actions section, light theme
+
+**v1.2** — AWS/GCP cost analysis, Helm chart, Prometheus integration
+
+**v2.0** — Slack/Teams alerts, multi-tenancy, RBAC for dashboard users
 
 ---
 
 ## ⚠️ Disclaimer
 
-Security awareness tool — **not for compliance auditing**. Use [kube-bench](https://github.com/aquasecurity/kube-bench) for official CIS compliance. Cost estimates based on Azure public retail pricing — actual costs vary with EA/MACC agreements.
+Security awareness tool — **not for formal compliance auditing**. Use [kube-bench](https://github.com/aquasecurity/kube-bench) for official CIS compliance. Cost estimates based on Azure public retail pricing — actual costs vary with EA/MACC agreements.
 
 ---
 
 ## 🤝 Contributing
 
-Issues, PRs, and feature requests welcome. Built for the Kubernetes community.
+Issues, PRs, and feature requests welcome.
 
 **Author:** Shamsher Khan — [IEEE Senior Member](https://ieee.org) · [opscart.com](https://opscart.com) · [DZone Core Member](https://dzone.com/users/shamsher_khan)
 
