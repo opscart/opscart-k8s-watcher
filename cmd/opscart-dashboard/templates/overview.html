@@ -66,19 +66,22 @@
 .wr-featured-count{background:rgba(239,68,68,0.18);color:#f87171;padding:3px 10px;border-radius:20px;font-size:0.7rem;font-weight:700}
 .wr-featured-sub{font-size:0.78rem;color:var(--text-muted);margin-bottom:1.25rem}
 .wr-issue-card{background:rgba(0,0,0,0.25);border:1px solid rgba(239,68,68,0.25);border-radius:var(--radius-sm);padding:1rem;margin-bottom:1rem}
+.wr-featured .wr-issue-card:first-of-type{border-color:rgba(239,68,68,0.5);box-shadow:0 0 24px rgba(239,68,68,0.08)}
 .wr-issue-top{display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:0.75rem}
 .wr-issue-name{font-size:0.95rem;font-weight:700;margin-bottom:0.3rem}
 .wr-issue-ns{font-size:0.75rem;color:var(--text-muted)}
 .wr-issue-section{margin-top:0.85rem;padding-top:0.85rem;border-top:1px solid rgba(255,255,255,0.05)}
 .wr-issue-label{font-size:0.7rem;text-transform:uppercase;letter-spacing:0.5px;color:var(--text-muted);margin-bottom:0.3rem}
 .wr-issue-text{font-size:0.83rem;line-height:1.5;color:var(--text-secondary)}
+.wr-issue-card{transition:border-color .2s,transform .2s}
+.wr-issue-card:hover{border-color:rgba(239,68,68,0.5);transform:translateX(3px)}
+.wr-issue-card:first-of-type{border-color:rgba(239,68,68,0.5);box-shadow:0 0 20px rgba(239,68,68,0.08)}
+.wr-quick-fix code{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1;min-width:0}
 .wr-quick-fix{background:rgba(0,0,0,0.4);border:1px solid var(--border);border-radius:6px;padding:0.55rem 0.75rem;margin-top:0.4rem;display:flex;align-items:center;gap:0.5rem;font-family:'Consolas','Monaco',monospace;font-size:0.72rem;color:var(--primary-light)}
-.wr-quick-fix code{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .wr-copy-btn{background:transparent;border:1px solid var(--border);color:var(--text-muted);font-size:0.65rem;padding:2px 8px;border-radius:4px;cursor:pointer;white-space:nowrap}
 .wr-copy-btn:hover{background:var(--surface-hover);color:var(--text)}
-.wr-view-details{display:inline-block;background:var(--danger);color:white;font-size:0.78rem;padding:0.5rem 1rem;border-radius:6px;text-decoration:none;font-weight:600;margin-top:0.5rem}
+.wr-view-details{display:inline-flex;align-items:center;gap:0.4rem;background:var(--danger);color:white;font-size:0.78rem;padding:0.5rem 1.25rem;border-radius:6px;text-decoration:none;font-weight:600;margin-top:0.75rem;transition:background .15s}
 .wr-view-details:hover{background:#dc2626}
-
 /* Cluster summary */
 .summary-grid{display:grid;grid-template-columns:repeat(5,1fr);gap:1rem}
 @media(max-width:900px){.summary-grid{grid-template-columns:repeat(2,1fr)}}
@@ -239,35 +242,34 @@
       <div class="wr-featured-sub">Issues that need your immediate attention</div>
 
       {{if .HasFeatured}}
+      {{range .FeaturedIssues}}
       <div class="wr-issue-card">
         <div class="wr-issue-top">
-          <span class="sev-badge {{.FeaturedIssue.Severity}}">{{if eq .FeaturedIssue.Severity "critical"}}CRITICAL{{else if eq .FeaturedIssue.Severity "high"}}HIGH{{else}}{{.FeaturedIssue.Severity}}{{end}}</span>
-          <span class="top-issue-count">{{.FeaturedIssue.Namespace}}</span>
+          <span class="sev-badge {{.Severity}}">{{if eq .Severity "critical"}}CRITICAL{{else if eq .Severity "high"}}HIGH{{else}}{{.Severity}}{{end}}</span>
+          <span class="top-issue-count">{{.Namespace}}</span>
         </div>
-        <div class="wr-issue-name">{{.FeaturedIssue.Message}}</div>
-        <div class="wr-issue-ns">{{.FeaturedIssue.Namespace}} · {{.FeaturedIssue.Resource}}</div>
+        <div class="wr-issue-name">{{.Message}}</div>
+        <div class="wr-issue-ns">{{.Namespace}} · {{.Resource}}</div>
 
-        {{if .FeaturedIssue.KubectlCmd}}
+        {{if .KubectlCmd}}
         <div class="wr-issue-section">
           <div class="wr-issue-label">Quick Fix</div>
           <div class="wr-quick-fix">
-            <code>{{.FeaturedIssue.KubectlCmd}}</code>
-            <button class="wr-copy-btn" onclick="navigator.clipboard.writeText('{{.FeaturedIssue.KubectlCmd}}')">Copy</button>
+            <code>{{.KubectlCmd}}</code>
+            <button class="wr-copy-btn" onclick="navigator.clipboard.writeText('{{.KubectlCmd}}')">Copy</button>
           </div>
         </div>
         {{end}}
-
-        <a class="wr-view-details" href="{{.WrURL}}">View Details</a>
       </div>
+      {{end}}
+
+      <a class="wr-view-details" href="{{$.WrURL}}">View All in War Room →</a>
       {{else}}
       <div class="empty-state-small">
         <span class="icon">✅</span>
         <div>No critical issues detected</div>
       </div>
       {{end}}
-    </div>
-  </div>
-</div>
 
 <!-- Footer trust badges -->
 <div class="trust-footer">
