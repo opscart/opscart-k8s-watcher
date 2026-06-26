@@ -47,3 +47,4 @@ reports/
 *.html
 !cmd/opscart-dashboard/templates/*.html
 main
+demo-broken-war-room.yaml
