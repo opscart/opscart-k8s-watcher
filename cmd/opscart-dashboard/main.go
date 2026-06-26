@@ -1491,8 +1491,8 @@ type overviewPageData struct {
 	TopIssues []topIssue
 
 	// War Room featured issue
-	FeaturedIssue *warRoomIssue
-	HasFeatured   bool
+	FeaturedIssues []warRoomIssue
+	HasFeatured    bool
 
 	// Cluster Summary
 	NodePoolCount  int
@@ -1542,7 +1542,7 @@ func buildOverviewData(scan *clusterScan, activeCtx string, clusterList []string
 	var cpuUtil, memUtil int
 	var wasteCount, securityScore, secFailed int
 	var wrIssues []warRoomIssue
-	var featured *warRoomIssue
+	var featuredIssues []warRoomIssue
 	var criticalCount int
 
 	if scan != nil {
@@ -1550,16 +1550,18 @@ func buildOverviewData(scan *clusterScan, activeCtx string, clusterList []string
 		for _, w := range wrIssues {
 			if w.Severity == "critical" {
 				criticalCount++
-				if featured == nil {
-					tmp := w
-					featured = &tmp
+				if len(featuredIssues) < 4 {
+					featuredIssues = append(featuredIssues, w)
 				}
 			}
 		}
-		// If no critical, feature highest-severity warning
-		if featured == nil && len(wrIssues) > 0 {
-			tmp := wrIssues[0]
-			featured = &tmp
+		// If no critical, feature up to 4 highest-severity warnings
+		if len(featuredIssues) == 0 && len(wrIssues) > 0 {
+			limit := 4
+			if len(wrIssues) < limit {
+				limit = len(wrIssues)
+			}
+			featuredIssues = wrIssues[:limit]
 		}
 
 		if scan.report != nil {
@@ -1638,14 +1640,14 @@ func buildOverviewData(scan *clusterScan, activeCtx string, clusterList []string
 		WasteCount:       wasteCount,
 		MonthlyCost:      monthlyCost,
 		TopIssues:        buildTopIssues(scan, wrIssues),
-		FeaturedIssue:    featured,
-		HasFeatured:      featured != nil,
+		FeaturedIssues:   featuredIssues,
+		HasFeatured:      len(featuredIssues) > 0,
 		NodePoolCount:    nodePoolCount,
 		PodCount:         podCount,
 		CPUUtilization:   cpuUtil,
 		MemUtilization:   memUtil,
 		NamespaceCount:   nsCount,
-		Version:          "v0.9.3",
+		Version:          "v1.0.0",
 		DashHref:         "/" + q,
 		CostsHref:        "/costs" + q,
 		InfraHref:        "/infrastructure" + q,
