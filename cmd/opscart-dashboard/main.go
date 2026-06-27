@@ -283,7 +283,7 @@ func runDashboard(_ *cobra.Command, _ []string) error {
 	mux.HandleFunc("/optimizations", srv.handleOptimizationsPage)
 	mux.HandleFunc("/healthz", handleHealth)
 	mux.HandleFunc("/incidents", srv.handleIncidentsPage)
-	mux.HandleFunc("/security", srv.handleStubPage("security", "Security Posture"))
+	mux.HandleFunc("/security", srv.handleSecurityPage)
 	mux.HandleFunc("/waste", srv.handleStubPage("waste", "Waste & Drift"))
 	mux.HandleFunc("/settings", srv.handleStubPage("settings", "Settings"))
 	addr := ":" + port
@@ -1574,6 +1574,140 @@ func renderWarRoomCard(issue warRoomIssue) string {
 	sb.WriteString(`</div>`)
 	sb.WriteString(`</div>`)
 	return sb.String()
+}
+
+// ── Security Posture page ─────────────────────────────────────────────────────
+
+type securityPageData struct {
+	DashHref      string
+	WrHref        string
+	CostsHref     string
+	InfraHref     string
+	WasteHref     string
+	SecurityHref  string
+	IncidentsHref string
+	ActivePage    string
+	ClusterName   string
+	CriticalCount int
+	Clusters      []sidebarCluster
+
+	CISScore      int
+	CISScoreColor string
+	TotalChecks   int
+	PassedChecks  int
+	FailedChecks  int
+	Controls      []analyzer.CISControl
+	Risks         models.SecurityRisks
+	HasRisks      bool
+	TotalPods     int
+	PriorityActions []string
+	ScannedAtMs   int64
+}
+
+var getSecurityTmpl = sync.OnceValue(func() *template.Template {
+	return template.Must(
+		template.New("security.html").
+			Funcs(template.FuncMap{
+				"add": func(a, b int) int { return a + b },
+			}).
+			ParseFS(templateFS,
+				"templates/base.html",
+				"templates/sidebar.html",
+				"templates/security.html"),
+	)
+})
+
+func (srv *server) handleSecurityPage(w http.ResponseWriter, r *http.Request) {
+	ctx := srv.activeCtx(r)
+	state := srv.getState(ctx)
+	state.mu.RLock()
+	scan := state.scan
+	state.mu.RUnlock()
+
+	if scan == nil {
+		if err := state.refresh(srv.clusterList); err != nil {
+			http.Error(w, "scan failed: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+		state.mu.RLock()
+		scan = state.scan
+		state.mu.RUnlock()
+	}
+
+	q := "?cluster=" + url.QueryEscape(ctx)
+
+	var clusters []sidebarCluster
+	if len(srv.clusterList) > 1 {
+		for _, c := range srv.clusterList {
+			label := displayName(c)
+			if len(label) > 22 {
+				label = label[:21] + "…"
+			}
+			clusters = append(clusters, sidebarCluster{
+				Href:     "/security?" + url.Values{"cluster": {c}}.Encode(),
+				Label:    label,
+				IsActive: c == ctx,
+			})
+		}
+	}
+
+	data := securityPageData{
+		DashHref:      "/" + q,
+		WrHref:        "/warroom" + q,
+		CostsHref:     "/costs" + q,
+		InfraHref:     "/infrastructure" + q,
+		WasteHref:     "/waste" + q,
+		SecurityHref:  "/security" + q,
+		IncidentsHref: "/incidents" + q,
+		ActivePage:    "security",
+		ClusterName:   displayName(ctx),
+		CriticalCount: countCriticalIssues(scan),
+		Clusters:      clusters,
+		ScannedAtMs:   time.Now().UnixMilli(),
+	}
+
+	if scan.cisResult != nil {
+		data.CISScore = scan.cisResult.Score
+		data.TotalChecks = scan.cisResult.TotalChecks
+		data.PassedChecks = scan.cisResult.PassedChecks
+		data.FailedChecks = scan.cisResult.FailedChecks
+		data.Controls = make([]analyzer.CISControl, len(scan.cisResult.Controls))
+		copy(data.Controls, scan.cisResult.Controls)
+		sort.SliceStable(data.Controls, func(i, j int) bool {
+			return !data.Controls[i].Passed && data.Controls[j].Passed
+		})
+	}
+	if scan.secAudit != nil {
+		data.Risks = scan.secAudit.Risks
+		data.TotalPods = scan.secAudit.TotalPodsAudited
+		data.PriorityActions = scan.secAudit.PriorityActions
+		r := scan.secAudit.Risks
+		data.HasRisks = r.RunningAsRoot > 0 || r.PrivilegedContainers > 0 ||
+			r.HostNetwork > 0 || r.HostPID > 0 || r.HostIPC > 0 ||
+			r.HostPathVolumes > 0 || r.DefaultServiceAccount > 0 ||
+			r.MissingResourceLimits > 0 || r.MissingProbes > 0 ||
+			r.AddedCapabilities > 0 || r.PrivilegeEscalation > 0 ||
+			r.WritableFilesystem > 0 || r.MissingNetworkPolicies > 0
+	}
+
+	switch {
+	case data.CISScore >= 70:
+		data.CISScoreColor = "green"
+	case data.CISScore >= 40:
+		data.CISScoreColor = "orange"
+	default:
+		data.CISScoreColor = "red"
+	}
+
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-cache, no-store, must-revalidate")
+	var buf strings.Builder
+	if err := getSecurityTmpl().Execute(&buf, data); err != nil {
+		log.Printf("security template: %v", err)
+		http.Error(w, "template error", http.StatusInternalServerError)
+		return
+	}
+	w.Write([]byte(buf.String()))
 }
 
 // ── Incidents page ───────────────────────────────────────────────────────────

@@ -1,0 +1,248 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1.0">
+<title>Security Posture — {{.ClusterName}}</title>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+{{template "base" .}}
+<style>
+.summary-bar{display:flex;gap:1rem;margin-bottom:2rem;flex-wrap:wrap}
+.summary-chip{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius-sm);padding:0.75rem 1.25rem;display:flex;align-items:center;gap:0.75rem;min-width:160px}
+.summary-chip.green{border-color:rgba(16,185,129,0.35)}
+.summary-chip.orange{border-color:rgba(245,158,11,0.35)}
+.summary-chip.red{border-color:rgba(239,68,68,0.35)}
+.summary-num{font-size:1.6rem;font-weight:800;line-height:1}
+.green .summary-num{color:var(--success)}
+.orange .summary-num{color:var(--warning)}
+.red .summary-num{color:var(--danger)}
+.summary-lbl{font-size:0.72rem;color:var(--text-muted);text-transform:uppercase;letter-spacing:0.5px;line-height:1.3}
+.sec-section{margin-bottom:2.5rem}
+.sec-section-hdr{display:flex;align-items:center;gap:0.75rem;margin-bottom:1rem;padding-bottom:0.75rem;border-bottom:1px solid var(--border)}
+.sec-section-hdr h2{font-size:1rem;font-weight:700}
+.control-list{display:flex;flex-direction:column;gap:0.5rem}
+.control-row{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius-sm);padding:0.85rem 1rem;display:grid;grid-template-columns:auto auto 1fr auto;align-items:start;gap:0.75rem}
+.control-row.failed{border-color:rgba(239,68,68,0.3);background:rgba(239,68,68,0.025)}
+.control-row.passed{opacity:0.75}
+.control-icon{font-size:1rem;line-height:1}
+.control-id{font-size:0.72rem;font-weight:700;color:var(--primary-light);white-space:nowrap;padding-top:1px}
+.control-desc{font-size:0.85rem;color:var(--text)}
+.control-finding{font-size:0.75rem;color:var(--danger);margin-top:0.2rem;line-height:1.4}
+.risk-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:0.75rem}
+.risk-card{background:var(--surface);border:1px solid rgba(239,68,68,0.3);border-radius:var(--radius-sm);padding:0.85rem 1rem;background:rgba(239,68,68,0.025)}
+.risk-count{font-size:1.4rem;font-weight:800;color:var(--danger);line-height:1}
+.risk-name{font-size:0.8rem;font-weight:600;color:var(--text);margin-top:0.15rem}
+.risk-hint{font-size:0.7rem;color:var(--text-muted);margin-top:0.35rem;line-height:1.4}
+.actions-list{display:flex;flex-direction:column;gap:0.5rem;counter-reset:actions}
+.action-item{display:flex;align-items:flex-start;gap:0.85rem;background:var(--surface);border:1px solid var(--border);border-radius:var(--radius-sm);padding:0.85rem 1rem}
+.action-num{background:var(--primary-bg);color:var(--primary-light);border-radius:50%;width:24px;height:24px;min-width:24px;display:flex;align-items:center;justify-content:center;font-size:0.7rem;font-weight:700;margin-top:1px}
+.action-text{font-size:0.85rem;color:var(--text);line-height:1.5}
+.no-risks{background:var(--surface);border:1px solid rgba(16,185,129,0.25);border-radius:var(--radius);padding:2rem;text-align:center;color:var(--text-muted)}
+.footer{text-align:center;padding:1.5rem 0;color:var(--text-muted);font-size:0.75rem;border-top:1px solid var(--border);margin-top:1rem}
+@media(max-width:640px){.risk-grid{grid-template-columns:1fr}.summary-bar{flex-direction:column}.control-row{grid-template-columns:auto 1fr}}
+</style>
+</head>
+<body>
+<div class="layout">
+{{template "sidebar.html" .}}
+<main class="main">
+  <div class="page-hdr">
+    <div>
+      <h1>🔒 Security Posture</h1>
+      <p>{{.ClusterName}} &mdash; CIS Kubernetes Benchmark v1.8</p>
+    </div>
+    <div class="page-meta">
+      <div>Last scanned: <strong id="sec-age">just now</strong></div>
+      <a class="back-link" href="{{.DashHref}}">← Back to Dashboard</a>
+    </div>
+  </div>
+
+  <div class="summary-bar">
+    <div class="summary-chip {{.CISScoreColor}}">
+      <div class="summary-num">{{.CISScore}}<span style="font-size:0.9rem;font-weight:500">/100</span></div>
+      <div class="summary-lbl">CIS<br>Score</div>
+    </div>
+    <div class="summary-chip{{if gt .PassedChecks 0}} green{{end}}">
+      <div class="summary-num">{{.PassedChecks}}<span style="font-size:0.9rem;font-weight:500">/{{.TotalChecks}}</span></div>
+      <div class="summary-lbl">Controls<br>Passed</div>
+    </div>
+    <div class="summary-chip">
+      <div class="summary-num">{{.TotalPods}}</div>
+      <div class="summary-lbl">Pods<br>Audited</div>
+    </div>
+  </div>
+
+  {{if .Controls}}
+  <div class="sec-section">
+    <div class="sec-section-hdr">
+      <h2>🛡️ CIS Controls</h2>
+      <span style="font-size:0.75rem;color:var(--text-muted)">{{.FailedChecks}} failed &middot; {{.PassedChecks}} passed</span>
+    </div>
+    <div class="control-list">
+      {{range .Controls}}
+      {{if .Passed}}
+      <div class="control-row passed">
+        <div class="control-icon">✅</div>
+        <div class="control-id">{{.ID}}</div>
+        <div>
+          <div class="control-desc">{{.Description}}</div>
+        </div>
+        <div style="font-size:0.7rem;color:var(--text-muted);white-space:nowrap">w: {{printf "%.1f" .Weight}}</div>
+      </div>
+      {{else}}
+      <div class="control-row failed">
+        <div class="control-icon">❌</div>
+        <div class="control-id">{{.ID}}</div>
+        <div>
+          <div class="control-desc">{{.Description}}</div>
+          {{if .Finding}}
+          <div class="control-finding">{{.Finding}}</div>
+          {{end}}
+        </div>
+        <div style="font-size:0.7rem;color:var(--text-muted);white-space:nowrap">w: {{printf "%.1f" .Weight}}</div>
+      </div>
+      {{end}}
+      {{end}}
+    </div>
+  </div>
+  {{end}}
+
+  <div class="sec-section">
+    <div class="sec-section-hdr">
+      <h2>⚠️ Risk Breakdown</h2>
+    </div>
+    {{$r := .Risks}}
+    {{if .HasRisks}}
+    <div class="risk-grid">
+      {{if gt $r.RunningAsRoot 0}}
+      <div class="risk-card">
+        <div class="risk-count">{{$r.RunningAsRoot}}</div>
+        <div class="risk-name">Running as Root</div>
+        <div class="risk-hint">Set securityContext.runAsNonRoot: true</div>
+      </div>
+      {{end}}
+      {{if gt $r.PrivilegedContainers 0}}
+      <div class="risk-card">
+        <div class="risk-count">{{$r.PrivilegedContainers}}</div>
+        <div class="risk-name">Privileged Containers</div>
+        <div class="risk-hint">Remove privileged: true from securityContext</div>
+      </div>
+      {{end}}
+      {{if gt $r.HostNetwork 0}}
+      <div class="risk-card">
+        <div class="risk-count">{{$r.HostNetwork}}</div>
+        <div class="risk-name">Host Network</div>
+        <div class="risk-hint">Avoid hostNetwork: true unless required</div>
+      </div>
+      {{end}}
+      {{if gt $r.HostPID 0}}
+      <div class="risk-card">
+        <div class="risk-count">{{$r.HostPID}}</div>
+        <div class="risk-name">Host PID</div>
+        <div class="risk-hint">Avoid hostPID: true — exposes host process tree</div>
+      </div>
+      {{end}}
+      {{if gt $r.HostIPC 0}}
+      <div class="risk-card">
+        <div class="risk-count">{{$r.HostIPC}}</div>
+        <div class="risk-name">Host IPC</div>
+        <div class="risk-hint">Avoid hostIPC: true — exposes host IPC namespace</div>
+      </div>
+      {{end}}
+      {{if gt $r.HostPathVolumes 0}}
+      <div class="risk-card">
+        <div class="risk-count">{{$r.HostPathVolumes}}</div>
+        <div class="risk-name">Host Path Volumes</div>
+        <div class="risk-hint">Replace hostPath mounts with PVCs where possible</div>
+      </div>
+      {{end}}
+      {{if gt $r.DefaultServiceAccount 0}}
+      <div class="risk-card">
+        <div class="risk-count">{{$r.DefaultServiceAccount}}</div>
+        <div class="risk-name">Default Service Account</div>
+        <div class="risk-hint">Create dedicated service accounts per workload</div>
+      </div>
+      {{end}}
+      {{if gt $r.MissingResourceLimits 0}}
+      <div class="risk-card">
+        <div class="risk-count">{{$r.MissingResourceLimits}}</div>
+        <div class="risk-name">Missing Resource Limits</div>
+        <div class="risk-hint">Set resources.limits.cpu and memory on all containers</div>
+      </div>
+      {{end}}
+      {{if gt $r.MissingProbes 0}}
+      <div class="risk-card">
+        <div class="risk-count">{{$r.MissingProbes}}</div>
+        <div class="risk-name">Missing Probes</div>
+        <div class="risk-hint">Add livenessProbe and readinessProbe to containers</div>
+      </div>
+      {{end}}
+      {{if gt $r.AddedCapabilities 0}}
+      <div class="risk-card">
+        <div class="risk-count">{{$r.AddedCapabilities}}</div>
+        <div class="risk-name">Added Capabilities</div>
+        <div class="risk-hint">Drop all capabilities and add only what's required</div>
+      </div>
+      {{end}}
+      {{if gt $r.PrivilegeEscalation 0}}
+      <div class="risk-card">
+        <div class="risk-count">{{$r.PrivilegeEscalation}}</div>
+        <div class="risk-name">Privilege Escalation</div>
+        <div class="risk-hint">Set allowPrivilegeEscalation: false in securityContext</div>
+      </div>
+      {{end}}
+      {{if gt $r.WritableFilesystem 0}}
+      <div class="risk-card">
+        <div class="risk-count">{{$r.WritableFilesystem}}</div>
+        <div class="risk-name">Writable Filesystem</div>
+        <div class="risk-hint">Set readOnlyRootFilesystem: true in securityContext</div>
+      </div>
+      {{end}}
+      {{if gt $r.MissingNetworkPolicies 0}}
+      <div class="risk-card">
+        <div class="risk-count">{{$r.MissingNetworkPolicies}}</div>
+        <div class="risk-name">Missing Network Policies</div>
+        <div class="risk-hint">Apply default-deny NetworkPolicy to each namespace</div>
+      </div>
+      {{end}}
+    </div>
+    {{else}}
+    <div class="no-risks">
+      <div style="font-size:2rem;margin-bottom:0.5rem">✅</div>
+      <div>No active risks detected</div>
+    </div>
+    {{end}}
+  </div>
+
+  {{if .PriorityActions}}
+  <div class="sec-section">
+    <div class="sec-section-hdr">
+      <h2>🎯 Priority Actions</h2>
+    </div>
+    <div class="actions-list">
+      {{range $i, $a := .PriorityActions}}
+      <div class="action-item">
+        <div class="action-num">{{add $i 1}}</div>
+        <div class="action-text">{{$a}}</div>
+      </div>
+      {{end}}
+    </div>
+  </div>
+  {{end}}
+
+  <div class="footer">OpsCart FinOps Engine &middot; Security Posture &middot; CIS Kubernetes Benchmark v1.8</div>
+</main>
+</div>
+<script>
+(function(){
+  var TS={{.ScannedAtMs}},el=document.getElementById('sec-age');
+  function upd(){
+    var s=Math.floor((Date.now()-TS)/1000);
+    var t=s<5?'just now':s<60?s+'s ago':Math.floor(s/60)+'m ago';
+    if(el)el.textContent=t;
+  }
+  setInterval(upd,1000);upd();
+})();
+</script>
+</body>
+</html>
