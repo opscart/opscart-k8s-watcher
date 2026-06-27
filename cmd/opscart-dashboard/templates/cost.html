@@ -113,32 +113,37 @@ tbody tr{transition:background 0.1s}
 
 <div class="nav-section">
 <div class="nav-label">Overview</div>
-<a class="nav-item active" href="{{.DashURL}}">📊 Overview</a>
+<a class="nav-item{{if eq .ActivePage "dashboard"}} active{{end}}" href="{{.DashURL}}">📊 Overview</a>
+<a class="nav-item{{if eq .ActivePage "warroom"}} active{{end}}" href="{{.WrURL}}">🚨 War Room{{if .CriticalCount}} <span class="nav-badge nav-badge-critical">{{.CriticalCount}}</span>{{end}}</a>
 </div>
 
 <div class="nav-section">
-<div class="nav-label">Operations</div>
-<a class="nav-item" href="{{.WrURL}}">🚨 War Room{{if .CriticalCount}} <span class="nav-badge">{{.CriticalCount}}</span>{{end}}</a>
+<div class="nav-label">Investigate</div>
+<a class="nav-item{{if eq .ActivePage "incidents"}} active{{end}}" href="{{.IncidentsURL}}">🔍 Incidents</a>
+<a class="nav-item{{if eq .ActivePage "infrastructure"}} active{{end}}" href="{{.InfraURL}}">🖥️ Infrastructure</a>
 </div>
 
 <div class="nav-section">
-<div class="nav-label">Analysis</div>
-<a class="nav-item" href="{{.CostsURL}}">💰 Costs</a>
-<a class="nav-item" href="{{.InfraURL}}">🖥️ Infrastructure</a>
-<a class="nav-item" href="{{.NSsURL}}">📦 Namespaces</a>
-<a class="nav-item" href="{{.OptURL}}">💡 Optimizations</a>
+<div class="nav-label">Analyze</div>
+<a class="nav-item active" href="{{.CostsURL}}">💰 Cost Intelligence</a>
+<a class="nav-item{{if eq .ActivePage "security"}} active{{end}}" href="{{.SecurityURL}}">🔒 Security Posture</a>
+<a class="nav-item{{if eq .ActivePage "waste"}} active{{end}}" href="{{.WasteURL}}">🗑️ Waste & Drift</a>
 </div>
 
+<div class="nav-footer">
+<div class="nav-divider"></div>
+<div class="cluster-selector">
+<div class="cluster-selector-label">Current Cluster</div>
+<div class="cluster-selector-value">{{.ClusterName}}</div>
 {{if gt (len .ClusterList) 1}}
-<div class="nav-section">
-<div class="nav-label">Clusters</div>
-{{range .ClusterList}}<a class="nav-item{{if .IsActive}} active{{end}}" href="{{.Href}}">🔵 {{.Label}}</a>
+<div class="cluster-list">
+{{range .ClusterList}}<a class="cluster-list-item{{if .IsActive}} active{{end}}" href="{{.Href}}">{{.Label}}</a>
 {{end}}
 </div>
 {{end}}
-
-<div class="cluster-info">
-<div class="cluster-badge"><h4>Cluster</h4><p>{{.ClusterName}}</p></div>
+</div>
+<div class="nav-divider"></div>
+<a class="nav-item{{if eq .ActivePage "settings"}} active{{end}}" href="/settings">⚙️ Settings</a>
 </div>
 </aside>
 <main class="main">
