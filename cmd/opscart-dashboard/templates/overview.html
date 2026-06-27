@@ -31,6 +31,12 @@
 .kpi-value.red{color:var(--danger)}
 .kpi-value.green{color:var(--success)}
 .kpi-value.orange{color:var(--warning)}
+.kpi-value.yellow{color:#eab308}
+.kpi-sub.red{color:var(--danger)}
+.kpi-sub.orange{color:var(--warning)}
+.kpi-sub.yellow{color:#eab308}
+.kpi-sub.green{color:var(--success)}
+.kpi-card-score{border-width:2px}
 .kpi-sub{font-size:0.7rem;color:var(--text-muted)}
 .kpi-sub.red{color:var(--danger)}
 
@@ -60,13 +66,14 @@
 .empty-state-small .icon{font-size:1.8rem;margin-bottom:0.5rem;display:block}
 
 /* War Room featured panel */
-.wr-featured{background:var(--surface);border:1px solid rgba(239,68,68,0.35);border-radius:var(--radius);padding:1.5rem;margin-bottom:1.5rem;animation:fadeIn 0.3s ease both;background:linear-gradient(180deg,rgba(239,68,68,0.03) 0%,var(--surface) 100%)}
 .wr-featured-hdr{display:flex;justify-content:space-between;align-items:center;margin-bottom:0.5rem}
 .wr-featured-title{font-size:1.05rem;font-weight:700;display:flex;align-items:center;gap:0.5rem}
 .wr-featured-count{background:rgba(239,68,68,0.18);color:#f87171;padding:3px 10px;border-radius:20px;font-size:0.7rem;font-weight:700}
 .wr-featured-sub{font-size:0.78rem;color:var(--text-muted);margin-bottom:1.25rem}
 .wr-issue-card{background:rgba(0,0,0,0.25);border:1px solid rgba(239,68,68,0.25);border-radius:var(--radius-sm);padding:1rem;margin-bottom:1rem}
 .wr-featured .wr-issue-card:first-of-type{border-color:rgba(239,68,68,0.5);box-shadow:0 0 24px rgba(239,68,68,0.08)}
+.wr-featured{background:var(--surface);border:1px solid rgba(239,68,68,0.35);border-radius:var(--radius);padding:1.5rem;margin-bottom:1.5rem;background:linear-gradient(180deg,rgba(239,68,68,0.03) 0%,var(--surface) 100%)}
+.wr-cards-body{max-height:520px;overflow-y:auto;margin:0 -1.5rem -1.5rem -1.5rem;padding:0 1.5rem 1.5rem 1.5rem}
 .wr-issue-top{display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:0.75rem}
 .wr-issue-name{font-size:0.95rem;font-weight:700;margin-bottom:0.3rem}
 .wr-issue-ns{font-size:0.75rem;color:var(--text-muted)}
@@ -120,18 +127,19 @@
 
 <!-- KPI Row -->
 <div class="kpi-row">
+
+  <div class="kpi-card kpi-card-score{{if eq .IncidentScoreColor "red"}} critical{{end}}">
+    <div class="kpi-icon {{.IncidentScoreColor}}">🎯</div>
+    <div class="kpi-label">Incident Score</div>
+    <div class="kpi-value {{.IncidentScoreColor}}">{{.IncidentScore}}<span style="font-size:0.9rem;font-weight:600;color:var(--text-muted)">/100</span></div>
+    <div class="kpi-sub {{.IncidentScoreColor}}">{{.IncidentScoreLabel}}</div>
+  </div>
+
   <div class="kpi-card{{if .CriticalCount}} critical{{end}}">
     <div class="kpi-icon red">⚠️</div>
     <div class="kpi-label">Critical Issues</div>
     <div class="kpi-value{{if .CriticalCount}} red{{else}} green{{end}}">{{.CriticalCount}}</div>
     <div class="kpi-sub{{if .CriticalCount}} red{{end}}">{{if .CriticalCount}}Needs immediate attention{{else}}All clear{{end}}</div>
-  </div>
-
-  <div class="kpi-card">
-    <div class="kpi-icon green">💰</div>
-    <div class="kpi-label">Potential Savings</div>
-    <div class="kpi-value green">${{.SavingsPotential | printf "%.0f"}}<span style="font-size:0.7rem;color:var(--text-muted);font-weight:600">/mo</span></div>
-    <div class="kpi-sub">Across all clusters</div>
   </div>
 
   <div class="kpi-card">
@@ -154,6 +162,7 @@
     <div class="kpi-value">${{.MonthlyCost | printf "%.0f"}}</div>
     <div class="kpi-sub">Estimated</div>
   </div>
+
 </div>
 
 <!-- Two-column layout -->
@@ -232,44 +241,53 @@
     </div>
   </div>
 
-  <!-- RIGHT: War Room featured -->
+<!-- RIGHT: War Room featured -->
   <div>
     <div class="wr-featured">
+
+      <!-- Sticky header -->
       <div class="wr-featured-hdr">
-        <div class="wr-featured-title">🚨 War Room {{if .HasFeatured}}<span class="wr-featured-count">{{.CriticalCount}} {{if eq .CriticalCount 1}}Critical{{else}}Issues{{end}}</span>{{end}}</div>
+        <div class="wr-featured-title">🚨 War Room
+          {{if .HasFeatured}}<span class="wr-featured-count">{{.CriticalCount}} {{if eq .CriticalCount 1}}Critical{{else}}Issues{{end}}</span>{{end}}
+        </div>
         <a class="view-all-link" href="{{.WrURL}}" style="margin-top:0">View all →</a>
       </div>
       <div class="wr-featured-sub">Issues that need your immediate attention</div>
 
       {{if .HasFeatured}}
-      {{range .FeaturedIssues}}
-      <div class="wr-issue-card">
-        <div class="wr-issue-top">
-          <span class="sev-badge {{.Severity}}">{{if eq .Severity "critical"}}CRITICAL{{else if eq .Severity "high"}}HIGH{{else}}{{.Severity}}{{end}}</span>
-          <span class="top-issue-count">{{.Namespace}}</span>
-        </div>
-        <div class="wr-issue-name">{{.Message}}</div>
-        <div class="wr-issue-ns">{{.Namespace}} · {{.Resource}}</div>
-
-        {{if .KubectlCmd}}
-        <div class="wr-issue-section">
-          <div class="wr-issue-label">Quick Fix</div>
-          <div class="wr-quick-fix">
-            <code>{{.KubectlCmd}}</code>
-            <button class="wr-copy-btn" onclick="navigator.clipboard.writeText('{{.KubectlCmd}}')">Copy</button>
+      <!-- Scrollable cards body -->
+      <div class="wr-cards-body">
+        {{range .FeaturedIssues}}
+        <div class="wr-issue-card">
+          <div class="wr-issue-top">
+            <span class="sev-badge {{.Severity}}">{{if eq .Severity "critical"}}CRITICAL{{else if eq .Severity "high"}}HIGH{{else}}{{.Severity}}{{end}}</span>
+            <span class="top-issue-count">{{.Namespace}}</span>
           </div>
+          <div class="wr-issue-name">{{.Message}}</div>
+          <div class="wr-issue-ns">{{.Namespace}} · {{.Resource}}</div>
+          {{if .KubectlCmd}}
+          <div class="wr-issue-section">
+            <div class="wr-issue-label">Quick Fix</div>
+            <div class="wr-quick-fix">
+              <code>{{.KubectlCmd}}</code>
+              <button class="wr-copy-btn" onclick="navigator.clipboard.writeText('{{.KubectlCmd}}')">Copy</button>
+            </div>
+          </div>
+          {{end}}
         </div>
         {{end}}
+        <a class="wr-view-details" href="{{$.WrURL}}">View All in War Room →</a>
       </div>
-      {{end}}
 
-      <a class="wr-view-details" href="{{$.WrURL}}">View All in War Room →</a>
       {{else}}
       <div class="empty-state-small">
         <span class="icon">✅</span>
         <div>No critical issues detected</div>
       </div>
       {{end}}
+
+    </div>
+  </div>
 
 <!-- Footer trust badges -->
 <div class="trust-footer">

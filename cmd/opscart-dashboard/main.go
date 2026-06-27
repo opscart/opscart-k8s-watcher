@@ -282,10 +282,76 @@ func runDashboard(_ *cobra.Command, _ []string) error {
 	mux.HandleFunc("/namespaces", srv.handleNamespacesPage)
 	mux.HandleFunc("/optimizations", srv.handleOptimizationsPage)
 	mux.HandleFunc("/healthz", handleHealth)
-
+	mux.HandleFunc("/incidents", srv.handleStubPage("incidents", "Incidents"))
+	mux.HandleFunc("/security", srv.handleStubPage("security", "Security Posture"))
+	mux.HandleFunc("/waste", srv.handleStubPage("waste", "Waste & Drift"))
+	mux.HandleFunc("/settings", srv.handleStubPage("settings", "Settings"))
 	addr := ":" + port
 	log.Printf("Dashboard ready at http://localhost%s", addr)
 	return http.ListenAndServe(addr, mux)
+}
+
+// ── Stub pages ────────────────────────────────────────────────────────────────
+
+type stubPageData struct {
+	Title         string
+	ActivePage    string
+	DashHref      string
+	WrHref        string
+	CostsHref     string
+	InfraHref     string
+	NsHref        string
+	OptHref       string
+	WasteHref     string
+	SecurityHref  string
+	IncidentsHref string
+	ClusterName   string
+	CriticalCount int
+	Clusters      []sidebarCluster
+}
+
+var getStubTmpl = sync.OnceValue(func() *template.Template {
+	return template.Must(
+		template.New("stub.html").
+			ParseFS(templateFS, "templates/base.html", "templates/sidebar.html", "templates/stub.html"),
+	)
+})
+
+func (srv *server) handleStubPage(page, title string) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		ctx := srv.activeCtx(r)
+		state := srv.getState(ctx)
+		state.mu.RLock()
+		scan := state.scan
+		state.mu.RUnlock()
+
+		q := "?cluster=" + url.QueryEscape(ctx)
+		data := stubPageData{
+			Title:         title,
+			ActivePage:    page,
+			DashHref:      "/" + q,
+			WrHref:        "/warroom" + q,
+			CostsHref:     "/costs" + q,
+			InfraHref:     "/infrastructure" + q,
+			NsHref:        "/namespaces" + q,
+			OptHref:       "/optimizations" + q,
+			WasteHref:     "/waste" + q,
+			SecurityHref:  "/security" + q,
+			IncidentsHref: "/incidents" + q,
+			ClusterName:   displayName(ctx),
+			CriticalCount: countCriticalIssues(scan),
+		}
+
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		w.Header().Set("Cache-Control", "no-cache, no-store, must-revalidate")
+		var buf strings.Builder
+		if err := getStubTmpl().Execute(&buf, data); err != nil {
+			log.Printf("stub template: %v", err)
+			http.Error(w, "template error", http.StatusInternalServerError)
+			return
+		}
+		w.Write([]byte(buf.String()))
+	}
 }
 
 // ── HTTP handlers ─────────────────────────────────────────────────────────────
@@ -1184,6 +1250,9 @@ type sidebarData struct {
 	InfraHref     string
 	NsHref        string
 	OptHref       string
+	WasteHref     string
+	SecurityHref  string
+	IncidentsHref string
 	WrHref        string
 	ActivePage    string
 	ClusterName   string
@@ -1195,6 +1264,101 @@ type sidebarCluster struct {
 	Href     string
 	Label    string
 	IsActive bool
+}
+
+// calcIncidentScore returns 0-100 score. Lower = worse.
+// 100 = perfect, 0 = critical failure.
+func calcIncidentScore(scan *clusterScan) (score int, color string, label string) {
+	if scan == nil {
+		return 100, "green", "No Data"
+	}
+
+	penalties := 0
+
+	// War Room issues
+	issues := collectWarRoomIssues(scan, 0)
+	crashLoops := 0
+	imagePulls := 0
+	oomKills := 0
+	unprotectedNS := 0
+
+	for _, issue := range issues {
+		switch issue.Type {
+		case "crash_loop":
+			crashLoops++
+		case "image_pull":
+			imagePulls++
+		case "oom_killed":
+			oomKills++
+		case "unprotected_namespace":
+			unprotectedNS++
+		}
+	}
+
+	// Crash loops: -8 each, cap at -40
+	crashPenalty := crashLoops * 8
+	if crashPenalty > 40 {
+		crashPenalty = 40
+	}
+	penalties += crashPenalty
+
+	// Image pull failures: -5 each, cap at -20
+	imagePenalty := imagePulls * 5
+	if imagePenalty > 20 {
+		imagePenalty = 20
+	}
+	penalties += imagePenalty
+
+	// OOM kills: -5 each, cap at -15
+	oomPenalty := oomKills * 5
+	if oomPenalty > 15 {
+		oomPenalty = 15
+	}
+	penalties += oomPenalty
+
+	// Unprotected namespaces: -4 each, cap at -12
+	nsPenalty := unprotectedNS * 4
+	if nsPenalty > 12 {
+		nsPenalty = 12
+	}
+	penalties += nsPenalty
+
+	// Waste: orphaned PVCs -1 each, cap at -5
+	if scan.wasteAudit != nil {
+		pvcPenalty := len(scan.wasteAudit.OrphanedPVCs)
+		if pvcPenalty > 5 {
+			pvcPenalty = 5
+		}
+		penalties += pvcPenalty
+	}
+
+	// CIS security score penalty
+	if scan.cisResult != nil {
+		if scan.cisResult.Score < 30 {
+			penalties += 20
+		} else if scan.cisResult.Score < 50 {
+			penalties += 10
+		} else if scan.cisResult.Score < 70 {
+			penalties += 5
+		}
+	}
+
+	score = 100 - penalties
+	if score < 0 {
+		score = 0
+	}
+
+	// Color + label bands
+	switch {
+	case score >= 80:
+		return score, "green", "Healthy"
+	case score >= 60:
+		return score, "yellow", "Needs Attention"
+	case score >= 40:
+		return score, "orange", "Degraded"
+	default:
+		return score, "red", "Critical"
+	}
 }
 
 // countCriticalIssues returns the number of critical issues in War Room data.
@@ -1256,6 +1420,9 @@ func buildSidebar(activePage, activeCtx, clusterName string, clusterList []strin
 		NsHref:        "/namespaces" + q,
 		OptHref:       "/optimizations" + q,
 		WrHref:        "/warroom" + q,
+		IncidentsHref: "/incidents" + q,
+		SecurityHref:  "/security" + q,
+		WasteHref:     "/waste" + q,
 		ActivePage:    activePage,
 		ClusterName:   clusterName,
 		Clusters:      clusters,
@@ -1453,6 +1620,10 @@ type costPageData struct {
 	WRIssues      []costWRIssue
 	CriticalCount int
 	CostsURL      string
+	IncidentsURL  string
+	SecurityURL   string
+	WasteURL      string
+	ActivePage    string
 }
 
 // ── Overview page (executive summary) ─────────────────────────────────────────
@@ -1471,13 +1642,16 @@ type overviewPageData struct {
 	CostsHref   string
 
 	// Sidebar aliases (matches sidebar.html template)
-	DashHref   string
-	InfraHref  string
-	NsHref     string
-	OptHref    string
-	WrHref     string
-	ActivePage string
-	Clusters   []sidebarCluster
+	DashHref      string
+	InfraHref     string
+	NsHref        string
+	OptHref       string
+	WrHref        string
+	IncidentsHref string
+	SecurityHref  string
+	WasteHref     string
+	ActivePage    string
+	Clusters      []sidebarCluster
 
 	// KPI bar
 	CriticalCount    int
@@ -1486,6 +1660,11 @@ type overviewPageData struct {
 	SecurityColor    string
 	WasteCount       int
 	MonthlyCost      float64
+
+	// Incident Score
+	IncidentScore      int
+	IncidentScoreColor string
+	IncidentScoreLabel string
 
 	// Top 5 Things to Fix
 	TopIssues []topIssue
@@ -1601,6 +1780,7 @@ func buildOverviewData(scan *clusterScan, activeCtx string, clusterList []string
 			wasteCount = scan.wasteAudit.TotalWasteItems
 		}
 	}
+	incidentScore, incidentScoreColor, incidentScoreLabel := calcIncidentScore(scan)
 	_ = secFailed // reserved for future use
 
 	q := ""
@@ -1624,38 +1804,44 @@ func buildOverviewData(scan *clusterScan, activeCtx string, clusterList []string
 	}
 
 	return overviewPageData{
-		ClusterName:      clusterName,
-		ActiveCtx:        activeCtx,
-		ClusterList:      clusters,
-		DashURL:          "/" + q,
-		InfraURL:         "/infrastructure" + q,
-		NSsURL:           "/namespaces" + q,
-		OptURL:           "/optimizations" + q,
-		WrURL:            "/warroom" + q,
-		CostsURL:         "/costs" + q,
-		ScannedAtMS:      time.Now().UnixMilli(),
-		CriticalCount:    criticalCount,
-		SavingsPotential: savings,
-		SecurityScore:    securityScore,
-		WasteCount:       wasteCount,
-		MonthlyCost:      monthlyCost,
-		TopIssues:        buildTopIssues(scan, wrIssues),
-		FeaturedIssues:   featuredIssues,
-		HasFeatured:      len(featuredIssues) > 0,
-		NodePoolCount:    nodePoolCount,
-		PodCount:         podCount,
-		CPUUtilization:   cpuUtil,
-		MemUtilization:   memUtil,
-		NamespaceCount:   nsCount,
-		Version:          "v1.0.0",
-		DashHref:         "/" + q,
-		CostsHref:        "/costs" + q,
-		InfraHref:        "/infrastructure" + q,
-		NsHref:           "/namespaces" + q,
-		OptHref:          "/optimizations" + q,
-		WrHref:           "/warroom" + q,
-		ActivePage:       "dashboard",
-		Clusters:         convertToSidebarClusters(clusterList, activeCtx, "/"),
+		ClusterName:        clusterName,
+		ActiveCtx:          activeCtx,
+		ClusterList:        clusters,
+		DashURL:            "/" + q,
+		InfraURL:           "/infrastructure" + q,
+		NSsURL:             "/namespaces" + q,
+		OptURL:             "/optimizations" + q,
+		WrURL:              "/warroom" + q,
+		CostsURL:           "/costs" + q,
+		ScannedAtMS:        time.Now().UnixMilli(),
+		CriticalCount:      criticalCount,
+		SavingsPotential:   savings,
+		SecurityScore:      securityScore,
+		WasteCount:         wasteCount,
+		MonthlyCost:        monthlyCost,
+		TopIssues:          buildTopIssues(scan, wrIssues),
+		FeaturedIssues:     featuredIssues,
+		HasFeatured:        len(featuredIssues) > 0,
+		NodePoolCount:      nodePoolCount,
+		PodCount:           podCount,
+		CPUUtilization:     cpuUtil,
+		MemUtilization:     memUtil,
+		NamespaceCount:     nsCount,
+		Version:            "v1.0.0",
+		DashHref:           "/" + q,
+		CostsHref:          "/costs" + q,
+		InfraHref:          "/infrastructure" + q,
+		NsHref:             "/namespaces" + q,
+		OptHref:            "/optimizations" + q,
+		WrHref:             "/warroom" + q,
+		IncidentsHref:      "/incidents" + q,
+		SecurityHref:       "/security" + q,
+		WasteHref:          "/waste" + q,
+		ActivePage:         "dashboard",
+		Clusters:           convertToSidebarClusters(clusterList, activeCtx, "/"),
+		IncidentScore:      incidentScore,
+		IncidentScoreColor: incidentScoreColor,
+		IncidentScoreLabel: incidentScoreLabel,
 	}
 }
 
@@ -1935,6 +2121,10 @@ func buildCostPageData(scan *clusterScan, activeCtx string, clusterList []string
 		RefreshURL:    "/refresh" + q,
 		CriticalCount: countCriticalIssues(scan),
 		CostsURL:      "/costs" + q,
+		IncidentsURL:  "/incidents" + q,
+		SecurityURL:   "/security" + q,
+		WasteURL:      "/waste" + q,
+		ActivePage:    "costs",
 	}
 
 	if scan != nil && scan.report != nil {
