@@ -282,7 +282,7 @@ func runDashboard(_ *cobra.Command, _ []string) error {
 	mux.HandleFunc("/namespaces", srv.handleNamespacesPage)
 	mux.HandleFunc("/optimizations", srv.handleOptimizationsPage)
 	mux.HandleFunc("/healthz", handleHealth)
-	mux.HandleFunc("/incidents", srv.handleStubPage("incidents", "Incidents"))
+	mux.HandleFunc("/incidents", srv.handleIncidentsPage)
 	mux.HandleFunc("/security", srv.handleStubPage("security", "Security Posture"))
 	mux.HandleFunc("/waste", srv.handleStubPage("waste", "Waste & Drift"))
 	mux.HandleFunc("/settings", srv.handleStubPage("settings", "Settings"))
@@ -1575,6 +1575,144 @@ func renderWarRoomCard(issue warRoomIssue) string {
 	sb.WriteString(`</div>`)
 	return sb.String()
 }
+
+// ── Incidents page ───────────────────────────────────────────────────────────
+
+type incidentsPageData struct {
+	// Sidebar fields (used by {{template "sidebar.html" .}})
+	DashHref      string
+	WrHref        string
+	CostsHref     string
+	InfraHref     string
+	WasteHref     string
+	SecurityHref  string
+	IncidentsHref string
+	ActivePage    string
+	ClusterName   string
+	Clusters      []sidebarCluster
+	CriticalCount int
+	// Page content
+	StatusDesc    string
+	DashURL       string
+	CritChipClass string
+	WarnChipClass string
+	Critical      []warRoomIssue
+	Warnings      []warRoomIssue
+	ScannedAtMs   int64
+}
+
+func (srv *server) handleIncidentsPage(w http.ResponseWriter, r *http.Request) {
+	ctx := srv.activeCtx(r)
+	state := srv.getState(ctx)
+
+	state.mu.RLock()
+	scan := state.scan
+	state.mu.RUnlock()
+
+	if scan == nil {
+		if err := state.refresh(srv.clusterList); err != nil {
+			http.Error(w, "scan failed: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+		state.mu.RLock()
+		scan = state.scan
+		state.mu.RUnlock()
+	}
+
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	fmt.Fprint(w, renderIncidentsPage(scan, ctx, srv.clusterList))
+}
+
+func renderIncidentsPage(scan *clusterScan, activeCtx string, clusterList []string) string {
+	allIssues := collectWarRoomIssues(scan, 0)
+	var critical, warnings []warRoomIssue
+	for _, issue := range allIssues {
+		if issue.Severity == "critical" {
+			critical = append(critical, issue)
+		} else {
+			warnings = append(warnings, issue)
+		}
+	}
+
+	scannedAt := time.Now()
+	clusterName := displayName(activeCtx)
+	if scan != nil && scan.report != nil {
+		scannedAt = scan.report.Timestamp
+		clusterName = scan.report.ClusterName
+	}
+
+	q := ""
+	if activeCtx != "" {
+		q = "?cluster=" + url.QueryEscape(activeCtx)
+	}
+
+	var clusters []sidebarCluster
+	if len(clusterList) > 1 {
+		for _, ctx := range clusterList {
+			label := displayName(ctx)
+			if len(label) > 22 {
+				label = label[:21] + "…"
+			}
+			clusters = append(clusters, sidebarCluster{
+				Href:     "/incidents?" + url.Values{"cluster": {ctx}}.Encode(),
+				Label:    label,
+				IsActive: ctx == activeCtx,
+			})
+		}
+	}
+
+	critChipClass := "ok"
+	if len(critical) > 0 {
+		critChipClass = "c"
+	}
+	warnChipClass := "ok"
+	if len(warnings) > 0 {
+		warnChipClass = "w"
+	}
+
+	data := incidentsPageData{
+		DashHref:      "/" + q,
+		WrHref:        "/warroom" + q,
+		CostsHref:     "/costs" + q,
+		InfraHref:     "/infrastructure" + q,
+		WasteHref:     "/waste" + q,
+		SecurityHref:  "/security" + q,
+		IncidentsHref: "/incidents" + q,
+		ActivePage:    "incidents",
+		ClusterName:   clusterName,
+		Clusters:      clusters,
+		CriticalCount: len(critical),
+		StatusDesc:    fmt.Sprintf("%d issue(s) detected", len(critical)+len(warnings)),
+		DashURL:       "/" + q,
+		CritChipClass: critChipClass,
+		WarnChipClass: warnChipClass,
+		Critical:      critical,
+		Warnings:      warnings,
+		ScannedAtMs:   scannedAt.UnixMilli(),
+	}
+
+	var buf strings.Builder
+	if err := getIncidentsTmpl().Execute(&buf, data); err != nil {
+		log.Printf("incidents template: %v", err)
+		return ""
+	}
+	return buf.String()
+}
+
+var getIncidentsTmpl = sync.OnceValue(func() *template.Template {
+	return template.Must(
+		template.New("incidents.html").
+			Funcs(template.FuncMap{
+				"renderCard": func(issue warRoomIssue) template.HTML {
+					return template.HTML(renderWarRoomCard(issue))
+				},
+			}).
+			ParseFS(templateFS,
+				"templates/base.html",
+				"templates/sidebar.html",
+				"templates/incidents.html"),
+	)
+})
 
 // ── HTML rendering pipeline ───────────────────────────────────────────────────
 
