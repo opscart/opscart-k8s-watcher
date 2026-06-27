@@ -1591,17 +1591,17 @@ type securityPageData struct {
 	CriticalCount int
 	Clusters      []sidebarCluster
 
-	CISScore      int
-	CISScoreColor string
-	TotalChecks   int
-	PassedChecks  int
-	FailedChecks  int
-	Controls      []analyzer.CISControl
-	Risks         models.SecurityRisks
-	HasRisks      bool
-	TotalPods     int
+	CISScore        int
+	CISScoreColor   string
+	TotalChecks     int
+	PassedChecks    int
+	FailedChecks    int
+	Controls        []analyzer.CISControl
+	Risks           models.SecurityRisks
+	HasRisks        bool
+	TotalPods       int
 	PriorityActions []string
-	ScannedAtMs   int64
+	ScannedAtMs     int64
 }
 
 var getSecurityTmpl = sync.OnceValue(func() *template.Template {
@@ -2214,7 +2214,7 @@ func buildOverviewData(scan *clusterScan, activeCtx string, clusterList []string
 		CPUUtilization:     cpuUtil,
 		MemUtilization:     memUtil,
 		NamespaceCount:     nsCount,
-		Version:            "v1.0.0",
+		Version:            "v1.1.0",
 		DashHref:           "/" + q,
 		CostsHref:          "/costs" + q,
 		InfraHref:          "/infrastructure" + q,
