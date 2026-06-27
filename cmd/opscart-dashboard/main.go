@@ -282,10 +282,76 @@ func runDashboard(_ *cobra.Command, _ []string) error {
 	mux.HandleFunc("/namespaces", srv.handleNamespacesPage)
 	mux.HandleFunc("/optimizations", srv.handleOptimizationsPage)
 	mux.HandleFunc("/healthz", handleHealth)
-
+	mux.HandleFunc("/incidents", srv.handleStubPage("incidents", "Incidents"))
+	mux.HandleFunc("/security", srv.handleStubPage("security", "Security Posture"))
+	mux.HandleFunc("/waste", srv.handleStubPage("waste", "Waste & Drift"))
+	mux.HandleFunc("/settings", srv.handleStubPage("settings", "Settings"))
 	addr := ":" + port
 	log.Printf("Dashboard ready at http://localhost%s", addr)
 	return http.ListenAndServe(addr, mux)
+}
+
+// ── Stub pages ────────────────────────────────────────────────────────────────
+
+type stubPageData struct {
+	Title         string
+	ActivePage    string
+	DashHref      string
+	WrHref        string
+	CostsHref     string
+	InfraHref     string
+	NsHref        string
+	OptHref       string
+	WasteHref     string
+	SecurityHref  string
+	IncidentsHref string
+	ClusterName   string
+	CriticalCount int
+	Clusters      []sidebarCluster
+}
+
+var getStubTmpl = sync.OnceValue(func() *template.Template {
+	return template.Must(
+		template.New("stub.html").
+			ParseFS(templateFS, "templates/base.html", "templates/sidebar.html", "templates/stub.html"),
+	)
+})
+
+func (srv *server) handleStubPage(page, title string) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		ctx := srv.activeCtx(r)
+		state := srv.getState(ctx)
+		state.mu.RLock()
+		scan := state.scan
+		state.mu.RUnlock()
+
+		q := "?cluster=" + url.QueryEscape(ctx)
+		data := stubPageData{
+			Title:         title,
+			ActivePage:    page,
+			DashHref:      "/" + q,
+			WrHref:        "/warroom" + q,
+			CostsHref:     "/costs" + q,
+			InfraHref:     "/infrastructure" + q,
+			NsHref:        "/namespaces" + q,
+			OptHref:       "/optimizations" + q,
+			WasteHref:     "/waste" + q,
+			SecurityHref:  "/security" + q,
+			IncidentsHref: "/incidents" + q,
+			ClusterName:   displayName(ctx),
+			CriticalCount: countCriticalIssues(scan),
+		}
+
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		w.Header().Set("Cache-Control", "no-cache, no-store, must-revalidate")
+		var buf strings.Builder
+		if err := getStubTmpl().Execute(&buf, data); err != nil {
+			log.Printf("stub template: %v", err)
+			http.Error(w, "template error", http.StatusInternalServerError)
+			return
+		}
+		w.Write([]byte(buf.String()))
+	}
 }
 
 // ── HTTP handlers ─────────────────────────────────────────────────────────────
@@ -1184,6 +1250,9 @@ type sidebarData struct {
 	InfraHref     string
 	NsHref        string
 	OptHref       string
+	WasteHref     string
+	SecurityHref  string
+	IncidentsHref string
 	WrHref        string
 	ActivePage    string
 	ClusterName   string
@@ -1256,6 +1325,9 @@ func buildSidebar(activePage, activeCtx, clusterName string, clusterList []strin
 		NsHref:        "/namespaces" + q,
 		OptHref:       "/optimizations" + q,
 		WrHref:        "/warroom" + q,
+		IncidentsHref: "/incidents" + q,
+		SecurityHref:  "/security" + q,
+		WasteHref:     "/waste" + q,
 		ActivePage:    activePage,
 		ClusterName:   clusterName,
 		Clusters:      clusters,
@@ -1453,6 +1525,10 @@ type costPageData struct {
 	WRIssues      []costWRIssue
 	CriticalCount int
 	CostsURL      string
+	IncidentsURL  string
+	SecurityURL   string
+	WasteURL      string
+	ActivePage    string
 }
 
 // ── Overview page (executive summary) ─────────────────────────────────────────
@@ -1471,13 +1547,16 @@ type overviewPageData struct {
 	CostsHref   string
 
 	// Sidebar aliases (matches sidebar.html template)
-	DashHref   string
-	InfraHref  string
-	NsHref     string
-	OptHref    string
-	WrHref     string
-	ActivePage string
-	Clusters   []sidebarCluster
+	DashHref      string
+	InfraHref     string
+	NsHref        string
+	OptHref       string
+	WrHref        string
+	IncidentsHref string
+	SecurityHref  string
+	WasteHref     string
+	ActivePage    string
+	Clusters      []sidebarCluster
 
 	// KPI bar
 	CriticalCount    int
@@ -1654,6 +1733,9 @@ func buildOverviewData(scan *clusterScan, activeCtx string, clusterList []string
 		NsHref:           "/namespaces" + q,
 		OptHref:          "/optimizations" + q,
 		WrHref:           "/warroom" + q,
+		IncidentsHref:    "/incidents" + q,
+		SecurityHref:     "/security" + q,
+		WasteHref:        "/waste" + q,
 		ActivePage:       "dashboard",
 		Clusters:         convertToSidebarClusters(clusterList, activeCtx, "/"),
 	}
@@ -1935,6 +2017,10 @@ func buildCostPageData(scan *clusterScan, activeCtx string, clusterList []string
 		RefreshURL:    "/refresh" + q,
 		CriticalCount: countCriticalIssues(scan),
 		CostsURL:      "/costs" + q,
+		IncidentsURL:  "/incidents" + q,
+		SecurityURL:   "/security" + q,
+		WasteURL:      "/waste" + q,
+		ActivePage:    "costs",
 	}
 
 	if scan != nil && scan.report != nil {
