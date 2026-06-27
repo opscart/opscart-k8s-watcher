@@ -284,7 +284,7 @@ func runDashboard(_ *cobra.Command, _ []string) error {
 	mux.HandleFunc("/healthz", handleHealth)
 	mux.HandleFunc("/incidents", srv.handleIncidentsPage)
 	mux.HandleFunc("/security", srv.handleSecurityPage)
-	mux.HandleFunc("/waste", srv.handleStubPage("waste", "Waste & Drift"))
+	mux.HandleFunc("/waste", srv.handleWastePage)
 	mux.HandleFunc("/settings", srv.handleStubPage("settings", "Settings"))
 	addr := ":" + port
 	log.Printf("Dashboard ready at http://localhost%s", addr)
@@ -1847,6 +1847,121 @@ var getIncidentsTmpl = sync.OnceValue(func() *template.Template {
 				"templates/incidents.html"),
 	)
 })
+
+// ── Waste & Drift page ────────────────────────────────────────────────────────
+
+type wastePageData struct {
+	DashHref      string
+	WrHref        string
+	CostsHref     string
+	InfraHref     string
+	WasteHref     string
+	SecurityHref  string
+	IncidentsHref string
+	ActivePage    string
+	ClusterName   string
+	CriticalCount int
+	Clusters      []sidebarCluster
+
+	TotalWasteItems      int
+	OrphanedPVCStorageGB int
+	EstimatedMonthly     float64
+	ZombieCount          int
+	StalePods            []analyzer.StalePod
+	OrphanedPVCs         []analyzer.OrphanedPVC
+	ZeroReplicaWorkloads []analyzer.ZeroReplicaWorkload
+	AbandonedNamespaces  []analyzer.AbandonedNamespace
+	StaleJobs            []analyzer.StaleJob
+	ScannedAtMs          int64
+}
+
+var getWasteTmpl = sync.OnceValue(func() *template.Template {
+	return template.Must(
+		template.New("waste.html").
+			ParseFS(templateFS,
+				"templates/base.html",
+				"templates/sidebar.html",
+				"templates/waste.html"),
+	)
+})
+
+func (srv *server) handleWastePage(w http.ResponseWriter, r *http.Request) {
+	ctx := srv.activeCtx(r)
+	state := srv.getState(ctx)
+	state.mu.RLock()
+	scan := state.scan
+	state.mu.RUnlock()
+
+	if scan == nil {
+		if err := state.refresh(srv.clusterList); err != nil {
+			http.Error(w, "scan failed: "+err.Error(), 500)
+			return
+		}
+		state.mu.RLock()
+		scan = state.scan
+		state.mu.RUnlock()
+	}
+
+	q := "?cluster=" + url.QueryEscape(ctx)
+
+	var clusters []sidebarCluster
+	if len(srv.clusterList) > 1 {
+		for _, c := range srv.clusterList {
+			label := displayName(c)
+			if len(label) > 22 {
+				label = label[:21] + "…"
+			}
+			clusters = append(clusters, sidebarCluster{
+				Href:     "/waste?" + url.Values{"cluster": {c}}.Encode(),
+				Label:    label,
+				IsActive: c == ctx,
+			})
+		}
+	}
+
+	data := wastePageData{
+		DashHref:      "/" + q,
+		WrHref:        "/warroom" + q,
+		CostsHref:     "/costs" + q,
+		InfraHref:     "/infrastructure" + q,
+		WasteHref:     "/waste" + q,
+		SecurityHref:  "/security" + q,
+		IncidentsHref: "/incidents" + q,
+		ActivePage:    "waste",
+		ClusterName:   displayName(ctx),
+		CriticalCount: countCriticalIssues(scan),
+		Clusters:      clusters,
+		ScannedAtMs:   time.Now().UnixMilli(),
+	}
+
+	if scan.wasteAudit != nil {
+		wa := scan.wasteAudit
+		data.TotalWasteItems = wa.TotalWasteItems
+		data.OrphanedPVCStorageGB = wa.OrphanedPVCStorageGB
+		data.EstimatedMonthly = wa.EstimatedMonthlyWaste
+		data.OrphanedPVCs = wa.OrphanedPVCs
+		data.ZeroReplicaWorkloads = wa.ZeroReplicaWorkloads
+		data.AbandonedNamespaces = wa.AbandonedNamespaces
+		data.StaleJobs = wa.StaleJobs
+
+		for _, p := range wa.StalePods {
+			if p.Kind == analyzer.StalePodZombie {
+				data.StalePods = append(data.StalePods, p)
+				data.ZombieCount++
+			}
+		}
+	}
+
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-cache, no-store, must-revalidate")
+	var buf strings.Builder
+	if err := getWasteTmpl().Execute(&buf, data); err != nil {
+		log.Printf("waste template: %v", err)
+		http.Error(w, "template error", 500)
+		return
+	}
+	w.Write([]byte(buf.String()))
+}
 
 // ── HTML rendering pipeline ───────────────────────────────────────────────────
 
