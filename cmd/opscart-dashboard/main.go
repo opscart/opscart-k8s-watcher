@@ -282,9 +282,9 @@ func runDashboard(_ *cobra.Command, _ []string) error {
 	mux.HandleFunc("/namespaces", srv.handleNamespacesPage)
 	mux.HandleFunc("/optimizations", srv.handleOptimizationsPage)
 	mux.HandleFunc("/healthz", handleHealth)
-	mux.HandleFunc("/incidents", srv.handleStubPage("incidents", "Incidents"))
-	mux.HandleFunc("/security", srv.handleStubPage("security", "Security Posture"))
-	mux.HandleFunc("/waste", srv.handleStubPage("waste", "Waste & Drift"))
+	mux.HandleFunc("/incidents", srv.handleIncidentsPage)
+	mux.HandleFunc("/security", srv.handleSecurityPage)
+	mux.HandleFunc("/waste", srv.handleWastePage)
 	mux.HandleFunc("/settings", srv.handleStubPage("settings", "Settings"))
 	addr := ":" + port
 	log.Printf("Dashboard ready at http://localhost%s", addr)
@@ -1574,6 +1574,393 @@ func renderWarRoomCard(issue warRoomIssue) string {
 	sb.WriteString(`</div>`)
 	sb.WriteString(`</div>`)
 	return sb.String()
+}
+
+// ── Security Posture page ─────────────────────────────────────────────────────
+
+type securityPageData struct {
+	DashHref      string
+	WrHref        string
+	CostsHref     string
+	InfraHref     string
+	WasteHref     string
+	SecurityHref  string
+	IncidentsHref string
+	ActivePage    string
+	ClusterName   string
+	CriticalCount int
+	Clusters      []sidebarCluster
+
+	CISScore      int
+	CISScoreColor string
+	TotalChecks   int
+	PassedChecks  int
+	FailedChecks  int
+	Controls      []analyzer.CISControl
+	Risks         models.SecurityRisks
+	HasRisks      bool
+	TotalPods     int
+	PriorityActions []string
+	ScannedAtMs   int64
+}
+
+var getSecurityTmpl = sync.OnceValue(func() *template.Template {
+	return template.Must(
+		template.New("security.html").
+			Funcs(template.FuncMap{
+				"add": func(a, b int) int { return a + b },
+			}).
+			ParseFS(templateFS,
+				"templates/base.html",
+				"templates/sidebar.html",
+				"templates/security.html"),
+	)
+})
+
+func (srv *server) handleSecurityPage(w http.ResponseWriter, r *http.Request) {
+	ctx := srv.activeCtx(r)
+	state := srv.getState(ctx)
+	state.mu.RLock()
+	scan := state.scan
+	state.mu.RUnlock()
+
+	if scan == nil {
+		if err := state.refresh(srv.clusterList); err != nil {
+			http.Error(w, "scan failed: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+		state.mu.RLock()
+		scan = state.scan
+		state.mu.RUnlock()
+	}
+
+	q := "?cluster=" + url.QueryEscape(ctx)
+
+	var clusters []sidebarCluster
+	if len(srv.clusterList) > 1 {
+		for _, c := range srv.clusterList {
+			label := displayName(c)
+			if len(label) > 22 {
+				label = label[:21] + "…"
+			}
+			clusters = append(clusters, sidebarCluster{
+				Href:     "/security?" + url.Values{"cluster": {c}}.Encode(),
+				Label:    label,
+				IsActive: c == ctx,
+			})
+		}
+	}
+
+	data := securityPageData{
+		DashHref:      "/" + q,
+		WrHref:        "/warroom" + q,
+		CostsHref:     "/costs" + q,
+		InfraHref:     "/infrastructure" + q,
+		WasteHref:     "/waste" + q,
+		SecurityHref:  "/security" + q,
+		IncidentsHref: "/incidents" + q,
+		ActivePage:    "security",
+		ClusterName:   displayName(ctx),
+		CriticalCount: countCriticalIssues(scan),
+		Clusters:      clusters,
+		ScannedAtMs:   time.Now().UnixMilli(),
+	}
+
+	if scan.cisResult != nil {
+		data.CISScore = scan.cisResult.Score
+		data.TotalChecks = scan.cisResult.TotalChecks
+		data.PassedChecks = scan.cisResult.PassedChecks
+		data.FailedChecks = scan.cisResult.FailedChecks
+		data.Controls = make([]analyzer.CISControl, len(scan.cisResult.Controls))
+		copy(data.Controls, scan.cisResult.Controls)
+		sort.SliceStable(data.Controls, func(i, j int) bool {
+			return !data.Controls[i].Passed && data.Controls[j].Passed
+		})
+	}
+	if scan.secAudit != nil {
+		data.Risks = scan.secAudit.Risks
+		data.TotalPods = scan.secAudit.TotalPodsAudited
+		data.PriorityActions = scan.secAudit.PriorityActions
+		r := scan.secAudit.Risks
+		data.HasRisks = r.RunningAsRoot > 0 || r.PrivilegedContainers > 0 ||
+			r.HostNetwork > 0 || r.HostPID > 0 || r.HostIPC > 0 ||
+			r.HostPathVolumes > 0 || r.DefaultServiceAccount > 0 ||
+			r.MissingResourceLimits > 0 || r.MissingProbes > 0 ||
+			r.AddedCapabilities > 0 || r.PrivilegeEscalation > 0 ||
+			r.WritableFilesystem > 0 || r.MissingNetworkPolicies > 0
+	}
+
+	switch {
+	case data.CISScore >= 70:
+		data.CISScoreColor = "green"
+	case data.CISScore >= 40:
+		data.CISScoreColor = "orange"
+	default:
+		data.CISScoreColor = "red"
+	}
+
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-cache, no-store, must-revalidate")
+	var buf strings.Builder
+	if err := getSecurityTmpl().Execute(&buf, data); err != nil {
+		log.Printf("security template: %v", err)
+		http.Error(w, "template error", http.StatusInternalServerError)
+		return
+	}
+	w.Write([]byte(buf.String()))
+}
+
+// ── Incidents page ───────────────────────────────────────────────────────────
+
+type incidentsPageData struct {
+	// Sidebar fields (used by {{template "sidebar.html" .}})
+	DashHref      string
+	WrHref        string
+	CostsHref     string
+	InfraHref     string
+	WasteHref     string
+	SecurityHref  string
+	IncidentsHref string
+	ActivePage    string
+	ClusterName   string
+	Clusters      []sidebarCluster
+	CriticalCount int
+	// Page content
+	StatusDesc    string
+	DashURL       string
+	CritChipClass string
+	WarnChipClass string
+	Critical      []warRoomIssue
+	Warnings      []warRoomIssue
+	ScannedAtMs   int64
+}
+
+func (srv *server) handleIncidentsPage(w http.ResponseWriter, r *http.Request) {
+	ctx := srv.activeCtx(r)
+	state := srv.getState(ctx)
+
+	state.mu.RLock()
+	scan := state.scan
+	state.mu.RUnlock()
+
+	if scan == nil {
+		if err := state.refresh(srv.clusterList); err != nil {
+			http.Error(w, "scan failed: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+		state.mu.RLock()
+		scan = state.scan
+		state.mu.RUnlock()
+	}
+
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	fmt.Fprint(w, renderIncidentsPage(scan, ctx, srv.clusterList))
+}
+
+func renderIncidentsPage(scan *clusterScan, activeCtx string, clusterList []string) string {
+	allIssues := collectWarRoomIssues(scan, 0)
+	var critical, warnings []warRoomIssue
+	for _, issue := range allIssues {
+		if issue.Severity == "critical" {
+			critical = append(critical, issue)
+		} else {
+			warnings = append(warnings, issue)
+		}
+	}
+
+	scannedAt := time.Now()
+	clusterName := displayName(activeCtx)
+	if scan != nil && scan.report != nil {
+		scannedAt = scan.report.Timestamp
+		clusterName = scan.report.ClusterName
+	}
+
+	q := ""
+	if activeCtx != "" {
+		q = "?cluster=" + url.QueryEscape(activeCtx)
+	}
+
+	var clusters []sidebarCluster
+	if len(clusterList) > 1 {
+		for _, ctx := range clusterList {
+			label := displayName(ctx)
+			if len(label) > 22 {
+				label = label[:21] + "…"
+			}
+			clusters = append(clusters, sidebarCluster{
+				Href:     "/incidents?" + url.Values{"cluster": {ctx}}.Encode(),
+				Label:    label,
+				IsActive: ctx == activeCtx,
+			})
+		}
+	}
+
+	critChipClass := "ok"
+	if len(critical) > 0 {
+		critChipClass = "c"
+	}
+	warnChipClass := "ok"
+	if len(warnings) > 0 {
+		warnChipClass = "w"
+	}
+
+	data := incidentsPageData{
+		DashHref:      "/" + q,
+		WrHref:        "/warroom" + q,
+		CostsHref:     "/costs" + q,
+		InfraHref:     "/infrastructure" + q,
+		WasteHref:     "/waste" + q,
+		SecurityHref:  "/security" + q,
+		IncidentsHref: "/incidents" + q,
+		ActivePage:    "incidents",
+		ClusterName:   clusterName,
+		Clusters:      clusters,
+		CriticalCount: len(critical),
+		StatusDesc:    fmt.Sprintf("%d issue(s) detected", len(critical)+len(warnings)),
+		DashURL:       "/" + q,
+		CritChipClass: critChipClass,
+		WarnChipClass: warnChipClass,
+		Critical:      critical,
+		Warnings:      warnings,
+		ScannedAtMs:   scannedAt.UnixMilli(),
+	}
+
+	var buf strings.Builder
+	if err := getIncidentsTmpl().Execute(&buf, data); err != nil {
+		log.Printf("incidents template: %v", err)
+		return ""
+	}
+	return buf.String()
+}
+
+var getIncidentsTmpl = sync.OnceValue(func() *template.Template {
+	return template.Must(
+		template.New("incidents.html").
+			Funcs(template.FuncMap{
+				"renderCard": func(issue warRoomIssue) template.HTML {
+					return template.HTML(renderWarRoomCard(issue))
+				},
+			}).
+			ParseFS(templateFS,
+				"templates/base.html",
+				"templates/sidebar.html",
+				"templates/incidents.html"),
+	)
+})
+
+// ── Waste & Drift page ────────────────────────────────────────────────────────
+
+type wastePageData struct {
+	DashHref      string
+	WrHref        string
+	CostsHref     string
+	InfraHref     string
+	WasteHref     string
+	SecurityHref  string
+	IncidentsHref string
+	ActivePage    string
+	ClusterName   string
+	CriticalCount int
+	Clusters      []sidebarCluster
+
+	TotalWasteItems      int
+	OrphanedPVCStorageGB int
+	EstimatedMonthly     float64
+	ZombieCount          int
+	StalePods            []analyzer.StalePod
+	OrphanedPVCs         []analyzer.OrphanedPVC
+	ZeroReplicaWorkloads []analyzer.ZeroReplicaWorkload
+	AbandonedNamespaces  []analyzer.AbandonedNamespace
+	StaleJobs            []analyzer.StaleJob
+	ScannedAtMs          int64
+}
+
+var getWasteTmpl = sync.OnceValue(func() *template.Template {
+	return template.Must(
+		template.New("waste.html").
+			ParseFS(templateFS,
+				"templates/base.html",
+				"templates/sidebar.html",
+				"templates/waste.html"),
+	)
+})
+
+func (srv *server) handleWastePage(w http.ResponseWriter, r *http.Request) {
+	ctx := srv.activeCtx(r)
+	state := srv.getState(ctx)
+	state.mu.RLock()
+	scan := state.scan
+	state.mu.RUnlock()
+
+	if scan == nil {
+		if err := state.refresh(srv.clusterList); err != nil {
+			http.Error(w, "scan failed: "+err.Error(), 500)
+			return
+		}
+		state.mu.RLock()
+		scan = state.scan
+		state.mu.RUnlock()
+	}
+
+	q := "?cluster=" + url.QueryEscape(ctx)
+
+	var clusters []sidebarCluster
+	if len(srv.clusterList) > 1 {
+		for _, c := range srv.clusterList {
+			label := displayName(c)
+			if len(label) > 22 {
+				label = label[:21] + "…"
+			}
+			clusters = append(clusters, sidebarCluster{
+				Href:     "/waste?" + url.Values{"cluster": {c}}.Encode(),
+				Label:    label,
+				IsActive: c == ctx,
+			})
+		}
+	}
+
+	data := wastePageData{
+		DashHref:      "/" + q,
+		WrHref:        "/warroom" + q,
+		CostsHref:     "/costs" + q,
+		InfraHref:     "/infrastructure" + q,
+		WasteHref:     "/waste" + q,
+		SecurityHref:  "/security" + q,
+		IncidentsHref: "/incidents" + q,
+		ActivePage:    "waste",
+		ClusterName:   displayName(ctx),
+		CriticalCount: countCriticalIssues(scan),
+		Clusters:      clusters,
+		ScannedAtMs:   time.Now().UnixMilli(),
+	}
+
+	if scan.wasteAudit != nil {
+		wa := scan.wasteAudit
+		data.TotalWasteItems = wa.TotalWasteItems
+		data.OrphanedPVCStorageGB = wa.OrphanedPVCStorageGB
+		data.EstimatedMonthly = wa.EstimatedMonthlyWaste
+		data.OrphanedPVCs = wa.OrphanedPVCs
+		data.ZeroReplicaWorkloads = wa.ZeroReplicaWorkloads
+		data.AbandonedNamespaces = wa.AbandonedNamespaces
+		data.StaleJobs = wa.StaleJobs
+
+		for _, p := range wa.StalePods {
+			if p.Kind == analyzer.StalePodZombie {
+				data.StalePods = append(data.StalePods, p)
+				data.ZombieCount++
+			}
+		}
+	}
+
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-cache, no-store, must-revalidate")
+	var buf strings.Builder
+	if err := getWasteTmpl().Execute(&buf, data); err != nil {
+		log.Printf("waste template: %v", err)
+		http.Error(w, "template error", 500)
+		return
+	}
+	w.Write([]byte(buf.String()))
 }
 
 // ── HTML rendering pipeline ───────────────────────────────────────────────────
