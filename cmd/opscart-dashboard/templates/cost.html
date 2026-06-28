@@ -107,27 +107,27 @@ tbody tr{transition:background 0.1s}
 <div class="layout">
 <aside class="sidebar">
 <div class="logo">
-<div class="logo-icon">⚡</div>
+<div class="logo-icon"><span class="nav-icon"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg></span></div>
 <div><div class="logo-text">OpsCart</div><div class="logo-sub">K8s Operational Intelligence</div></div>
 </div>
 
 <div class="nav-section">
 <div class="nav-label">Overview</div>
-<a class="nav-item{{if eq .ActivePage "dashboard"}} active{{end}}" href="{{.DashURL}}">📊 Overview</a>
-<a class="nav-item{{if eq .ActivePage "warroom"}} active{{end}}" href="{{.WrURL}}">🚨 War Room{{if .CriticalCount}} <span class="nav-badge nav-badge-critical">{{.CriticalCount}}</span>{{end}}</a>
+<a class="nav-item{{if eq .ActivePage "dashboard"}} active{{end}}" href="{{.DashURL}}"><span class="nav-icon"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/></svg></span> Overview</a>
+<a class="nav-item{{if eq .ActivePage "warroom"}} active{{end}}" href="{{.WrURL}}"><span class="nav-icon"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><polygon points="7.86 2 16.14 2 22 7.86 22 16.14 16.14 22 7.86 22 2 16.14 2 7.86 7.86 2"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg></span> War Room{{if .CriticalCount}} <span class="nav-badge nav-badge-critical">{{.CriticalCount}}</span>{{end}}</a>
 </div>
 
 <div class="nav-section">
 <div class="nav-label">Investigate</div>
-<a class="nav-item{{if eq .ActivePage "incidents"}} active{{end}}" href="{{.IncidentsURL}}">🔍 Incidents</a>
-<a class="nav-item{{if eq .ActivePage "infrastructure"}} active{{end}}" href="{{.InfraURL}}">🖥️ Infrastructure</a>
+<a class="nav-item{{if eq .ActivePage "incidents"}} active{{end}}" href="{{.IncidentsURL}}"><span class="nav-icon"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/></svg></span> Incidents</a>
+<a class="nav-item{{if eq .ActivePage "infrastructure"}} active{{end}}" href="{{.InfraURL}}"><span class="nav-icon"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="3" width="20" height="14" rx="2"/><path d="M8 21h8M12 17v4"/></svg></span> Infrastructure</a>
 </div>
 
 <div class="nav-section">
 <div class="nav-label">Analyze</div>
-<a class="nav-item active" href="{{.CostsURL}}">💰 Cost Intelligence</a>
-<a class="nav-item{{if eq .ActivePage "security"}} active{{end}}" href="{{.SecurityURL}}">🔒 Security Posture</a>
-<a class="nav-item{{if eq .ActivePage "waste"}} active{{end}}" href="{{.WasteURL}}">🗑️ Waste & Drift</a>
+<a class="nav-item active" href="{{.CostsURL}}"><span class="nav-icon"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="2" x2="12" y2="22"/><path d="M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"/></svg></span> Cost Intelligence</a>
+<a class="nav-item{{if eq .ActivePage "security"}} active{{end}}" href="{{.SecurityURL}}"><span class="nav-icon"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg></span> Security Posture</a>
+<a class="nav-item{{if eq .ActivePage "waste"}} active{{end}}" href="{{.WasteURL}}"><span class="nav-icon"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14H6L5 6"/><path d="M10 11v6M14 11v6"/><path d="M9 6V4h6v2"/></svg></span> Waste &amp; Drift</a>
 </div>
 
 <div class="nav-footer">
@@ -143,17 +143,17 @@ tbody tr{transition:background 0.1s}
 {{end}}
 </div>
 <div class="nav-divider"></div>
-<a class="nav-item{{if eq .ActivePage "settings"}} active{{end}}" href="/settings">⚙️ Settings</a>
+<a class="nav-item{{if eq .ActivePage "settings"}} active{{end}}" href="/settings"><span class="nav-icon"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.07 4.93a10 10 0 0 1 0 14.14M4.93 4.93a10 10 0 0 0 0 14.14"/></svg></span> Settings</a>
 </div>
 </aside>
 <main class="main">
 <div class="oc-kpi-row">
-<div class="kpi"><div class="kpi-top"><div class="kpi-icon {{if .CriticalCount}}red{{else}}green{{end}}">🚨</div></div><h3 class="money {{if .CriticalCount}}red{{else}}green{{end}}">{{.CriticalCount}}</h3><p>{{if .CriticalCount}}Critical Issues{{else}}All Clear{{end}}</p></div>
+<div class="kpi-icon {{if .CriticalCount}}red{{else}}green{{end}}"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><polygon points="7.86 2 16.14 2 22 7.86 22 16.14 16.14 22 7.86 22 2 16.14 2 7.86 7.86 2"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg></div>
 <div class="kpi"><div class="kpi-top"><div class="kpi-icon green">💡</div><span class="kpi-trend down">↓ Save</span></div><h3 class="money green">${{money .SavingsPotential}}</h3><p>Potential Savings</p></div>
 <div class="kpi"><div class="kpi-top"><div class="kpi-icon {{.SecurityColor}}">🔐</div></div><h3>{{.SecurityDisplay}}</h3><p>Security Score</p></div>
-<div class="kpi"><div class="kpi-top"><div class="kpi-icon {{.WasteColor}}">🗑️</div></div><h3>{{.WasteDisplay}}</h3><p>Waste Resources</p></div>
-<div class="kpi"><div class="kpi-top"><div class="kpi-icon red">💰</div></div><h3 class="money red">${{money .MonthlyCost}}</h3><p>Monthly Cost</p></div>
-<div class="kpi"><div class="kpi-top"><div class="kpi-icon cyan">☸️</div></div><h3>{{.ClusterCount}}</h3><p>Clusters</p></div>
+<div class="kpi-icon {{.WasteColor}}"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14H6L5 6"/><path d="M10 11v6M14 11v6"/><path d="M9 6V4h6v2"/></svg></div>
+<div class="kpi-icon red"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="2" x2="12" y2="22"/><path d="M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"/></svg></div>
+<div class="kpi"><div class="kpi-top"><div class="kpi-icon cyan"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><circle cx="12" cy="12" r="3"/><line x1="12" y1="2" x2="12" y2="5"/><line x1="12" y1="19" x2="12" y2="22"/><line x1="2" y1="12" x2="5" y2="12"/><line x1="19" y1="12" x2="22" y2="12"/></svg></div></div><h3>{{.ClusterCount}}</h3><p>Clusters</p></div>
 </div>
 <div style="display:grid;grid-template-columns:1fr 340px;gap:1.5rem;align-items:start">
 <div>
@@ -162,7 +162,7 @@ tbody tr{transition:background 0.1s}
 <p style="color:var(--text-muted);font-size:0.9rem">Kubernetes infrastructure cost breakdown &bull; {{.Timestamp.Format "Monday, January 2, 2006"}}</p>
 </div>
 <div class="section">
-<div class="section-hdr"><div class="section-title">🎯 Pricing Confidence</div></div>
+<div class="section-hdr"><div class="section-title">Pricing Confidence</div></div>
 <div class="confidence-card">
 <div class="conf-ring">
 <svg width="80" height="80" viewBox="0 0 80 80">
@@ -184,7 +184,7 @@ tbody tr{transition:background 0.1s}
 </div>
 </div>
 <div class="section">
-<div class="section-hdr"><div class="section-title">🖥️ Node Pool Infrastructure</div></div>
+<div class="section-hdr"><div class="section-title">Node Pool Infrastructure</div></div>
 <div class="table-wrap"><table>
 <thead><tr><th>Pool Name</th><th>VM Size</th><th>Nodes</th><th>Type</th><th>CPU Utilization</th><th>Memory Utilization</th><th>$/Node/Mo</th><th>Pool Total</th><th>RI Savings</th></tr></thead>
 <tbody>
@@ -250,7 +250,7 @@ tbody tr{transition:background 0.1s}
 </div>
 {{if .Scenarios}}
 <div class="section">
-<div class="section-hdr"><div class="section-title">🎯 Optimization Opportunities</div></div>
+<div class="section-hdr"><div class="section-title">Optimization Opportunities</div></div>
 <div class="scenarios-grid">
 {{range .Scenarios}}
 <div class="scenario-card">
@@ -275,7 +275,7 @@ tbody tr{transition:background 0.1s}
 <div style="position:sticky;top:2rem">
 <div class="section" style="border-color:rgba(239,68,68,0.4)">
 <div class="section-hdr">
-<div class="section-title">🚨 War Room</div>
+<div class="section-title">War Room</div>
 {{if .WRIssues}}<span style="background:rgba(239,68,68,0.12);color:#ef4444;padding:3px 10px;border-radius:20px;font-size:0.72rem;font-weight:700">{{len .WRIssues}} issues</span>
 {{else}}<span style="background:rgba(16,185,129,0.12);color:#10b981;padding:3px 10px;border-radius:20px;font-size:0.72rem;font-weight:700">All clear</span>
 {{end}}
