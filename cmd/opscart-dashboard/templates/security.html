@@ -48,7 +48,7 @@
 <main class="main">
   <div class="page-hdr">
     <div>
-      <h1>🔒 Security Posture</h1>
+      <h1>Security Posture</h1>
       <p>{{.ClusterName}} &mdash; CIS Kubernetes Benchmark v1.8</p>
     </div>
     <div class="page-meta">
@@ -109,7 +109,7 @@
 
   <div class="sec-section">
     <div class="sec-section-hdr">
-      <h2>⚠️ Risk Breakdown</h2>
+      <h2>Risk Breakdown</h2>
     </div>
     {{$r := .Risks}}
     {{if .HasRisks}}
@@ -217,7 +217,7 @@
   {{if .PriorityActions}}
   <div class="sec-section">
     <div class="sec-section-hdr">
-      <h2>🎯 Priority Actions</h2>
+      <h2>Priority Actions</h2>
     </div>
     <div class="actions-list">
       {{range $i, $a := .PriorityActions}}
