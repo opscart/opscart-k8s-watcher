@@ -33,6 +33,7 @@ rules:
       - endpoints
       - persistentvolumeclaims
       - replicationcontrollers
+      - events
     verbs: ["get", "list"]
   - apiGroups: ["apps"]
     resources: ["deployments", "statefulsets", "daemonsets", "replicasets"]
@@ -87,7 +88,7 @@ spec:
 
       containers:
         - name: dashboard
-          image: ghcr.io/opscart/opscart-dashboard:v1.1.0
+          image: ghcr.io/opscart/opscart-dashboard:v1.2.0
           imagePullPolicy: Always
           args:
             - "--port=8080"
