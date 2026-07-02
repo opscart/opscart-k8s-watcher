@@ -1,0 +1,244 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1.0">
+<title>Investigation — {{.PodName}}</title>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+{{template "base" .}}
+<style>
+.inv-bar{display:flex;gap:1rem;margin-bottom:2rem;flex-wrap:wrap}
+.inv-chip{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius-sm);padding:0.75rem 1.25rem;display:flex;align-items:center;gap:0.75rem}
+.inv-chip.danger{border-color:rgba(239,68,68,0.35);background:rgba(239,68,68,0.025)}
+.inv-chip-label{font-size:0.72rem;color:var(--text-muted);text-transform:uppercase;letter-spacing:0.5px;line-height:1.3}
+.inv-chip-value{font-size:1.1rem;font-weight:700;color:var(--text);margin-top:0.1rem}
+.inv-badge{display:inline-flex;padding:2px 9px;border-radius:20px;font-size:0.7rem;font-weight:700;background:rgba(239,68,68,0.15);color:#f87171;text-transform:uppercase;letter-spacing:0.5px}
+.inv-state-reason{font-size:0.78rem;color:var(--text-muted);margin-top:0.25rem}
+.inv-section{margin-bottom:2.5rem}
+.inv-section-hdr{display:flex;align-items:center;gap:0.75rem;margin-bottom:1rem;padding-bottom:0.75rem;border-bottom:1px solid var(--border)}
+.inv-section-hdr h2{font-size:1rem;font-weight:700}
+.inv-hints{display:flex;flex-direction:column;gap:0.5rem}
+.inv-hint{display:flex;align-items:flex-start;gap:0.75rem;background:var(--surface);border:1px solid var(--border);border-radius:var(--radius-sm);padding:0.85rem 1rem}
+.inv-hint-icon{color:var(--warning);flex-shrink:0;margin-top:2px}
+.inv-hint-text{font-size:0.85rem;color:var(--text);line-height:1.5}
+.inv-cmds{display:flex;flex-direction:column;gap:0.5rem}
+.inv-cmd{display:flex;align-items:center;gap:0.75rem;background:rgba(0,0,0,0.3);border:1px solid var(--border);border-radius:var(--radius-sm);padding:0.65rem 0.9rem}
+.inv-cmd code{font-family:'Consolas','Monaco',monospace;font-size:0.78rem;color:var(--primary-light);flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.wr-copy-btn{background:transparent;border:1px solid var(--border);border-radius:4px;color:var(--text-muted);cursor:pointer;font-size:0.64rem;padding:2px 8px;white-space:nowrap;transition:all 0.15s;flex-shrink:0;font-family:inherit}
+.wr-copy-btn:hover{background:var(--surface-hover);color:var(--text)}
+.inv-events-wrap{overflow-x:auto}
+.inv-events-tbl{width:100%;border-collapse:collapse;font-size:0.82rem}
+.inv-events-tbl th{text-align:left;padding:0.6rem 0.75rem;font-size:0.7rem;text-transform:uppercase;letter-spacing:0.5px;color:var(--text-muted);border-bottom:1px solid var(--border);font-weight:600}
+.inv-events-tbl td{padding:0.6rem 0.75rem;border-bottom:1px solid rgba(51,65,85,0.5);vertical-align:top;color:var(--text-secondary)}
+.inv-events-tbl tr:last-child td{border-bottom:none}
+.inv-events-tbl tr.evt-warning>td:first-child{border-left:3px solid var(--danger);padding-left:0.6rem}
+.inv-events-tbl tr.evt-normal>td:first-child{border-left:3px solid transparent;padding-left:0.6rem}
+.inv-evt-type-warning{color:#f87171;font-weight:600;font-size:0.75rem}
+.inv-evt-type-normal{color:var(--text-muted);font-size:0.75rem}
+.inv-evt-reason{font-weight:600;color:var(--text)}
+.inv-evt-count{font-variant-numeric:tabular-nums;text-align:center}
+.inv-evt-msg{color:var(--text-secondary);line-height:1.4;max-width:340px}
+.inv-empty{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius-sm);padding:2rem;text-align:center;color:var(--text-muted);font-size:0.85rem}
+.inv-resources{display:grid;grid-template-columns:repeat(3,1fr);gap:1rem}
+.inv-res-card{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius-sm);padding:1rem 1.25rem}
+.inv-res-title{font-size:0.7rem;text-transform:uppercase;letter-spacing:0.5px;color:var(--text-muted);margin-bottom:0.65rem;font-weight:600}
+.inv-res-list{display:flex;flex-direction:column;gap:0.3rem}
+.inv-res-item{font-size:0.8rem;color:var(--text-secondary);font-family:'Consolas','Monaco',monospace}
+.inv-res-none{font-size:0.8rem;color:var(--text-muted);font-style:italic}
+.inv-notice{background:rgba(245,158,11,0.06);border:1px solid rgba(245,158,11,0.3);border-radius:var(--radius);padding:1.5rem;display:flex;align-items:flex-start;gap:1rem;margin-bottom:2rem}
+.inv-notice-icon{color:var(--warning);flex-shrink:0;margin-top:2px}
+.inv-notice-text{font-size:0.9rem;color:var(--text);line-height:1.5}
+@media(max-width:768px){.inv-resources{grid-template-columns:1fr}.inv-bar{flex-direction:column}}
+</style>
+</head>
+<body>
+<div class="layout">
+{{template "sidebar.html" .}}
+<main class="main">
+  <div class="page-hdr">
+    <div>
+      <h1>Investigation</h1>
+      <p>{{.Namespace}} / {{.PodName}}</p>
+    </div>
+    <div class="page-meta">
+      <div>Last scanned: <strong id="inv-age">just now</strong></div>
+      <a class="back-link" href="{{.BackURL}}">← Back to War Room</a>
+    </div>
+  </div>
+
+  {{if .NotFound}}
+
+  <div class="inv-notice">
+    <div class="inv-notice-icon">
+      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
+    </div>
+    <div class="inv-notice-text">Pod not found — it may have been deleted or recreated</div>
+  </div>
+
+  {{if .Hints}}
+  <div class="inv-section">
+    <div class="inv-section-hdr">
+      <h2>Possible Causes</h2>
+    </div>
+    <div class="inv-hints">
+      {{range .Hints}}
+      <div class="inv-hint">
+        <div class="inv-hint-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg></div>
+        <div class="inv-hint-text">{{.}}</div>
+      </div>
+      {{end}}
+    </div>
+  </div>
+  {{end}}
+
+  {{if .Commands}}
+  <div class="inv-section">
+    <div class="inv-section-hdr">
+      <h2>Investigation Commands</h2>
+    </div>
+    <div class="inv-cmds">
+      {{range .Commands}}
+      <div class="inv-cmd"><code>{{.}}</code><button class="wr-copy-btn" onclick="navigator.clipboard.writeText('{{.}}')">Copy</button></div>
+      {{end}}
+    </div>
+  </div>
+  {{end}}
+
+  {{else}}
+
+  <div class="inv-bar">
+    <div class="inv-chip danger">
+      <div>
+        <div class="inv-badge">CRITICAL</div>
+        {{if .StateReason}}<div class="inv-state-reason">{{.StateReason}}</div>{{end}}
+      </div>
+    </div>
+    <div class="inv-chip">
+      <div>
+        <div class="inv-chip-label">Restarts</div>
+        <div class="inv-chip-value">{{.Restarts}}</div>
+      </div>
+    </div>
+    <div class="inv-chip">
+      <div>
+        <div class="inv-chip-label">Age</div>
+        <div class="inv-chip-value">{{.AgeDays}}d</div>
+      </div>
+    </div>
+    {{if .OwnerKind}}
+    <div class="inv-chip">
+      <div>
+        <div class="inv-chip-label">Owner</div>
+        <div class="inv-chip-value">{{.OwnerKind}}/{{.OwnerName}}</div>
+      </div>
+    </div>
+    {{end}}
+  </div>
+
+  {{if .Hints}}
+  <div class="inv-section">
+    <div class="inv-section-hdr">
+      <h2>Possible Causes</h2>
+    </div>
+    <div class="inv-hints">
+      {{range .Hints}}
+      <div class="inv-hint">
+        <div class="inv-hint-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg></div>
+        <div class="inv-hint-text">{{.}}</div>
+      </div>
+      {{end}}
+    </div>
+  </div>
+  {{end}}
+
+  {{if .Commands}}
+  <div class="inv-section">
+    <div class="inv-section-hdr">
+      <h2>Investigation Commands</h2>
+    </div>
+    <div class="inv-cmds">
+      {{range .Commands}}
+      <div class="inv-cmd"><code>{{.}}</code><button class="wr-copy-btn" onclick="navigator.clipboard.writeText('{{.}}')">Copy</button></div>
+      {{end}}
+    </div>
+  </div>
+  {{end}}
+
+  <div class="inv-section">
+    <div class="inv-section-hdr">
+      <h2>Recent Events</h2>
+    </div>
+    {{if .Events}}
+    <div class="inv-events-wrap">
+      <table class="inv-events-tbl">
+        <thead>
+          <tr>
+            <th>Type</th>
+            <th>Reason</th>
+            <th>Age</th>
+            <th>Count</th>
+            <th>Message</th>
+          </tr>
+        </thead>
+        <tbody>
+          {{range .Events}}
+          <tr class="{{if eq .Type "Warning"}}evt-warning{{else}}evt-normal{{end}}">
+            <td><span class="{{if eq .Type "Warning"}}inv-evt-type-warning{{else}}inv-evt-type-normal{{end}}">{{.Type}}</span></td>
+            <td class="inv-evt-reason">{{.Reason}}</td>
+            <td>{{.Age}}</td>
+            <td class="inv-evt-count">{{.Count}}</td>
+            <td class="inv-evt-msg">{{.Message}}</td>
+          </tr>
+          {{end}}
+        </tbody>
+      </table>
+    </div>
+    {{else}}
+    <div class="inv-empty">No recent events recorded for this pod</div>
+    {{end}}
+  </div>
+
+  <div class="inv-section">
+    <div class="inv-section-hdr">
+      <h2>Related Resources</h2>
+    </div>
+    <div class="inv-resources">
+      <div class="inv-res-card">
+        <div class="inv-res-title">ConfigMaps</div>
+        <div class="inv-res-list">
+          {{if .ConfigMaps}}{{range .ConfigMaps}}<div class="inv-res-item">{{.}}</div>{{end}}{{else}}<div class="inv-res-none">None referenced</div>{{end}}
+        </div>
+      </div>
+      <div class="inv-res-card">
+        <div class="inv-res-title">Secrets</div>
+        <div class="inv-res-list">
+          {{if .Secrets}}{{range .Secrets}}<div class="inv-res-item">{{.}}</div>{{end}}{{else}}<div class="inv-res-none">None referenced</div>{{end}}
+        </div>
+      </div>
+      <div class="inv-res-card">
+        <div class="inv-res-title">PVCs</div>
+        <div class="inv-res-list">
+          {{if .PVCs}}{{range .PVCs}}<div class="inv-res-item">{{.}}</div>{{end}}{{else}}<div class="inv-res-none">None referenced</div>{{end}}
+        </div>
+      </div>
+    </div>
+  </div>
+
+  {{end}}
+
+  <div class="footer">OpsCart FinOps Engine &middot; Investigation &middot; {{.Namespace}} / {{.PodName}}</div>
+</main>
+</div>
+<script>
+(function(){
+  var TS={{.ScannedAtMs}},el=document.getElementById('inv-age');
+  function upd(){
+    var s=Math.floor((Date.now()-TS)/1000);
+    var t=s<5?'just now':s<60?s+'s ago':Math.floor(s/60)+'m ago';
+    if(el)el.textContent=t;
+  }
+  setInterval(upd,1000);upd();
+})();
+</script>
+</body>
+</html>
