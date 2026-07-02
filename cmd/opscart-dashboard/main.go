@@ -282,6 +282,7 @@ func runDashboard(_ *cobra.Command, _ []string) error {
 	mux.HandleFunc("/namespaces", srv.handleNamespacesPage)
 	mux.HandleFunc("/optimizations", srv.handleOptimizationsPage)
 	mux.HandleFunc("/healthz", handleHealth)
+	mux.HandleFunc("/investigate", srv.handleInvestigationPage)
 	mux.HandleFunc("/incidents", srv.handleIncidentsPage)
 	mux.HandleFunc("/security", srv.handleSecurityPage)
 	mux.HandleFunc("/waste", srv.handleWastePage)
@@ -1572,6 +1573,16 @@ func renderWarRoomCard(issue warRoomIssue) string {
 	sb.WriteString(fmt.Sprintf(`<code>%s</code>`, issue.KubectlCmd))
 	sb.WriteString(`<button class="copy-btn" onclick="var b=this,c=this.previousElementSibling.textContent;navigator.clipboard.writeText(c).then(function(){b.textContent='✓';setTimeout(function(){b.textContent='Copy'},1500)})">Copy</button>`)
 	sb.WriteString(`</div>`)
+	// Investigate button — links to investigation page
+	if issue.Resource != "" && issue.Namespace != "" {
+		investigateURL := fmt.Sprintf("/investigate?pod=%s&ns=%s&type=%s",
+			url.QueryEscape(issue.Resource),
+			url.QueryEscape(issue.Namespace),
+			url.QueryEscape(issue.Type))
+		sb.WriteString(fmt.Sprintf(
+			`<a class="investigate-btn" href="%s">Investigate →</a>`,
+			investigateURL))
+	}
 	sb.WriteString(`</div>`)
 	return sb.String()
 }
