@@ -1,0 +1,53 @@
+# Default values for opscart-watcher.
+
+image:
+  repository: ghcr.io/opscart/opscart-dashboard
+  tag: "v1.2.0"
+  pullPolicy: Always
+
+nameOverride: ""
+fullnameOverride: ""
+
+namespace:
+  create: true
+  name: opscart-system
+
+serviceAccount:
+  create: true
+  name: opscart-dashboard
+
+service:
+  type: ClusterIP
+  port: 80
+  targetPort: 8080
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 64Mi
+  limits:
+    cpu: 500m
+    memory: 256Mi
+
+args:
+  - "--port=8080"
+  - "--breakdown=deployment"
+
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 65534
+  runAsGroup: 65534
+  seccompProfile:
+    type: RuntimeDefault
+
+probes:
+  readiness:
+    path: /healthz
+    initialDelaySeconds: 10
+    periodSeconds: 10
+    failureThreshold: 3
+  liveness:
+    path: /healthz
+    initialDelaySeconds: 20
+    periodSeconds: 30
+    failureThreshold: 3
