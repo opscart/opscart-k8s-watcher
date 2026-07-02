@@ -1563,8 +1563,8 @@ func renderWarRoomCard(issue warRoomIssue) string {
 	}
 
 	var sb strings.Builder
-	sb.WriteString(fmt.Sprintf(`<div class="wr-card %s">`, sc))
-	sb.WriteString(fmt.Sprintf(`<div class="wr-top"><span class="badge %s">%s</span><span class="type-lbl">%s %s</span>%s</div>`,
+	sb.WriteString(fmt.Sprintf(`<div class="wr-card %s %s">`, sc, "wr-type-"+strings.ReplaceAll(issue.Type, "_", "-")))
+	sb.WriteString(fmt.Sprintf(`<div class="wr-top"><span class="badge %s">%s</span><span class="type-lbl"><span class="wr-type-icon %s"></span>%s</span>%s</div>`,
 		sc, bl, icon, label, age))
 	sb.WriteString(fmt.Sprintf(`<div class="wr-name">%s</div>`, name))
 	sb.WriteString(fmt.Sprintf(`<div class="wr-ns">ns: %s</div>`, issue.Namespace))
@@ -2736,24 +2736,24 @@ func fmtCostRange(cr models.CostRange) string {
 	return fmt.Sprintf("$%.0f", cr.Best)
 }
 
-func warRoomTypeLabel(t string) (icon, label string) {
+func warRoomTypeLabel(t string) (iconClass, label string) {
 	switch t {
 	case "crash_loop":
-		return "💀", "CrashLoop"
+		return "wri-crash", "CrashLoop"
 	case "oomkilled":
-		return "🧠", "OOMKilled"
+		return "wri-oom", "OOMKilled"
 	case "image_pull_backoff":
-		return "📦", "ImagePullBackOff"
+		return "wri-image", "ImagePullBackOff"
 	case "privileged_container":
-		return "⚠️", "Privileged"
+		return "wri-priv", "Privileged"
 	case "unprotected_namespace":
-		return "🔓", "No NetPolicy"
+		return "wri-netpol", "No NetPolicy"
 	case "orphaned_pvc":
-		return "💾", "Orphaned PVC"
+		return "wri-pvc", "Orphaned PVC"
 	case "zero_replica":
-		return "⏸️", "Zero Replicas"
+		return "wri-zero", "Zero Replicas"
 	default:
-		return "⚠️", t
+		return "wri-default", t
 	}
 }
 
