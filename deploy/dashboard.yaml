@@ -8,7 +8,7 @@ metadata:
 apiVersion: v1
 kind: ServiceAccount
 metadata:
-  name: opscart-dashboard
+  name: opscart-watcher
   namespace: opscart-system
 
 ---
@@ -22,7 +22,7 @@ metadata:
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
-  name: opscart-dashboard
+  name: opscart-watcher
 rules:
   - apiGroups: [""]
     resources:
@@ -52,35 +52,35 @@ rules:
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
 metadata:
-  name: opscart-dashboard
+  name: opscart-watcher
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: ClusterRole
-  name: opscart-dashboard
+  name: opscart-watcher
 subjects:
   - kind: ServiceAccount
-    name: opscart-dashboard
+    name: opscart-watcher
     namespace: opscart-system
 
 ---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: opscart-dashboard
+  name: opscart-watcher
   namespace: opscart-system
   labels:
-    app: opscart-dashboard
+    app: opscart-watcher
 spec:
   replicas: 1
   selector:
     matchLabels:
-      app: opscart-dashboard
+      app: opscart-watcher
   template:
     metadata:
       labels:
-        app: opscart-dashboard
+        app: opscart-watcher
     spec:
-      serviceAccountName: opscart-dashboard
+      serviceAccountName: opscart-watcher
 
       # In-cluster: client-go auto-detects the service account token and
       # cluster CA at /var/run/secrets/kubernetes.io/serviceaccount/
@@ -138,14 +138,14 @@ spec:
 apiVersion: v1
 kind: Service
 metadata:
-  name: opscart-dashboard
+  name: opscart-watcher
   namespace: opscart-system
   labels:
-    app: opscart-dashboard
+    app: opscart-watcher
 spec:
   type: ClusterIP
   selector:
-    app: opscart-dashboard
+    app: opscart-watcher
   ports:
     - name: http
       port: 80
