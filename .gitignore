@@ -48,3 +48,6 @@ reports/
 !cmd/opscart-dashboard/templates/*.html
 main
 demo-broken-war-room.yaml
+opscart.db
+opscart.db-shm
+opscart.db-wal

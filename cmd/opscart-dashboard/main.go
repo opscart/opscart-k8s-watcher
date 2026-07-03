@@ -1,7 +1,9 @@
 package main
 
 import (
+	"crypto/rand"
 	"embed"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"html/template"
@@ -17,6 +19,7 @@ import (
 
 	"github.com/opscart/opscart-k8s-watcher/pkg/analyzer"
 	"github.com/opscart/opscart-k8s-watcher/pkg/models"
+	"github.com/opscart/opscart-k8s-watcher/pkg/store"
 	"github.com/spf13/cobra"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/tools/clientcmd"
@@ -137,6 +140,7 @@ type dashboardState struct {
 	scan     *clusterScan
 	htmlPage string
 	scanning atomic.Bool
+	db       store.Store
 }
 
 func (s *dashboardState) refresh(clusterList []string) error {
@@ -156,8 +160,65 @@ func (s *dashboardState) refresh(clusterList []string) error {
 	s.htmlPage = page
 	s.mu.Unlock()
 
-	log.Printf("[%s] scan complete — $%.0f/mo  waste=%d  cis=%d",
-		displayName(s.ctx), scan.report.TotalMonthlyCost, scan.wasteTotal(), scan.securityScore())
+	// Persist to operational memory (best-effort, never blocks scan)
+	if s.db != nil {
+		scanID := newScanID()
+		start := time.Now()
+
+		incScore, _, _ := calcIncidentScore(scan)
+		issues := collectWarRoomIssues(scan, 0)
+
+		critical, warnings := 0, 0
+		var incidents []store.IncidentData
+		for _, is := range issues {
+			if is.Severity == "critical" {
+				critical++
+			} else {
+				warnings++
+			}
+			owner := store.OwnerNameFromPod(is.Resource)
+			details, _ := json.Marshal(map[string]any{
+				"age_days": is.AgeDays,
+				"message":  is.Message,
+			})
+			incidents = append(incidents, store.IncidentData{
+				Fingerprint: store.Fingerprint(is.Namespace, "Workload", owner, is.Type),
+				Namespace:   is.Namespace,
+				Resource:    is.Resource,
+				IssueType:   is.Type,
+				Severity:    is.Severity,
+				DetailsJSON: string(details),
+			})
+		}
+
+		snap := store.SnapshotData{
+			ScannedAt:     time.Now(),
+			IncidentScore: incScore,
+			CriticalCount: critical,
+			WarningCount:  warnings,
+			SecurityScore: scan.securityScore(),
+			WasteCount:    scan.wasteTotal(),
+			MonthlyCost:   scan.report.TotalMonthlyCost,
+			PodCount:      scan.monthlyPodCount(),
+		}
+
+		if err := s.db.WriteSnapshot(s.ctx, scanID, snap); err != nil {
+			log.Printf("[%s] store snapshot: %v", displayName(s.ctx), err)
+		}
+		if err := s.db.UpsertIncidents(s.ctx, scanID, incidents); err != nil {
+			log.Printf("[%s] store incidents: %v", displayName(s.ctx), err)
+		}
+		if resolved, err := s.db.ResolveMissing(s.ctx, scanID); err == nil && resolved > 0 {
+			log.Printf("[%s] %d incident(s) resolved", displayName(s.ctx), resolved)
+		}
+		_ = s.db.WriteScanHistory(s.ctx, scanID, store.ScanMeta{
+			DurationMS: time.Since(start).Milliseconds(),
+			Success:    true,
+			Version:    "v1.3.0",
+		})
+	}
+
+	log.Printf("[%s] scan complete: %d namespaces, $%s/month, %d critical issues", displayName(s.ctx), len(scan.report.NamespaceCosts), formatMoney(scan.report.TotalMonthlyCost), countCriticalIssues(scan))
 	return nil
 }
 
@@ -167,10 +228,11 @@ type server struct {
 	clusterList []string
 	mu          sync.RWMutex
 	states      map[string]*dashboardState
+	db          store.Store
 }
 
-func newServer(clusterList []string) *server {
-	return &server{clusterList: clusterList, states: make(map[string]*dashboardState)}
+func newServer(clusterList []string, db store.Store) *server {
+	return &server{clusterList: clusterList, states: make(map[string]*dashboardState), db: db}
 }
 
 func (srv *server) getState(ctx string) *dashboardState {
@@ -185,7 +247,7 @@ func (srv *server) getState(ctx string) *dashboardState {
 	if s = srv.states[ctx]; s != nil {
 		return s
 	}
-	s = &dashboardState{ctx: ctx}
+	s = &dashboardState{ctx: ctx, db: srv.db}
 	srv.states[ctx] = s
 	return s
 }
@@ -242,7 +304,7 @@ func (srv *server) handleOverviewPage(w http.ResponseWriter, r *http.Request) {
 		state.mu.RUnlock()
 	}
 
-	data := buildOverviewData(scan, ctx, srv.clusterList)
+	data := buildOverviewData(scan, ctx, srv.clusterList, srv.db)
 
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-cache, no-store, must-revalidate")
@@ -260,7 +322,20 @@ func (srv *server) handleOverviewPage(w http.ResponseWriter, r *http.Request) {
 
 func runDashboard(_ *cobra.Command, _ []string) error {
 	cl := parseClusterList()
-	srv := newServer(cl)
+	dbPath := os.Getenv("OPSCART_DB_PATH")
+	if dbPath == "" {
+		dbPath = "./opscart.db"
+	}
+	var db store.Store
+	if sqlDB, err := store.OpenSQLite(dbPath); err != nil {
+		log.Printf("store: persistence disabled (%v)", err)
+		db = &store.NullStore{}
+	} else {
+		db = sqlDB
+		defer sqlDB.Close()
+		log.Printf("store: operational memory at %s", dbPath)
+	}
+	srv := newServer(cl, db)
 
 	log.Printf("Scanning cluster %q ...", displayName(cl[0]))
 	if err := srv.getState(cl[0]).refresh(cl); err != nil {
@@ -2066,6 +2141,7 @@ type overviewPageData struct {
 
 	// Top 5 Things to Fix
 	TopIssues []topIssue
+	Trend     *store.OverviewTrend
 
 	// War Room featured issue
 	FeaturedIssues []warRoomIssue
@@ -2112,7 +2188,8 @@ func convertToSidebarClusters(clusterList []string, activeCtx, basePath string) 
 	return out
 }
 
-func buildOverviewData(scan *clusterScan, activeCtx string, clusterList []string) overviewPageData {
+func buildOverviewData(scan *clusterScan, activeCtx string, clusterList []string, db store.Store) overviewPageData {
+
 	clusterName := displayName(activeCtx)
 	var monthlyCost, savings float64
 	var podCount, nsCount, nodePoolCount int
@@ -2181,6 +2258,13 @@ func buildOverviewData(scan *clusterScan, activeCtx string, clusterList []string
 	incidentScore, incidentScoreColor, incidentScoreLabel := calcIncidentScore(scan)
 	_ = secFailed // reserved for future use
 
+	var trend *store.OverviewTrend
+	if db != nil {
+		if t, err := db.GetOverviewTrend(activeCtx); err == nil {
+			trend = t
+		}
+	}
+
 	q := ""
 	if activeCtx != "" {
 		q = "?cluster=" + url.QueryEscape(activeCtx)
@@ -2225,7 +2309,7 @@ func buildOverviewData(scan *clusterScan, activeCtx string, clusterList []string
 		CPUUtilization:     cpuUtil,
 		MemUtilization:     memUtil,
 		NamespaceCount:     nsCount,
-		Version:            "v1.1.0",
+		Version:            "v1.3.0",
 		DashHref:           "/" + q,
 		CostsHref:          "/costs" + q,
 		InfraHref:          "/infrastructure" + q,
@@ -2240,6 +2324,7 @@ func buildOverviewData(scan *clusterScan, activeCtx string, clusterList []string
 		IncidentScore:      incidentScore,
 		IncidentScoreColor: incidentScoreColor,
 		IncidentScoreLabel: incidentScoreLabel,
+		Trend:              trend,
 	}
 }
 
@@ -2491,7 +2576,18 @@ type costWRIssue struct {
 var getOverviewTmpl = sync.OnceValue(func() *template.Template {
 	return template.Must(
 		template.New("overview.html").
-			Funcs(template.FuncMap{"money": formatMoney}).
+			Funcs(template.FuncMap{
+				"money": formatMoney,
+				"sparkHeight": func(score int) int {
+					if score <= 0 {
+						return 4
+					}
+					if score >= 100 {
+						return 32
+					}
+					return 3 + (score * 28 / 100)
+				},
+			}).
 			ParseFS(templateFS, "templates/base.html", "templates/sidebar.html", "templates/overview.html"),
 	)
 })
@@ -2913,4 +3009,9 @@ func kubeClient(ctx string) (*kubernetes.Clientset, error) {
 		return nil, fmt.Errorf("loading kubeconfig for %q: %w", displayName(ctx), err)
 	}
 	return kubernetes.NewForConfig(cfg)
+}
+func newScanID() string {
+	b := make([]byte, 8)
+	_, _ = rand.Read(b)
+	return hex.EncodeToString(b)
 }
