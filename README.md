@@ -54,7 +54,7 @@ open http://localhost:8080
 
 ```bash
 kubectl apply -f https://raw.githubusercontent.com/opscart/opscart-k8s-watcher/main/deploy/dashboard.yaml
-kubectl port-forward -n opscart-system svc/opscart-dashboard 8080:80
+kubectl port-forward -n opscart-system svc/opscart-watcher 8080:80
 open http://localhost:8080
 ```
 
@@ -182,5 +182,7 @@ Awareness tool — not for formal compliance auditing. Use [kube-bench](https://
 ---
 
 **Author:** Shamsher Khan — [opscart.com](https://opscart.com) · [IEEE Senior Member](https://ieee.org) · [DZone Core Member](https://dzone.com/users/shamsher_khan)
+
+[![Release](https://img.shields.io/github/v/release/opscart/opscart-k8s-watcher)](https://github.com/opscart/opscart-k8s-watcher/releases)
 
 **License:** MIT
