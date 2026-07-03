@@ -3,6 +3,7 @@
 **Kubectl shows resources. Lens shows state. OpsCart shows what deserves your attention.**
 
 [![License](https://img.shields.io/badge/license-MIT-green)](LICENSE)
+[![Release](https://img.shields.io/github/v/release/opscart/opscart-k8s-watcher)](https://github.com/opscart/opscart-k8s-watcher/releases)
 [![Docker](https://img.shields.io/badge/docker-ghcr.io%2Fopscart-blue)](https://ghcr.io/opscart/opscart-dashboard)
 [![Trivy](https://img.shields.io/badge/trivy-0%20CVEs-success)](https://trivy.dev)
 
