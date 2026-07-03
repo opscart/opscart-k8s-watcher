@@ -88,11 +88,14 @@ spec:
 
       containers:
         - name: dashboard
-          image: ghcr.io/opscart/opscart-dashboard:v1.2.0
+          image: ghcr.io/opscart/opscart-dashboard:v1.3.0
           imagePullPolicy: Always
           args:
             - "--port=8080"
             - "--breakdown=deployment"
+          env:
+            - name: OPSCART_DB_PATH
+              value: /data/opscart.db
           ports:
             - name: http
               containerPort: 8080
@@ -104,6 +107,9 @@ spec:
             limits:
               cpu: 500m
               memory: 256Mi
+          volumeMounts:
+            - name: opscart-data
+              mountPath: /data
           readinessProbe:
             httpGet:
               path: /healthz
@@ -118,7 +124,9 @@ spec:
             initialDelaySeconds: 20
             periodSeconds: 30
             failureThreshold: 3
-
+      volumes:
+        - name: opscart-data
+          emptyDir: {}
       securityContext:
         runAsNonRoot: true
         runAsUser: 65534   # nobody — matches USER in Dockerfile

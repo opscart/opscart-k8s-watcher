@@ -37,8 +37,21 @@
 .kpi-sub.yellow{color:#eab308}
 .kpi-sub.green{color:var(--success)}
 .kpi-card-score{border-width:2px}
-.kpi-sub{font-size:0.7rem;color:var(--text-muted)}
+.kpi-sub{font-size:0.7rem;color:var(--text-muted);min-height:1rem}
 .kpi-sub.red{color:var(--danger)}
+.kpi-trend{font-size:0.72rem;font-weight:600;margin-top:0.35rem;display:flex;align-items:center;gap:0.3rem}
+.kpi-trend.up-good{color:#4ade80}
+.kpi-trend.up-bad{color:#f87171}
+.kpi-trend.down-good{color:#4ade80}
+.kpi-trend.down-bad{color:#f87171}
+.kpi-trend.flat{color:#94a3b8}
+.trend-arrow{font-size:0.8rem;font-weight:700}
+.sparkline{display:flex;align-items:flex-end;gap:2px;height:36px;margin-top:0.5rem}
+.spark-bar{width:7px;border-radius:2px 2px 0 0;background:var(--primary-light);opacity:0.6;min-height:4px;transition:opacity .2s}
+.spark-bar:last-child{opacity:1}
+.spark-bar.spark-low{background:var(--danger)}
+.spark-bar.spark-mid{background:var(--warning)}
+.spark-bar.spark-high{background:var(--success)}
 
 .section-card{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:1.5rem;margin-bottom:1.5rem;animation:fadeIn 0.3s ease both}
 .section-hdr{margin-bottom:1.25rem}
@@ -133,6 +146,23 @@
     <div class="kpi-label">Incident Score</div>
     <div class="kpi-value {{.IncidentScoreColor}}">{{.IncidentScore}}<span style="font-size:0.9rem;font-weight:600;color:var(--text-muted)">/100</span></div>
     <div class="kpi-sub {{.IncidentScoreColor}}">{{.IncidentScoreLabel}}</div>
+    {{if and .Trend .Trend.HasHistory}}
+    <div class="kpi-trend {{if eq .Trend.IncidentScore.Direction "up"}}up-good{{else if eq .Trend.IncidentScore.Direction "down"}}down-bad{{else}}flat{{end}}">
+      <span class="trend-arrow">{{if eq .Trend.IncidentScore.Direction "up"}}↑{{else if eq .Trend.IncidentScore.Direction "down"}}↓{{else}}→{{end}}</span>
+      <span>{{if gt .Trend.IncidentScore.Delta 0}}+{{end}}{{.Trend.IncidentScore.Delta}} from last scan</span>
+    </div>
+    {{if .Trend.ScoreHistory}}
+    <div class="sparkline">
+      {{range .Trend.ScoreHistory}}
+      <div class="spark-bar {{if lt . 40}}spark-low{{else if lt . 70}}spark-mid{{else}}spark-high{{end}}"
+           style="height:{{sparkHeight .}}px"
+           title="Score: {{.}}"></div>
+      {{end}}
+    </div>
+    {{end}}
+    {{else if .Trend}}
+    <div class="kpi-trend flat"><span>Trend data building...</span></div>
+    {{end}}
   </div>
 
   <div class="kpi-card{{if .CriticalCount}} critical{{end}}">
@@ -140,6 +170,12 @@
     <div class="kpi-label">Critical Issues</div>
     <div class="kpi-value{{if .CriticalCount}} red{{else}} green{{end}}">{{.CriticalCount}}</div>
     <div class="kpi-sub{{if .CriticalCount}} red{{end}}">{{if .CriticalCount}}Needs immediate attention{{else}}All clear{{end}}</div>
+    {{if and .Trend .Trend.HasHistory}}
+    <div class="kpi-trend {{if eq .Trend.CriticalCount.Direction "up"}}up-bad{{else if eq .Trend.CriticalCount.Direction "down"}}down-good{{else}}flat{{end}}">
+      <span class="trend-arrow">{{if eq .Trend.CriticalCount.Direction "up"}}↑{{else if eq .Trend.CriticalCount.Direction "down"}}↓{{else}}→{{end}}</span>
+      <span>{{if gt .Trend.CriticalCount.Delta 0}}+{{end}}{{.Trend.CriticalCount.Delta}} from last scan</span>
+    </div>
+    {{end}}
   </div>
 
   <div class="kpi-card">
@@ -147,6 +183,12 @@
     <div class="kpi-label">Security Score</div>
     <div class="kpi-value">{{.SecurityScore}}<span style="font-size:0.7rem;color:var(--text-muted);font-weight:600">/100</span></div>
     <div class="kpi-sub">{{if lt .SecurityScore 40}}High Risk{{else if lt .SecurityScore 70}}Medium Risk{{else}}Good{{end}}</div>
+    {{if and .Trend .Trend.HasHistory}}
+    <div class="kpi-trend {{if eq .Trend.SecurityScore.Direction "up"}}up-good{{else if eq .Trend.SecurityScore.Direction "down"}}down-bad{{else}}flat{{end}}">
+      <span class="trend-arrow">{{if eq .Trend.SecurityScore.Direction "up"}}↑{{else if eq .Trend.SecurityScore.Direction "down"}}↓{{else}}→{{end}}</span>
+      <span>{{if gt .Trend.SecurityScore.Delta 0}}+{{end}}{{.Trend.SecurityScore.Delta}} from last scan</span>
+    </div>
+    {{end}}
   </div>
 
   <div class="kpi-card">
@@ -154,6 +196,12 @@
     <div class="kpi-label">Waste Resources</div>
     <div class="kpi-value orange">{{.WasteCount}}</div>
     <div class="kpi-sub">Resources found</div>
+    {{if and .Trend .Trend.HasHistory}}
+    <div class="kpi-trend {{if eq .Trend.WasteCount.Direction "up"}}up-bad{{else if eq .Trend.WasteCount.Direction "down"}}down-good{{else}}flat{{end}}">
+      <span class="trend-arrow">{{if eq .Trend.WasteCount.Direction "up"}}↑{{else if eq .Trend.WasteCount.Direction "down"}}↓{{else}}→{{end}}</span>
+      <span>{{if gt .Trend.WasteCount.Delta 0}}+{{end}}{{.Trend.WasteCount.Delta}} from last scan</span>
+    </div>
+    {{end}}
   </div>
 
   <div class="kpi-card">
