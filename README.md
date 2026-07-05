@@ -22,7 +22,9 @@ OpsCart    →  shows what deserves attention first
 
 ---
 
-<!-- Screenshot placeholder — replace with docs/dashboard-preview.png -->
+[![OpsCart Watcher Dashboard](docs/dashboard-preview.png)](https://youtube.com/watch?v=YOUR_VIDEO_ID)
+
+*[Watch the 5-minute demo →](https://www.youtube.com/watch?v=BAu-zp48Hh8)*
 
 ---
 
