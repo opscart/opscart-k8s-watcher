@@ -22,8 +22,7 @@ OpsCart    →  shows what deserves attention first
 
 ---
 
-[![OpsCart Watcher Dashboard](docs/dashboard-preview.png)](https://youtube.com/watch?v=YOUR_VIDEO_ID)
-
+[![OpsCart Watcher Demo](https://img.youtube.com/vi/BAu-zp48Hh8/maxresdefault.jpg)](https://youtube.com/watch?v=BAu-zp48Hh8)
 *[Watch the 5-minute demo →](https://www.youtube.com/watch?v=BAu-zp48Hh8)*
 
 ---
