@@ -151,6 +151,14 @@
         <div class="inv-chip-value">{{.AgeDays}}d</div>
       </div>
     </div>
+    {{if .FirstDetected}}
+    <div class="inv-chip">
+      <div>
+        <div class="inv-chip-label">First detected</div>
+        <div class="inv-chip-value">{{.FirstDetected}}</div>
+      </div>
+    </div>
+    {{end}}
     {{if .OwnerKind}}
     <div class="inv-chip">
       <div>
@@ -172,7 +180,13 @@
     <div class="inv-section-hdr">
       <h2>Evidence</h2>
     </div>
-    <div class="inv-evidence">
+<div class="inv-evidence">
+      {{if .FirstDetected}}
+      <div class="inv-evidence-chip">
+        <div class="inv-evidence-label">First detected</div>
+        <div class="inv-evidence-value">{{.FirstDetected}}</div>
+      </div>
+      {{end}}
       <div class="inv-evidence-chip">
         <div class="inv-evidence-label">Restarts</div>
         <div class="inv-evidence-value">{{.Restarts}}</div>
