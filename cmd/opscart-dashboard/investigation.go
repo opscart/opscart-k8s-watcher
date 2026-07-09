@@ -12,6 +12,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/opscart/opscart-k8s-watcher/pkg/store"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
@@ -50,11 +51,12 @@ type investigationPageData struct {
 	OwnerName string
 
 	// Status
-	Phase       string
-	Restarts    int32
-	AgeDays     int
-	StateReason string // CrashLoopBackOff, ImagePullBackOff...
-	NotFound    bool   // pod deleted since scan
+	Phase         string
+	Restarts      int32
+	AgeDays       int
+	StateReason   string // CrashLoopBackOff, ImagePullBackOff...
+	NotFound      bool   // pod deleted since scan
+	FirstDetected string
 
 	// Sections
 	Hints              []investigationHint  // possible causes
@@ -368,6 +370,17 @@ func (srv *server) handleInvestigationPage(w http.ResponseWriter, r *http.Reques
 	data.ConfigMaps, data.Secrets, data.PVCs = referencedResources(pod)
 	data.Hints = investigationHints(issueType, data.StateReason, data.Restarts, pod)
 
+	// ── NEW: First detected (from incidents table) ────────────────────────────
+	ownerNameForFP := data.OwnerName
+	if ownerNameForFP == "" {
+		ownerNameForFP = store.OwnerNameFromPod(podName)
+	}
+	fp := store.Fingerprint(namespace, "Workload", ownerNameForFP, issueType)
+	if rec, err := srv.db.GetIncidentHistory(ctx, fp); err == nil && rec != nil {
+		data.FirstDetected = firstDetectedLabel(rec.FirstSeen)
+	}
+	// ── END NEW
+
 	// Investigation commands
 	data.OperationalSummary = buildOperationalSummary(&data)
 	if data.OwnerKind == "Deployment" {
@@ -456,4 +469,21 @@ func max(a, b int) int {
 		return a
 	}
 	return b
+}
+
+// firstDetectedLabel converts a first_seen timestamp to a human label.
+// Returns "today", "1 day ago", "N days ago", or "" for zero time.
+func firstDetectedLabel(t time.Time) string {
+	if t.IsZero() {
+		return ""
+	}
+	days := int(time.Since(t).Hours() / 24)
+	switch days {
+	case 0:
+		return "today"
+	case 1:
+		return "1 day ago"
+	default:
+		return fmt.Sprintf("%d days ago", days)
+	}
 }
