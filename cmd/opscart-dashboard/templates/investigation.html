@@ -205,6 +205,66 @@
       </div>
     </div>
   </div>
+{{if or .BlastSiblings .BlastServices .BlastSharedConf}}
+<div class="inv-section">
+  <div class="inv-section-hdr">
+    <h2>Blast Radius</h2>
+    {{if .BlastTotal}}
+    <span style="font-size:0.8rem;color:var(--text-muted);margin-left:auto">
+      {{.BlastHealthy}}/{{.BlastTotal}} replicas healthy
+    </span>
+    {{end}}
+  </div>
+
+  {{if .BlastSiblings}}
+  <div style="margin-bottom:1.25rem">
+    <div class="inv-evidence-label" style="margin-bottom:0.6rem">Sibling Pods</div>
+    <div style="display:flex;flex-wrap:wrap;gap:0.5rem">
+      {{range .BlastSiblings}}
+      <span style="font-size:0.75rem;font-family:monospace;padding:3px 10px;border-radius:20px;
+        background:{{if .Healthy}}rgba(34,197,94,0.1){{else}}rgba(239,68,68,0.1){{end}};
+        color:{{if .Healthy}}#4ade80{{else}}#f87171{{end}};
+        border:1px solid {{if .Healthy}}rgba(34,197,94,0.25){{else}}rgba(239,68,68,0.25){{end}}">
+        {{.Name}} <span style="opacity:0.6">({{.Phase}})</span>
+      </span>
+      {{end}}
+    </div>
+  </div>
+  {{end}}
+
+  {{if .BlastServices}}
+  <div style="margin-bottom:1.25rem">
+    <div class="inv-evidence-label" style="margin-bottom:0.6rem">Services routing to this workload</div>
+    <div style="display:flex;flex-wrap:wrap;gap:0.5rem">
+      {{range .BlastServices}}
+      <div class="inv-evidence-chip">
+        <div class="inv-evidence-label">{{.Type}}</div>
+        <div class="inv-evidence-value" style="font-size:0.85rem">{{.Name}}</div>
+        {{if .Ports}}<div style="font-size:0.72rem;color:var(--text-muted);margin-top:0.2rem">{{.Ports}}</div>{{end}}
+      </div>
+      {{end}}
+    </div>
+  </div>
+  {{end}}
+
+  {{if .BlastSharedConf}}
+  <div>
+    <div class="inv-evidence-label" style="margin-bottom:0.6rem">Deployments sharing same config</div>
+    <div style="display:flex;flex-direction:column;gap:0.4rem">
+      {{range .BlastSharedConf}}
+      <div class="inv-hint" style="padding:0.65rem 1rem">
+        <span style="font-size:0.82rem;font-weight:600;color:var(--text)">{{.DeploymentName}}</span>
+        <span style="font-size:0.75rem;color:var(--text-muted);margin-left:0.75rem">
+          shares: {{range $i,$v := .SharedItems}}{{if $i}}, {{end}}{{$v}}{{end}}
+        </span>
+      </div>
+      {{end}}
+    </div>
+  </div>
+  {{end}}
+
+</div>
+{{end}}
 
   {{if .Hints}}
   <div class="inv-section">
