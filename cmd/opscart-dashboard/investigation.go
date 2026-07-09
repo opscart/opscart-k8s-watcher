@@ -57,7 +57,12 @@ type investigationPageData struct {
 	StateReason   string // CrashLoopBackOff, ImagePullBackOff...
 	NotFound      bool   // pod deleted since scan
 	FirstDetected string
-
+	// Blast radius
+	BlastSiblings   []blastRadiusPod     // sibling pods under same owner
+	BlastServices   []blastRadiusService // services routing to this deployment
+	BlastSharedConf []blastSharedDep     // other deployments sharing same CMs/Secrets
+	BlastHealthy    int                  // count of healthy siblings
+	BlastTotal      int                  // total replicas
 	// Sections
 	Hints              []investigationHint  // possible causes
 	Commands           []string             // investigation kubectl commands
@@ -76,6 +81,24 @@ type investigationHint struct {
 	Title      string
 	Reason     string
 	Command    string // optional — if this hint has a specific command
+}
+
+type blastRadiusPod struct {
+	Name    string
+	Phase   string
+	Healthy bool
+}
+
+type blastRadiusService struct {
+	Name      string
+	Namespace string
+	Type      string // ClusterIP / LoadBalancer / NodePort
+	Ports     string // "80/TCP, 443/TCP"
+}
+
+type blastSharedDep struct {
+	DeploymentName string
+	SharedItems    []string // names of the shared CMs/Secrets
 }
 
 func investigationHints(issueType string, stateReason string, restarts int32, pod *corev1.Pod) []investigationHint {
@@ -292,6 +315,185 @@ func referencedResources(pod *corev1.Pod) (cms, secrets, pvcs []string) {
 	return clean(cms), clean(secrets), clean(pvcs)
 }
 
+// blastRadiusSiblings returns all pods owned by the same workload.
+func blastRadiusSiblings(clientset *kubernetes.Clientset, namespace, ownerKind, ownerName string) (pods []blastRadiusPod, healthy, total int) {
+	if ownerName == "" {
+		return
+	}
+	list, err := clientset.CoreV1().Pods(namespace).List(context.TODO(), metav1.ListOptions{})
+	if err != nil {
+		return
+	}
+	for _, p := range list.Items {
+		kind, name := resolveOwner(clientset, &p)
+		if kind != ownerKind || name != ownerName {
+			continue
+		}
+		// Derive kubectl-style status from container state
+		status := string(p.Status.Phase)
+		for _, cs := range p.Status.ContainerStatuses {
+			if cs.State.Waiting != nil && cs.State.Waiting.Reason != "" {
+				status = cs.State.Waiting.Reason
+				break
+			}
+			if cs.State.Terminated != nil && cs.State.Terminated.Reason != "" {
+				status = cs.State.Terminated.Reason
+				break
+			}
+		}
+		isHealthy := p.Status.Phase == corev1.PodRunning && func() bool {
+			for _, cs := range p.Status.ContainerStatuses {
+				if cs.State.Waiting != nil || !cs.Ready {
+					return false
+				}
+			}
+			return true
+		}()
+		pods = append(pods, blastRadiusPod{
+			Name:    p.Name,
+			Phase:   status,
+			Healthy: isHealthy,
+		})
+		total++
+		if isHealthy {
+			healthy++
+		}
+	}
+	return
+}
+
+// blastRadiusServices returns services whose selector matches the pod's labels.
+func blastRadiusServices(clientset *kubernetes.Clientset, namespace string, podLabels map[string]string) []blastRadiusService {
+	list, err := clientset.CoreV1().Services(namespace).List(context.TODO(), metav1.ListOptions{})
+	if err != nil {
+		return nil
+	}
+	var results []blastRadiusService
+	for _, svc := range list.Items {
+		if len(svc.Spec.Selector) == 0 {
+			continue
+		}
+		if labelsMatch(svc.Spec.Selector, podLabels) {
+			ports := formatPorts(svc.Spec.Ports)
+			results = append(results, blastRadiusService{
+				Name:      svc.Name,
+				Namespace: svc.Namespace,
+				Type:      string(svc.Spec.Type),
+				Ports:     ports,
+			})
+		}
+	}
+	return results
+}
+
+// blastRadiusSharedConfig finds other Deployments in the namespace sharing CMs or Secrets with this pod.
+func blastRadiusSharedConfig(clientset *kubernetes.Clientset, namespace, selfName string, cms, secrets []string) []blastSharedDep {
+	if len(cms) == 0 && len(secrets) == 0 {
+		return nil
+	}
+	deps, err := clientset.AppsV1().Deployments(namespace).List(context.TODO(), metav1.ListOptions{})
+	if err != nil {
+		return nil
+	}
+	var results []blastSharedDep
+	for _, dep := range deps.Items {
+		if dep.Name == selfName {
+			continue
+		}
+		depCMs, depSecrets, _ := referencedResourcesFromSpec(&dep.Spec.Template.Spec)
+		var shared []string
+		for _, cm := range cms {
+			if contains(depCMs, cm) {
+				shared = append(shared, "cm:"+cm)
+			}
+		}
+		for _, sec := range secrets {
+			if contains(depSecrets, sec) {
+				shared = append(shared, "secret:"+sec)
+			}
+		}
+		if len(shared) > 0 {
+			results = append(results, blastSharedDep{
+				DeploymentName: dep.Name,
+				SharedItems:    shared,
+			})
+		}
+	}
+	return results
+}
+
+// labelsMatch reports whether all selector keys/values exist in target.
+func labelsMatch(selector, target map[string]string) bool {
+	for k, v := range selector {
+		if target[k] != v {
+			return false
+		}
+	}
+	return true
+}
+
+// formatPorts formats a slice of ServicePort into "80/TCP, 443/TCP".
+func formatPorts(ports []corev1.ServicePort) string {
+	var parts []string
+	for _, p := range ports {
+		parts = append(parts, fmt.Sprintf("%d/%s", p.Port, p.Protocol))
+	}
+	return strings.Join(parts, ", ")
+}
+
+// contains reports whether slice s contains item.
+func contains(s []string, item string) bool {
+	for _, v := range s {
+		if v == item {
+			return true
+		}
+	}
+	return false
+}
+
+// referencedResourcesFromSpec extracts CM/Secret/PVC names from a PodSpec directly.
+func referencedResourcesFromSpec(spec *corev1.PodSpec) (cms, secrets, pvcs []string) {
+	seen := map[string]bool{}
+	add := func(slice *[]string, name string) {
+		if name != "" && !seen[name] {
+			seen[name] = true
+			*slice = append(*slice, name)
+		}
+	}
+	for _, v := range spec.Volumes {
+		if v.ConfigMap != nil {
+			add(&cms, v.ConfigMap.Name)
+		}
+		if v.Secret != nil {
+			add(&secrets, v.Secret.SecretName)
+		}
+		if v.PersistentVolumeClaim != nil {
+			add(&pvcs, v.PersistentVolumeClaim.ClaimName)
+		}
+	}
+	for _, c := range append(spec.InitContainers, spec.Containers...) {
+		for _, e := range c.EnvFrom {
+			if e.ConfigMapRef != nil {
+				add(&cms, e.ConfigMapRef.Name)
+			}
+			if e.SecretRef != nil {
+				add(&secrets, e.SecretRef.Name)
+			}
+		}
+		for _, e := range c.Env {
+			if e.ValueFrom != nil {
+				if e.ValueFrom.ConfigMapKeyRef != nil {
+					add(&cms, e.ValueFrom.ConfigMapKeyRef.Name)
+				}
+				if e.ValueFrom.SecretKeyRef != nil {
+					add(&secrets, e.ValueFrom.SecretKeyRef.Name)
+				}
+			}
+		}
+	}
+	return
+}
+
 func (srv *server) handleInvestigationPage(w http.ResponseWriter, r *http.Request) {
 	ctx := srv.activeCtx(r)
 	podName := r.URL.Query().Get("pod")
@@ -369,6 +571,11 @@ func (srv *server) handleInvestigationPage(w http.ResponseWriter, r *http.Reques
 	data.Events = podEvents(clientset, namespace, podName, 10)
 	data.ConfigMaps, data.Secrets, data.PVCs = referencedResources(pod)
 	data.Hints = investigationHints(issueType, data.StateReason, data.Restarts, pod)
+
+	// Blast radius
+	data.BlastSiblings, data.BlastHealthy, data.BlastTotal = blastRadiusSiblings(clientset, namespace, data.OwnerKind, data.OwnerName)
+	data.BlastServices = blastRadiusServices(clientset, namespace, pod.Labels)
+	data.BlastSharedConf = blastRadiusSharedConfig(clientset, namespace, data.OwnerName, data.ConfigMaps, data.Secrets)
 
 	// ── NEW: First detected (from incidents table) ────────────────────────────
 	ownerNameForFP := data.OwnerName
