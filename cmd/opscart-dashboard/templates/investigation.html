@@ -205,17 +205,42 @@
       </div>
     </div>
   </div>
-{{if or .BlastSiblings .BlastServices .BlastSharedConf}}
+{{if or .BlastSiblings .BlastServices .BlastIngresses .BlastNamespacePods}}
 <div class="inv-section">
   <div class="inv-section-hdr">
     <h2>Blast Radius</h2>
+  </div>
+
+  {{/* ── Header summary row ── */}}
+  <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:0.75rem;margin-bottom:1.5rem">
+    <div class="inv-evidence-chip">
+      <div class="inv-evidence-label">Deployment</div>
+      <div class="inv-evidence-value" style="font-size:0.88rem">{{.OwnerName}}</div>
+    </div>
+    <div class="inv-evidence-chip">
+      <div class="inv-evidence-label">Namespace</div>
+      <div class="inv-evidence-value" style="font-size:0.88rem">{{.Namespace}}</div>
+    </div>
     {{if .BlastTotal}}
-    <span style="font-size:0.8rem;color:var(--text-muted);margin-left:auto">
-      {{.BlastHealthy}}/{{.BlastTotal}} replicas healthy
-    </span>
+    <div class="inv-evidence-chip" style="{{if eq .BlastHealthy 0}}border-color:rgba(239,68,68,0.4);background:rgba(239,68,68,0.04){{end}}">
+      <div class="inv-evidence-label">Replicas down</div>
+      <div class="inv-evidence-value" style="font-size:0.88rem;{{if eq .BlastHealthy 0}}color:#f87171{{end}}">
+        {{.BlastHealthy}}/{{.BlastTotal}} healthy
+        {{if eq .BlastHealthy 0}}<span style="font-size:0.7rem;margin-left:0.4rem;opacity:0.8">(100% failure)</span>{{end}}
+      </div>
+    </div>
+    {{end}}
+    {{if .BlastNsTotal}}
+    <div class="inv-evidence-chip">
+      <div class="inv-evidence-label">Other pods in namespace</div>
+      <div class="inv-evidence-value" style="font-size:0.88rem;{{if lt .BlastNsHealthy .BlastNsTotal}}color:#fbbf24{{else}}color:#4ade80{{end}}">
+        {{.BlastNsHealthy}}/{{.BlastNsTotal}} healthy
+      </div>
+    </div>
     {{end}}
   </div>
 
+  {{/* ── Sibling pods ── */}}
   {{if .BlastSiblings}}
   <div style="margin-bottom:1.25rem">
     <div class="inv-evidence-label" style="margin-bottom:0.6rem">Sibling Pods</div>
@@ -232,6 +257,7 @@
   </div>
   {{end}}
 
+  {{/* ── Services routing ── */}}
   {{if .BlastServices}}
   <div style="margin-bottom:1.25rem">
     <div class="inv-evidence-label" style="margin-bottom:0.6rem">Services routing to this workload</div>
@@ -247,8 +273,57 @@
   </div>
   {{end}}
 
-  {{if .BlastSharedConf}}
+  {{/* ── Ingress exposure ── */}}
+  {{if .BlastIngresses}}
+  <div style="margin-bottom:1.25rem">
+    <div class="inv-evidence-label" style="margin-bottom:0.6rem">Ingress exposed</div>
+    <div style="display:flex;flex-direction:column;gap:0.4rem">
+      {{range .BlastIngresses}}
+      <div style="display:flex;align-items:center;gap:0.75rem;background:{{if .External}}rgba(239,68,68,0.04){{else}}var(--surface){{end}};
+        border:1px solid {{if .External}}rgba(239,68,68,0.3){{else}}var(--border){{end}};
+        border-radius:var(--radius-sm);padding:0.5rem 0.9rem">
+        <code style="font-size:0.78rem;color:var(--primary-light);flex:1">{{.Host}}{{.Path}}</code>
+        {{if .External}}
+        <span style="font-size:0.65rem;font-weight:700;padding:2px 8px;border-radius:20px;
+          background:rgba(239,68,68,0.15);color:#f87171;text-transform:uppercase;letter-spacing:0.5px;white-space:nowrap">
+          EXTERNAL
+        </span>
+        {{else}}
+        <span style="font-size:0.65rem;font-weight:700;padding:2px 8px;border-radius:20px;
+          background:rgba(100,116,139,0.15);color:#94a3b8;text-transform:uppercase;letter-spacing:0.5px;white-space:nowrap">
+          INTERNAL
+        </span>
+        {{end}}
+      </div>
+      {{end}}
+    </div>
+  </div>
+  {{end}}
+
+  {{/* ── Namespace health ── */}}
+  {{if .BlastNamespacePods}}
   <div>
+    <div class="inv-evidence-label" style="margin-bottom:0.6rem">Other pods in namespace</div>
+    <div style="display:flex;flex-direction:column;gap:0.3rem">
+      {{range .BlastNamespacePods}}
+      <div style="display:flex;align-items:center;gap:0.75rem;padding:0.4rem 0">
+        <span style="font-size:0.8rem;color:var(--text);font-family:monospace;min-width:200px">{{.WorkloadName}}</span>
+        <div style="flex:1;height:4px;background:var(--border);border-radius:2px;max-width:120px">
+          <div style="height:4px;border-radius:2px;width:{{if .Total}}{{mul .Healthy 100 | div .Total}}%{{else}}0%{{end}};
+            background:{{if eq .Healthy .Total}}#4ade80{{else}}#f87171{{end}}"></div>
+        </div>
+        <span style="font-size:0.75rem;color:{{if eq .Healthy .Total}}#4ade80{{else}}#f87171{{end}}">
+          {{.Healthy}}/{{.Total}}
+        </span>
+      </div>
+      {{end}}
+    </div>
+  </div>
+  {{end}}
+
+  {{/* ── Shared config risk ── */}}
+  {{if .BlastSharedConf}}
+  <div style="margin-top:1.25rem">
     <div class="inv-evidence-label" style="margin-bottom:0.6rem">Deployments sharing same config</div>
     <div style="display:flex;flex-direction:column;gap:0.4rem">
       {{range .BlastSharedConf}}
