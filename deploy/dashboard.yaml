@@ -63,6 +63,25 @@ subjects:
     namespace: opscart-system
 
 ---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: opscart-data
+  namespace: opscart-system
+spec:
+  accessModes:
+    - ReadWriteOnce
+  # storageClassName is intentionally omitted so the cluster's default
+  # StorageClass is used (e.g. minikube's "standard", or a cloud
+  # provider's default such as "gp2" / "managed-csi"). If your cluster
+  # has no default StorageClass, or you need a specific one, set it
+  # explicitly here, e.g.:
+  #   storageClassName: standard
+  resources:
+    requests:
+      storage: 1Gi
+
+---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -72,6 +91,14 @@ metadata:
     app: opscart-watcher
 spec:
   replicas: 1
+  # opscart-data is ReadWriteOnce, so it can only be mounted by one pod
+  # at a time. A RollingUpdate would start the new pod (and try to mount
+  # the volume) before terminating the old one, and the new pod would
+  # hang waiting for a mount the old pod still holds. Recreate tears down
+  # the old pod first, freeing the volume before the replacement starts.
+  # Only correct for single-replica deployments backed by RWO storage.
+  strategy:
+    type: Recreate
   selector:
     matchLabels:
       app: opscart-watcher
@@ -88,7 +115,7 @@ spec:
 
       containers:
         - name: dashboard
-          image: ghcr.io/opscart/opscart-dashboard:v1.3.0
+          image: ghcr.io/opscart/opscart-dashboard:v1.7.0
           imagePullPolicy: Always
           args:
             - "--port=8080"
@@ -126,7 +153,8 @@ spec:
             failureThreshold: 3
       volumes:
         - name: opscart-data
-          emptyDir: {}
+          persistentVolumeClaim:
+            claimName: opscart-data
       securityContext:
         runAsNonRoot: true
         runAsUser: 65534   # nobody — matches USER in Dockerfile
