@@ -101,7 +101,8 @@
       {{range .Hints}}
       <div class="inv-hint inv-hint-{{.Confidence}}">
         <div class="inv-hint-header">
-          <span class="inv-conf-badge inv-conf-{{.Confidence}}">{{if eq .Confidence "high"}}High Confidence{{else if eq .Confidence "medium"}}Medium{{else}}Low{{end}}</span>
+          <span style="font-size:0.72rem;font-weight:700;color:var(--text-muted);min-width:52px">STEP {{.Step}}</span>
+          <span class="inv-conf-badge inv-conf-{{.Confidence}}">{{if eq .Confidence "high"}}High{{else if eq .Confidence "medium"}}Medium{{else}}Low{{end}}</span>
           <span class="inv-hint-title">{{.Title}}</span>
         </div>
         <div class="inv-hint-reason">{{.Reason}}</div>
@@ -181,6 +182,12 @@
       <h2>Evidence</h2>
     </div>
 <div class="inv-evidence">
+      {{if .Severity}}
+      <div class="inv-evidence-chip" style="border-color:rgba(239,68,68,0.4);background:rgba(239,68,68,0.04)">
+        <div class="inv-evidence-label">Severity</div>
+        <div class="inv-evidence-value" style="color:#f87171;text-transform:capitalize">{{.Severity}}</div>
+      </div>
+      {{end}}
       {{if .FirstDetected}}
       <div class="inv-evidence-chip">
         <div class="inv-evidence-label">First detected</div>
@@ -350,7 +357,8 @@
       {{range .Hints}}
       <div class="inv-hint inv-hint-{{.Confidence}}">
         <div class="inv-hint-header">
-          <span class="inv-conf-badge inv-conf-{{.Confidence}}">{{if eq .Confidence "high"}}High Confidence{{else if eq .Confidence "medium"}}Medium{{else}}Low{{end}}</span>
+          <span style="font-size:0.72rem;font-weight:700;color:var(--text-muted);min-width:52px">STEP {{.Step}}</span>
+          <span class="inv-conf-badge inv-conf-{{.Confidence}}">{{if eq .Confidence "high"}}High{{else if eq .Confidence "medium"}}Medium{{else}}Low{{end}}</span>
           <span class="inv-hint-title">{{.Title}}</span>
         </div>
         <div class="inv-hint-reason">{{.Reason}}</div>

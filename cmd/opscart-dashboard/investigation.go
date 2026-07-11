@@ -95,6 +95,7 @@ type blastNamespacePod struct {
 
 type investigationHint struct {
 	Confidence string // "high" / "medium" / "low"
+	Step       int
 	Title      string
 	Reason     string
 	Command    string // optional — if this hint has a specific command
@@ -210,6 +211,9 @@ func investigationHints(issueType string, stateReason string, restarts int32, po
 			Reason:     "Events contain the most recent failure reason from the Kubernetes control plane.",
 			Command:    fmt.Sprintf("kubectl get events -n %s --field-selector involvedObject.name=%s", pod.Namespace, pod.Name),
 		})
+	}
+	for i := range hints {
+		hints[i].Step = i + 1
 	}
 	return hints
 }
@@ -700,11 +704,20 @@ func (srv *server) handleInvestigationPage(w http.ResponseWriter, r *http.Reques
 
 	// Investigation commands
 	data.OperationalSummary = buildOperationalSummary(&data)
+	data.Commands = []string{
+		fmt.Sprintf("kubectl logs %s -n %s --previous", podName, namespace),
+		fmt.Sprintf("kubectl describe pod %s -n %s", podName, namespace),
+		fmt.Sprintf("kubectl get events -n %s --field-selector involvedObject.name=%s --sort-by='.lastTimestamp'", namespace, podName),
+	}
 	if data.OwnerKind == "Deployment" {
 		data.Commands = append(data.Commands,
-			fmt.Sprintf("kubectl rollout history deployment/%s -n %s", data.OwnerName, namespace))
+			fmt.Sprintf("kubectl rollout history deployment/%s -n %s", data.OwnerName, namespace),
+			fmt.Sprintf("kubectl get deployment %s -n %s -o yaml", data.OwnerName, namespace),
+		)
 	}
-
+	data.Commands = append(data.Commands,
+		fmt.Sprintf("kubectl top pod %s -n %s", podName, namespace),
+	)
 	renderInvestigation(w, data)
 }
 
