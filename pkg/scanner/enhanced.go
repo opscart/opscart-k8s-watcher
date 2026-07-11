@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/opscart/opscart-k8s-watcher/pkg/kube"
 	"github.com/opscart/opscart-k8s-watcher/pkg/models"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -110,13 +111,7 @@ func (s *Scanner) getServiceDetails(namespace string) ([]models.ServiceDetail, e
 		}
 
 		// Get endpoints to see if service has backends
-		endpoints, _ := s.clientset.CoreV1().Endpoints(svc.Namespace).Get(s.ctx, svc.Name, metav1.GetOptions{})
-		endpointCount := 0
-		if endpoints != nil {
-			for _, subset := range endpoints.Subsets {
-				endpointCount += len(subset.Addresses)
-			}
-		}
+		endpointCount, _ := kube.ReadyEndpointAddressCount(s.ctx, s.clientset, svc.Namespace, svc.Name)
 
 		// Extract external IP for LoadBalancer services
 		externalIP := ""
