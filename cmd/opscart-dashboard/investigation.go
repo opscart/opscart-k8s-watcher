@@ -665,9 +665,9 @@ func (srv *server) handleInvestigationPage(w http.ResponseWriter, r *http.Reques
 				{Confidence: "high", Title: "Check current pods in namespace", Reason: "A replacement pod likely exists with a different suffix.", Command: fmt.Sprintf("kubectl get pods -n %s", namespace)},
 				{Confidence: "medium", Title: "Check recent events", Reason: "Events may show why the pod was terminated.", Command: fmt.Sprintf("kubectl get events -n %s --sort-by='.lastTimestamp'", namespace)},
 			}
-			for i := range data.Hints { // ← ADD THESE
-				data.Hints[i].Step = i + 1 // ← THREE
-			} // ← LINES
+			for i := range data.Hints {
+				data.Hints[i].Step = i + 1
+			}
 			data.Commands = []string{
 				fmt.Sprintf("kubectl get pods -n %s", namespace),
 				fmt.Sprintf("kubectl get events -n %s --sort-by='.lastTimestamp'", namespace),
