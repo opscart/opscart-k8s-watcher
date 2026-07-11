@@ -372,6 +372,9 @@ func blastRadiusSiblings(clientset *kubernetes.Clientset, namespace, ownerKind, 
 			}
 			return true
 		}()
+		if !isHealthy && status == string(corev1.PodRunning) {
+			status = "Running (not ready)"
+		}
 		pods = append(pods, blastRadiusPod{
 			Name:    p.Name,
 			Phase:   status,
