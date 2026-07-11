@@ -245,6 +245,22 @@
       </div>
     </div>
     {{end}}
+    {{if .CustomerImpact}}
+    <div class="inv-evidence-chip" style="
+      {{if eq .CustomerImpact "possible-external"}}border-color:rgba(239,68,68,0.35);background:rgba(239,68,68,0.04)
+      {{else if eq .CustomerImpact "internal"}}border-color:rgba(34,197,94,0.25);background:rgba(34,197,94,0.03)
+      {{else}}border-color:var(--border){{end}}">
+      <div class="inv-evidence-label">Customer Impact</div>
+      <div class="inv-evidence-value" style="font-size:0.82rem;
+        {{if eq .CustomerImpact "possible-external"}}color:#f87171
+        {{else if eq .CustomerImpact "internal"}}color:#4ade80
+        {{else}}color:var(--text-muted){{end}}">
+        {{if eq .CustomerImpact "possible-external"}}🔴 Possible external traffic
+        {{else if eq .CustomerImpact "internal"}}🟢 Internal workload
+        {{else}}🟡 Unknown{{end}}
+      </div>
+    </div>
+    {{end}}
   </div>
 
   {{/* ── Sibling pods ── */}}

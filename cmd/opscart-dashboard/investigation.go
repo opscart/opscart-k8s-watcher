@@ -68,6 +68,7 @@ type investigationPageData struct {
 	BlastNamespacePods []blastNamespacePod  // other workloads in namespace
 	BlastNsHealthy     int                  // namespace-wide healthy pod count
 	BlastNsTotal       int                  // namespace-wide total pod count
+	CustomerImpact     string
 	// Sections
 	Hints              []investigationHint  // possible causes
 	Commands           []string             // investigation kubectl commands
@@ -389,6 +390,7 @@ func blastRadiusServices(clientset *kubernetes.Clientset, namespace string, podL
 	if err != nil {
 		return nil
 	}
+	log.Printf("blastRadiusServices: found %d services in %s, podLabels=%v", len(list.Items), namespace, podLabels) // temp
 	var results []blastRadiusService
 	for _, svc := range list.Items {
 		if len(svc.Spec.Selector) == 0 {
@@ -690,6 +692,7 @@ func (srv *server) handleInvestigationPage(w http.ResponseWriter, r *http.Reques
 	}
 	data.BlastIngresses = blastIngresses(clientset, namespace, svcNames)
 	data.BlastNamespacePods, data.BlastNsHealthy, data.BlastNsTotal = blastNamespaceHealth(clientset, namespace, data.OwnerName)
+	data.CustomerImpact = deriveCustomerImpact(data.BlastIngresses, data.BlastServices)
 
 	// ── NEW: First detected (from incidents table) ────────────────────────────
 	ownerNameForFP := data.OwnerName
@@ -739,6 +742,26 @@ var getInvestigationTmpl = sync.OnceValue(func() *template.Template {
 				"templates/investigation.html"),
 	)
 })
+
+func deriveCustomerImpact(ingresses []blastIngressRule, services []blastRadiusService) string {
+	// Ingress with external host → likely customer-facing
+	for _, ing := range ingresses {
+		if ing.External {
+			return "possible-external"
+		}
+	}
+	// LoadBalancer service → external IP assigned or pending
+	for _, svc := range services {
+		if svc.Type == "LoadBalancer" {
+			return "possible-external"
+		}
+	}
+	// ClusterIP or NodePort with no ingress → internal
+	if len(services) > 0 {
+		return "internal"
+	}
+	return "unknown"
+}
 
 func renderInvestigation(w http.ResponseWriter, data investigationPageData) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
