@@ -14,6 +14,7 @@ import (
 
 	"github.com/opscart/opscart-k8s-watcher/pkg/store"
 	corev1 "k8s.io/api/core/v1"
+	networkingv1 "k8s.io/api/networking/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
 )
@@ -58,11 +59,16 @@ type investigationPageData struct {
 	NotFound      bool   // pod deleted since scan
 	FirstDetected string
 	// Blast radius
-	BlastSiblings   []blastRadiusPod     // sibling pods under same owner
-	BlastServices   []blastRadiusService // services routing to this deployment
-	BlastSharedConf []blastSharedDep     // other deployments sharing same CMs/Secrets
-	BlastHealthy    int                  // count of healthy siblings
-	BlastTotal      int                  // total replicas
+	BlastSiblings      []blastRadiusPod     // sibling pods under same owner
+	BlastServices      []blastRadiusService // services routing to this deployment
+	BlastSharedConf    []blastSharedDep     // other deployments sharing same CMs/Secrets
+	BlastHealthy       int                  // count of healthy siblings
+	BlastTotal         int                  // total replicas
+	BlastIngresses     []blastIngressRule   // ingress rules routing to affected services
+	BlastNamespacePods []blastNamespacePod  // other workloads in namespace
+	BlastNsHealthy     int                  // namespace-wide healthy pod count
+	BlastNsTotal       int                  // namespace-wide total pod count
+	CustomerImpact     string
 	// Sections
 	Hints              []investigationHint  // possible causes
 	Commands           []string             // investigation kubectl commands
@@ -76,8 +82,21 @@ type investigationPageData struct {
 	BackURL     string
 }
 
+type blastIngressRule struct {
+	Host     string
+	Path     string
+	External bool // true = customer-facing
+}
+
+type blastNamespacePod struct {
+	WorkloadName string
+	Healthy      int
+	Total        int
+}
+
 type investigationHint struct {
 	Confidence string // "high" / "medium" / "low"
+	Step       int
 	Title      string
 	Reason     string
 	Command    string // optional — if this hint has a specific command
@@ -193,6 +212,9 @@ func investigationHints(issueType string, stateReason string, restarts int32, po
 			Reason:     "Events contain the most recent failure reason from the Kubernetes control plane.",
 			Command:    fmt.Sprintf("kubectl get events -n %s --field-selector involvedObject.name=%s", pod.Namespace, pod.Name),
 		})
+	}
+	for i := range hints {
+		hints[i].Step = i + 1
 	}
 	return hints
 }
@@ -368,6 +390,7 @@ func blastRadiusServices(clientset *kubernetes.Clientset, namespace string, podL
 	if err != nil {
 		return nil
 	}
+	log.Printf("blastRadiusServices: found %d services in %s, podLabels=%v", len(list.Items), namespace, podLabels) // temp
 	var results []blastRadiusService
 	for _, svc := range list.Items {
 		if len(svc.Spec.Selector) == 0 {
@@ -420,6 +443,92 @@ func blastRadiusSharedConfig(clientset *kubernetes.Clientset, namespace, selfNam
 		}
 	}
 	return results
+}
+
+// blastIngresses finds Ingress rules that route to any of the given service names.
+func blastIngresses(clientset *kubernetes.Clientset, namespace string, serviceNames []string) []blastIngressRule {
+	if len(serviceNames) == 0 {
+		return nil
+	}
+	var list *networkingv1.IngressList
+	var err error
+	list, err = clientset.NetworkingV1().Ingresses(namespace).List(context.TODO(), metav1.ListOptions{})
+	if err != nil {
+		return nil
+	}
+	svcSet := map[string]bool{}
+	for _, s := range serviceNames {
+		svcSet[s] = true
+	}
+	var results []blastIngressRule
+	for _, ing := range list.Items {
+		for _, rule := range ing.Spec.Rules {
+			if rule.HTTP == nil {
+				continue
+			}
+			for _, path := range rule.HTTP.Paths {
+				if path.Backend.Service != nil && svcSet[path.Backend.Service.Name] {
+					results = append(results, blastIngressRule{
+						Host:     rule.Host,
+						Path:     path.Path,
+						External: rule.Host != "" && !strings.HasSuffix(rule.Host, ".cluster.local"),
+					})
+				}
+			}
+		}
+	}
+	return results
+}
+
+// blastNamespaceHealth counts healthy vs total pods per workload in the namespace,
+// excluding the pod under investigation.
+func blastNamespaceHealth(clientset *kubernetes.Clientset, namespace, excludeOwnerName string) (workloads []blastNamespacePod, healthy, total int) {
+	list, err := clientset.CoreV1().Pods(namespace).List(context.TODO(), metav1.ListOptions{})
+	if err != nil {
+		return
+	}
+	type counts struct{ h, t int }
+	tally := map[string]*counts{}
+	for _, p := range list.Items {
+		_, ownerName := resolveOwner(clientset, &p)
+		if ownerName == excludeOwnerName {
+			continue
+		}
+		if tally[ownerName] == nil {
+			tally[ownerName] = &counts{}
+		}
+		tally[ownerName].t++
+		total++
+		isHealthy := func() bool {
+			if p.Status.Phase != corev1.PodRunning {
+				return false
+			}
+			for _, cs := range p.Status.ContainerStatuses {
+				if cs.State.Waiting != nil || !cs.Ready {
+					return false
+				}
+			}
+			return true
+		}()
+		if isHealthy {
+			tally[ownerName].h++
+			healthy++
+		}
+	}
+	// Sort by name for stable output
+	names := make([]string, 0, len(tally))
+	for k := range tally {
+		names = append(names, k)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		workloads = append(workloads, blastNamespacePod{
+			WorkloadName: name,
+			Healthy:      tally[name].h,
+			Total:        tally[name].t,
+		})
+	}
+	return
 }
 
 // labelsMatch reports whether all selector keys/values exist in target.
@@ -577,6 +686,14 @@ func (srv *server) handleInvestigationPage(w http.ResponseWriter, r *http.Reques
 	data.BlastServices = blastRadiusServices(clientset, namespace, pod.Labels)
 	data.BlastSharedConf = blastRadiusSharedConfig(clientset, namespace, data.OwnerName, data.ConfigMaps, data.Secrets)
 
+	svcNames := make([]string, 0, len(data.BlastServices))
+	for _, s := range data.BlastServices {
+		svcNames = append(svcNames, s.Name)
+	}
+	data.BlastIngresses = blastIngresses(clientset, namespace, svcNames)
+	data.BlastNamespacePods, data.BlastNsHealthy, data.BlastNsTotal = blastNamespaceHealth(clientset, namespace, data.OwnerName)
+	data.CustomerImpact = deriveCustomerImpact(data.BlastIngresses, data.BlastServices)
+
 	// ── NEW: First detected (from incidents table) ────────────────────────────
 	ownerNameForFP := data.OwnerName
 	if ownerNameForFP == "" {
@@ -590,23 +707,61 @@ func (srv *server) handleInvestigationPage(w http.ResponseWriter, r *http.Reques
 
 	// Investigation commands
 	data.OperationalSummary = buildOperationalSummary(&data)
+	data.Commands = []string{
+		fmt.Sprintf("kubectl logs %s -n %s --previous", podName, namespace),
+		fmt.Sprintf("kubectl describe pod %s -n %s", podName, namespace),
+		fmt.Sprintf("kubectl get events -n %s --field-selector involvedObject.name=%s --sort-by='.lastTimestamp'", namespace, podName),
+	}
 	if data.OwnerKind == "Deployment" {
 		data.Commands = append(data.Commands,
-			fmt.Sprintf("kubectl rollout history deployment/%s -n %s", data.OwnerName, namespace))
+			fmt.Sprintf("kubectl rollout history deployment/%s -n %s", data.OwnerName, namespace),
+			fmt.Sprintf("kubectl get deployment %s -n %s -o yaml", data.OwnerName, namespace),
+		)
 	}
-
+	data.Commands = append(data.Commands,
+		fmt.Sprintf("kubectl top pod %s -n %s", podName, namespace),
+	)
 	renderInvestigation(w, data)
 }
 
 var getInvestigationTmpl = sync.OnceValue(func() *template.Template {
 	return template.Must(
 		template.New("investigation.html").
+			Funcs(template.FuncMap{
+				"mul": func(a, b int) int { return a * b },
+				"div": func(a, b int) int {
+					if b == 0 {
+						return 0
+					}
+					return a / b
+				},
+			}).
 			ParseFS(templateFS,
 				"templates/base.html",
 				"templates/sidebar.html",
 				"templates/investigation.html"),
 	)
 })
+
+func deriveCustomerImpact(ingresses []blastIngressRule, services []blastRadiusService) string {
+	// Ingress with external host → likely customer-facing
+	for _, ing := range ingresses {
+		if ing.External {
+			return "possible-external"
+		}
+	}
+	// LoadBalancer service → external IP assigned or pending
+	for _, svc := range services {
+		if svc.Type == "LoadBalancer" {
+			return "possible-external"
+		}
+	}
+	// ClusterIP or NodePort with no ingress → internal
+	if len(services) > 0 {
+		return "internal"
+	}
+	return "unknown"
+}
 
 func renderInvestigation(w http.ResponseWriter, data investigationPageData) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
