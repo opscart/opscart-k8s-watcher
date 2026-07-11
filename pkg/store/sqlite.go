@@ -107,6 +107,14 @@ func OpenSQLite(path string) (*SQLiteStore, error) {
 		db.Close()
 		return nil, err
 	}
+	// NORMAL syncs the WAL on checkpoint rather than every transaction.
+	// Paired with WAL mode and a clean Close() on SIGTERM, this is safe
+	// against kubelet-initiated pod restarts while avoiding FULL's
+	// per-commit fsync cost.
+	if _, err := db.Exec("PRAGMA synchronous=NORMAL"); err != nil {
+		db.Close()
+		return nil, err
+	}
 
 	var version int
 	if err := db.QueryRow("PRAGMA user_version").Scan(&version); err != nil {

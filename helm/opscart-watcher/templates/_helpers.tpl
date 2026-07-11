@@ -39,7 +39,7 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 Namespace
 */}}
 {{- define "opscart-watcher.namespace" -}}
-{{- .Values.namespace.name }}
+{{- .Release.Namespace }}
 {{- end }}
 
 {{/*
@@ -47,4 +47,15 @@ ServiceAccount name
 */}}
 {{- define "opscart-watcher.serviceAccountName" -}}
 {{- .Values.serviceAccount.name }}
+{{- end }}
+
+{{/*
+PVC claim name — the templated PVC's name, or the user-supplied existingClaim.
+*/}}
+{{- define "opscart-watcher.pvcName" -}}
+{{- if .Values.persistence.existingClaim }}
+{{- .Values.persistence.existingClaim }}
+{{- else }}
+{{- include "opscart-watcher.fullname" . }}
+{{- end }}
 {{- end }}

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"crypto/rand"
 	"embed"
 	"encoding/hex"
@@ -11,10 +12,12 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"os/signal"
 	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	"github.com/opscart/opscart-k8s-watcher/pkg/analyzer"
@@ -333,9 +336,9 @@ func runDashboard(_ *cobra.Command, _ []string) error {
 		db = &store.NullStore{}
 	} else {
 		db = sqlDB
-		defer sqlDB.Close()
 		log.Printf("store: operational memory at %s", dbPath)
 	}
+	defer db.Close()
 	srv := newServer(cl, db)
 
 	log.Printf("Scanning cluster %q ...", displayName(cl[0]))
@@ -364,8 +367,34 @@ func runDashboard(_ *cobra.Command, _ []string) error {
 	mux.HandleFunc("/waste", srv.handleWastePage)
 	mux.HandleFunc("/settings", srv.handleStubPage("settings", "Settings"))
 	addr := ":" + port
-	log.Printf("Dashboard ready at http://localhost%s", addr)
-	return http.ListenAndServe(addr, mux)
+	httpServer := &http.Server{Addr: addr, Handler: mux}
+
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+
+	serveErr := make(chan error, 1)
+	go func() {
+		log.Printf("Dashboard ready at http://localhost%s", addr)
+		serveErr <- httpServer.ListenAndServe()
+	}()
+
+	select {
+	case err := <-serveErr:
+		if err != nil && err != http.ErrServerClosed {
+			return err
+		}
+	case <-ctx.Done():
+		stop()
+		log.Printf("shutting down: flushing operational memory")
+
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		if err := httpServer.Shutdown(shutdownCtx); err != nil {
+			log.Printf("http server shutdown: %v", err)
+		}
+	}
+
+	return nil
 }
 
 // ── Stub pages ────────────────────────────────────────────────────────────────
