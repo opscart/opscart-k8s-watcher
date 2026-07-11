@@ -182,12 +182,13 @@ func (s *dashboardState) refresh(clusterList []string) error {
 				"message":  is.Message,
 			})
 			incidents = append(incidents, store.IncidentData{
-				Fingerprint: store.Fingerprint(is.Namespace, "Workload", owner, is.Type),
-				Namespace:   is.Namespace,
-				Resource:    is.Resource,
-				IssueType:   is.Type,
-				Severity:    is.Severity,
-				DetailsJSON: string(details),
+				Fingerprint:  store.Fingerprint(is.Namespace, "Workload", owner, is.Type),
+				Namespace:    is.Namespace,
+				Resource:     is.Resource,
+				IssueType:    is.Type,
+				Severity:     is.Severity,
+				DetailsJSON:  string(details),
+				RestartCount: is.RestartCount,
 			})
 		}
 
@@ -586,13 +587,14 @@ func handleHealth(w http.ResponseWriter, _ *http.Request) {
 // ── War Room helpers ──────────────────────────────────────────────────────────
 
 type warRoomIssue struct {
-	Severity   string `json:"severity"`
-	Type       string `json:"type"`
-	Namespace  string `json:"namespace"`
-	Resource   string `json:"resource"`
-	Message    string `json:"message"`
-	AgeDays    int    `json:"age_days,omitempty"`
-	KubectlCmd string `json:"kubectl_cmd,omitempty"`
+	Severity     string `json:"severity"`
+	Type         string `json:"type"`
+	Namespace    string `json:"namespace"`
+	Resource     string `json:"resource"`
+	Message      string `json:"message"`
+	AgeDays      int    `json:"age_days,omitempty"`
+	KubectlCmd   string `json:"kubectl_cmd,omitempty"`
+	RestartCount int    `json:"restart_count,omitempty"`
 }
 
 type warRoomPageData struct {
@@ -616,13 +618,14 @@ func collectWarRoomIssues(scan *clusterScan, limit int) []warRoomIssue {
 			if pod.Kind == analyzer.StalePodZombie {
 				itype := zombieTypeForStatus(pod.Status)
 				issues = append(issues, warRoomIssue{
-					Severity:   "critical",
-					Type:       itype,
-					Namespace:  pod.Namespace,
-					Resource:   pod.Name,
-					Message:    fmt.Sprintf("%s — %d restarts, %d days old", pod.Status, pod.RestartCount, pod.AgeDays),
-					AgeDays:    pod.AgeDays,
-					KubectlCmd: kubectlCmdForIssue(itype, pod.Name, pod.Namespace),
+					Severity:     "critical",
+					Type:         itype,
+					Namespace:    pod.Namespace,
+					Resource:     pod.Name,
+					Message:      fmt.Sprintf("%s — %d restarts, %d days old", pod.Status, pod.RestartCount, pod.AgeDays),
+					AgeDays:      pod.AgeDays,
+					KubectlCmd:   kubectlCmdForIssue(itype, pod.Name, pod.Namespace),
+					RestartCount: int(pod.RestartCount),
 				})
 			}
 		}
