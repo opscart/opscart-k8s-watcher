@@ -12,6 +12,7 @@ type Store interface {
 	GetOverviewTrend(cluster string) (*OverviewTrend, error)
 	GetLatestSnapshot(cluster string) (*SnapshotData, error)
 	GetIncidentHistory(cluster string, fingerprint string) (*IncidentRecord, error)
+	GetIncidentTimeline(cluster string, fingerprint string) ([]IncidentEvent, error)
 	Close() error
 }
 
@@ -29,12 +30,13 @@ type SnapshotData struct {
 }
 
 type IncidentData struct {
-	Fingerprint string // "namespace/OwnerKind/owner-name/issue_type"
-	Namespace   string
-	Resource    string
-	IssueType   string
-	Severity    string
-	DetailsJSON string // per-type attributes, e.g. {"restarts":932}
+	Fingerprint  string // "namespace/OwnerKind/owner-name/issue_type"
+	Namespace    string
+	Resource     string
+	IssueType    string
+	Severity     string
+	DetailsJSON  string // per-type attributes, e.g. {"restarts":932}
+	RestartCount int
 }
 
 type ScanMeta struct {
@@ -68,4 +70,16 @@ type IncidentRecord struct {
 	LastSeen    time.Time
 	Status      string // "active" / "resolved"
 	DetailsJSON string
+}
+
+// IncidentEvent is a single append-only entry in an incident's operational
+// timeline (detected, updated, resolved, reopened, ...).
+type IncidentEvent struct {
+	OccurredAt   time.Time
+	EventType    string // DETECTED | UPDATED | RESOLVED | REOPENED
+	EventReason  string // RestartMilestone | SeverityChanged | Detected | Resolved | Reopened
+	RestartCount int
+	Severity     string
+	State        string
+	Message      string
 }

@@ -101,7 +101,7 @@
       {{range .Hints}}
       <div class="inv-hint inv-hint-{{.Confidence}}">
         <div class="inv-hint-header">
-          <span style="font-size:0.72rem;font-weight:700;color:var(--text-muted);min-width:52px">STEP {{.Step}}</span>
+          {{if .Step}}<span style="font-size:0.72rem;font-weight:700;color:var(--text-muted);min-width:52px">STEP {{.Step}}</span>{{end}}
           <span class="inv-conf-badge inv-conf-{{.Confidence}}">{{if eq .Confidence "high"}}High{{else if eq .Confidence "medium"}}Medium{{else}}Low{{end}}</span>
           <span class="inv-hint-title">{{.Title}}</span>
         </div>
@@ -177,6 +177,37 @@
   </div>
   {{end}}
 
+  {{if .Timeline}}
+<div class="inv-section">
+  <div class="inv-section-hdr">
+    <h2>Incident Timeline</h2>
+    <span style="font-size:0.8rem;color:var(--text-muted);margin-left:auto">{{len .Timeline}} events</span>
+  </div>
+  <div style="position:relative;padding-left:1.5rem">
+    {{/* vertical line */}}
+    <div style="position:absolute;left:5px;top:8px;bottom:8px;width:2px;background:var(--border)"></div>
+    {{range .Timeline}}
+    <div style="position:relative;padding:0.5rem 0 0.5rem 1rem">
+      {{/* dot */}}
+      <div style="position:absolute;left:-1.45rem;top:0.9rem;width:12px;height:12px;border-radius:50%;
+        border:2px solid var(--surface);
+        background:{{if eq .EventType "DETECTED"}}#f87171{{else if eq .EventType "RESOLVED"}}#4ade80{{else if eq .EventType "REOPENED"}}#fbbf24{{else}}#94a3b8{{end}}"></div>
+      <div style="display:flex;align-items:baseline;gap:0.75rem;flex-wrap:wrap">
+        <span style="font-size:0.72rem;color:var(--text-muted);font-variant-numeric:tabular-nums;min-width:120px">
+          {{.OccurredAt.Format "Jan 2 15:04"}}
+        </span>
+        <span style="font-size:0.85rem;color:var(--text);font-weight:{{if eq .EventType "UPDATED"}}400{{else}}600{{end}}">
+          {{.Message}}
+        </span>
+        {{if and .RestartCount (eq .EventReason "RestartMilestone")}}
+        <span style="font-size:0.72rem;color:var(--text-muted)">({{.RestartCount}} at time of event)</span>
+        {{end}}
+      </div>
+    </div>
+    {{end}}
+  </div>
+</div>
+{{end}}
   <div class="inv-section">
     <div class="inv-section-hdr">
       <h2>Evidence</h2>
@@ -373,7 +404,7 @@
       {{range .Hints}}
       <div class="inv-hint inv-hint-{{.Confidence}}">
         <div class="inv-hint-header">
-          <span style="font-size:0.72rem;font-weight:700;color:var(--text-muted);min-width:52px">STEP {{.Step}}</span>
+          {{if .Step}}<span style="font-size:0.72rem;font-weight:700;color:var(--text-muted);min-width:52px">STEP {{.Step}}</span>{{end}}
           <span class="inv-conf-badge inv-conf-{{.Confidence}}">{{if eq .Confidence "high"}}High{{else if eq .Confidence "medium"}}Medium{{else}}Low{{end}}</span>
           <span class="inv-hint-title">{{.Title}}</span>
         </div>

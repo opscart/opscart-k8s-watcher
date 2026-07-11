@@ -69,6 +69,7 @@ type investigationPageData struct {
 	BlastNsHealthy     int                  // namespace-wide healthy pod count
 	BlastNsTotal       int                  // namespace-wide total pod count
 	CustomerImpact     string
+	Timeline           []store.IncidentEvent
 	// Sections
 	Hints              []investigationHint  // possible causes
 	Commands           []string             // investigation kubectl commands
@@ -656,6 +657,24 @@ func (srv *server) handleInvestigationPage(w http.ResponseWriter, r *http.Reques
 			{Confidence: "high", Title: "Check current pods in namespace", Reason: "A replacement pod likely exists with a different suffix.", Command: fmt.Sprintf("kubectl get pods -n %s", namespace)},
 			{Confidence: "medium", Title: "Check recent events", Reason: "Events may show why the pod was terminated.", Command: fmt.Sprintf("kubectl get events -n %s --sort-by='.lastTimestamp'", namespace)},
 		}
+		if err != nil {
+			// Pod may have been deleted/recreated since the scan
+			data.NotFound = true
+			data.Hints = []investigationHint{
+				{Confidence: "high", Title: "Pod no longer exists", Reason: "This pod may have been deleted or recreated with a new name since the last scan."},
+				{Confidence: "high", Title: "Check current pods in namespace", Reason: "A replacement pod likely exists with a different suffix.", Command: fmt.Sprintf("kubectl get pods -n %s", namespace)},
+				{Confidence: "medium", Title: "Check recent events", Reason: "Events may show why the pod was terminated.", Command: fmt.Sprintf("kubectl get events -n %s --sort-by='.lastTimestamp'", namespace)},
+			}
+			for i := range data.Hints { // ← ADD THESE
+				data.Hints[i].Step = i + 1 // ← THREE
+			} // ← LINES
+			data.Commands = []string{
+				fmt.Sprintf("kubectl get pods -n %s", namespace),
+				fmt.Sprintf("kubectl get events -n %s --sort-by='.lastTimestamp'", namespace),
+			}
+			renderInvestigation(w, data)
+			return
+		}
 		data.Commands = []string{
 			fmt.Sprintf("kubectl get pods -n %s", namespace),
 			fmt.Sprintf("kubectl get events -n %s --sort-by='.lastTimestamp'", namespace),
@@ -702,6 +721,9 @@ func (srv *server) handleInvestigationPage(w http.ResponseWriter, r *http.Reques
 	fp := store.Fingerprint(namespace, "Workload", ownerNameForFP, issueType)
 	if rec, err := srv.db.GetIncidentHistory(ctx, fp); err == nil && rec != nil {
 		data.FirstDetected = firstDetectedLabel(rec.FirstSeen)
+	}
+	if events, err := srv.db.GetIncidentTimeline(ctx, fp); err == nil {
+		data.Timeline = events
 	}
 	// ── END NEW
 

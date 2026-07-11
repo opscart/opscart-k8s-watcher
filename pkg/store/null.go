@@ -34,6 +34,10 @@ func (NullStore) GetIncidentHistory(cluster string, fingerprint string) (*Incide
 	return nil, nil
 }
 
+func (NullStore) GetIncidentTimeline(cluster string, fingerprint string) ([]IncidentEvent, error) {
+	return nil, nil
+}
+
 func (NullStore) Close() error {
 	return nil
 }
