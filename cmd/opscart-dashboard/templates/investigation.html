@@ -101,7 +101,7 @@
       {{range .Hints}}
       <div class="inv-hint inv-hint-{{.Confidence}}">
         <div class="inv-hint-header">
-          <span style="font-size:0.72rem;font-weight:700;color:var(--text-muted);min-width:52px">STEP {{.Step}}</span>
+          {{if .Step}}<span style="font-size:0.72rem;font-weight:700;color:var(--text-muted);min-width:52px">STEP {{.Step}}</span>{{end}}
           <span class="inv-conf-badge inv-conf-{{.Confidence}}">{{if eq .Confidence "high"}}High{{else if eq .Confidence "medium"}}Medium{{else}}Low{{end}}</span>
           <span class="inv-hint-title">{{.Title}}</span>
         </div>
@@ -404,7 +404,7 @@
       {{range .Hints}}
       <div class="inv-hint inv-hint-{{.Confidence}}">
         <div class="inv-hint-header">
-          <span style="font-size:0.72rem;font-weight:700;color:var(--text-muted);min-width:52px">STEP {{.Step}}</span>
+          {{if .Step}}<span style="font-size:0.72rem;font-weight:700;color:var(--text-muted);min-width:52px">STEP {{.Step}}</span>{{end}}
           <span class="inv-conf-badge inv-conf-{{.Confidence}}">{{if eq .Confidence "high"}}High{{else if eq .Confidence "medium"}}Medium{{else}}Low{{end}}</span>
           <span class="inv-hint-title">{{.Title}}</span>
         </div>
