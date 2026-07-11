@@ -69,6 +69,7 @@ type investigationPageData struct {
 	BlastNsHealthy     int                  // namespace-wide healthy pod count
 	BlastNsTotal       int                  // namespace-wide total pod count
 	CustomerImpact     string
+	Timeline           []store.IncidentEvent
 	// Sections
 	Hints              []investigationHint  // possible causes
 	Commands           []string             // investigation kubectl commands
@@ -702,6 +703,9 @@ func (srv *server) handleInvestigationPage(w http.ResponseWriter, r *http.Reques
 	fp := store.Fingerprint(namespace, "Workload", ownerNameForFP, issueType)
 	if rec, err := srv.db.GetIncidentHistory(ctx, fp); err == nil && rec != nil {
 		data.FirstDetected = firstDetectedLabel(rec.FirstSeen)
+	}
+	if events, err := srv.db.GetIncidentTimeline(ctx, fp); err == nil {
+		data.Timeline = events
 	}
 	// ── END NEW
 
