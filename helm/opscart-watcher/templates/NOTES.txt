@@ -1,0 +1,17 @@
+{{ .Chart.Name }} {{ .Chart.AppVersion }} deployed.
+
+  Install into a fresh cluster with:
+    helm install {{ .Release.Name }} ./helm/opscart-watcher -n {{ .Release.Namespace }} --create-namespace
+
+  Access the dashboard:
+    kubectl port-forward -n {{ .Release.Namespace }} deploy/{{ include "opscart-watcher.fullname" . }} 8080:8080
+    open http://localhost:8080
+
+{{- if .Values.persistence.enabled }}
+  Operational memory (incident history, timelines) is persisted on PVC
+  "{{ .Values.persistence.existingClaim | default (include "opscart-watcher.fullname" .) }}".
+  This PVC is kept on `helm uninstall` — delete it manually to discard history.
+{{- else }}
+  WARNING: persistence.enabled=false — incident history and timelines
+  will be LOST on every pod restart.
+{{- end }}
