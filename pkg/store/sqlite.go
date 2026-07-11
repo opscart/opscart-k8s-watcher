@@ -13,11 +13,18 @@ var _ Store = (*SQLiteStore)(nil)
 // schemaVersion is stored in PRAGMA user_version. Bump it whenever the
 // schema changes, and teach migrateSchema how to reach it from the
 // previous version.
-const schemaVersion = 2
+const schemaVersion = 3
 
 // restartMilestones are the restart-count thresholds that generate a
 // RestartMilestone timeline event when crossed.
 var restartMilestones = []int{10, 50, 100, 500, 1000, 2500, 5000, 10000}
+
+// resolveThreshold is the number of consecutive scans an active incident
+// must be absent from before it is marked resolved. CrashLoopBackOff pods
+// briefly report Running between crashes, so a single missed scan is not
+// enough signal — debouncing over resolveThreshold scans avoids flapping
+// resolved/reopened churn in the timeline.
+const resolveThreshold = 3
 
 const schema = `
 CREATE TABLE IF NOT EXISTS cluster_snapshots (
@@ -50,7 +57,8 @@ CREATE TABLE IF NOT EXISTS incidents (
     details_json          TEXT,
     status                TEXT    NOT NULL DEFAULT 'active',
     last_scan_id          TEXT,
-    current_restart_count INTEGER NOT NULL DEFAULT 0
+    current_restart_count INTEGER NOT NULL DEFAULT 0,
+    missing_scans         INTEGER NOT NULL DEFAULT 0
 );
 CREATE UNIQUE INDEX IF NOT EXISTS idx_inc_fp ON incidents(cluster, fingerprint);
 
@@ -208,7 +216,8 @@ func migrateIncidentsTable(tx *sql.Tx) error {
 			    details_json          TEXT,
 			    status                TEXT    NOT NULL DEFAULT 'active',
 			    last_scan_id          TEXT,
-			    current_restart_count INTEGER NOT NULL DEFAULT 0
+			    current_restart_count INTEGER NOT NULL DEFAULT 0,
+			    missing_scans         INTEGER NOT NULL DEFAULT 0
 			);
 			INSERT INTO incidents_new (
 			    fingerprint, cluster, namespace, resource, issue_type,
@@ -228,6 +237,12 @@ func migrateIncidentsTable(tx *sql.Tx) error {
 
 	if !cols["current_restart_count"] {
 		if _, err := tx.Exec(`ALTER TABLE incidents ADD COLUMN current_restart_count INTEGER NOT NULL DEFAULT 0`); err != nil {
+			return err
+		}
+	}
+
+	if !cols["missing_scans"] {
+		if _, err := tx.Exec(`ALTER TABLE incidents ADD COLUMN missing_scans INTEGER NOT NULL DEFAULT 0`); err != nil {
 			return err
 		}
 	}
@@ -291,16 +306,17 @@ func (s *SQLiteStore) UpsertIncidents(cluster string, scanID string, incidents [
 		INSERT INTO incidents (
 			fingerprint, cluster, namespace, resource, issue_type,
 			severity, first_seen, last_seen, details_json, status, last_scan_id,
-			current_restart_count
+			current_restart_count, missing_scans
 		)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, 0)
 		ON CONFLICT(cluster, fingerprint) DO UPDATE SET
 			last_seen = excluded.last_seen,
 			details_json = excluded.details_json,
 			severity = excluded.severity,
 			status = 'active',
 			last_scan_id = excluded.last_scan_id,
-			current_restart_count = excluded.current_restart_count
+			current_restart_count = excluded.current_restart_count,
+			missing_scans = 0
 	`)
 	if err != nil {
 		return err
@@ -364,6 +380,12 @@ func (s *SQLiteStore) UpsertIncidents(cluster string, scanID string, incidents [
 	return tx.Commit()
 }
 
+// ResolveMissing debounces resolution over resolveThreshold consecutive
+// scans: an active incident absent from the current scan has its
+// missing_scans counter incremented, and only flips to status='resolved'
+// (emitting one RESOLVED event) once that counter reaches resolveThreshold.
+// UpsertIncidents resets missing_scans to 0 as soon as the incident
+// reappears, so a resolution requires resolveThreshold *consecutive* misses.
 func (s *SQLiteStore) ResolveMissing(cluster string, scanID string) (int, error) {
 	tx, err := s.db.Begin()
 	if err != nil {
@@ -372,49 +394,55 @@ func (s *SQLiteStore) ResolveMissing(cluster string, scanID string) (int, error)
 	defer tx.Rollback()
 
 	rows, err := tx.Query(
-		`SELECT id, current_restart_count, severity FROM incidents
+		`SELECT id, current_restart_count, severity, missing_scans FROM incidents
 		 WHERE cluster=? AND status='active' AND last_scan_id != ?`,
 		cluster, scanID,
 	)
 	if err != nil {
 		return 0, err
 	}
-	type toResolve struct {
-		id       int64
-		restart  int
-		severity string
+	type candidate struct {
+		id           int64
+		restart      int
+		severity     string
+		missingScans int
 	}
-	var resolving []toResolve
+	var candidates []candidate
 	for rows.Next() {
-		var r toResolve
-		if err := rows.Scan(&r.id, &r.restart, &r.severity); err != nil {
+		var c candidate
+		if err := rows.Scan(&c.id, &c.restart, &c.severity, &c.missingScans); err != nil {
 			rows.Close()
 			return 0, err
 		}
-		resolving = append(resolving, r)
+		candidates = append(candidates, c)
 	}
 	if err := rows.Err(); err != nil {
 		return 0, err
 	}
 	rows.Close()
 
-	res, err := tx.Exec(
-		`UPDATE incidents SET status='resolved'
-		 WHERE cluster=? AND status='active' AND last_scan_id != ?`,
-		cluster, scanID,
-	)
-	if err != nil {
-		return 0, err
-	}
-	n, err := res.RowsAffected()
-	if err != nil {
-		return 0, err
-	}
-
 	now := time.Now().Unix()
-	for _, r := range resolving {
-		if err := insertIncidentEvent(tx, r.id, scanID, now, "RESOLVED", "Resolved",
-			r.restart, r.severity, "resolved", "Incident resolved"); err != nil {
+	resolved := 0
+	for _, c := range candidates {
+		missing := c.missingScans + 1
+		if missing >= resolveThreshold {
+			if _, err := tx.Exec(
+				`UPDATE incidents SET status='resolved', missing_scans=? WHERE id=?`,
+				missing, c.id,
+			); err != nil {
+				return 0, err
+			}
+			if err := insertIncidentEvent(tx, c.id, scanID, now, "RESOLVED", "Resolved",
+				c.restart, c.severity, "resolved", "Incident resolved"); err != nil {
+				return 0, err
+			}
+			resolved++
+			continue
+		}
+		if _, err := tx.Exec(
+			`UPDATE incidents SET missing_scans=? WHERE id=?`,
+			missing, c.id,
+		); err != nil {
 			return 0, err
 		}
 	}
@@ -422,7 +450,7 @@ func (s *SQLiteStore) ResolveMissing(cluster string, scanID string) (int, error)
 	if err := tx.Commit(); err != nil {
 		return 0, err
 	}
-	return int(n), nil
+	return resolved, nil
 }
 
 func (s *SQLiteStore) WriteScanHistory(cluster string, scanID string, meta ScanMeta) error {
