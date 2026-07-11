@@ -52,6 +52,8 @@ kubectl port-forward -n opscart-system svc/opscart-watcher 8080:80
 open http://localhost:8080
 ```
 
+Incident history persists on a PVC by default — see the [chart README](helm/opscart-watcher/README.md) for storage options and minikube-specific notes. The raw manifest below is a quickstart; the Helm chart is canonical.
+
 ### kubectl
 
 ```bash
@@ -81,8 +83,10 @@ go build -o opscart-dashboard ./cmd/opscart-dashboard
 
 **Investigation** — One click from detection to investigation. Every incident includes:
 - OpsCart Assessment: what the pattern means and estimated investigation time
-- Evidence: restart count, state, age, owner
-- Recommended Investigation: High / Medium / Low confidence hints with specific kubectl commands
+- Incident Timeline: an operational journal — first detected, restart milestones, severity changes, resolved/reoccurred — persisted across pod restarts
+- Evidence: severity, first detected, restart count, state, age, owner
+- Blast Radius: replicas down, sibling pod health, services routing to the workload, ingress exposure, namespace-wide health, and a customer-impact heuristic (internal vs. possible external traffic)
+- Recommended Investigation: numbered steps with High / Medium / Low confidence and specific kubectl commands
 - Recent Events: last 10 events filtered to this pod
 - Related Resources: ConfigMaps, Secrets, PVCs referenced by the pod spec
 
@@ -98,9 +102,9 @@ go build -o opscart-dashboard ./cmd/opscart-dashboard
 
 ### Platform
 
-**Operational Memory** — OpsCart remembers what happened. A lightweight local database tracks cluster snapshots, incident history (first seen, last seen, active/resolved), and scan metadata. Powers trend arrows, sparklines, and incident age on the Investigation page. Backed by SQLite (~5MB), stored at `/data/opscart.db`.
+**Operational Memory** — OpsCart remembers what happened. A lightweight local database tracks cluster snapshots, incident lifecycle (detected → milestones → resolved → reopened) as an append-only event journal, and scan metadata. Powers trend arrows, sparklines, incident age, and the per-incident timeline. Backed by SQLite, persisted on a PVC that survives pod restarts and `helm uninstall`.
 
-**Helm Chart** — Full Helm chart with configurable values, read-only RBAC, non-root security context, and EmptyDir volume for persistence.
+**Helm Chart** — Full Helm chart with configurable values, PVC-backed persistence, read-only RBAC, and non-root security context. See the [chart README](helm/opscart-watcher/README.md) for persistence options, minikube notes, and all values.
 
 **Agentless** — Runs as a single container. No sidecars, no DaemonSets, no node access, no cloud credentials.
 
@@ -142,14 +146,9 @@ OpsCart is not a replacement for these tools. It is the triage layer that tells 
 
 ## Helm Configuration
 
-| Parameter | Default | Description |
-|-----------|---------|-------------|
-| `image.repository` | `ghcr.io/opscart/opscart-dashboard` | Image repository |
-| `image.tag` | `latest` | Image tag |
-| `namespace.name` | `opscart-system` | Target namespace |
-| `service.type` | `ClusterIP` | Service type |
-| `resources.requests.memory` | `64Mi` | Memory request |
-| `resources.limits.memory` | `256Mi` | Memory limit |
+See [helm/opscart-watcher/README.md](helm/opscart-watcher/README.md)
+for the full values reference, persistence configuration, and
+environment-specific notes (minikube, multi-node, local images).
 
 ---
 
@@ -170,11 +169,10 @@ go build -o opscart-scan ./cmd/opscart-scan
 
 ## Coming Next
 
-- Persistent incident history (PVC-backed SQLite)
-- Blast radius analysis (services and ingresses affected per incident)
-- Change detection ("new since yesterday" / "resolved since yesterday")
+- Restart acceleration in assessments ("22% increase since yesterday")
+- Root cause confidence scoring (deterministic, evidence-based)
+- Related incidents (cross-incident correlation within a namespace)
 - Slack and Teams notifications
-
 ---
 
 ## Disclaimer

@@ -2,15 +2,17 @@
 
 image:
   repository: ghcr.io/opscart/opscart-dashboard
-  tag: "v1.3.0"
+  tag: "v1.7.0"
+  # For local development with a locally-built image (e.g. minikube):
+  # the image must be loaded under the EXACT repository:tag rendered by
+  # this chart — kubelet does no fuzzy matching with pullPolicy Never.
+  #   docker build -t ghcr.io/opscart/opscart-dashboard:dev .
+  #   minikube image load ghcr.io/opscart/opscart-dashboard:dev
+  #   helm upgrade ... --set image.tag=dev --set image.pullPolicy=Never
   pullPolicy: Always
 
 nameOverride: ""
 fullnameOverride: ""
-
-namespace:
-  create: true
-  name: opscart-system
 
 serviceAccount:
   create: true
@@ -20,6 +22,12 @@ service:
   type: ClusterIP
   port: 80
   targetPort: 8080
+
+persistence:
+  enabled: true
+  size: 1Gi
+  storageClassName: ""   # empty = cluster default
+  existingClaim: ""      # use a pre-created PVC instead of templating one
 
 resources:
   requests:
@@ -37,8 +45,17 @@ podSecurityContext:
   runAsNonRoot: true
   runAsUser: 65534
   runAsGroup: 65534
+  fsGroup: 65534   
   seccompProfile:
     type: RuntimeDefault
+
+volumePermissions:
+  # Enable when the storage provisioner doesn't honor fsGroup
+  # (e.g. minikube hostpath-provisioner, some NFS provisioners).
+  # Runs a root init container to chown the data volume.
+  enabled: false
+
+nodeSelector: {}
 
 probes:
   readiness:
