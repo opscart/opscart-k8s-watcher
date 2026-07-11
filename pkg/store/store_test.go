@@ -50,6 +50,46 @@ func TestOpenAndMigrate(t *testing.T) {
 	}
 }
 
+func TestWALModeActive(t *testing.T) {
+	s := openTestStore(t)
+
+	var mode string
+	if err := s.db.QueryRow("PRAGMA journal_mode").Scan(&mode); err != nil {
+		t.Fatalf("PRAGMA journal_mode: %v", err)
+	}
+	if mode != "wal" {
+		t.Fatalf("expected journal_mode=wal, got %q", mode)
+	}
+}
+
+func TestClose_SubsequentOpsFailCleanly(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "close.db")
+	s, err := OpenSQLite(path)
+	if err != nil {
+		t.Fatalf("OpenSQLite: %v", err)
+	}
+
+	if err := s.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	if err := s.WriteSnapshot("test-cluster", "scan-1", SnapshotData{}); err == nil {
+		t.Fatalf("expected WriteSnapshot to fail on a closed store")
+	}
+	if err := s.UpsertIncidents("test-cluster", "scan-1", []IncidentData{{Fingerprint: "fp"}}); err == nil {
+		t.Fatalf("expected UpsertIncidents to fail on a closed store")
+	}
+	if _, err := s.GetIncidentTimeline("test-cluster", "fp"); err == nil {
+		t.Fatalf("expected GetIncidentTimeline to fail on a closed store")
+	}
+
+	// Close is safe to call again (mirrors main.go's single deferred Close
+	// alongside any explicit shutdown-path close).
+	if err := s.Close(); err != nil {
+		t.Fatalf("second Close should not error, got: %v", err)
+	}
+}
+
 func TestSnapshotRoundTrip(t *testing.T) {
 	s := openTestStore(t)
 
