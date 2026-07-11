@@ -82,6 +82,10 @@ func getKubernetesClient(clusterContext string) (*kubernetes.Clientset, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to load kubeconfig: %w", err)
 	}
+	// Default client-go limits (QPS 5, Burst 10) cause skipped sub-scans on
+	// large clusters ("context deadline exceeded").
+	config.QPS = 50
+	config.Burst = 100
 
 	clientset, err := kubernetes.NewForConfig(config)
 	if err != nil {

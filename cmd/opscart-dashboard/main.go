@@ -3040,6 +3040,10 @@ func kubeClient(ctx string) (*kubernetes.Clientset, error) {
 	if err != nil {
 		return nil, fmt.Errorf("loading kubeconfig for %q: %w", displayName(ctx), err)
 	}
+	// Default client-go limits (QPS 5, Burst 10) cause multi-second scans and
+	// skipped sub-scans ("context deadline exceeded") on large clusters.
+	cfg.QPS = 50
+	cfg.Burst = 100
 	return kubernetes.NewForConfig(cfg)
 }
 func newScanID() string {

@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/opscart/opscart-k8s-watcher/pkg/kube"
 	autoscalingv2 "k8s.io/api/autoscaling/v2"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -890,8 +891,7 @@ func (w *WasteAuditor) detectOrphanedServices(audit *WasteAudit, filterNamespace
 		}
 
 		// Check endpoints
-		endpoints, err := w.clientset.CoreV1().Endpoints(svc.Namespace).Get(w.ctx, svc.Name, metav1.GetOptions{})
-		hasEndpoints := err == nil && len(endpoints.Subsets) > 0
+		hasEndpoints, _ := kube.ServiceHasReadyEndpoints(w.ctx, w.clientset, svc.Namespace, svc.Name)
 
 		if !hasEndpoints {
 			isLB := svc.Spec.Type == corev1.ServiceTypeLoadBalancer
@@ -971,8 +971,8 @@ func (w *WasteAuditor) detectBrokenIngresses(audit *WasteAudit, filterNamespace 
 					continue
 				}
 				svcName := path.Backend.Service.Name
-				ep, err := w.clientset.CoreV1().Endpoints(ing.Namespace).Get(w.ctx, svcName, metav1.GetOptions{})
-				if err != nil || len(ep.Subsets) == 0 {
+				hasReady, _ := kube.ServiceHasReadyEndpoints(w.ctx, w.clientset, ing.Namespace, svcName)
+				if !hasReady {
 					missingBackends = append(missingBackends, fmt.Sprintf("%s → %s (no endpoints)", rule.Host, svcName))
 				}
 			}
@@ -981,8 +981,8 @@ func (w *WasteAuditor) detectBrokenIngresses(audit *WasteAudit, filterNamespace 
 		// Also check default backend
 		if ing.Spec.DefaultBackend != nil && ing.Spec.DefaultBackend.Service != nil {
 			svcName := ing.Spec.DefaultBackend.Service.Name
-			ep, err := w.clientset.CoreV1().Endpoints(ing.Namespace).Get(w.ctx, svcName, metav1.GetOptions{})
-			if err != nil || len(ep.Subsets) == 0 {
+			hasReady, _ := kube.ServiceHasReadyEndpoints(w.ctx, w.clientset, ing.Namespace, svcName)
+			if !hasReady {
 				missingBackends = append(missingBackends, fmt.Sprintf("default-backend → %s (no endpoints)", svcName))
 			}
 		}

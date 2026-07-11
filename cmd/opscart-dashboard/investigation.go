@@ -372,6 +372,9 @@ func blastRadiusSiblings(clientset *kubernetes.Clientset, namespace, ownerKind, 
 			}
 			return true
 		}()
+		if !isHealthy && status == string(corev1.PodRunning) {
+			status = "Running (not ready)"
+		}
 		pods = append(pods, blastRadiusPod{
 			Name:    p.Name,
 			Phase:   status,
@@ -391,7 +394,6 @@ func blastRadiusServices(clientset *kubernetes.Clientset, namespace string, podL
 	if err != nil {
 		return nil
 	}
-	log.Printf("blastRadiusServices: found %d services in %s, podLabels=%v", len(list.Items), namespace, podLabels) // temp
 	var results []blastRadiusService
 	for _, svc := range list.Items {
 		if len(svc.Spec.Selector) == 0 {

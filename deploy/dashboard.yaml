@@ -19,6 +19,7 @@ metadata:
 # networkpolicies           — network.go (unprotected namespace detection)
 # persistentvolumeclaims    — waste.go (unbound PVC detection)
 # horizontalpodautoscalers  — waste.go
+# endpointslices            — waste.go, scanner/enhanced.go (service backend readiness)
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
@@ -46,6 +47,9 @@ rules:
     verbs: ["get", "list"]
   - apiGroups: ["networking.k8s.io"]
     resources: ["networkpolicies", "ingresses"]
+    verbs: ["get", "list"]
+  - apiGroups: ["discovery.k8s.io"]
+    resources: ["endpointslices"]
     verbs: ["get", "list"]
 
 ---
