@@ -394,7 +394,6 @@ func blastRadiusServices(clientset *kubernetes.Clientset, namespace string, podL
 	if err != nil {
 		return nil
 	}
-	log.Printf("blastRadiusServices: found %d services in %s, podLabels=%v", len(list.Items), namespace, podLabels) // temp
 	var results []blastRadiusService
 	for _, svc := range list.Items {
 		if len(svc.Spec.Selector) == 0 {
