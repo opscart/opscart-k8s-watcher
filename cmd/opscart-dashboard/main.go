@@ -243,10 +243,11 @@ type server struct {
 	states        map[string]*dashboardState
 	db            store.Store
 	retentionDays int
+	dbPersistent  bool
 }
 
-func newServer(clusterList []string, db store.Store, retentionDays int) *server {
-	return &server{clusterList: clusterList, states: make(map[string]*dashboardState), db: db, retentionDays: retentionDays}
+func newServer(clusterList []string, db store.Store, retentionDays int, dbPersistent bool) *server {
+	return &server{clusterList: clusterList, states: make(map[string]*dashboardState), db: db, retentionDays: retentionDays, dbPersistent: dbPersistent}
 }
 
 func (srv *server) getState(ctx string) *dashboardState {
@@ -349,15 +350,17 @@ func runDashboard(_ *cobra.Command, _ []string) error {
 		}
 	}
 	var db store.Store
+	dbPersistent := false
 	if sqlDB, err := store.OpenSQLite(dbPath); err != nil {
 		log.Printf("store: persistence disabled (%v)", err)
 		db = &store.NullStore{}
 	} else {
 		db = sqlDB
+		dbPersistent = true
 		log.Printf("store: operational memory at %s", dbPath)
 	}
 	defer db.Close()
-	srv := newServer(cl, db, retentionDays)
+	srv := newServer(cl, db, retentionDays, dbPersistent)
 
 	log.Printf("Scanning cluster %q ...", displayName(cl[0]))
 	if err := srv.getState(cl[0]).refresh(cl); err != nil {
@@ -378,7 +381,7 @@ func runDashboard(_ *cobra.Command, _ []string) error {
 	mux.HandleFunc("/infrastructure", srv.handleInfrastructurePage)
 	mux.HandleFunc("/namespaces", srv.handleNamespacesPage)
 	mux.HandleFunc("/optimizations", srv.handleOptimizationsPage)
-	mux.HandleFunc("/healthz", handleHealth)
+	mux.HandleFunc("/healthz", srv.handleHealth)
 	mux.HandleFunc("/investigate", srv.handleInvestigationPage)
 	mux.HandleFunc("/incidents", srv.handleIncidentsPage)
 	mux.HandleFunc("/security", srv.handleSecurityPage)
@@ -626,9 +629,14 @@ func (srv *server) handleWarRoom(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(issues)
 }
 
-func handleHealth(w http.ResponseWriter, _ *http.Request) {
+func (srv *server) handleHealth(w http.ResponseWriter, _ *http.Request) {
+	persistence := "ephemeral"
+	if srv.dbPersistent {
+		persistence = "persistent"
+	}
+	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
-	fmt.Fprintln(w, "ok")
+	fmt.Fprintf(w, `{"status":"ok","persistence":"%s"}`, persistence)
 }
 
 // ── War Room helpers ──────────────────────────────────────────────────────────
