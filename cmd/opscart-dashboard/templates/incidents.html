@@ -7,151 +7,315 @@
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
 {{template "base" .}}
 <style>
-.summary-bar{display:flex;gap:1rem;margin-bottom:2rem;flex-wrap:wrap}
-.summary-chip{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius-sm);padding:0.75rem 1.25rem;display:flex;align-items:center;gap:0.75rem;min-width:160px}
-.summary-chip.c{border-color:rgba(239,68,68,0.35)}
-.summary-chip.w{border-color:rgba(245,158,11,0.35)}
-.summary-chip.ok{border-color:rgba(16,185,129,0.35)}
-.summary-num{font-size:1.6rem;font-weight:800;line-height:1}
-.c .summary-num{color:var(--danger)}
-.w .summary-num{color:var(--warning)}
-.ok .summary-num{color:var(--success)}
-.summary-lbl{font-size:0.72rem;color:var(--text-muted);text-transform:uppercase;letter-spacing:0.5px;line-height:1.3}
-.wr-section{margin-bottom:2.5rem}
-.wr-section-hdr{display:flex;align-items:center;gap:0.75rem;margin-bottom:1rem;padding-bottom:0.75rem;border-bottom:1px solid var(--border)}
-.wr-section-hdr h2{font-size:1rem;font-weight:700}
-.cnt-chip{padding:3px 10px;border-radius:20px;font-size:0.7rem;font-weight:700}
-.cnt-chip.c{background:rgba(239,68,68,0.15);color:#f87171}
-.cnt-chip.w{background:rgba(245,158,11,0.15);color:#fbbf24}
-.wr-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(340px,1fr));gap:1rem}
-.wr-card{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:1.25rem;display:flex;flex-direction:column;gap:0.55rem;transition:border-color 0.2s;animation:fadeIn 0.3s ease both}
-.wr-card.c{border-color:rgba(239,68,68,0.3);background:rgba(239,68,68,0.025)}
-.wr-card.w{border-color:rgba(245,158,11,0.25);background:rgba(245,158,11,0.02)}
-.wr-card:hover{border-color:var(--primary)}
-.wr-type-crash-loop{border-left:3px solid rgba(239,68,68,0.6)}
-.wr-type-oomkilled{border-left:3px solid rgba(249,115,22,0.6)}
-.wr-type-image-pull-backoff{border-left:3px solid rgba(234,179,8,0.6)}
-.wr-type-privileged-container{border-left:3px solid rgba(139,92,246,0.6)}
-.wr-type-unprotected-namespace{border-left:3px solid rgba(59,130,246,0.6)}
-.wr-type-orphaned-pvc{border-left:3px solid rgba(100,116,139,0.5)}
-.wr-type-zero-replica{border-left:3px solid rgba(100,116,139,0.4)}
-.wr-type-icon{display:inline-flex;align-items:center;justify-content:center;
-  width:16px;height:16px;margin-right:2px;vertical-align:middle;flex-shrink:0}
-.wri-crash::before{content:"";display:block;width:14px;height:14px;
-  background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='14' height='14' viewBox='0 0 24 24' fill='none' stroke='%23f87171' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpolyline points='23 4 23 10 17 10'/%3E%3Cpolyline points='1 20 1 14 7 14'/%3E%3Cpath d='M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15'/%3E%3C/svg%3E");
-  background-repeat:no-repeat;background-size:contain}
-.wri-oom::before{content:"";display:block;width:14px;height:14px;
-  background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='14' height='14' viewBox='0 0 24 24' fill='none' stroke='%23fb923c' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Crect x='4' y='4' width='16' height='16' rx='2'/%3E%3Crect x='9' y='9' width='6' height='6'/%3E%3Cline x1='9' y1='1' x2='9' y2='4'/%3E%3Cline x1='15' y1='1' x2='15' y2='4'/%3E%3Cline x1='9' y1='20' x2='9' y2='23'/%3E%3Cline x1='15' y1='20' x2='15' y2='23'/%3E%3Cline x1='20' y1='9' x2='23' y2='9'/%3E%3Cline x1='20' y1='14' x2='23' y2='14'/%3E%3Cline x1='1' y1='9' x2='4' y2='9'/%3E%3Cline x1='1' y1='14' x2='4' y2='14'/%3E%3C/svg%3E");
-  background-repeat:no-repeat;background-size:contain}
-.wri-image::before{content:"";display:block;width:14px;height:14px;
-  background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='14' height='14' viewBox='0 0 24 24' fill='none' stroke='%23eab308' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z'/%3E%3Cpolyline points='3.27 6.96 12 12.01 20.73 6.96'/%3E%3Cline x1='12' y1='22.08' x2='12' y2='12'/%3E%3C/svg%3E");
-  background-repeat:no-repeat;background-size:contain}
-.wri-priv::before{content:"";display:block;width:14px;height:14px;
-  background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='14' height='14' viewBox='0 0 24 24' fill='none' stroke='%23a78bfa' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z'/%3E%3Cline x1='12' y1='8' x2='12' y2='12'/%3E%3Cline x1='12' y1='16' x2='12.01' y2='16'/%3E%3C/svg%3E");
-  background-repeat:no-repeat;background-size:contain}
-.wri-netpol::before{content:"";display:block;width:14px;height:14px;
-  background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='14' height='14' viewBox='0 0 24 24' fill='none' stroke='%2360a5fa' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Crect x='3' y='11' width='18' height='11' rx='2' ry='2'/%3E%3Cpath d='M7 11V7a5 5 0 0 1 9.9-1'/%3E%3C/svg%3E");
-  background-repeat:no-repeat;background-size:contain}
-.wri-pvc::before{content:"";display:block;width:14px;height:14px;
-  background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='14' height='14' viewBox='0 0 24 24' fill='none' stroke='%2394a3b8' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cellipse cx='12' cy='5' rx='9' ry='3'/%3E%3Cpath d='M21 12c0 1.66-4 3-9 3s-9-1.34-9-3'/%3E%3Cpath d='M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5'/%3E%3C/svg%3E");
-  background-repeat:no-repeat;background-size:contain}
-.wri-zero::before{content:"";display:block;width:14px;height:14px;
-  background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='14' height='14' viewBox='0 0 24 24' fill='none' stroke='%2394a3b8' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Crect x='6' y='4' width='4' height='16'/%3E%3Crect x='14' y='4' width='4' height='16'/%3E%3C/svg%3E");
-  background-repeat:no-repeat;background-size:contain}
-.wri-default::before{content:"";display:block;width:14px;height:14px;
-  background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='14' height='14' viewBox='0 0 24 24' fill='none' stroke='%2394a3b8' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Ccircle cx='12' cy='12' r='10'/%3E%3Cline x1='12' y1='8' x2='12' y2='12'/%3E%3Cline x1='12' y1='16' x2='12.01' y2='16'/%3E%3C/svg%3E");
-  background-repeat:no-repeat;background-size:contain}
-.wr-top{display:flex;align-items:center;gap:0.5rem;flex-wrap:wrap}
-.badge{padding:2px 8px;border-radius:20px;font-size:0.64rem;font-weight:700;letter-spacing:0.5px}
-.badge.c{background:rgba(239,68,68,0.15);color:#f87171}
-.badge.w{background:rgba(245,158,11,0.15);color:#fbbf24}
-.type-lbl{font-size:0.72rem;color:var(--text-muted)}
-.age-lbl{margin-left:auto;font-size:0.7rem;color:var(--text-muted);white-space:nowrap;background:rgba(255,255,255,0.05);padding:1px 7px;border-radius:4px}
-.wr-name{font-size:0.93rem;font-weight:700;color:var(--text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.wr-ns{font-size:0.73rem;color:var(--text-muted)}
-.wr-reason{font-size:0.78rem;color:var(--text-secondary);line-height:1.55;display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden}
-.wr-cmd{display:flex;align-items:center;gap:0.5rem;background:rgba(0,0,0,0.3);border:1px solid var(--border);border-radius:var(--radius-xs);padding:0.5rem 0.75rem;margin-top:auto}
-.wr-cmd code{font-family:'Consolas','Monaco',monospace;font-size:0.7rem;color:var(--primary-light);flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.copy-btn{background:transparent;border:1px solid var(--border);border-radius:4px;color:var(--text-muted);cursor:pointer;font-size:0.64rem;padding:2px 7px;white-space:nowrap;transition:all 0.15s;flex-shrink:0}
-.copy-btn:hover{background:var(--surface-hover);color:var(--text)}
-.all-clear-box{background:var(--surface);border:1px solid rgba(16,185,129,0.25);border-radius:var(--radius);padding:2.5rem;text-align:center;color:var(--text-muted)}
-.all-clear-box .icon{font-size:2.5rem;margin-bottom:0.5rem}
-.footer{text-align:center;padding:1.5rem 0;color:var(--text-muted);font-size:0.75rem;border-top:1px solid var(--border);margin-top:1rem}
-@media(max-width:640px){.wr-grid{grid-template-columns:1fr}.summary-bar{flex-direction:column}}
+/* ── Filter bar ── */
+.inc-filters{display:flex;gap:.6rem;flex-wrap:wrap;align-items:center;margin-bottom:.85rem}
+.inc-search{flex:1;min-width:260px;display:flex;align-items:center;gap:.5rem;background:var(--surface);border:1px solid var(--border);border-radius:var(--radius-sm);padding:.55rem .9rem;transition:border-color .15s}
+.inc-search:focus-within{border-color:var(--primary-light)}
+.inc-search svg{color:var(--text-muted);flex-shrink:0}
+.inc-search input{background:none;border:none;outline:none;color:var(--text);font:inherit;font-size:.85rem;width:100%}
+.inc-search input::placeholder{color:var(--text-muted)}
+.inc-select{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius-sm);color:var(--text-secondary);font:inherit;font-size:.82rem;padding:.55rem .75rem;outline:none;cursor:pointer;transition:border-color .15s}
+.inc-select:hover,.inc-select:focus{border-color:#475569}
+.inc-select.active-filter{border-color:rgba(129,140,248,.55);color:var(--primary-light)}
+.inc-btn{background:var(--primary-light);border:none;border-radius:var(--radius-sm);color:#fff;font:inherit;font-size:.82rem;font-weight:600;padding:.55rem 1.1rem;cursor:pointer;white-space:nowrap;transition:opacity .15s}
+.inc-btn:hover{opacity:.85}
+.inc-btn-clear{background:transparent;border:1px solid var(--border);border-radius:var(--radius-sm);color:var(--text-muted);font:inherit;font-size:.82rem;padding:.55rem .9rem;cursor:pointer;transition:all .15s}
+.inc-btn-clear:hover{border-color:#475569;color:var(--text)}
+
+/* ── Summary strip ── */
+.inc-summary{display:flex;gap:1.5rem;margin-bottom:.85rem;font-size:.78rem;color:var(--text-muted);flex-wrap:wrap;align-items:center}
+.inc-summary b{color:var(--text);font-weight:700}
+.inc-sum-crit b{color:#f87171}
+.inc-sum-reo b{color:#fbbf24}
+.inc-sum-res b{color:#4ade80}
+.inc-total{margin-left:auto;font-size:.75rem}
+
+/* ── Table ── */
+.inc-tbl-wrap{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);overflow:hidden}
+.inc-tbl{width:100%;border-collapse:collapse;font-size:.82rem}
+.inc-tbl th{text-align:left;padding:.65rem .9rem;font-size:.64rem;text-transform:uppercase;letter-spacing:.5px;color:var(--text-muted);border-bottom:1px solid var(--border);font-weight:600;white-space:nowrap;background:rgba(0,0,0,.15);cursor:default}
+.inc-tbl th.sortable{cursor:pointer;user-select:none}
+.inc-tbl th.sortable:hover{color:var(--text)}
+.inc-tbl th .sort-icon{margin-left:3px;opacity:.5;font-size:.58rem}
+.inc-tbl th.sort-active{color:var(--primary-light)}
+.inc-tbl th.sort-active .sort-icon{opacity:1}
+.inc-tbl td{padding:.6rem .9rem;border-bottom:1px solid rgba(51,65,85,.5);vertical-align:middle;color:var(--text-secondary);white-space:nowrap}
+.inc-tbl tbody tr:last-child td{border-bottom:none}
+.inc-tbl tbody tr{cursor:pointer;transition:background .1s}
+.inc-tbl tbody tr:hover{background:var(--surface-hover)}
+.inc-tbl tr.inc-row-resolved td{opacity:.6}
+.inc-tbl tr.inc-row-resolved:hover td{opacity:.85}
+
+/* severity badge */
+.inc-sev{display:inline-flex;padding:2px 9px;border-radius:20px;font-size:.62rem;font-weight:700;text-transform:uppercase;letter-spacing:.5px;white-space:nowrap}
+.inc-sev-critical{background:rgba(239,68,68,.15);color:#f87171}
+.inc-sev-high{background:rgba(245,158,11,.15);color:#fbbf24}
+.inc-sev-medium{background:rgba(100,116,139,.18);color:#94a3b8}
+.inc-sev-low{background:rgba(100,116,139,.12);color:#64748b}
+
+/* incident name cell */
+.inc-name{font-weight:600;color:var(--text);max-width:220px;overflow:hidden;text-overflow:ellipsis}
+.inc-type{font-family:'Consolas','Monaco',monospace;font-size:.7rem;color:var(--text-muted);margin-top:1px}
+
+/* namespace */
+.inc-ns{font-family:'Consolas','Monaco',monospace;font-size:.76rem;max-width:160px;overflow:hidden;text-overflow:ellipsis}
+
+/* status dot */
+.inc-status{display:inline-flex;align-items:center;gap:.4rem;font-size:.74rem;font-weight:600;white-space:nowrap}
+.inc-dot{width:8px;height:8px;border-radius:50%;flex-shrink:0}
+.inc-status-active .inc-dot{background:#f87171;box-shadow:0 0 6px rgba(248,113,113,.5)}
+.inc-status-active{color:#f87171}
+.inc-status-resolved .inc-dot{background:#4ade80}
+.inc-status-resolved{color:#4ade80}
+.inc-status-reopened .inc-dot{background:#fbbf24;box-shadow:0 0 5px rgba(251,191,36,.45)}
+.inc-status-reopened{color:#fbbf24}
+.inc-reopen-n{font-size:.62rem;color:var(--text-muted);font-weight:500;margin-left:1px}
+
+/* numbers */
+.inc-num{font-variant-numeric:tabular-nums;text-align:right;color:var(--text-secondary)}
+.inc-age{color:var(--text-muted);font-size:.76rem}
+.inc-dash{color:var(--text-muted)}
+
+/* trend */
+.inc-trend{font-size:.74rem;font-weight:600;white-space:nowrap}
+.inc-trend-accelerating{color:#f87171}
+.inc-trend-stable{color:var(--text-muted)}
+.inc-trend-recovering{color:#4ade80}
+
+/* arrow */
+.inc-arrow{color:var(--text-muted);font-size:.85rem;text-align:center}
+
+/* ── Empty state ── */
+.inc-empty{padding:3rem;text-align:center;color:var(--text-muted)}
+.inc-empty-icon{font-size:2rem;margin-bottom:.75rem;opacity:.4}
+.inc-empty-msg{font-size:.9rem;margin-bottom:.4rem;color:var(--text-secondary)}
+.inc-empty-sub{font-size:.78rem}
+
+/* ── Pagination ── */
+.inc-pager{display:flex;justify-content:space-between;align-items:center;padding:.75rem 1rem;font-size:.76rem;color:var(--text-muted);border-top:1px solid var(--border);background:rgba(0,0,0,.1);flex-wrap:wrap;gap:.5rem}
+.inc-pager-btns{display:flex;gap:.3rem;flex-wrap:wrap}
+.inc-pg{border:1px solid var(--border);background:none;color:var(--text-secondary);border-radius:6px;padding:3px 10px;font:inherit;font-size:.75rem;cursor:pointer;transition:all .12s}
+.inc-pg:hover{background:var(--surface-hover);color:var(--text)}
+.inc-pg.inc-pg-cur{background:rgba(99,102,241,.2);border-color:var(--primary-light);color:var(--primary-light);font-weight:700}
+.inc-pg:disabled{opacity:.35;cursor:default}
+
+/* ── War Room callout ── */
+.inc-wr-banner{display:flex;align-items:center;justify-content:space-between;background:rgba(99,102,241,.07);border:1px solid rgba(129,140,248,.2);border-radius:var(--radius-sm);padding:.65rem 1rem;margin-bottom:1rem;font-size:.8rem;color:var(--text-muted)}
+.inc-wr-link{color:var(--primary-light);text-decoration:none;font-weight:600;font-size:.8rem}
+.inc-wr-link:hover{text-decoration:underline}
 </style>
 </head>
 <body>
 <div class="layout">
 {{template "sidebar.html" .}}
 <main class="main">
+
   <div class="page-hdr">
     <div>
-      <h1>🔍 Incidents</h1>
-      <p>{{.ClusterName}} &mdash; {{.StatusDesc}}</p>
+      <h1>Incidents</h1>
+      <p>The system of record — every incident this cluster has seen, active and resolved.</p>
     </div>
     <div class="page-meta">
       <div>Last scanned: <strong id="inc-age">just now</strong></div>
-      <a class="back-link" href="{{.DashURL}}">← Back to Dashboard</a>
     </div>
   </div>
 
-  <div class="summary-bar">
-    <div class="summary-chip {{.CritChipClass}}">
-      <div class="summary-num">{{len .Critical}}</div>
-      <div class="summary-lbl">Critical<br>Issues</div>
-    </div>
-    <div class="summary-chip {{.WarnChipClass}}">
-      <div class="summary-num">{{len .Warnings}}</div>
-      <div class="summary-lbl">High<br>Severity</div>
-    </div>
+  <!-- War Room callout -->
+  <div class="inc-wr-banner">
+    <span>Need immediate triage? <a class="inc-wr-link" href="{{.WrHref}}">War Room shows the top incidents ranked by impact →</a></span>
+    {{if .CriticalCount}}<span style="color:#f87171;font-weight:600">{{.CriticalCount}} critical active</span>{{end}}
   </div>
 
-  <div class="wr-section">
-    <div class="wr-section-hdr">
-      <h2>🔴 Critical Issues</h2>
-      <span class="cnt-chip c">{{len .Critical}}</span>
+  <!-- Filter form -->
+  <form method="GET" action="/incidents" id="inc-form">
+    <input type="hidden" name="cluster" value="{{.ClusterName}}">
+    <div class="inc-filters">
+      <div class="inc-search">
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+        <input type="text" name="q" placeholder="Search — workload name, namespace, issue type…" value="{{.Filter.Text}}" autocomplete="off">
+      </div>
+      <select name="ns" class="inc-select{{if .Filter.Namespace}} active-filter{{end}}" onchange="this.form.submit()">
+        <option value="">Namespace: All</option>
+        {{range .Namespaces}}<option value="{{.}}"{{if eq . $.Filter.Namespace}} selected{{end}}>{{.}}</option>{{end}}
+      </select>
+      <select name="type" class="inc-select{{if .Filter.IssueType}} active-filter{{end}}" onchange="this.form.submit()">
+        <option value="">Type: All</option>
+        <option value="crash_loop"{{if eq .Filter.IssueType "crash_loop"}} selected{{end}}>crash_loop</option>
+        <option value="image_pull_backoff"{{if eq .Filter.IssueType "image_pull_backoff"}} selected{{end}}>image_pull_backoff</option>
+        <option value="oom_killed"{{if eq .Filter.IssueType "oom_killed"}} selected{{end}}>oom_killed</option>
+        <option value="privileged_container"{{if eq .Filter.IssueType "privileged_container"}} selected{{end}}>privileged_container</option>
+        <option value="unprotected_namespace"{{if eq .Filter.IssueType "unprotected_namespace"}} selected{{end}}>unprotected_namespace</option>
+      </select>
+      <select name="severity" class="inc-select{{if .Filter.Severity}} active-filter{{end}}" onchange="this.form.submit()">
+        <option value="">Severity: All</option>
+        <option value="critical"{{if eq .Filter.Severity "critical"}} selected{{end}}>Critical</option>
+        <option value="high"{{if eq .Filter.Severity "high"}} selected{{end}}>High</option>
+        <option value="medium"{{if eq .Filter.Severity "medium"}} selected{{end}}>Medium</option>
+      </select>
+      <select name="status" class="inc-select{{if .Filter.Status}} active-filter{{end}}" onchange="this.form.submit()">
+        <option value="active"{{if eq .Filter.Status "active"}} selected{{end}}>Active</option>
+        <option value=""{{if eq .Filter.Status ""}} selected{{end}}>All</option>
+        <option value="resolved"{{if eq .Filter.Status "resolved"}} selected{{end}}>Resolved</option>
+        <option value="reopened"{{if eq .Filter.Status "reopened"}} selected{{end}}>Reopened</option>
+      </select>
+      <select name="sort" class="inc-select" onchange="this.form.submit()">
+        <option value="severity"{{if eq .Filter.SortBy "severity"}} selected{{end}}>Sort: Severity</option>
+        <option value="first_seen"{{if eq .Filter.SortBy "first_seen"}} selected{{end}}>Sort: First detected</option>
+        <option value="last_seen"{{if eq .Filter.SortBy "last_seen"}} selected{{end}}>Sort: Last seen</option>
+        <option value="restarts"{{if eq .Filter.SortBy "restarts"}} selected{{end}}>Sort: Restarts</option>
+      </select>
+      <button type="submit" class="inc-btn">Search</button>
+      {{if or .Filter.Text .Filter.Namespace .Filter.IssueType .Filter.Severity}}
+      <a href="/incidents?cluster={{.ClusterName}}" class="inc-btn-clear">Clear</a>
+      {{end}}
     </div>
-    {{if eq (len .Critical) 0}}
-    <div class="all-clear-box">
-      <div class="icon">✅</div>
-      <div>No crash-looping, OOMKilled, or ImagePullBackOff pods detected</div>
+  </form>
+
+  <!-- Summary strip -->
+  <div class="inc-summary">
+    {{if .ActiveCount}}<span class="inc-sum-crit"><b>{{.ActiveCount}}</b> active critical</span>{{end}}
+    {{if .ReopenedCount}}<span class="inc-sum-reo"><b>{{.ReopenedCount}}</b> reopened</span>{{end}}
+    {{if .ResolvedCount}}<span class="inc-sum-res"><b>{{.ResolvedCount}}</b> resolved</span>{{end}}
+    <span class="inc-total"><b style="color:var(--text)">{{.Total}}</b> incidents in memory{{if or .Filter.Text .Filter.Namespace .Filter.IssueType .Filter.Severity .Filter.Status}} matching filters{{end}}</span>
+  </div>
+
+  <!-- Registry table -->
+  <div class="inc-tbl-wrap">
+    {{if .Incidents}}
+    <table class="inc-tbl">
+      <thead>
+        <tr>
+          <th>Severity</th>
+          <th>Incident</th>
+          <th>Namespace</th>
+          <th>Status</th>
+          <th class="sortable{{if eq .Filter.SortBy "first_seen"}} sort-active{{end}}">
+            <a href="?cluster={{.ClusterName}}&q={{.Filter.Text}}&ns={{.Filter.Namespace}}&type={{.Filter.IssueType}}&severity={{.Filter.Severity}}&status={{.Filter.Status}}&sort=first_seen" style="color:inherit;text-decoration:none">
+              First detected <span class="sort-icon">▲▼</span>
+            </a>
+          </th>
+          <th class="sortable{{if eq .Filter.SortBy "last_seen"}} sort-active{{end}}">
+            <a href="?cluster={{.ClusterName}}&q={{.Filter.Text}}&ns={{.Filter.Namespace}}&type={{.Filter.IssueType}}&severity={{.Filter.Severity}}&status={{.Filter.Status}}&sort=last_seen" style="color:inherit;text-decoration:none">
+              Last seen <span class="sort-icon">▲▼</span>
+            </a>
+          </th>
+          <th class="sortable{{if eq .Filter.SortBy "restarts"}} sort-active{{end}}" style="text-align:right">
+            <a href="?cluster={{.ClusterName}}&q={{.Filter.Text}}&ns={{.Filter.Namespace}}&type={{.Filter.IssueType}}&severity={{.Filter.Severity}}&status={{.Filter.Status}}&sort=restarts" style="color:inherit;text-decoration:none">
+              Restarts <span class="sort-icon">▲▼</span>
+            </a>
+          </th>
+          <th>Trend</th>
+          <th></th>
+        </tr>
+      </thead>
+      <tbody>
+        {{range .Incidents}}
+        <tr class="{{if eq .Status "resolved"}}inc-row-resolved{{end}}"
+            onclick="window.location='/investigate?pod={{.Resource}}&ns={{.Namespace}}&type={{.IssueType}}&cluster={{$.ClusterName}}'">
+          <td>
+            <span class="inc-sev inc-sev-{{.Severity}}">{{.Severity}}</span>
+          </td>
+          <td>
+            <div class="inc-name">
+              {{if eq .IssueType "unprotected_namespace"}}{{.Namespace}}{{else}}{{.Resource}}{{end}}
+            </div>
+            <div class="inc-type">{{.IssueType}}</div>
+          </td>
+          <td class="inc-ns">{{.Namespace}}</td>
+          <td>
+            {{if eq .Status "resolved"}}
+              <span class="inc-status inc-status-resolved"><span class="inc-dot"></span>Resolved</span>
+            {{else if gt .ReopenCount 0}}
+              <span class="inc-status inc-status-reopened"><span class="inc-dot"></span>Reopened<span class="inc-reopen-n">×{{.ReopenCount}}</span></span>
+            {{else}}
+              <span class="inc-status inc-status-active"><span class="inc-dot"></span>Active</span>
+            {{end}}
+          </td>
+          <td class="inc-age">{{firstDetected .FirstSeen}}</td>
+          <td class="inc-age">{{lastSeen .LastSeen}}</td>
+          <td class="inc-num">
+            {{if gt .RestartCount 0}}{{.RestartCount}}{{else}}<span class="inc-dash">—</span>{{end}}
+          </td>
+          <td>
+            {{if .Trend}}
+              <span class="inc-trend inc-trend-{{.Trend}}">
+                {{if eq .Trend "accelerating"}}↑ accelerating
+                {{else if eq .Trend "stable"}}→ stable
+                {{else if eq .Trend "recovering"}}↓ recovering
+                {{else}}{{.Trend}}{{end}}
+              </span>
+            {{else if eq .Status "resolved"}}
+              <span class="inc-age">recovered in {{recoveredIn .FirstSeen .LastSeen}}</span>
+            {{else}}
+              <span class="inc-dash">—</span>
+            {{end}}
+          </td>
+          <td class="inc-arrow">→</td>
+        </tr>
+        {{end}}
+      </tbody>
+    </table>
+
+    <!-- Pagination -->
+    <div class="inc-pager">
+      <span>
+        Showing <b style="color:var(--text)">{{pageStart .Page .PerPage}}–{{pageEnd .Page .PerPage .Total}}</b>
+        of <b style="color:var(--text)">{{.Total}}</b>
+        {{if gt .Total 1}}incidents{{else}}incident{{end}}
+        · sorted by {{.Filter.SortBy}}, newest first
+      </span>
+      <div class="inc-pager-btns">
+        {{if gt .Page 1}}
+        <a href="?cluster={{.ClusterName}}&q={{.Filter.Text}}&ns={{.Filter.Namespace}}&type={{.Filter.IssueType}}&severity={{.Filter.Severity}}&status={{.Filter.Status}}&sort={{.Filter.SortBy}}&page={{prevPage .Page}}">
+          <button class="inc-pg">‹ Prev</button>
+        </a>
+        {{end}}
+        {{range pageRange .Page .TotalPages}}
+        <a href="?cluster={{.ClusterName}}&q={{$.Filter.Text}}&ns={{$.Filter.Namespace}}&type={{$.Filter.IssueType}}&severity={{$.Filter.Severity}}&status={{$.Filter.Status}}&sort={{$.Filter.SortBy}}&page={{.}}">
+          <button class="inc-pg{{if eq . $.Page}} inc-pg-cur{{end}}">{{.}}</button>
+        </a>
+        {{end}}
+        {{if lt .Page .TotalPages}}
+        <a href="?cluster={{.ClusterName}}&q={{.Filter.Text}}&ns={{.Filter.Namespace}}&type={{.Filter.IssueType}}&severity={{.Filter.Severity}}&status={{.Filter.Status}}&sort={{.Filter.SortBy}}&page={{nextPage .Page .TotalPages}}">
+          <button class="inc-pg">Next ›</button>
+        </a>
+        {{end}}
+      </div>
     </div>
+
     {{else}}
-    <div class="wr-grid">
-      {{range .Critical}}{{renderCard .}}{{end}}
+    <!-- Empty state -->
+    <div class="inc-empty">
+      <div class="inc-empty-icon">🔍</div>
+      <div class="inc-empty-msg">No incidents match your filters</div>
+      <div class="inc-empty-sub">
+        {{if or .Filter.Text .Filter.Namespace .Filter.IssueType .Filter.Severity}}
+          Try clearing some filters — <a href="/incidents?cluster={{.ClusterName}}" style="color:var(--primary-light)">show all active</a>
+        {{else}}
+          No active incidents detected. This cluster looks healthy.
+        {{end}}
+      </div>
     </div>
     {{end}}
   </div>
 
-  <div class="wr-section">
-    <div class="wr-section-hdr">
-      <h2>🟡 High Severity</h2>
-      <span class="cnt-chip w">{{len .Warnings}}</span>
-    </div>
-    {{if eq (len .Warnings) 0}}
-    <div class="all-clear-box">
-      <div class="icon">✅</div>
-      <div>No unprotected namespaces, orphaned PVCs, or zero-replica workloads detected</div>
-    </div>
-    {{else}}
-    <div class="wr-grid">
-      {{range .Warnings}}{{renderCard .}}{{end}}
-    </div>
-    {{end}}
-  </div>
-
-  <div class="footer">OpsCart FinOps Engine &middot; Incidents &middot; All active issues &mdash; verify with owners before acting</div>
 </main>
 </div>
 <script>
 (function(){
-  var TS={{.ScannedAtMs}},el=document.getElementById('inc-age');
+  var el = document.getElementById('inc-age');
+  var TS = Date.now();
   function upd(){
-    var s=Math.floor((Date.now()-TS)/1000);
-    var t=s<5?'just now':s<60?s+'s ago':Math.floor(s/60)+'m ago';
-    if(el)el.textContent=t;
+    var s = Math.floor((Date.now()-TS)/1000);
+    var t = s<5?'just now':s<60?s+'s ago':Math.floor(s/60)+'m ago';
+    if(el) el.textContent = t;
   }
-  setInterval(upd,1000);upd();
+  setInterval(upd,1000); upd();
+  // submit form on Enter in search box
+  var inp = document.querySelector('.inc-search input');
+  if(inp) inp.addEventListener('keydown', function(e){
+    if(e.key==='Enter'){ e.preventDefault(); document.getElementById('inc-form').submit(); }
+  });
 })();
 </script>
 </body>

@@ -1,5 +1,7 @@
 package store
 
+import "time"
+
 // NullStore is a no-op Store implementation used when persistence is
 // disabled.
 type NullStore struct{}
@@ -36,6 +38,14 @@ func (NullStore) GetIncidentHistory(cluster string, fingerprint string) (*Incide
 
 func (NullStore) GetIncidentTimeline(cluster string, fingerprint string) ([]IncidentEvent, error) {
 	return nil, nil
+}
+
+func (NullStore) QueryIncidents(f IncidentFilter) ([]IncidentSummary, int, error) {
+	return nil, 0, nil
+}
+
+func (NullStore) PruneOlderThan(cluster string, cutoff time.Time) (int, error) {
+	return 0, nil
 }
 
 func (NullStore) Close() error {
