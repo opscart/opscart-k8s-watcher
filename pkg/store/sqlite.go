@@ -3,6 +3,7 @@ package store
 import (
 	"database/sql"
 	"fmt"
+	"strings"
 	"time"
 
 	_ "modernc.org/sqlite"
@@ -13,7 +14,7 @@ var _ Store = (*SQLiteStore)(nil)
 // schemaVersion is stored in PRAGMA user_version. Bump it whenever the
 // schema changes, and teach migrateSchema how to reach it from the
 // previous version.
-const schemaVersion = 3
+const schemaVersion = 4
 
 // restartMilestones are the restart-count thresholds that generate a
 // RestartMilestone timeline event when crossed.
@@ -27,6 +28,8 @@ var restartMilestones = []int{10, 50, 100, 500, 1000, 2500, 5000, 10000}
 const resolveThreshold = 3
 
 const schema = `
+PRAGMA auto_vacuum = INCREMENTAL;
+
 CREATE TABLE IF NOT EXISTS cluster_snapshots (
     id              INTEGER PRIMARY KEY AUTOINCREMENT,
     scan_id         TEXT    NOT NULL,
@@ -61,6 +64,9 @@ CREATE TABLE IF NOT EXISTS incidents (
     missing_scans         INTEGER NOT NULL DEFAULT 0
 );
 CREATE UNIQUE INDEX IF NOT EXISTS idx_inc_fp ON incidents(cluster, fingerprint);
+CREATE INDEX IF NOT EXISTS idx_incidents_cluster_status ON incidents(cluster, status);
+CREATE INDEX IF NOT EXISTS idx_incidents_cluster_ns ON incidents(cluster, namespace);
+CREATE INDEX IF NOT EXISTS idx_incidents_cluster_first ON incidents(cluster, first_seen);
 
 CREATE TABLE IF NOT EXISTS scan_history (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -177,6 +183,17 @@ func migrateSchema(db *sql.DB) error {
 		    message       TEXT
 		);
 		CREATE INDEX IF NOT EXISTS idx_incident_events_incident ON incident_events(incident_id, occurred_at);
+	`); err != nil {
+		return err
+	}
+
+	// Query-path indexes for the incidents registry (QueryIncidents). Added
+	// unconditionally and idempotently regardless of the version being
+	// migrated from — cheap to check, safe to re-run.
+	if _, err := tx.Exec(`
+		CREATE INDEX IF NOT EXISTS idx_incidents_cluster_status ON incidents(cluster, status);
+		CREATE INDEX IF NOT EXISTS idx_incidents_cluster_ns ON incidents(cluster, namespace);
+		CREATE INDEX IF NOT EXISTS idx_incidents_cluster_first ON incidents(cluster, first_seen);
 	`); err != nil {
 		return err
 	}
@@ -668,6 +685,414 @@ func (s *SQLiteStore) GetIncidentTimeline(cluster string, fingerprint string) ([
 		})
 	}
 	return out, rows.Err()
+}
+
+// inClause builds a "?,?,?" placeholder string and matching args slice for
+// an IN(...) clause over ids. Callers must guard len(ids) == 0 themselves
+// (an empty IN() is invalid SQL).
+func inClause(ids []int64) (string, []any) {
+	placeholders := make([]string, len(ids))
+	args := make([]any, len(ids))
+	for i, id := range ids {
+		placeholders[i] = "?"
+		args[i] = id
+	}
+	return strings.Join(placeholders, ","), args
+}
+
+// orderByClause maps IncidentFilter.SortBy to a trusted (non-user-supplied)
+// ORDER BY expression. Every branch is a fixed string from this switch, so
+// interpolating it into the query below is not a SQL-injection risk. A
+// secondary "id" sort keeps pagination deterministic when the primary key
+// has ties.
+func orderByClause(sortBy string, desc bool) string {
+	col := "last_seen"
+	switch sortBy {
+	case "severity":
+		col = `CASE severity
+			WHEN 'critical' THEN 0
+			WHEN 'high' THEN 1
+			WHEN 'medium' THEN 2
+			WHEN 'low' THEN 3
+			ELSE 4
+		END`
+	case "first_seen":
+		col = "first_seen"
+	case "restarts":
+		col = "current_restart_count"
+	case "last_seen", "":
+		col = "last_seen"
+	}
+	dir := "ASC"
+	if desc {
+		dir = "DESC"
+	}
+	return col + " " + dir + ", id " + dir
+}
+
+// trendEvent is one DETECTED/RestartMilestone event, used by deriveTrend.
+type trendEvent struct {
+	occurredAt   int64
+	restartCount int
+}
+
+// batchReopenCounts returns, for each incident id, the number of REOPENED
+// events in its journal. One query for the whole page — never per-row.
+func (s *SQLiteStore) batchReopenCounts(ids []int64) (map[int64]int, error) {
+	counts := make(map[int64]int, len(ids))
+	if len(ids) == 0 {
+		return counts, nil
+	}
+	placeholders, args := inClause(ids)
+	rows, err := s.db.Query(fmt.Sprintf(
+		`SELECT incident_id, COUNT(*) FROM incident_events
+		 WHERE incident_id IN (%s) AND event_type = 'REOPENED'
+		 GROUP BY incident_id`,
+		placeholders,
+	), args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var id int64
+		var count int
+		if err := rows.Scan(&id, &count); err != nil {
+			return nil, err
+		}
+		counts[id] = count
+	}
+	return counts, rows.Err()
+}
+
+// batchTrendEvents returns, for each incident id, its two most recent
+// DETECTED/RestartMilestone events (newest first) — the only journal
+// entries that carry both a restart count and a timestamp without scanning
+// every event. One windowed query for the whole page.
+func (s *SQLiteStore) batchTrendEvents(ids []int64) (map[int64][]trendEvent, error) {
+	out := make(map[int64][]trendEvent, len(ids))
+	if len(ids) == 0 {
+		return out, nil
+	}
+	placeholders, args := inClause(ids)
+	rows, err := s.db.Query(fmt.Sprintf(`
+		SELECT incident_id, occurred_at, restart_count FROM (
+			SELECT incident_id, occurred_at, restart_count,
+				ROW_NUMBER() OVER (
+					PARTITION BY incident_id
+					ORDER BY occurred_at DESC, id DESC
+				) AS rn
+			FROM incident_events
+			WHERE incident_id IN (%s)
+			  AND (event_type = 'DETECTED'
+				OR (event_type = 'UPDATED' AND event_reason = 'RestartMilestone'))
+		) WHERE rn <= 2
+		ORDER BY incident_id, occurred_at DESC
+	`, placeholders), args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var id int64
+		var e trendEvent
+		if err := rows.Scan(&id, &e.occurredAt, &e.restartCount); err != nil {
+			return nil, err
+		}
+		out[id] = append(out[id], e)
+	}
+	return out, rows.Err()
+}
+
+// deriveTrend classifies an active incident's restart trajectory as
+// "accelerating" or "stable" from its two most recent milestone-relevant
+// events (DETECTED and RestartMilestone) — the cheapest points in the
+// journal that carry both a restart count and a timestamp.
+//
+// Heuristic: lifetimeRate is total restarts/day since first_seen. recentRate
+// is restarts/day between the two most recent events. If recentRate exceeds
+// lifetimeRate by more than 25%, the incident is "accelerating" (restarting
+// faster than its own history predicts). Otherwise — including incidents
+// with fewer than two such events, or whose most recent event is more than
+// 24h old (no recent movement to compare) — it is "stable".
+//
+// This intentionally approximates a 48h window with whatever two events
+// happen to exist rather than sampling restart_count on a fixed schedule,
+// so it stays a single indexed query with no per-row journal scan.
+// "recovering" is reserved for a future trend dimension (e.g. severity
+// de-escalation): restart counts are monotonically non-decreasing within an
+// incident's active lifetime, so this heuristic never emits it.
+func deriveTrend(events []trendEvent, currentRestart int, firstSeenUnix int64) string {
+	now := time.Now().Unix()
+
+	daysSinceFirst := float64(now-firstSeenUnix) / 86400
+	if daysSinceFirst < 1 {
+		daysSinceFirst = 1
+	}
+	lifetimeRate := float64(currentRestart) / daysSinceFirst
+
+	if len(events) < 2 {
+		return "stable"
+	}
+	// events[0] is the most recent (see batchTrendEvents' DESC ordering).
+	latest, prev := events[0], events[1]
+
+	if now-latest.occurredAt > 24*3600 {
+		return "stable"
+	}
+
+	elapsedHours := float64(latest.occurredAt-prev.occurredAt) / 3600
+	if elapsedHours < 1 {
+		elapsedHours = 1
+	}
+	recentRate := float64(latest.restartCount-prev.restartCount) / (elapsedHours / 24)
+
+	if recentRate > lifetimeRate*1.25 {
+		return "accelerating"
+	}
+	return "stable"
+}
+
+// QueryIncidents implements the incidents registry: a filtered, sorted,
+// paginated view over the incidents table plus derived per-row fields
+// (ReopenCount, Trend) computed with two batched follow-up queries rather
+// than per-row lookups.
+func (s *SQLiteStore) QueryIncidents(f IncidentFilter) ([]IncidentSummary, int, error) {
+	where := []string{"cluster = ?"}
+	args := []any{f.Cluster}
+
+	if f.Text != "" {
+		like := "%" + f.Text + "%"
+		where = append(where, "(resource LIKE ? OR namespace LIKE ? OR issue_type LIKE ?)")
+		args = append(args, like, like, like)
+	}
+	if f.Namespace != "" {
+		where = append(where, "namespace = ?")
+		args = append(args, f.Namespace)
+	}
+	if f.IssueType != "" {
+		where = append(where, "issue_type = ?")
+		args = append(args, f.IssueType)
+	}
+	if f.Severity != "" {
+		where = append(where, "severity = ?")
+		args = append(args, f.Severity)
+	}
+	if !f.SinceFirst.IsZero() {
+		where = append(where, "first_seen >= ?")
+		args = append(args, f.SinceFirst.Unix())
+	}
+	switch f.Status {
+	case "active":
+		where = append(where, "status = 'active'")
+	case "resolved":
+		where = append(where, "status = 'resolved'")
+	case "reopened":
+		where = append(where, `status = 'active' AND id IN (
+			SELECT incident_id FROM incident_events WHERE event_type = 'REOPENED'
+		)`)
+	}
+	whereClause := "WHERE " + strings.Join(where, " AND ")
+
+	var total int
+	if err := s.db.QueryRow(
+		"SELECT COUNT(*) FROM incidents "+whereClause, args...,
+	).Scan(&total); err != nil {
+		return nil, 0, err
+	}
+	if total == 0 {
+		return nil, 0, nil
+	}
+
+	perPage := f.PerPage
+	if perPage <= 0 {
+		perPage = 50
+	}
+	if perPage > 200 {
+		perPage = 200
+	}
+	page := f.Page
+	if page < 1 {
+		page = 1
+	}
+	offset := (page - 1) * perPage
+
+	rowArgs := append(append([]any{}, args...), perPage, offset)
+	rows, err := s.db.Query(fmt.Sprintf(
+		`SELECT id, fingerprint, namespace, resource, issue_type, severity,
+			status, first_seen, last_seen, current_restart_count
+		 FROM incidents %s ORDER BY %s LIMIT ? OFFSET ?`,
+		whereClause, orderByClause(f.SortBy, f.SortDesc),
+	), rowArgs...)
+	if err != nil {
+		return nil, 0, err
+	}
+
+	type rawRow struct {
+		id                     int64
+		fingerprint, namespace string
+		resource, issueType    string
+		severity, status       string
+		firstSeen, lastSeen    int64
+		restartCount           int
+	}
+	var raws []rawRow
+	ids := make([]int64, 0, perPage)
+	for rows.Next() {
+		var r rawRow
+		if err := rows.Scan(
+			&r.id, &r.fingerprint, &r.namespace, &r.resource, &r.issueType,
+			&r.severity, &r.status, &r.firstSeen, &r.lastSeen, &r.restartCount,
+		); err != nil {
+			rows.Close()
+			return nil, 0, err
+		}
+		raws = append(raws, r)
+		ids = append(ids, r.id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, 0, err
+	}
+	rows.Close()
+
+	reopenCounts, err := s.batchReopenCounts(ids)
+	if err != nil {
+		return nil, 0, err
+	}
+	trendInputs, err := s.batchTrendEvents(ids)
+	if err != nil {
+		return nil, 0, err
+	}
+
+	items := make([]IncidentSummary, 0, len(raws))
+	for _, r := range raws {
+		summary := IncidentSummary{
+			Fingerprint:  r.fingerprint,
+			Namespace:    r.namespace,
+			Resource:     r.resource,
+			IssueType:    r.issueType,
+			Severity:     r.severity,
+			Status:       r.status,
+			ReopenCount:  reopenCounts[r.id],
+			FirstSeen:    time.Unix(r.firstSeen, 0),
+			LastSeen:     time.Unix(r.lastSeen, 0),
+			RestartCount: r.restartCount,
+		}
+		if r.status == "active" {
+			summary.Trend = deriveTrend(trendInputs[r.id], r.restartCount, r.firstSeen)
+		}
+		items = append(items, summary)
+	}
+
+	return items, total, nil
+}
+
+// PruneOlderThan removes data older than cutoff for cluster, in one
+// transaction:
+//   - Resolved incidents (and their full event history) are deleted once
+//     last_seen falls before cutoff.
+//   - Active incidents are never deleted regardless of age — only their
+//     event journal is trimmed, and even then the DETECTED event is kept
+//     forever so an incident's first-seen provenance always survives.
+//   - cluster_snapshots and scan_history rows older than cutoff are deleted
+//     outright — they carry no active/resolved notion of their own.
+//
+// The returned count is the number of resolved incidents deleted.
+func (s *SQLiteStore) PruneOlderThan(cluster string, cutoff time.Time) (int, error) {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return 0, err
+	}
+	defer tx.Rollback()
+
+	cutoffUnix := cutoff.Unix()
+
+	rows, err := tx.Query(
+		`SELECT id FROM incidents WHERE cluster = ? AND status = 'resolved' AND last_seen < ?`,
+		cluster, cutoffUnix,
+	)
+	if err != nil {
+		return 0, err
+	}
+	var resolvedIDs []int64
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			rows.Close()
+			return 0, err
+		}
+		resolvedIDs = append(resolvedIDs, id)
+	}
+	if err := rows.Err(); err != nil {
+		return 0, err
+	}
+	rows.Close()
+
+	if len(resolvedIDs) > 0 {
+		placeholders, idArgs := inClause(resolvedIDs)
+		if _, err := tx.Exec(
+			fmt.Sprintf(`DELETE FROM incident_events WHERE incident_id IN (%s)`, placeholders),
+			idArgs...,
+		); err != nil {
+			return 0, err
+		}
+		if _, err := tx.Exec(
+			fmt.Sprintf(`DELETE FROM incidents WHERE id IN (%s)`, placeholders),
+			idArgs...,
+		); err != nil {
+			return 0, err
+		}
+	}
+
+	if _, err := tx.Exec(
+		`DELETE FROM incident_events
+		 WHERE occurred_at < ?
+		   AND event_type != 'DETECTED'
+		   AND incident_id IN (SELECT id FROM incidents WHERE cluster = ? AND status = 'active')`,
+		cutoffUnix, cluster,
+	); err != nil {
+		return 0, err
+	}
+
+	if _, err := tx.Exec(
+		`DELETE FROM cluster_snapshots WHERE cluster = ? AND scanned_at < ?`,
+		cluster, cutoffUnix,
+	); err != nil {
+		return 0, err
+	}
+
+	if _, err := tx.Exec(
+		`DELETE FROM scan_history WHERE cluster = ? AND scanned_at < ?`,
+		cluster, cutoffUnix,
+	); err != nil {
+		return 0, err
+	}
+
+	if err := tx.Commit(); err != nil {
+		return 0, err
+	}
+
+	pruned := len(resolvedIDs)
+	if pruned > 0 {
+		// Reclaim the pages just freed above. PRAGMA incremental_vacuum
+		// (not VACUUM) because: VACUUM rewrites the entire database file
+		// and cannot run inside a transaction — on this store's
+		// single-writer connection (SetMaxOpenConns(1) in OpenSQLite) it
+		// would stall every other DB operation for its duration, which is
+		// unacceptable on a per-scan-cycle cadence. incremental_vacuum only
+		// touches pages already marked free by this prune, runs standalone
+		// with no explicit transaction, and is checkpointed into the WAL
+		// like any other write. It requires auto_vacuum=INCREMENTAL, set at
+		// schema creation for new databases; databases created before this
+		// schema version keep auto_vacuum=NONE (retrofitting it requires a
+		// full VACUUM, which we avoid for the same reason), so this call is
+		// simply a no-op for them — freed pages are still reused for new
+		// rows either way, making this a disk-usage optimization rather
+		// than a correctness concern. Best-effort: errors are ignored.
+		_, _ = s.db.Exec("PRAGMA incremental_vacuum")
+	}
+
+	return pruned, nil
 }
 
 func (s *SQLiteStore) Close() error {

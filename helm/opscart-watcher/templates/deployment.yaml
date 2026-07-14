@@ -49,6 +49,8 @@ spec:
           env:
             - name: OPSCART_DB_PATH
               value: /data/opscart.db
+            - name: OPSCART_RETENTION_DAYS
+              value: {{ .Values.retentionDays | quote }}
           ports:
             - name: http
               containerPort: {{ .Values.service.targetPort }}

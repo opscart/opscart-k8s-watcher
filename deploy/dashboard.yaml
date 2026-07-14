@@ -127,6 +127,10 @@ spec:
           env:
             - name: OPSCART_DB_PATH
               value: /data/opscart.db
+            # Resolved incidents/events older than this are pruned each scan
+            # cycle; 0 = keep forever.
+            - name: OPSCART_RETENTION_DAYS
+              value: "90"
           ports:
             - name: http
               containerPort: 8080

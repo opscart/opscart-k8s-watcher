@@ -1046,3 +1046,624 @@ func TestMigration_Idempotent(t *testing.T) {
 		t.Fatalf("expected user_version=%d, got %d", schemaVersion, version)
 	}
 }
+
+// TestMigration_QueryIndexesIdempotent verifies that opening a database from
+// the previous schema version (which lacks the incidents-registry query
+// indexes) adds them exactly once, without error, whether opened one or
+// multiple times.
+func TestMigration_QueryIndexesIdempotent(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "v3.db")
+
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatalf("open v3 db: %v", err)
+	}
+	if _, err := db.Exec(`
+		CREATE TABLE incidents (
+		    id                    INTEGER PRIMARY KEY AUTOINCREMENT,
+		    fingerprint           TEXT    NOT NULL,
+		    cluster               TEXT    NOT NULL,
+		    namespace             TEXT    NOT NULL,
+		    resource              TEXT    NOT NULL,
+		    issue_type            TEXT    NOT NULL,
+		    severity              TEXT    NOT NULL,
+		    first_seen            INTEGER NOT NULL,
+		    last_seen             INTEGER NOT NULL,
+		    details_json          TEXT,
+		    status                TEXT    NOT NULL DEFAULT 'active',
+		    last_scan_id          TEXT,
+		    current_restart_count INTEGER NOT NULL DEFAULT 0,
+		    missing_scans         INTEGER NOT NULL DEFAULT 0
+		);
+		CREATE UNIQUE INDEX idx_inc_fp ON incidents(cluster, fingerprint);
+
+		CREATE TABLE incident_events (
+		    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+		    incident_id   INTEGER NOT NULL,
+		    scan_id       TEXT    NOT NULL,
+		    occurred_at   INTEGER NOT NULL,
+		    event_type    TEXT    NOT NULL,
+		    event_reason  TEXT,
+		    restart_count INTEGER,
+		    severity      TEXT,
+		    state         TEXT,
+		    message       TEXT
+		);
+		CREATE INDEX idx_incident_events_incident ON incident_events(incident_id, occurred_at);
+
+		CREATE TABLE cluster_snapshots (
+		    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+		    scan_id         TEXT    NOT NULL,
+		    cluster         TEXT    NOT NULL,
+		    scanned_at      INTEGER NOT NULL,
+		    incident_score  INTEGER NOT NULL,
+		    critical_count  INTEGER NOT NULL,
+		    warning_count   INTEGER NOT NULL,
+		    security_score  INTEGER NOT NULL,
+		    waste_count     INTEGER NOT NULL,
+		    monthly_cost    REAL    NOT NULL,
+		    pod_count       INTEGER,
+		    namespace_count INTEGER,
+		    node_count      INTEGER
+		);
+
+		CREATE TABLE scan_history (
+		    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+		    scan_id     TEXT    NOT NULL,
+		    cluster     TEXT    NOT NULL,
+		    scanned_at  INTEGER NOT NULL,
+		    duration_ms INTEGER,
+		    success     INTEGER NOT NULL DEFAULT 1,
+		    error       TEXT,
+		    version     TEXT
+		);
+
+		PRAGMA user_version = 3;
+	`); err != nil {
+		t.Fatalf("create v3 schema: %v", err)
+	}
+	db.Close()
+
+	assertMigrated := func() {
+		s, err := OpenSQLite(path)
+		if err != nil {
+			t.Fatalf("OpenSQLite: %v", err)
+		}
+		defer s.Close()
+
+		var version int
+		if err := s.db.QueryRow("PRAGMA user_version").Scan(&version); err != nil {
+			t.Fatalf("PRAGMA user_version: %v", err)
+		}
+		if version != schemaVersion {
+			t.Fatalf("expected user_version=%d, got %d", schemaVersion, version)
+		}
+
+		rows, err := s.db.Query(`PRAGMA index_list(incidents)`)
+		if err != nil {
+			t.Fatalf("PRAGMA index_list: %v", err)
+		}
+		defer rows.Close()
+		names := map[string]bool{}
+		for rows.Next() {
+			var seq, unique, partial int
+			var name, origin string
+			if err := rows.Scan(&seq, &name, &unique, &origin, &partial); err != nil {
+				t.Fatalf("scan index_list row: %v", err)
+			}
+			names[name] = true
+		}
+		if err := rows.Err(); err != nil {
+			t.Fatalf("index_list rows: %v", err)
+		}
+		for _, want := range []string{"idx_incidents_cluster_status", "idx_incidents_cluster_ns", "idx_incidents_cluster_first"} {
+			if !names[want] {
+				t.Fatalf("expected index %s to exist, got %v", want, names)
+			}
+		}
+	}
+
+	// First open performs the migration; second open must be a no-op.
+	assertMigrated()
+	assertMigrated()
+}
+
+// ── Incidents registry: QueryIncidents ──────────────────────────────────────
+
+// insertRawIncident inserts an incidents row directly via SQL, bypassing
+// UpsertIncidents, so tests can control first_seen/last_seen/status/
+// restart_count precisely instead of relying on time.Now().
+func insertRawIncident(t *testing.T, s *SQLiteStore, cluster string, inc IncidentData, status string, firstSeen, lastSeen time.Time) int64 {
+	t.Helper()
+	res, err := s.db.Exec(
+		`INSERT INTO incidents (
+			fingerprint, cluster, namespace, resource, issue_type, severity,
+			first_seen, last_seen, details_json, status, last_scan_id,
+			current_restart_count, missing_scans
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'scan-fixture', ?, 0)`,
+		inc.Fingerprint, cluster, inc.Namespace, inc.Resource, inc.IssueType, inc.Severity,
+		firstSeen.Unix(), lastSeen.Unix(), inc.DetailsJSON, status, inc.RestartCount,
+	)
+	if err != nil {
+		t.Fatalf("insertRawIncident: %v", err)
+	}
+	id, err := res.LastInsertId()
+	if err != nil {
+		t.Fatalf("insertRawIncident LastInsertId: %v", err)
+	}
+	return id
+}
+
+// insertRawEvent inserts an incident_events row directly, for precise
+// control over occurred_at/restart_count in trend and retention fixtures.
+func insertRawEvent(t *testing.T, s *SQLiteStore, incidentID int64, eventType, eventReason string, restartCount int, occurredAt time.Time) {
+	t.Helper()
+	_, err := s.db.Exec(
+		`INSERT INTO incident_events (
+			incident_id, scan_id, occurred_at, event_type, event_reason,
+			restart_count, severity, state, message
+		) VALUES (?, 'scan-fixture', ?, ?, ?, ?, 'critical', 'active', 'fixture')`,
+		incidentID, occurredAt.Unix(), eventType, eventReason, restartCount,
+	)
+	if err != nil {
+		t.Fatalf("insertRawEvent: %v", err)
+	}
+}
+
+func TestQueryIncidents_Filters(t *testing.T) {
+	s := openTestStore(t)
+	now := time.Now()
+
+	incA := IncidentData{Fingerprint: "ns-a/Deployment/svc-a/crash_loop", Namespace: "ns-a", Resource: "svc-a", IssueType: "crash_loop", Severity: "critical", RestartCount: 50}
+	incB := IncidentData{Fingerprint: "ns-b/Deployment/svc-b/oom", Namespace: "ns-b", Resource: "svc-b", IssueType: "oom", Severity: "medium", RestartCount: 5}
+	incC := IncidentData{Fingerprint: "ns-a/Deployment/svc-c/image_pull", Namespace: "ns-a", Resource: "svc-c", IssueType: "image_pull", Severity: "high", RestartCount: 0}
+
+	insertRawIncident(t, s, "test-cluster", incA, "active", now.Add(-10*24*time.Hour), now.Add(-1*time.Hour))
+	insertRawIncident(t, s, "test-cluster", incB, "resolved", now.Add(-5*24*time.Hour), now.Add(-2*time.Hour))
+	insertRawIncident(t, s, "test-cluster", incC, "active", now.Add(-1*time.Hour), now)
+
+	// Text filter matches resource/namespace/issue_type, case-insensitive.
+	items, total, err := s.QueryIncidents(IncidentFilter{Cluster: "test-cluster", Text: "SVC-A"})
+	if err != nil {
+		t.Fatalf("QueryIncidents(text): %v", err)
+	}
+	if total != 1 || len(items) != 1 || items[0].Resource != "svc-a" {
+		t.Fatalf("expected 1 match for text=SVC-A, got total=%d items=%+v", total, items)
+	}
+
+	// Namespace filter, exact.
+	if _, total, err = s.QueryIncidents(IncidentFilter{Cluster: "test-cluster", Namespace: "ns-a"}); err != nil {
+		t.Fatalf("QueryIncidents(namespace): %v", err)
+	} else if total != 2 {
+		t.Fatalf("expected 2 incidents in ns-a, got %d", total)
+	}
+
+	// IssueType filter.
+	if items, total, err = s.QueryIncidents(IncidentFilter{Cluster: "test-cluster", IssueType: "oom"}); err != nil {
+		t.Fatalf("QueryIncidents(issue_type): %v", err)
+	} else if total != 1 || items[0].IssueType != "oom" {
+		t.Fatalf("expected 1 oom incident, got total=%d items=%+v", total, items)
+	}
+
+	// Severity filter.
+	if _, total, err = s.QueryIncidents(IncidentFilter{Cluster: "test-cluster", Severity: "critical"}); err != nil {
+		t.Fatalf("QueryIncidents(severity): %v", err)
+	} else if total != 1 {
+		t.Fatalf("expected 1 critical incident, got %d", total)
+	}
+
+	// Status filter: active vs resolved.
+	if _, total, err = s.QueryIncidents(IncidentFilter{Cluster: "test-cluster", Status: "resolved"}); err != nil {
+		t.Fatalf("QueryIncidents(status=resolved): %v", err)
+	} else if total != 1 {
+		t.Fatalf("expected 1 resolved incident, got %d", total)
+	}
+	if _, total, err = s.QueryIncidents(IncidentFilter{Cluster: "test-cluster", Status: "active"}); err != nil {
+		t.Fatalf("QueryIncidents(status=active): %v", err)
+	} else if total != 2 {
+		t.Fatalf("expected 2 active incidents, got %d", total)
+	}
+
+	// SinceFirst: only incidents first_seen within the last 3 days -> incC.
+	if _, total, err = s.QueryIncidents(IncidentFilter{Cluster: "test-cluster", SinceFirst: now.Add(-3 * 24 * time.Hour)}); err != nil {
+		t.Fatalf("QueryIncidents(since_first): %v", err)
+	} else if total != 1 {
+		t.Fatalf("expected 1 incident first_seen within last 3 days, got %d", total)
+	}
+}
+
+func TestQueryIncidents_Pagination(t *testing.T) {
+	s := openTestStore(t)
+	now := time.Now()
+
+	for i := 0; i < 5; i++ {
+		inc := IncidentData{
+			Fingerprint: fmt.Sprintf("default/Deployment/svc-%d/crash_loop", i),
+			Namespace:   "default", Resource: fmt.Sprintf("svc-%d", i), IssueType: "crash_loop", Severity: "critical",
+		}
+		insertRawIncident(t, s, "test-cluster", inc, "active",
+			now.Add(-time.Duration(i)*time.Hour), now.Add(-time.Duration(i)*time.Hour))
+	}
+
+	items1, total1, err := s.QueryIncidents(IncidentFilter{Cluster: "test-cluster", PerPage: 2, Page: 1, SortBy: "first_seen", SortDesc: true})
+	if err != nil {
+		t.Fatalf("QueryIncidents(page1): %v", err)
+	}
+	if total1 != 5 {
+		t.Fatalf("expected total=5, got %d", total1)
+	}
+	if len(items1) != 2 {
+		t.Fatalf("expected 2 items on page 1, got %d", len(items1))
+	}
+
+	items2, total2, err := s.QueryIncidents(IncidentFilter{Cluster: "test-cluster", PerPage: 2, Page: 2, SortBy: "first_seen", SortDesc: true})
+	if err != nil {
+		t.Fatalf("QueryIncidents(page2): %v", err)
+	}
+	if total2 != 5 {
+		t.Fatalf("expected total=5 on page 2, got %d", total2)
+	}
+	if len(items2) != 2 {
+		t.Fatalf("expected 2 items on page 2, got %d", len(items2))
+	}
+
+	items3, total3, err := s.QueryIncidents(IncidentFilter{Cluster: "test-cluster", PerPage: 2, Page: 3, SortBy: "first_seen", SortDesc: true})
+	if err != nil {
+		t.Fatalf("QueryIncidents(page3): %v", err)
+	}
+	if total3 != 5 {
+		t.Fatalf("expected total=5 on page 3, got %d", total3)
+	}
+	if len(items3) != 1 {
+		t.Fatalf("expected 1 item on page 3, got %d", len(items3))
+	}
+
+	seen := map[string]bool{}
+	for _, it := range append(append(items1, items2...), items3...) {
+		if seen[it.Fingerprint] {
+			t.Fatalf("fingerprint %s appeared on more than one page", it.Fingerprint)
+		}
+		seen[it.Fingerprint] = true
+	}
+	if len(seen) != 5 {
+		t.Fatalf("expected 5 distinct fingerprints across pages, got %d", len(seen))
+	}
+
+	// PerPage default (<=0) and cap (>200) both resolve without error; with
+	// only 5 rows in the fixture we can't observe the cap directly, but this
+	// exercises the clamp path.
+	if _, _, err = s.QueryIncidents(IncidentFilter{Cluster: "test-cluster"}); err != nil {
+		t.Fatalf("QueryIncidents(default perPage): %v", err)
+	}
+	itemsCapped, _, err := s.QueryIncidents(IncidentFilter{Cluster: "test-cluster", PerPage: 9999})
+	if err != nil {
+		t.Fatalf("QueryIncidents(capped perPage): %v", err)
+	}
+	if len(itemsCapped) != 5 {
+		t.Fatalf("expected all 5 rows with an oversized PerPage, got %d", len(itemsCapped))
+	}
+}
+
+func TestQueryIncidents_SortOrders(t *testing.T) {
+	s := openTestStore(t)
+	now := time.Now()
+
+	low := IncidentData{Fingerprint: "default/Deployment/svc-low/crash_loop", Namespace: "default", Resource: "svc-low", IssueType: "crash_loop", Severity: "low", RestartCount: 1}
+	crit := IncidentData{Fingerprint: "default/Deployment/svc-crit/crash_loop", Namespace: "default", Resource: "svc-crit", IssueType: "crash_loop", Severity: "critical", RestartCount: 100}
+	med := IncidentData{Fingerprint: "default/Deployment/svc-med/crash_loop", Namespace: "default", Resource: "svc-med", IssueType: "crash_loop", Severity: "medium", RestartCount: 50}
+
+	insertRawIncident(t, s, "test-cluster", low, "active", now.Add(-3*time.Hour), now.Add(-3*time.Hour))
+	insertRawIncident(t, s, "test-cluster", crit, "active", now.Add(-2*time.Hour), now.Add(-30*time.Minute))
+	insertRawIncident(t, s, "test-cluster", med, "active", now.Add(-1*time.Hour), now.Add(-90*time.Minute))
+
+	items, _, err := s.QueryIncidents(IncidentFilter{Cluster: "test-cluster", SortBy: "severity"})
+	if err != nil {
+		t.Fatalf("QueryIncidents(sort=severity): %v", err)
+	}
+	if len(items) != 3 || items[0].Severity != "critical" || items[1].Severity != "medium" || items[2].Severity != "low" {
+		t.Fatalf("expected severity order critical,medium,low, got %+v", items)
+	}
+
+	items, _, err = s.QueryIncidents(IncidentFilter{Cluster: "test-cluster", SortBy: "restarts", SortDesc: true})
+	if err != nil {
+		t.Fatalf("QueryIncidents(sort=restarts desc): %v", err)
+	}
+	if items[0].RestartCount != 100 || items[2].RestartCount != 1 {
+		t.Fatalf("expected restarts desc order, got %+v", items)
+	}
+
+	items, _, err = s.QueryIncidents(IncidentFilter{Cluster: "test-cluster", SortBy: "first_seen"})
+	if err != nil {
+		t.Fatalf("QueryIncidents(sort=first_seen): %v", err)
+	}
+	if items[0].Resource != "svc-low" {
+		t.Fatalf("expected svc-low first (oldest first_seen), got %+v", items)
+	}
+
+	items, _, err = s.QueryIncidents(IncidentFilter{Cluster: "test-cluster", SortBy: "last_seen", SortDesc: true})
+	if err != nil {
+		t.Fatalf("QueryIncidents(sort=last_seen desc): %v", err)
+	}
+	if items[0].Resource != "svc-crit" {
+		t.Fatalf("expected svc-crit first (most recent last_seen), got %+v", items)
+	}
+}
+
+func TestQueryIncidents_ReopenCountAndStatus(t *testing.T) {
+	s := openTestStore(t)
+
+	inc := IncidentData{Fingerprint: "default/Deployment/svc-a/crash_loop", Namespace: "default", Resource: "svc-a", IssueType: "crash_loop", Severity: "critical"}
+	other := IncidentData{Fingerprint: "default/Deployment/svc-b/oom", Namespace: "default", Resource: "svc-b", IssueType: "oom", Severity: "medium"}
+
+	if err := s.UpsertIncidents("test-cluster", "scan-1", []IncidentData{inc, other}); err != nil {
+		t.Fatalf("UpsertIncidents(1): %v", err)
+	}
+	// Resolve + reopen svc-a (inc) twice; svc-b (other) stays present/active
+	// throughout and is never resolved.
+	for i := 0; i < 2; i++ {
+		driveToResolved(t, s, "test-cluster", []IncidentData{other}, fmt.Sprintf("scan-miss-%d", i))
+		if err := s.UpsertIncidents("test-cluster", fmt.Sprintf("scan-reopen-%d", i), []IncidentData{inc, other}); err != nil {
+			t.Fatalf("UpsertIncidents(reopen %d): %v", i, err)
+		}
+	}
+
+	items, total, err := s.QueryIncidents(IncidentFilter{Cluster: "test-cluster", Status: "reopened"})
+	if err != nil {
+		t.Fatalf("QueryIncidents(status=reopened): %v", err)
+	}
+	if total != 1 || len(items) != 1 || items[0].Fingerprint != inc.Fingerprint {
+		t.Fatalf("expected only svc-a under status=reopened, got total=%d items=%+v", total, items)
+	}
+	if items[0].ReopenCount != 2 {
+		t.Fatalf("expected ReopenCount=2, got %d", items[0].ReopenCount)
+	}
+	if items[0].Status != "active" {
+		t.Fatalf("expected reopened incident status=active, got %s", items[0].Status)
+	}
+
+	itemsOther, totalOther, err := s.QueryIncidents(IncidentFilter{Cluster: "test-cluster", Text: "svc-b"})
+	if err != nil {
+		t.Fatalf("QueryIncidents(text=svc-b): %v", err)
+	}
+	if totalOther != 1 || itemsOther[0].ReopenCount != 0 {
+		t.Fatalf("expected svc-b ReopenCount=0 (never resolved), got total=%d items=%+v", totalOther, itemsOther)
+	}
+}
+
+func TestQueryIncidents_Trend(t *testing.T) {
+	s := openTestStore(t)
+	now := time.Now()
+
+	// Resolved incidents never get a trend, regardless of history.
+	resolved := IncidentData{Fingerprint: "default/Deployment/svc-resolved/crash_loop", Namespace: "default", Resource: "svc-resolved", IssueType: "crash_loop", Severity: "critical", RestartCount: 20}
+	insertRawIncident(t, s, "test-cluster", resolved, "resolved", now.Add(-10*24*time.Hour), now.Add(-5*24*time.Hour))
+
+	// Active incident with only the initial DETECTED event: not enough
+	// history to judge a rate -> "stable".
+	single := IncidentData{Fingerprint: "default/Deployment/svc-single/crash_loop", Namespace: "default", Resource: "svc-single", IssueType: "crash_loop", Severity: "critical", RestartCount: 5}
+	singleID := insertRawIncident(t, s, "test-cluster", single, "active", now.Add(-2*time.Hour), now.Add(-1*time.Hour))
+	insertRawEvent(t, s, singleID, "DETECTED", "Detected", 0, now.Add(-2*time.Hour))
+
+	// Active incident with a sharp recent spike vs. its lifetime rate -> "accelerating".
+	fast := IncidentData{Fingerprint: "default/Deployment/svc-fast/crash_loop", Namespace: "default", Resource: "svc-fast", IssueType: "crash_loop", Severity: "critical", RestartCount: 130}
+	fastID := insertRawIncident(t, s, "test-cluster", fast, "active", now.Add(-30*24*time.Hour), now.Add(-30*time.Minute))
+	insertRawEvent(t, s, fastID, "DETECTED", "Detected", 0, now.Add(-30*24*time.Hour))
+	insertRawEvent(t, s, fastID, "UPDATED", "RestartMilestone", 100, now.Add(-2*time.Hour))
+	insertRawEvent(t, s, fastID, "UPDATED", "RestartMilestone", 130, now.Add(-1*time.Hour))
+
+	// Active incident whose recent rate roughly matches its lifetime average -> "stable".
+	slow := IncidentData{Fingerprint: "default/Deployment/svc-slow/crash_loop", Namespace: "default", Resource: "svc-slow", IssueType: "crash_loop", Severity: "critical", RestartCount: 52}
+	slowID := insertRawIncident(t, s, "test-cluster", slow, "active", now.Add(-30*24*time.Hour), now.Add(-1*time.Hour))
+	insertRawEvent(t, s, slowID, "DETECTED", "Detected", 0, now.Add(-30*24*time.Hour))
+	insertRawEvent(t, s, slowID, "UPDATED", "RestartMilestone", 50, now.Add(-10*24*time.Hour))
+	insertRawEvent(t, s, slowID, "UPDATED", "RestartMilestone", 52, now.Add(-1*time.Hour))
+
+	items, _, err := s.QueryIncidents(IncidentFilter{Cluster: "test-cluster", SortBy: "first_seen"})
+	if err != nil {
+		t.Fatalf("QueryIncidents: %v", err)
+	}
+
+	byResource := map[string]IncidentSummary{}
+	for _, it := range items {
+		byResource[it.Resource] = it
+	}
+
+	if got := byResource["svc-resolved"].Trend; got != "" {
+		t.Fatalf("expected resolved incident to have empty Trend, got %q", got)
+	}
+	if got := byResource["svc-single"].Trend; got != "stable" {
+		t.Fatalf("expected svc-single Trend=stable (insufficient history), got %q", got)
+	}
+	if got := byResource["svc-fast"].Trend; got != "accelerating" {
+		t.Fatalf("expected svc-fast Trend=accelerating, got %q", got)
+	}
+	if got := byResource["svc-slow"].Trend; got != "stable" {
+		t.Fatalf("expected svc-slow Trend=stable, got %q", got)
+	}
+}
+
+// ── Retention ────────────────────────────────────────────────────────────────
+
+func TestRetentionCutoff(t *testing.T) {
+	now := time.Now()
+
+	if cutoff, enabled := RetentionCutoff(0, now); enabled || !cutoff.IsZero() {
+		t.Fatalf("expected retention disabled (enabled=false, zero cutoff) for days=0, got enabled=%v cutoff=%v", enabled, cutoff)
+	}
+	if cutoff, enabled := RetentionCutoff(-5, now); enabled || !cutoff.IsZero() {
+		t.Fatalf("expected retention disabled for negative days, got enabled=%v cutoff=%v", enabled, cutoff)
+	}
+
+	cutoff, enabled := RetentionCutoff(90, now)
+	if !enabled {
+		t.Fatalf("expected retention enabled for days=90")
+	}
+	if want := now.AddDate(0, 0, -90); !cutoff.Equal(want) {
+		t.Fatalf("expected cutoff=%v, got %v", want, cutoff)
+	}
+}
+
+// TestRetentionDisabled_PrunesNothing mirrors the scan-loop guard in
+// cmd/opscart-dashboard/main.go: when RetentionCutoff reports the feature
+// disabled (days<=0), the caller must never invoke PruneOlderThan at all —
+// so even a very old, resolved incident is left untouched.
+func TestRetentionDisabled_PrunesNothing(t *testing.T) {
+	s := openTestStore(t)
+	now := time.Now()
+
+	old := IncidentData{Fingerprint: "default/Deployment/svc-ancient/crash_loop", Namespace: "default", Resource: "svc-ancient", IssueType: "crash_loop", Severity: "critical"}
+	insertRawIncident(t, s, "test-cluster", old, "resolved", now.Add(-400*24*time.Hour), now.Add(-400*24*time.Hour))
+
+	if _, enabled := RetentionCutoff(0, now); enabled {
+		t.Fatalf("expected retention disabled for days=0")
+	}
+	// No PruneOlderThan call is made — confirm nothing changed.
+
+	var count int
+	if err := s.db.QueryRow("SELECT COUNT(*) FROM incidents WHERE cluster = 'test-cluster'").Scan(&count); err != nil {
+		t.Fatalf("count incidents: %v", err)
+	}
+	if count != 1 {
+		t.Fatalf("expected the ancient incident untouched, got %d rows", count)
+	}
+}
+
+func TestPruneOlderThan(t *testing.T) {
+	s := openTestStore(t)
+	now := time.Now()
+	cutoff := now.Add(-30 * 24 * time.Hour)
+
+	// Resolved and old -> pruned, along with all of its events.
+	oldResolved := IncidentData{Fingerprint: "default/Deployment/svc-old-resolved/crash_loop", Namespace: "default", Resource: "svc-old-resolved", IssueType: "crash_loop", Severity: "critical"}
+	oldResolvedID := insertRawIncident(t, s, "test-cluster", oldResolved, "resolved", now.Add(-60*24*time.Hour), now.Add(-40*24*time.Hour))
+	insertRawEvent(t, s, oldResolvedID, "DETECTED", "Detected", 0, now.Add(-60*24*time.Hour))
+	insertRawEvent(t, s, oldResolvedID, "RESOLVED", "Resolved", 5, now.Add(-40*24*time.Hour))
+
+	// Resolved but recent -> kept.
+	recentResolved := IncidentData{Fingerprint: "default/Deployment/svc-recent-resolved/oom", Namespace: "default", Resource: "svc-recent-resolved", IssueType: "oom", Severity: "medium"}
+	insertRawIncident(t, s, "test-cluster", recentResolved, "resolved", now.Add(-10*24*time.Hour), now.Add(-2*24*time.Hour))
+
+	// Active and old (first_seen/last_seen far in the past) -> the incident
+	// row is never deleted; only its stale non-DETECTED events are trimmed,
+	// and DETECTED survives regardless of age.
+	oldActive := IncidentData{Fingerprint: "default/Deployment/svc-old-active/crash_loop", Namespace: "default", Resource: "svc-old-active", IssueType: "crash_loop", Severity: "high"}
+	oldActiveID := insertRawIncident(t, s, "test-cluster", oldActive, "active", now.Add(-90*24*time.Hour), now.Add(-1*time.Hour))
+	insertRawEvent(t, s, oldActiveID, "DETECTED", "Detected", 0, now.Add(-90*24*time.Hour))
+	insertRawEvent(t, s, oldActiveID, "UPDATED", "SeverityChanged", 3, now.Add(-89*24*time.Hour))
+	insertRawEvent(t, s, oldActiveID, "UPDATED", "RestartMilestone", 10, now.Add(-1*time.Hour))
+
+	if _, err := s.db.Exec(
+		`INSERT INTO cluster_snapshots (scan_id, cluster, scanned_at, incident_score, critical_count, warning_count, security_score, waste_count, monthly_cost)
+		 VALUES ('scan-old', 'test-cluster', ?, 10, 1, 1, 90, 0, 100.0)`,
+		now.Add(-45*24*time.Hour).Unix(),
+	); err != nil {
+		t.Fatalf("insert old snapshot: %v", err)
+	}
+	if _, err := s.db.Exec(
+		`INSERT INTO cluster_snapshots (scan_id, cluster, scanned_at, incident_score, critical_count, warning_count, security_score, waste_count, monthly_cost)
+		 VALUES ('scan-recent', 'test-cluster', ?, 10, 1, 1, 90, 0, 100.0)`,
+		now.Add(-1*24*time.Hour).Unix(),
+	); err != nil {
+		t.Fatalf("insert recent snapshot: %v", err)
+	}
+	if _, err := s.db.Exec(
+		`INSERT INTO scan_history (scan_id, cluster, scanned_at, success) VALUES ('scan-old', 'test-cluster', ?, 1)`,
+		now.Add(-45*24*time.Hour).Unix(),
+	); err != nil {
+		t.Fatalf("insert old scan_history: %v", err)
+	}
+	if _, err := s.db.Exec(
+		`INSERT INTO scan_history (scan_id, cluster, scanned_at, success) VALUES ('scan-recent', 'test-cluster', ?, 1)`,
+		now.Add(-1*24*time.Hour).Unix(),
+	); err != nil {
+		t.Fatalf("insert recent scan_history: %v", err)
+	}
+
+	pruned, err := s.PruneOlderThan("test-cluster", cutoff)
+	if err != nil {
+		t.Fatalf("PruneOlderThan: %v", err)
+	}
+	if pruned != 1 {
+		t.Fatalf("expected 1 pruned incident, got %d", pruned)
+	}
+
+	var count int
+	if err := s.db.QueryRow("SELECT COUNT(*) FROM incidents WHERE id = ?", oldResolvedID).Scan(&count); err != nil {
+		t.Fatalf("count old-resolved incidents: %v", err)
+	}
+	if count != 0 {
+		t.Fatalf("expected old-resolved incident deleted, still have %d rows", count)
+	}
+	if err := s.db.QueryRow("SELECT COUNT(*) FROM incident_events WHERE incident_id = ?", oldResolvedID).Scan(&count); err != nil {
+		t.Fatalf("count old-resolved events: %v", err)
+	}
+	if count != 0 {
+		t.Fatalf("expected old-resolved incident's events deleted, still have %d rows", count)
+	}
+
+	rec, err := s.GetIncidentHistory("test-cluster", recentResolved.Fingerprint)
+	if err != nil {
+		t.Fatalf("GetIncidentHistory(recent-resolved): %v", err)
+	}
+	if rec == nil {
+		t.Fatalf("expected recent-resolved incident to survive pruning")
+	}
+
+	rec, err = s.GetIncidentHistory("test-cluster", oldActive.Fingerprint)
+	if err != nil {
+		t.Fatalf("GetIncidentHistory(old-active): %v", err)
+	}
+	if rec == nil || rec.Status != "active" {
+		t.Fatalf("expected old-active incident to survive pruning as active, got %+v", rec)
+	}
+
+	events, err := s.GetIncidentTimeline("test-cluster", oldActive.Fingerprint)
+	if err != nil {
+		t.Fatalf("GetIncidentTimeline(old-active): %v", err)
+	}
+	var hasDetected, hasSeverityChanged, hasMilestone bool
+	for _, e := range events {
+		switch e.EventReason {
+		case "Detected":
+			hasDetected = true
+		case "SeverityChanged":
+			hasSeverityChanged = true
+		case "RestartMilestone":
+			hasMilestone = true
+		}
+	}
+	if !hasDetected {
+		t.Fatalf("expected DETECTED event to survive pruning regardless of age, got %+v", events)
+	}
+	if hasSeverityChanged {
+		t.Fatalf("expected old non-DETECTED event to be pruned, got %+v", events)
+	}
+	if !hasMilestone {
+		t.Fatalf("expected recent event to survive, got %+v", events)
+	}
+
+	if err := s.db.QueryRow("SELECT COUNT(*) FROM cluster_snapshots WHERE scan_id = 'scan-old'").Scan(&count); err != nil {
+		t.Fatalf("count old snapshot: %v", err)
+	}
+	if count != 0 {
+		t.Fatalf("expected old snapshot pruned, still have %d rows", count)
+	}
+	if err := s.db.QueryRow("SELECT COUNT(*) FROM cluster_snapshots WHERE scan_id = 'scan-recent'").Scan(&count); err != nil {
+		t.Fatalf("count recent snapshot: %v", err)
+	}
+	if count != 1 {
+		t.Fatalf("expected recent snapshot kept, got %d rows", count)
+	}
+	if err := s.db.QueryRow("SELECT COUNT(*) FROM scan_history WHERE scan_id = 'scan-old'").Scan(&count); err != nil {
+		t.Fatalf("count old scan_history: %v", err)
+	}
+	if count != 0 {
+		t.Fatalf("expected old scan_history pruned, still have %d rows", count)
+	}
+	if err := s.db.QueryRow("SELECT COUNT(*) FROM scan_history WHERE scan_id = 'scan-recent'").Scan(&count); err != nil {
+		t.Fatalf("count recent scan_history: %v", err)
+	}
+	if count != 1 {
+		t.Fatalf("expected recent scan_history kept, got %d rows", count)
+	}
+}
