@@ -211,7 +211,7 @@
       <tbody>
         {{range .Incidents}}
         <tr class="{{if eq .Status "resolved"}}inc-row-resolved{{end}}"
-            onclick="window.location='/investigate?pod={{.Resource}}&ns={{.Namespace}}&type={{.IssueType}}&cluster={{$.ClusterName}}'">
+            onclick="window.location='/investigate?pod={{.Resource}}&ns={{.Namespace}}&type={{.IssueType}}&cluster={{$.ClusterName}}&from=incidents'">
           <td>
             <span class="inc-sev inc-sev-{{.Severity}}">{{.Severity}}</span>
           </td>

@@ -624,6 +624,15 @@ func (srv *server) handleInvestigationPage(w http.ResponseWriter, r *http.Reques
 	state.mu.RUnlock()
 
 	q := "?cluster=" + url.QueryEscape(ctx)
+	from := r.URL.Query().Get("from")
+	activePage := "warroom"
+	if from == "incidents" {
+		activePage = "incidents"
+	}
+	backURL := "/warroom" + q
+	if from == "incidents" {
+		backURL = "/incidents" + q
+	}
 	data := investigationPageData{
 		DashHref:      "/" + q,
 		WrHref:        "/warroom" + q,
@@ -632,13 +641,13 @@ func (srv *server) handleInvestigationPage(w http.ResponseWriter, r *http.Reques
 		WasteHref:     "/waste" + q,
 		SecurityHref:  "/security" + q,
 		IncidentsHref: "/incidents" + q,
-		ActivePage:    "incidents",
+		ActivePage:    activePage,
 		ClusterName:   displayName(ctx),
 		CriticalCount: countCriticalIssues(scan),
 		PodName:       podName,
 		Namespace:     namespace,
 		IssueType:     issueType,
-		BackURL:       "/warroom" + q,
+		BackURL:       backURL,
 		ScannedAtMs:   time.Now().UnixMilli(),
 	}
 

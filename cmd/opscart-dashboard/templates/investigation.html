@@ -79,7 +79,8 @@
     </div>
     <div class="page-meta">
       <div>Last scanned: <strong id="inv-age">just now</strong></div>
-      <a class="back-link" href="{{.BackURL}}">← Back to War Room</a>
+      <a class="back-link" href="{{.BackURL}}">{{if eq .ActivePage "incidents"}}← Back to Incidents{{else}}← Back to War Room{{end}}</a>
+
     </div>
   </div>
 
