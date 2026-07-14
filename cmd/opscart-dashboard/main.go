@@ -654,6 +654,8 @@ type warRoomPageData struct {
 	Warnings      []warRoomIssue
 	ScannedAtMs   int64
 	Sidebar       template.HTML
+	TotalIssues   int
+	IncidentsHref string
 }
 
 func collectWarRoomIssues(scan *clusterScan, limit int) []warRoomIssue {
@@ -709,14 +711,18 @@ func collectWarRoomIssues(scan *clusterScan, limit int) []warRoomIssue {
 			}
 		}
 	}
-
-	// Sort: critical before high
+	// Sort: critical first, then by restart count descending (highest impact first)
 	severityOrder := map[string]int{"critical": 0, "high": 1, "medium": 2, "low": 3}
 	sort.SliceStable(issues, func(i, j int) bool {
-		return severityOrder[issues[i].Severity] < severityOrder[issues[j].Severity]
+		si := severityOrder[issues[i].Severity]
+		sj := severityOrder[issues[j].Severity]
+		if si != sj {
+			return si < sj
+		}
+		// Within same severity: higher restart count = more urgent
+		return issues[i].RestartCount > issues[j].RestartCount
 	})
 
-	// limit=0 means no cap (used by the HTML page to show all issues)
 	if limit > 0 && len(issues) > limit {
 		return issues[:limit]
 	}
@@ -1616,7 +1622,10 @@ func renderWarRoomPage(scan *clusterScan, activeCtx string, clusterList []string
 	if activeCtx != "" {
 		q = "?cluster=" + url.QueryEscape(activeCtx)
 	}
-
+	// Cap War Room at top 20 — full registry is in Incidents
+	if len(critical) > 20 {
+		critical = critical[:20]
+	}
 	critChipClass := "ok"
 	if len(critical) > 0 {
 		critChipClass = "c"
@@ -1636,6 +1645,8 @@ func renderWarRoomPage(scan *clusterScan, activeCtx string, clusterList []string
 		Warnings:      warnings,
 		ScannedAtMs:   scannedAt.UnixMilli(),
 		Sidebar:       template.HTML(buildSidebar("warroom", activeCtx, clusterName, clusterList, countCriticalIssues(scan))),
+		TotalIssues:   len(critical) + len(warnings),
+		IncidentsHref: "/incidents" + q,
 	}
 
 	var buf strings.Builder
