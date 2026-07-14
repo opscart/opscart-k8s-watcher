@@ -392,16 +392,23 @@ func (s *SQLiteStore) UpsertIncidents(cluster string, scanID string, incidents [
 				}
 			}
 			if milestone := highestMilestoneCrossed(prevRestart, inc.RestartCount); milestone > 0 {
-				err = insertIncidentEvent(tx, incidentID, scanID, now, "UPDATED", "RestartMilestone",
-					inc.RestartCount, inc.Severity, "active",
-					fmt.Sprintf("Restart count exceeded %d", milestone))
+				var lastMilestone int
+				_ = tx.QueryRow(
+					`SELECT COALESCE(MAX(restart_count), 0) FROM incident_events
+					 WHERE incident_id=? AND event_reason='RestartMilestone'`,
+					incidentID,
+				).Scan(&lastMilestone)
+				if lastMilestone < milestone {
+					err = insertIncidentEvent(tx, incidentID, scanID, now, "UPDATED", "RestartMilestone",
+						inc.RestartCount, inc.Severity, "active",
+						fmt.Sprintf("Restart count exceeded %d", milestone))
+				}
 			}
 		}
 		if err != nil {
 			return err
 		}
 	}
-
 	return tx.Commit()
 }
 
