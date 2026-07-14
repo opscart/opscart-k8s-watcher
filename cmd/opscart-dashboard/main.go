@@ -2784,6 +2784,8 @@ func zombieTypeForStatus(status string) string {
 		return "oomkilled"
 	case "ImagePullBackOff":
 		return "image_pull_backoff"
+	case "ProbeFailure":
+		return "probe_failure"
 	default:
 		return "crash_loop"
 	}
@@ -2793,6 +2795,8 @@ func kubectlCmdForIssue(issueType, resource, namespace string) string {
 	switch issueType {
 	case "crash_loop":
 		return fmt.Sprintf("kubectl logs %s -n %s --previous", resource, namespace)
+	case "probe_failure":
+		return fmt.Sprintf("kubectl describe pod %s -n %s", resource, namespace)
 	default:
 		return fmt.Sprintf("kubectl describe pod %s -n %s", resource, namespace)
 	}

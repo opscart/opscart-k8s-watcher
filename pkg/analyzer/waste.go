@@ -391,6 +391,32 @@ func (w *WasteAuditor) detectStalePods(audit *WasteAudit, filterNamespace string
 				}
 			}
 		}
+		{
+			var totalRestarts int32
+			var notReady int
+			for _, cs := range pod.Status.ContainerStatuses {
+				totalRestarts += cs.RestartCount
+				if !cs.Ready {
+					notReady++
+				}
+			}
+			if notReady > 0 && totalRestarts > 10 && pod.Status.Phase == corev1.PodRunning {
+				audit.StalePods = append(audit.StalePods, StalePod{
+					Name:         pod.Name,
+					Namespace:    pod.Namespace,
+					Kind:         StalePodZombie,
+					AgeDays:      ageDays,
+					RestartCount: totalRestarts,
+					Status:       "ProbeFailure",
+					Reason: fmt.Sprintf(
+						"%d/%d containers not ready after %d restarts — startup or liveness probe likely failing.",
+						notReady, len(pod.Status.ContainerStatuses), totalRestarts,
+					),
+					Score: float64(ageDays)*0.4 + float64(totalRestarts)*0.3,
+				})
+				goto nextPod
+			}
+		}
 
 		// ── IDLE detection: old pod, no recent restart activity ──────
 		// Age gate applies here: we only flag idle pods that have been
