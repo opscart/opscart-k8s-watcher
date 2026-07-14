@@ -13,6 +13,8 @@ type Store interface {
 	GetLatestSnapshot(cluster string) (*SnapshotData, error)
 	GetIncidentHistory(cluster string, fingerprint string) (*IncidentRecord, error)
 	GetIncidentTimeline(cluster string, fingerprint string) ([]IncidentEvent, error)
+	QueryIncidents(f IncidentFilter) (items []IncidentSummary, total int, err error)
+	PruneOlderThan(cluster string, cutoff time.Time) (pruned int, err error)
 	Close() error
 }
 
@@ -82,4 +84,47 @@ type IncidentEvent struct {
 	Severity     string
 	State        string
 	Message      string
+}
+
+// IncidentFilter narrows a QueryIncidents call. Cluster is required; every
+// other field is optional and its zero value means "no filter on this
+// dimension".
+type IncidentFilter struct {
+	Cluster    string
+	Text       string // matches resource, namespace, issue_type (LIKE, case-insensitive)
+	Namespace  string // exact, empty = all
+	IssueType  string // exact, empty = all
+	Severity   string // exact, empty = all
+	Status     string // "active" | "resolved" | "reopened" | "" (all)
+	SinceFirst time.Time
+	SortBy     string // "severity" | "first_seen" | "last_seen" | "restarts"
+	SortDesc   bool
+	Page       int // 1-based
+	PerPage    int // default 50, cap 200
+}
+
+// IncidentSummary is one row of a QueryIncidents result page.
+type IncidentSummary struct {
+	Fingerprint  string
+	Namespace    string
+	Resource     string
+	IssueType    string
+	Severity     string
+	Status       string // active | resolved
+	ReopenCount  int
+	FirstSeen    time.Time
+	LastSeen     time.Time
+	RestartCount int
+	Trend        string // "accelerating" | "stable" | "recovering" | ""
+}
+
+// RetentionCutoff computes the cutoff time for PruneOlderThan given a
+// retention window in days. days <= 0 disables retention ("keep forever"),
+// signaled by enabled=false; callers must not call PruneOlderThan in that
+// case.
+func RetentionCutoff(days int, now time.Time) (cutoff time.Time, enabled bool) {
+	if days <= 0 {
+		return time.Time{}, false
+	}
+	return now.AddDate(0, 0, -days), true
 }
