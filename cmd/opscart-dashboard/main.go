@@ -14,6 +14,7 @@ import (
 	"os"
 	"os/signal"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -138,12 +139,13 @@ func (s *clusterScan) securityScore() int {
 // ── Per-cluster state ─────────────────────────────────────────────────────────
 
 type dashboardState struct {
-	ctx      string
-	mu       sync.RWMutex
-	scan     *clusterScan
-	htmlPage string
-	scanning atomic.Bool
-	db       store.Store
+	ctx           string
+	mu            sync.RWMutex
+	scan          *clusterScan
+	htmlPage      string
+	scanning      atomic.Bool
+	db            store.Store
+	retentionDays int
 }
 
 func (s *dashboardState) refresh(clusterList []string) error {
@@ -215,6 +217,13 @@ func (s *dashboardState) refresh(clusterList []string) error {
 		if resolved, err := s.db.ResolveMissing(s.ctx, scanID); err == nil && resolved > 0 {
 			log.Printf("[%s] %d incident(s) resolved", displayName(s.ctx), resolved)
 		}
+		if cutoff, ok := store.RetentionCutoff(s.retentionDays, time.Now()); ok {
+			if pruned, err := s.db.PruneOlderThan(s.ctx, cutoff); err != nil {
+				log.Printf("[%s] store prune: %v", displayName(s.ctx), err)
+			} else if pruned > 0 {
+				log.Printf("[%s] retention: pruned %d incident(s) older than %d day(s)", displayName(s.ctx), pruned, s.retentionDays)
+			}
+		}
 		_ = s.db.WriteScanHistory(s.ctx, scanID, store.ScanMeta{
 			DurationMS: time.Since(start).Milliseconds(),
 			Success:    true,
@@ -229,14 +238,15 @@ func (s *dashboardState) refresh(clusterList []string) error {
 // ── Server ────────────────────────────────────────────────────────────────────
 
 type server struct {
-	clusterList []string
-	mu          sync.RWMutex
-	states      map[string]*dashboardState
-	db          store.Store
+	clusterList   []string
+	mu            sync.RWMutex
+	states        map[string]*dashboardState
+	db            store.Store
+	retentionDays int
 }
 
-func newServer(clusterList []string, db store.Store) *server {
-	return &server{clusterList: clusterList, states: make(map[string]*dashboardState), db: db}
+func newServer(clusterList []string, db store.Store, retentionDays int) *server {
+	return &server{clusterList: clusterList, states: make(map[string]*dashboardState), db: db, retentionDays: retentionDays}
 }
 
 func (srv *server) getState(ctx string) *dashboardState {
@@ -251,7 +261,7 @@ func (srv *server) getState(ctx string) *dashboardState {
 	if s = srv.states[ctx]; s != nil {
 		return s
 	}
-	s = &dashboardState{ctx: ctx, db: srv.db}
+	s = &dashboardState{ctx: ctx, db: srv.db, retentionDays: srv.retentionDays}
 	srv.states[ctx] = s
 	return s
 }
@@ -330,6 +340,14 @@ func runDashboard(_ *cobra.Command, _ []string) error {
 	if dbPath == "" {
 		dbPath = "./opscart.db"
 	}
+	retentionDays := 90
+	if v := os.Getenv("OPSCART_RETENTION_DAYS"); v != "" {
+		if parsed, err := strconv.Atoi(v); err != nil {
+			log.Printf("store: invalid OPSCART_RETENTION_DAYS=%q, using default of %d days", v, retentionDays)
+		} else {
+			retentionDays = parsed
+		}
+	}
 	var db store.Store
 	if sqlDB, err := store.OpenSQLite(dbPath); err != nil {
 		log.Printf("store: persistence disabled (%v)", err)
@@ -339,7 +357,7 @@ func runDashboard(_ *cobra.Command, _ []string) error {
 		log.Printf("store: operational memory at %s", dbPath)
 	}
 	defer db.Close()
-	srv := newServer(cl, db)
+	srv := newServer(cl, db, retentionDays)
 
 	log.Printf("Scanning cluster %q ...", displayName(cl[0]))
 	if err := srv.getState(cl[0]).refresh(cl); err != nil {
@@ -1827,144 +1845,6 @@ func (srv *server) handleSecurityPage(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Write([]byte(buf.String()))
 }
-
-// ── Incidents page ───────────────────────────────────────────────────────────
-
-type incidentsPageData struct {
-	// Sidebar fields (used by {{template "sidebar.html" .}})
-	DashHref      string
-	WrHref        string
-	CostsHref     string
-	InfraHref     string
-	WasteHref     string
-	SecurityHref  string
-	IncidentsHref string
-	ActivePage    string
-	ClusterName   string
-	Clusters      []sidebarCluster
-	CriticalCount int
-	// Page content
-	StatusDesc    string
-	DashURL       string
-	CritChipClass string
-	WarnChipClass string
-	Critical      []warRoomIssue
-	Warnings      []warRoomIssue
-	ScannedAtMs   int64
-}
-
-func (srv *server) handleIncidentsPage(w http.ResponseWriter, r *http.Request) {
-	ctx := srv.activeCtx(r)
-	state := srv.getState(ctx)
-
-	state.mu.RLock()
-	scan := state.scan
-	state.mu.RUnlock()
-
-	if scan == nil {
-		if err := state.refresh(srv.clusterList); err != nil {
-			http.Error(w, "scan failed: "+err.Error(), http.StatusInternalServerError)
-			return
-		}
-		state.mu.RLock()
-		scan = state.scan
-		state.mu.RUnlock()
-	}
-
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	fmt.Fprint(w, renderIncidentsPage(scan, ctx, srv.clusterList))
-}
-
-func renderIncidentsPage(scan *clusterScan, activeCtx string, clusterList []string) string {
-	allIssues := collectWarRoomIssues(scan, 0)
-	var critical, warnings []warRoomIssue
-	for _, issue := range allIssues {
-		if issue.Severity == "critical" {
-			critical = append(critical, issue)
-		} else {
-			warnings = append(warnings, issue)
-		}
-	}
-
-	scannedAt := time.Now()
-	clusterName := displayName(activeCtx)
-	if scan != nil && scan.report != nil {
-		scannedAt = scan.report.Timestamp
-		clusterName = scan.report.ClusterName
-	}
-
-	q := ""
-	if activeCtx != "" {
-		q = "?cluster=" + url.QueryEscape(activeCtx)
-	}
-
-	var clusters []sidebarCluster
-	if len(clusterList) > 1 {
-		for _, ctx := range clusterList {
-			label := displayName(ctx)
-			if len(label) > 22 {
-				label = label[:21] + "…"
-			}
-			clusters = append(clusters, sidebarCluster{
-				Href:     "/incidents?" + url.Values{"cluster": {ctx}}.Encode(),
-				Label:    label,
-				IsActive: ctx == activeCtx,
-			})
-		}
-	}
-
-	critChipClass := "ok"
-	if len(critical) > 0 {
-		critChipClass = "c"
-	}
-	warnChipClass := "ok"
-	if len(warnings) > 0 {
-		warnChipClass = "w"
-	}
-
-	data := incidentsPageData{
-		DashHref:      "/" + q,
-		WrHref:        "/warroom" + q,
-		CostsHref:     "/costs" + q,
-		InfraHref:     "/infrastructure" + q,
-		WasteHref:     "/waste" + q,
-		SecurityHref:  "/security" + q,
-		IncidentsHref: "/incidents" + q,
-		ActivePage:    "incidents",
-		ClusterName:   clusterName,
-		Clusters:      clusters,
-		CriticalCount: len(critical),
-		StatusDesc:    fmt.Sprintf("%d issue(s) detected", len(critical)+len(warnings)),
-		DashURL:       "/" + q,
-		CritChipClass: critChipClass,
-		WarnChipClass: warnChipClass,
-		Critical:      critical,
-		Warnings:      warnings,
-		ScannedAtMs:   scannedAt.UnixMilli(),
-	}
-
-	var buf strings.Builder
-	if err := getIncidentsTmpl().Execute(&buf, data); err != nil {
-		log.Printf("incidents template: %v", err)
-		return ""
-	}
-	return buf.String()
-}
-
-var getIncidentsTmpl = sync.OnceValue(func() *template.Template {
-	return template.Must(
-		template.New("incidents.html").
-			Funcs(template.FuncMap{
-				"renderCard": func(issue warRoomIssue) template.HTML {
-					return template.HTML(renderWarRoomCard(issue))
-				},
-			}).
-			ParseFS(templateFS,
-				"templates/base.html",
-				"templates/sidebar.html",
-				"templates/incidents.html"),
-	)
-})
 
 // ── Waste & Drift page ────────────────────────────────────────────────────────
 
