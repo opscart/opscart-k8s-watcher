@@ -60,4 +60,17 @@ body{font-family:'Inter',system-ui,sans-serif;background:var(--bg);color:var(--t
 .section{animation:fadeIn 0.3s ease both}
 @media(max-width:1024px){.layout{grid-template-columns:1fr}.sidebar{display:none}}
 </style>
+<script>
+(function(){
+  fetch('/healthz').then(function(r){return r.json();}).then(function(d){
+    if(d.persistence==='ephemeral'){
+      var b=document.createElement('div');
+      b.style.cssText='position:fixed;bottom:1rem;right:1rem;background:rgba(245,158,11,0.12);border:1px solid rgba(245,158,11,0.35);border-radius:8px;padding:6px 14px;font-size:0.72rem;color:#fbbf24;font-family:Inter,sans-serif;z-index:9999;cursor:default;backdrop-filter:blur(4px)';
+      b.title='Incident history will not survive pod restarts. Check volume permissions (fsGroup / volumePermissions.enabled).';
+      b.textContent='\u26a0 Ephemeral mode \u2014 history not persisted';
+      document.body.appendChild(b);
+    }
+  }).catch(function(){});
+})();
+</script>
 {{end}}
