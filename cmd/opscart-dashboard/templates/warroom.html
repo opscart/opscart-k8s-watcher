@@ -7,6 +7,9 @@
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
 {{template "base" .}}
 <style>
+.wr-registry-link{display:flex;align-items:center;justify-content:space-between;background:rgba(99,102,241,.07);border:1px solid rgba(129,140,248,.2);border-radius:var(--radius-sm);padding:.65rem 1rem;margin-bottom:1.5rem;font-size:.8rem;color:var(--text-muted)}
+.wr-registry-link a{color:var(--primary-light);font-weight:600;text-decoration:none}
+.wr-registry-link a:hover{text-decoration:underline}
 .summary-bar{display:flex;gap:1rem;margin-bottom:2rem;flex-wrap:wrap}
 .summary-chip{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius-sm);padding:0.75rem 1.25rem;display:flex;align-items:center;gap:0.75rem;min-width:160px}
 .summary-chip.c{border-color:rgba(239,68,68,0.35)}
@@ -108,9 +111,16 @@
     </div>
   </div>
 
-  <div class="wr-section">
-    <div class="wr-section-hdr">
-      <h2>🔴 Critical Issues</h2>
+    {{if .TotalIssues}}
+    <div class="wr-registry-link">
+      <span>Ranked by severity · restart count</span>
+      <a href="{{.IncidentsHref}}">View all {{.TotalIssues}} incidents in registry →</a>
+    </div>
+    {{end}}
+
+    <div class="wr-section">
+      <div class="wr-section-hdr">
+        <h2>🔴 Critical Issues</h2>
       <span class="cnt-chip c">{{len .Critical}}</span>
     </div>
     {{if eq (len .Critical) 0}}
