@@ -31,17 +31,18 @@ type investigationEvent struct {
 
 type investigationPageData struct {
 	// Sidebar fields
-	DashHref      string
-	WrHref        string
-	CostsHref     string
-	InfraHref     string
-	WasteHref     string
-	SecurityHref  string
-	IncidentsHref string
-	ActivePage    string
-	ClusterName   string
-	CriticalCount int
-	Clusters      []sidebarCluster
+	DashHref            string
+	WrHref              string
+	CostsHref           string
+	InfraHref           string
+	WasteHref           string
+	SecurityHref        string
+	IncidentsHref       string
+	ActivePage          string
+	ClusterName         string
+	CriticalCount       int
+	Clusters            []sidebarCluster
+	RestartAcceleration string
 
 	// Pod identity
 	PodName   string
@@ -730,8 +731,12 @@ func (srv *server) handleInvestigationPage(w http.ResponseWriter, r *http.Reques
 		ownerNameForFP = store.OwnerNameFromPod(podName)
 	}
 	fp := store.Fingerprint(namespace, "Workload", ownerNameForFP, issueType)
-	if rec, err := srv.db.GetIncidentHistory(ctx, fp); err == nil && rec != nil {
+	rec, _ := srv.db.GetIncidentHistory(ctx, fp)
+	if rec != nil {
 		data.FirstDetected = firstDetectedLabel(rec.FirstSeen)
+		if accel := computeRestartAcceleration(srv.db, ctx, fp); accel != "" {
+			data.RestartAcceleration = accel
+		}
 	}
 	if events, err := srv.db.GetIncidentTimeline(ctx, fp); err == nil {
 		data.Timeline = events
@@ -775,6 +780,46 @@ var getInvestigationTmpl = sync.OnceValue(func() *template.Template {
 				"templates/investigation.html"),
 	)
 })
+
+// computeRestartAcceleration compares restart rate over the last 24h
+// against the lifetime average using RestartMilestone events.
+// Returns a human description like "22% increase since yesterday" or "".
+func computeRestartAcceleration(db store.Store, cluster, fingerprint string) string {
+	events, err := db.GetIncidentTimeline(cluster, fingerprint)
+	if err != nil || len(events) < 2 {
+		return ""
+	}
+	// Find restart counts: most recent event vs one ~24h ago
+	now := time.Now()
+	var recentCount, olderCount int
+	var olderFound bool
+	for i := len(events) - 1; i >= 0; i-- {
+		e := events[i]
+		if e.EventReason != "RestartMilestone" && e.EventReason != "Detected" {
+			continue
+		}
+		age := now.Sub(e.OccurredAt)
+		if !olderFound && age >= 20*time.Hour {
+			olderCount = e.RestartCount
+			olderFound = true
+		}
+		recentCount = events[len(events)-1].RestartCount
+	}
+	if !olderFound || olderCount == 0 {
+		return ""
+	}
+	// Rate comparison: restarts in last 24h vs previous 24h equivalent
+	recentDelta := recentCount - olderCount
+	if recentDelta <= 0 {
+		return ""
+	}
+	// Express as percentage increase over the older baseline per day
+	pct := (recentDelta * 100) / olderCount
+	if pct < 10 {
+		return "" // not significant enough to call out
+	}
+	return fmt.Sprintf("%d%% increase in restart rate since yesterday", pct)
+}
 
 func deriveCustomerImpact(ingresses []blastIngressRule, services []blastRadiusService) string {
 	// Ingress with external host → likely customer-facing
@@ -825,9 +870,15 @@ func buildOperationalSummary(data *investigationPageData) string {
 		if rate == "accelerating" {
 			failureType = "worsening or resource-related"
 		}
+		accelSuffix := ""
+		if data.RestartAcceleration != "" {
+			accelSuffix = " Restart rate " + data.RestartAcceleration + "."
+			rate = "accelerating" // override if event data says so
+			failureType = "worsening or resource-related"
+		}
 		parts = append(parts, fmt.Sprintf(
-			"This workload has restarted %d times over %d day(s). The restart rate appears %s, suggesting a %s failure.",
-			data.Restarts, max(data.AgeDays, 1), rate, failureType))
+			"This workload has restarted %d times over %d day(s). The restart rate appears %s, suggesting a %s failure.%s",
+			data.Restarts, max(data.AgeDays, 1), rate, failureType, accelSuffix))
 	}
 
 	// Config references
