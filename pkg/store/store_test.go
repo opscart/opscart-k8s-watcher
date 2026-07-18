@@ -27,6 +27,29 @@ func driveToResolved(t *testing.T, s *SQLiteStore, cluster string, present []Inc
 	}
 }
 
+// backdateIncidentEvents shifts every recorded event for the given incident
+// back in time by `age`, simulating a resolution (and the history leading
+// up to it) that happened well in the past without sleeping in tests, since
+// UpsertIncidents/ResolveMissing always stamp events with the real wall
+// clock. Shifting the whole history (not just the RESOLVED event) preserves
+// event ordering — only backdating RESOLVED would place it before DETECTED.
+func backdateIncidentEvents(t *testing.T, s *SQLiteStore, cluster, fingerprint string, age time.Duration) {
+	t.Helper()
+	var incidentID int64
+	if err := s.db.QueryRow(
+		"SELECT id FROM incidents WHERE cluster=? AND fingerprint=?",
+		cluster, fingerprint,
+	).Scan(&incidentID); err != nil {
+		t.Fatalf("lookup incident id: %v", err)
+	}
+	if _, err := s.db.Exec(
+		`UPDATE incident_events SET occurred_at = occurred_at - ? WHERE incident_id=?`,
+		int64(age.Seconds()), incidentID,
+	); err != nil {
+		t.Fatalf("backdate incident events: %v", err)
+	}
+}
+
 func openTestStore(t *testing.T) *SQLiteStore {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "test.db")
@@ -516,6 +539,9 @@ func TestTimeline_ReopenedAfterResolve(t *testing.T) {
 	}
 	// resolve it: incident absent for resolveThreshold consecutive scans
 	driveToResolved(t, s, "test-cluster", nil, "scan-miss")
+	// push the resolution outside flapAbsorptionWindow so this reappearance
+	// reads as a genuine recurrence, not a flap
+	backdateIncidentEvents(t, s, "test-cluster", inc.Fingerprint, flapAbsorptionWindow+time.Minute)
 
 	// reappears after genuine resolution
 	if err := s.UpsertIncidents("test-cluster", "scan-reopen", []IncidentData{inc}); err != nil {
@@ -704,6 +730,9 @@ func TestDebounce_ReopensAfterGenuineResolve(t *testing.T) {
 	if rec.Status != "resolved" {
 		t.Fatalf("expected genuinely resolved, got %s", rec.Status)
 	}
+	// push the resolution outside flapAbsorptionWindow so this reappearance
+	// reads as a genuine recurrence, not a flap
+	backdateIncidentEvents(t, s, "test-cluster", inc.Fingerprint, flapAbsorptionWindow+time.Minute)
 
 	if err := s.UpsertIncidents("test-cluster", "scan-reopen", []IncidentData{inc}); err != nil {
 		t.Fatalf("UpsertIncidents(reopen): %v", err)
@@ -724,6 +753,117 @@ func TestDebounce_ReopensAfterGenuineResolve(t *testing.T) {
 	last := events[len(events)-1]
 	if last.EventType != "REOPENED" || last.EventReason != "Reopened" {
 		t.Fatalf("expected trailing REOPENED event, got %+v", last)
+	}
+}
+
+// ── Flap absorption ──────────────────────────────────────────────────────────
+
+func TestFlapAbsorption_ReappearsWithinWindow_NoReopenEventEmitted(t *testing.T) {
+	s := openTestStore(t)
+
+	inc := IncidentData{Fingerprint: "default/Deployment/svc-a/probe_failure", Namespace: "default", Resource: "svc-a", IssueType: "probe_failure", Severity: "warning"}
+
+	if err := s.UpsertIncidents("test-cluster", "scan-1", []IncidentData{inc}); err != nil {
+		t.Fatalf("UpsertIncidents(1): %v", err)
+	}
+	driveToResolved(t, s, "test-cluster", nil, "scan-miss")
+
+	rec, err := s.GetIncidentHistory("test-cluster", inc.Fingerprint)
+	if err != nil {
+		t.Fatalf("GetIncidentHistory: %v", err)
+	}
+	if rec.Status != "resolved" {
+		t.Fatalf("expected resolved before flap, got %s", rec.Status)
+	}
+
+	// reappears moments later (well within flapAbsorptionWindow) — this is
+	// the flap this feature absorbs, not a genuine recurrence.
+	if err := s.UpsertIncidents("test-cluster", "scan-flap", []IncidentData{inc}); err != nil {
+		t.Fatalf("UpsertIncidents(flap): %v", err)
+	}
+
+	rec, err = s.GetIncidentHistory("test-cluster", inc.Fingerprint)
+	if err != nil {
+		t.Fatalf("GetIncidentHistory: %v", err)
+	}
+	if rec.Status != "active" {
+		t.Fatalf("expected active after absorbed flap, got %s", rec.Status)
+	}
+
+	events, err := s.GetIncidentTimeline("test-cluster", inc.Fingerprint)
+	if err != nil {
+		t.Fatalf("GetIncidentTimeline: %v", err)
+	}
+	if len(events) != 1 || events[0].EventType != "DETECTED" {
+		t.Fatalf("expected only the initial DETECTED event (RESOLVED removed, no REOPENED), got %+v", events)
+	}
+}
+
+func TestFlapAbsorption_ReappearsAfterWindow_ReopenedEmitted(t *testing.T) {
+	s := openTestStore(t)
+
+	inc := IncidentData{Fingerprint: "default/Deployment/svc-a/probe_failure", Namespace: "default", Resource: "svc-a", IssueType: "probe_failure", Severity: "warning"}
+
+	if err := s.UpsertIncidents("test-cluster", "scan-1", []IncidentData{inc}); err != nil {
+		t.Fatalf("UpsertIncidents(1): %v", err)
+	}
+	driveToResolved(t, s, "test-cluster", nil, "scan-miss")
+	backdateIncidentEvents(t, s, "test-cluster", inc.Fingerprint, flapAbsorptionWindow+time.Minute)
+
+	if err := s.UpsertIncidents("test-cluster", "scan-reopen", []IncidentData{inc}); err != nil {
+		t.Fatalf("UpsertIncidents(reopen): %v", err)
+	}
+
+	events, err := s.GetIncidentTimeline("test-cluster", inc.Fingerprint)
+	if err != nil {
+		t.Fatalf("GetIncidentTimeline: %v", err)
+	}
+	if len(events) != 3 {
+		t.Fatalf("expected 3 events (DETECTED, RESOLVED, REOPENED), got %d: %+v", len(events), events)
+	}
+	if events[1].EventType != "RESOLVED" {
+		t.Fatalf("expected RESOLVED event to be retained (gap exceeded the window), got %+v", events[1])
+	}
+	if events[2].EventType != "REOPENED" || events[2].EventReason != "Reopened" {
+		t.Fatalf("expected trailing REOPENED event, got %+v", events[2])
+	}
+}
+
+func TestFlapAbsorption_MultipleRapidFlapsLeaveOnlyDetected(t *testing.T) {
+	s := openTestStore(t)
+
+	inc := IncidentData{Fingerprint: "default/Deployment/svc-a/probe_failure", Namespace: "default", Resource: "svc-a", IssueType: "probe_failure", Severity: "warning"}
+
+	if err := s.UpsertIncidents("test-cluster", "scan-1", []IncidentData{inc}); err != nil {
+		t.Fatalf("UpsertIncidents(1): %v", err)
+	}
+
+	// 5 resolve/reopen cycles, ~3 minutes apart — mirrors the flapping
+	// probe_failure pattern this feature exists to absorb.
+	for cycle := 0; cycle < 5; cycle++ {
+		driveToResolved(t, s, "test-cluster", nil, fmt.Sprintf("cycle%d-miss", cycle))
+		backdateIncidentEvents(t, s, "test-cluster", inc.Fingerprint, 3*time.Minute)
+
+		scanID := fmt.Sprintf("cycle%d-reappear", cycle)
+		if err := s.UpsertIncidents("test-cluster", scanID, []IncidentData{inc}); err != nil {
+			t.Fatalf("UpsertIncidents(%s): %v", scanID, err)
+		}
+	}
+
+	rec, err := s.GetIncidentHistory("test-cluster", inc.Fingerprint)
+	if err != nil {
+		t.Fatalf("GetIncidentHistory: %v", err)
+	}
+	if rec.Status != "active" {
+		t.Fatalf("expected active after flap cycles settle, got %s", rec.Status)
+	}
+
+	events, err := s.GetIncidentTimeline("test-cluster", inc.Fingerprint)
+	if err != nil {
+		t.Fatalf("GetIncidentTimeline: %v", err)
+	}
+	if len(events) != 1 || events[0].EventType != "DETECTED" {
+		t.Fatalf("expected only the original DETECTED event to survive 5 flap cycles, got %+v", events)
 	}
 }
 
@@ -1402,6 +1542,9 @@ func TestQueryIncidents_ReopenCountAndStatus(t *testing.T) {
 	// throughout and is never resolved.
 	for i := 0; i < 2; i++ {
 		driveToResolved(t, s, "test-cluster", []IncidentData{other}, fmt.Sprintf("scan-miss-%d", i))
+		// push each resolution outside flapAbsorptionWindow so the reopen
+		// below counts as a genuine recurrence, not an absorbed flap
+		backdateIncidentEvents(t, s, "test-cluster", inc.Fingerprint, flapAbsorptionWindow+time.Minute)
 		if err := s.UpsertIncidents("test-cluster", fmt.Sprintf("scan-reopen-%d", i), []IncidentData{inc, other}); err != nil {
 			t.Fatalf("UpsertIncidents(reopen %d): %v", i, err)
 		}
