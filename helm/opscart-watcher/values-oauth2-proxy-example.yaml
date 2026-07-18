@@ -1,0 +1,83 @@
+# Example: fronting OpsCart with oauth2-proxy for authenticated access.
+#
+# This file is a REFERENCE, not a drop-in chart value — oauth2-proxy is
+# deployed and configured separately (via its own Helm chart or manifests).
+# This shows how to wire your ingress to require auth before traffic
+# reaches OpsCart.
+#
+# Prerequisites:
+#   1. oauth2-proxy deployed in-cluster (helm repo: oauth2-proxy/oauth2-proxy)
+#      configured with your identity provider (Azure AD / Google / GitHub / OIDC)
+#   2. An ingress controller that supports auth-url / auth-signin annotations
+#      (nginx-ingress is the most common; documented here)
+
+# ── OpsCart's own values remain unchanged ──────────────────────────────────
+# OpsCart does not need to know auth is happening. It keeps listening on
+# plain HTTP inside the cluster; the ingress enforces auth before any
+# request reaches the Service.
+# ── Basic auth and oauth2-proxy together ───────────────────────────────────
+# OpsCart's built-in basic auth (see values.yaml `auth:` block) stays active
+# by default even when oauth2-proxy fronts the ingress. This means a user
+# would see two prompts: oauth2-proxy's sign-in, then OpsCart's basic auth.
+#
+# If you're using the oauth2-proxy pattern below, set a stable basic-auth
+# password once (so it isn't regenerated on every restart) and share it
+# only with the operators who manage the Helm release — end users never
+# see it, because oauth2-proxy's auth-url check happens first and only
+# passes already-authenticated traffic through to OpsCart.
+#
+# auth:
+#   username: "admin"
+#   passwordEnv: "OPSCART_AUTH_PASS"
+
+replicaCount: 1
+image:
+  repository: ghcr.io/opscart/opscart-dashboard
+  tag: v1.8.3
+
+persistence:
+  enabled: true
+  size: 1Gi
+
+retentionDays: 90
+
+# ── Ingress with oauth2-proxy auth annotations ─────────────────────────────
+ingress:
+  enabled: true
+  className: nginx
+  annotations:
+    # Redirect unauthenticated requests to oauth2-proxy's sign-in flow
+    nginx.ingress.kubernetes.io/auth-url: "https://oauth2-proxy.your-domain.com/oauth2/auth"
+    nginx.ingress.kubernetes.io/auth-signin: "https://oauth2-proxy.your-domain.com/oauth2/start?rd=$scheme://$host$request_uri"
+    # Pass identity headers through to OpsCart if you later want to log
+    # "who viewed this" — OpsCart does not currently read these headers,
+    # but they arrive pre-authenticated regardless.
+    nginx.ingress.kubernetes.io/auth-response-headers: "X-Auth-Request-User,X-Auth-Request-Email"
+  hosts:
+    - host: opscart.your-domain.com
+      paths:
+        - path: /
+          pathType: Prefix
+  tls:
+    - secretName: opscart-tls
+      hosts:
+        - opscart.your-domain.com
+
+# ── Reference: minimal oauth2-proxy values (deployed separately) ──────────
+# helm install oauth2-proxy oauth2-proxy/oauth2-proxy -f oauth2-proxy-values.yaml
+#
+# oauth2-proxy-values.yaml would contain, e.g. for Azure AD:
+#
+#   config:
+#     clientID: "<azure-ad-app-client-id>"
+#     clientSecret: "<azure-ad-app-client-secret>"
+#     cookieSecret: "<random-32-byte-base64-secret>"
+#   extraArgs:
+#     provider: azure
+#     azure-tenant: "<your-tenant-id>"
+#     email-domain: "*"
+#     upstreams: "static://202"
+#     cookie-secure: "true"
+#
+# See https://oauth2-proxy.github.io/oauth2-proxy/configuration/providers/
+# for GitHub, Google, and generic OIDC provider configuration.
