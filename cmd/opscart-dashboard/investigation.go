@@ -206,6 +206,24 @@ func investigationHints(issueType string, stateReason string, restarts int32, po
 			Title:      "Replace with specific capabilities",
 			Reason:     "Use securityContext.capabilities.add for specific needs instead of full privileged access.",
 		})
+	case "probe_failure":
+		hints = append(hints, investigationHint{
+			Confidence: "high",
+			Title:      "Check what the startup/liveness probe is actually testing",
+			Reason:     "The container is starting and running, but kubelet is killing it for failing its configured probe — the app itself may be healthy.",
+			Command:    fmt.Sprintf("kubectl describe pod %s -n %s", pod.Name, pod.Namespace),
+		})
+		hints = append(hints, investigationHint{
+			Confidence: "high",
+			Title:      "Compare probe timing against real startup time",
+			Reason:     "A probe that fires before the app finishes initializing will kill a healthy container. Check initialDelaySeconds, periodSeconds, and failureThreshold against actual startup time.",
+		})
+		hints = append(hints, investigationHint{
+			Confidence: "medium",
+			Title:      "Check previous container logs for the probe endpoint's response",
+			Reason:     "If the probe hits an HTTP endpoint, the app's own logs often show why that endpoint returned an error or timed out.",
+			Command:    fmt.Sprintf("kubectl logs %s -n %s --previous", pod.Name, pod.Namespace),
+		})
 
 	default:
 		hints = append(hints, investigationHint{
@@ -859,6 +877,9 @@ func buildOperationalSummary(data *investigationPageData) string {
 	case "privileged_container":
 		parts = append(parts,
 			"Review whether privileged mode is genuinely required — most workloads can use specific capabilities instead.")
+	case "probe_failure":
+		parts = append(parts,
+			"Investigation should begin with the probe configuration — this container is starting successfully but being killed for failing its startup or liveness check. Estimated time: 5–10 minutes.")
 	}
 
 	return strings.Join(parts, " ")
