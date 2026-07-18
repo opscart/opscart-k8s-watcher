@@ -226,6 +226,7 @@
         <div class="inv-evidence-value">{{.FirstDetected}}</div>
       </div>
       {{end}}
+      {{if not .NamespaceScoped}}
       <div class="inv-evidence-chip">
         <div class="inv-evidence-label">Restarts</div>
         <div class="inv-evidence-value">{{.Restarts}}</div>
@@ -242,8 +243,52 @@
         <div class="inv-evidence-label">Owner</div>
         <div class="inv-evidence-value">{{if .OwnerKind}}{{.OwnerKind}}/{{.OwnerName}}{{else}}None{{end}}</div>
       </div>
+      {{end}}
     </div>
   </div>
+{{if .NamespaceScoped}}
+<div class="inv-section">
+  <div class="inv-section-hdr">
+    <h2>Namespace Finding</h2>
+  </div>
+  <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:0.75rem;margin-bottom:1.5rem">
+    <div class="inv-evidence-chip">
+      <div class="inv-evidence-label">Namespace</div>
+      <div class="inv-evidence-value" style="font-size:0.88rem">{{.Namespace}}</div>
+    </div>
+    <div class="inv-evidence-chip">
+      <div class="inv-evidence-label">Pods affected</div>
+      <div class="inv-evidence-value">{{.NamespacePodCount}}</div>
+    </div>
+  </div>
+  {{if .NamespaceFinding}}
+  <div class="inv-summary">
+    <div class="inv-summary-label">Finding</div>
+    <div class="inv-summary-text">{{.NamespaceFinding}}</div>
+  </div>
+  {{end}}
+  {{if eq .IssueType "unprotected_namespace"}}
+  <div>
+    <div class="inv-evidence-label" style="margin-bottom:0.6rem">Sample default-deny NetworkPolicy</div>
+    <div class="inv-cmd" style="align-items:flex-start">
+      <pre id="np-yaml" style="white-space:pre;overflow-x:auto;margin:0;font-family:'Consolas','Monaco',monospace;font-size:0.78rem;color:var(--primary-light);flex:1">apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-all
+  namespace: {{.Namespace}}
+spec:
+  podSelector: {}
+  policyTypes:
+    - Ingress
+    - Egress</pre>
+      <button class="wr-copy-btn" onclick="navigator.clipboard.writeText(document.getElementById('np-yaml').textContent)">Copy</button>
+    </div>
+  </div>
+  {{end}}
+</div>
+{{end}}
+
+{{if not .NamespaceScoped}}
 {{if or .BlastSiblings .BlastServices .BlastIngresses .BlastNamespacePods}}
 <div class="inv-section">
   <div class="inv-section-hdr">
@@ -394,6 +439,7 @@
   {{end}}
 
 </div>
+{{end}}
 {{end}}
 
   {{if .Hints}}
