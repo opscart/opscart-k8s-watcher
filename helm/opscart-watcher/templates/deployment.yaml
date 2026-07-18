@@ -8,12 +8,6 @@ metadata:
 spec:
   replicas: 1
   {{- if .Values.persistence.enabled }}
-  # opscart-data is ReadWriteOnce, so it can only be mounted by one pod at a
-  # time. A RollingUpdate would start the new pod (and try to mount the
-  # volume) before terminating the old one, and the new pod would hang
-  # waiting for a mount the old pod still holds. Recreate tears down the old
-  # pod first, freeing the volume before the replacement starts. Only
-  # correct for single-replica deployments backed by RWO storage.
   strategy:
     type: Recreate
   {{- end }}
@@ -51,6 +45,10 @@ spec:
               value: /data/opscart.db
             - name: OPSCART_RETENTION_DAYS
               value: {{ .Values.retentionDays | quote }}
+            {{- if .Values.auth.existingSecret }}
+            - name: OPSCART_AUTH_SECRET_NAME
+              value: {{ .Values.auth.existingSecret | quote }}
+            {{- end }}
           ports:
             - name: http
               containerPort: {{ .Values.service.targetPort }}
@@ -60,6 +58,11 @@ spec:
           volumeMounts:
             - name: opscart-data
               mountPath: /data
+            {{- if .Values.auth.existingSecret }}
+            - name: auth-secret
+              mountPath: /etc/opscart/auth
+              readOnly: true
+            {{- end }}
           readinessProbe:
             httpGet:
               path: {{ .Values.probes.readiness.path }}
@@ -86,3 +89,8 @@ spec:
           {{- else }}
           emptyDir: {}
           {{- end }}
+        {{- if .Values.auth.existingSecret }}
+        - name: auth-secret
+          secret:
+            secretName: {{ .Values.auth.existingSecret }}
+        {{- end }}

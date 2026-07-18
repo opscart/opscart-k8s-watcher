@@ -2,7 +2,7 @@
 
 image:
   repository: ghcr.io/opscart/opscart-dashboard
-  tag: "v1.7.0"
+  tag: "v1.8.5"
   # For local development with a locally-built image (e.g. minikube):
   # the image must be loaded under the EXACT repository:tag rendered by
   # this chart — kubelet does no fuzzy matching with pullPolicy Never.
@@ -42,6 +42,10 @@ resources:
 args:
   - "--port=8080"
   - "--breakdown=deployment"
+
+auth:
+  username: "admin"        # used only if generating a password with a custom username; ignored if existingSecret is set
+  existingSecret: ""       # name of a Secret with keys "username" and "password" — mounted at /etc/opscart/auth/
 
 podSecurityContext:
   runAsNonRoot: true
