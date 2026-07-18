@@ -44,12 +44,13 @@ type investigationPageData struct {
 	Clusters      []sidebarCluster
 
 	// Pod identity
-	PodName   string
-	Namespace string
-	IssueType string // crash_loop, image_pull, oom_killed, privileged
-	Severity  string
-	OwnerKind string // Deployment / StatefulSet / Job / (none)
-	OwnerName string
+	PodName       string
+	Namespace     string
+	IssueType     string // crash_loop, image_pull_backoff, oomkilled, privileged_container, probe_failure...
+	Severity      string
+	OwnerKind     string // Deployment / StatefulSet / Job / (none)
+	OwnerName     string
+	ContainerName string // set when the finding is container-scoped (e.g. privileged_container); empty otherwis
 
 	// Status
 	Phase         string
@@ -157,7 +158,7 @@ func investigationHints(issueType string, stateReason string, restarts int32, po
 			Command:    fmt.Sprintf("kubectl get events -n %s --field-selector involvedObject.name=%s", pod.Namespace, pod.Name),
 		})
 
-	case "image_pull":
+	case "image_pull_backoff":
 		hints = append(hints, investigationHint{
 			Confidence: "high",
 			Title:      "Verify image tag exists in registry",
@@ -176,7 +177,7 @@ func investigationHints(issueType string, stateReason string, restarts int32, po
 			Reason:     "Credentials rotate on some registries — a working deployment can break without code changes.",
 		})
 
-	case "oom_killed":
+	case "oomkilled":
 		hints = append(hints, investigationHint{
 			Confidence: "high",
 			Title:      "Memory limit is below actual usage",
@@ -194,7 +195,7 @@ func investigationHints(issueType string, stateReason string, restarts int32, po
 			Reason:     "If OOM kills are periodic rather than immediate, a memory leak or batch job may be the cause.",
 		})
 
-	case "privileged":
+	case "privileged_container":
 		hints = append(hints, investigationHint{
 			Confidence: "high",
 			Title:      "Confirm privileged mode is actually required",
@@ -204,6 +205,24 @@ func investigationHints(issueType string, stateReason string, restarts int32, po
 			Confidence: "medium",
 			Title:      "Replace with specific capabilities",
 			Reason:     "Use securityContext.capabilities.add for specific needs instead of full privileged access.",
+		})
+	case "probe_failure":
+		hints = append(hints, investigationHint{
+			Confidence: "high",
+			Title:      "Check what the startup/liveness probe is actually testing",
+			Reason:     "The container is starting and running, but kubelet is killing it for failing its configured probe — the app itself may be healthy.",
+			Command:    fmt.Sprintf("kubectl describe pod %s -n %s", pod.Name, pod.Namespace),
+		})
+		hints = append(hints, investigationHint{
+			Confidence: "high",
+			Title:      "Compare probe timing against real startup time",
+			Reason:     "A probe that fires before the app finishes initializing will kill a healthy container. Check initialDelaySeconds, periodSeconds, and failureThreshold against actual startup time.",
+		})
+		hints = append(hints, investigationHint{
+			Confidence: "medium",
+			Title:      "Check previous container logs for the probe endpoint's response",
+			Reason:     "If the probe hits an HTTP endpoint, the app's own logs often show why that endpoint returned an error or timed out.",
+			Command:    fmt.Sprintf("kubectl logs %s -n %s --previous", pod.Name, pod.Namespace),
 		})
 
 	default:
@@ -658,7 +677,11 @@ func (srv *server) handleInvestigationPage(w http.ResponseWriter, r *http.Reques
 		http.Error(w, "cluster connection failed", http.StatusBadGateway)
 		return
 	}
-
+	if idx := strings.Index(podName, "/"); idx != -1 {
+		data.PodName = podName[:idx]
+		data.ContainerName = podName[idx+1:]
+		podName = podName[:idx]
+	}
 	pod, err := clientset.CoreV1().Pods(namespace).Get(context.TODO(), podName, metav1.GetOptions{})
 	if err != nil {
 		// Pod may have been deleted/recreated since the scan
@@ -845,15 +868,18 @@ func buildOperationalSummary(data *investigationPageData) string {
 	case "crash_loop":
 		parts = append(parts,
 			"Investigation should begin with previous container logs. Estimated time: 5–10 minutes.")
-	case "image_pull":
+	case "image_pull_backoff":
 		parts = append(parts,
 			"Investigation should begin with registry credentials and image tag verification. Estimated time: 2–5 minutes.")
-	case "oom_killed":
+	case "oomkilled":
 		parts = append(parts,
 			"Investigation should begin with memory limit configuration. Estimated time: 5 minutes.")
-	case "privileged":
+	case "privileged_container":
 		parts = append(parts,
 			"Review whether privileged mode is genuinely required — most workloads can use specific capabilities instead.")
+	case "probe_failure":
+		parts = append(parts,
+			"Investigation should begin with the probe configuration — this container is starting successfully but being killed for failing its startup or liveness check. Estimated time: 5–10 minutes.")
 	}
 
 	return strings.Join(parts, " ")
