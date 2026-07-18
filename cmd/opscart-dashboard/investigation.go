@@ -59,6 +59,12 @@ type investigationPageData struct {
 	StateReason   string // CrashLoopBackOff, ImagePullBackOff...
 	NotFound      bool   // pod deleted since scan
 	FirstDetected string
+
+	// Namespace-scoped findings (unprotected_namespace, idle_namespace) — no pod involved
+	NamespaceScoped   bool
+	NamespacePodCount int    // pods affected/exposed, from the incident's stored details
+	NamespaceFinding  string // the specific finding description
+
 	// Blast radius
 	BlastSiblings      []blastRadiusPod     // sibling pods under same owner
 	BlastServices      []blastRadiusService // services routing to this deployment
@@ -122,10 +128,32 @@ type blastSharedDep struct {
 	SharedItems    []string // names of the shared CMs/Secrets
 }
 
-func investigationHints(issueType string, stateReason string, restarts int32, pod *corev1.Pod) []investigationHint {
+func investigationHints(issueType string, stateReason string, restarts int32, pod *corev1.Pod, namespace string) []investigationHint {
 	var hints []investigationHint
 
 	switch issueType {
+	case "unprotected_namespace":
+		hints = append(hints, investigationHint{
+			Confidence: "high",
+			Title:      "Apply a default-deny NetworkPolicy",
+			Reason:     "No NetworkPolicy means every pod in this namespace can be reached by every other pod in the cluster.",
+			Command:    fmt.Sprintf("kubectl get networkpolicies -n %s", namespace),
+		})
+		hints = append(hints, investigationHint{
+			Confidence: "medium",
+			Title:      "Review which pods are actually exposed",
+			Reason:     "Confirm the pod count and whether any of them handle sensitive data or traffic.",
+			Command:    fmt.Sprintf("kubectl get pods -n %s", namespace),
+		})
+
+	case "idle_namespace":
+		hints = append(hints, investigationHint{
+			Confidence: "medium",
+			Title:      "Confirm this namespace is genuinely unused",
+			Reason:     "Idle namespaces consuming resources may be forgotten test environments or decommissioned projects.",
+			Command:    fmt.Sprintf("kubectl get all -n %s", namespace),
+		})
+
 	case "crash_loop":
 		hints = append(hints, investigationHint{
 			Confidence: "high",
@@ -625,6 +653,39 @@ func referencedResourcesFromSpec(spec *corev1.PodSpec) (cms, secrets, pvcs []str
 	return
 }
 
+// populateNamespaceFinding fills NamespacePodCount/NamespaceFinding from the same
+// audit data War Room already surfaces for these namespace-level issue types
+// (see collectWarRoomIssues in warroom.go), rather than re-deriving pod counts.
+func populateNamespaceFinding(data *investigationPageData, scan *clusterScan, issueType, namespace string) {
+	if scan == nil {
+		return
+	}
+	switch issueType {
+	case "unprotected_namespace":
+		if scan.netAudit == nil {
+			return
+		}
+		for _, ns := range scan.netAudit.UnprotectedNamespaces {
+			if ns.Name == namespace {
+				data.NamespacePodCount = ns.PodCount
+				data.NamespaceFinding = ns.RiskReason
+				return
+			}
+		}
+	case "idle_namespace":
+		if scan.wasteAudit == nil {
+			return
+		}
+		for _, ns := range scan.wasteAudit.AbandonedNamespaces {
+			if ns.Name == namespace {
+				data.NamespacePodCount = ns.PodCount
+				data.NamespaceFinding = ns.Reason
+				return
+			}
+		}
+	}
+}
+
 func (srv *server) handleInvestigationPage(w http.ResponseWriter, r *http.Request) {
 	ctx := srv.activeCtx(r)
 	podName := r.URL.Query().Get("pod")
@@ -668,6 +729,32 @@ func (srv *server) handleInvestigationPage(w http.ResponseWriter, r *http.Reques
 		IssueType:     issueType,
 		BackURL:       backURL,
 		ScannedAtMs:   time.Now().UnixMilli(),
+	}
+
+	var namespaceScopedTypes = map[string]bool{
+		"unprotected_namespace": true,
+		"idle_namespace":        true,
+	}
+	if namespaceScopedTypes[issueType] {
+		data.NamespaceScoped = true
+		populateNamespaceFinding(&data, scan, issueType, namespace)
+		data.Hints = investigationHints(issueType, "", 0, nil, namespace)
+		for _, h := range data.Hints {
+			if h.Command != "" {
+				data.Commands = append(data.Commands, h.Command)
+			}
+		}
+		data.OperationalSummary = buildOperationalSummary(&data)
+
+		fp := store.Fingerprint(namespace, "Workload", store.OwnerNameFromPod(podName), issueType)
+		if rec, err := srv.db.GetIncidentHistory(ctx, fp); err == nil && rec != nil {
+			data.FirstDetected = firstDetectedLabel(rec.FirstSeen)
+		}
+		if events, err := srv.db.GetIncidentTimeline(ctx, fp); err == nil {
+			data.Timeline = events
+		}
+		renderInvestigation(w, data)
+		return
 	}
 
 	// Live cluster data — fresh client, not scan cache
@@ -732,7 +819,7 @@ func (srv *server) handleInvestigationPage(w http.ResponseWriter, r *http.Reques
 	data.OwnerKind, data.OwnerName = resolveOwner(clientset, pod)
 	data.Events = podEvents(clientset, namespace, podName, 10)
 	data.ConfigMaps, data.Secrets, data.PVCs = referencedResources(pod)
-	data.Hints = investigationHints(issueType, data.StateReason, data.Restarts, pod)
+	data.Hints = investigationHints(issueType, data.StateReason, data.Restarts, pod, namespace)
 
 	// Blast radius
 	data.BlastSiblings, data.BlastHealthy, data.BlastTotal = blastRadiusSiblings(clientset, namespace, data.OwnerKind, data.OwnerName)
@@ -838,29 +925,33 @@ func buildOperationalSummary(data *investigationPageData) string {
 
 	var parts []string
 
-	// Restart pattern
-	if data.Restarts > 0 {
-		rate := "stable"
-		if data.AgeDays > 0 && int(data.Restarts)/data.AgeDays > 200 {
-			rate = "accelerating"
-		}
-		failureType := "deterministic configuration or application"
-		if rate == "accelerating" {
-			failureType = "worsening or resource-related"
-		}
-		parts = append(parts, fmt.Sprintf(
-			"This workload has restarted %d times over %d day(s). The restart rate appears %s, suggesting a %s failure.",
-			data.Restarts, max(data.AgeDays, 1), rate, failureType))
-	}
-
-	// Config references
-	if len(data.Secrets) == 0 && len(data.ConfigMaps) == 0 {
-		parts = append(parts,
-			"No referenced ConfigMaps or Secrets were detected in the pod spec — missing configuration is unlikely to be the root cause.")
+	if data.NamespaceScoped {
+		parts = append(parts, fmt.Sprintf("Namespace %s: %s", data.Namespace, data.NamespaceFinding))
 	} else {
-		parts = append(parts, fmt.Sprintf(
-			"The pod references %d ConfigMap(s) and %d Secret(s) — verify these exist and contain the expected keys.",
-			len(data.ConfigMaps), len(data.Secrets)))
+		// Restart pattern
+		if data.Restarts > 0 {
+			rate := "stable"
+			if data.AgeDays > 0 && int(data.Restarts)/data.AgeDays > 200 {
+				rate = "accelerating"
+			}
+			failureType := "deterministic configuration or application"
+			if rate == "accelerating" {
+				failureType = "worsening or resource-related"
+			}
+			parts = append(parts, fmt.Sprintf(
+				"This workload has restarted %d times over %d day(s). The restart rate appears %s, suggesting a %s failure.",
+				data.Restarts, max(data.AgeDays, 1), rate, failureType))
+		}
+
+		// Config references
+		if len(data.Secrets) == 0 && len(data.ConfigMaps) == 0 {
+			parts = append(parts,
+				"No referenced ConfigMaps or Secrets were detected in the pod spec — missing configuration is unlikely to be the root cause.")
+		} else {
+			parts = append(parts, fmt.Sprintf(
+				"The pod references %d ConfigMap(s) and %d Secret(s) — verify these exist and contain the expected keys.",
+				len(data.ConfigMaps), len(data.Secrets)))
+		}
 	}
 
 	// Issue-specific recommendation
@@ -880,6 +971,12 @@ func buildOperationalSummary(data *investigationPageData) string {
 	case "probe_failure":
 		parts = append(parts,
 			"Investigation should begin with the probe configuration — this container is starting successfully but being killed for failing its startup or liveness check. Estimated time: 5–10 minutes.")
+	case "unprotected_namespace":
+		parts = append(parts,
+			"This is a configuration gap, not a runtime failure — no pod-level investigation applies here.")
+	case "idle_namespace":
+		parts = append(parts,
+			"This is a configuration/waste finding, not a runtime failure — no pod-level investigation applies here.")
 	}
 
 	return strings.Join(parts, " ")
