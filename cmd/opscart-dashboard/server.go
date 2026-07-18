@@ -66,10 +66,16 @@ type server struct {
 	db            store.Store
 	retentionDays int
 	dbPersistent  bool
+	auth          *authConfig
 }
 
 func newServer(clusterList []string, db store.Store, retentionDays int, dbPersistent bool) *server {
-	return &server{clusterList: clusterList, states: make(map[string]*dashboardState), db: db, retentionDays: retentionDays, dbPersistent: dbPersistent}
+	auth, err := resolveAuthConfig()
+	if err != nil {
+		log.Fatalf("auth: %v", err)
+	}
+	logAuthConfig(auth)
+	return &server{clusterList: clusterList, states: make(map[string]*dashboardState), db: db, retentionDays: retentionDays, dbPersistent: dbPersistent, auth: auth}
 }
 
 func (srv *server) getState(ctx string) *dashboardState {
@@ -128,7 +134,7 @@ func (srv *server) handleOverviewPage(w http.ResponseWriter, r *http.Request) {
 	w.Write([]byte(buf.String()))
 }
 
-func (srv *server) newMux() *http.ServeMux {
+func (srv *server) newMux() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", srv.handleOverviewPage)
 	mux.HandleFunc("/costs", srv.handleDashboard)
@@ -141,13 +147,19 @@ func (srv *server) newMux() *http.ServeMux {
 	mux.HandleFunc("/infrastructure", srv.handleInfrastructurePage)
 	mux.HandleFunc("/namespaces", srv.handleNamespacesPage)
 	mux.HandleFunc("/optimizations", srv.handleOptimizationsPage)
-	mux.HandleFunc("/healthz", srv.handleHealth)
 	mux.HandleFunc("/investigate", srv.handleInvestigationPage)
 	mux.HandleFunc("/incidents", srv.handleIncidentsPage)
 	mux.HandleFunc("/security", srv.handleSecurityPage)
 	mux.HandleFunc("/waste", srv.handleWastePage)
 	mux.HandleFunc("/settings", srv.handleStubPage("settings", "Settings"))
-	return mux
+
+	// /healthz is registered on the unwrapped top-level mux so kubelet
+	// liveness/readiness probes succeed without credentials; every other
+	// route is served through the authenticated sub-mux.
+	top := http.NewServeMux()
+	top.HandleFunc("/healthz", srv.handleHealth)
+	top.Handle("/", basicAuthMiddleware(srv.auth, mux))
+	return top
 }
 
 // ── HTTP handlers ─────────────────────────────────────────────────────────────
