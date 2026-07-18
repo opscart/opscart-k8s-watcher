@@ -157,7 +157,7 @@ func investigationHints(issueType string, stateReason string, restarts int32, po
 			Command:    fmt.Sprintf("kubectl get events -n %s --field-selector involvedObject.name=%s", pod.Namespace, pod.Name),
 		})
 
-	case "image_pull":
+	case "image_pull_backoff":
 		hints = append(hints, investigationHint{
 			Confidence: "high",
 			Title:      "Verify image tag exists in registry",
@@ -176,7 +176,7 @@ func investigationHints(issueType string, stateReason string, restarts int32, po
 			Reason:     "Credentials rotate on some registries — a working deployment can break without code changes.",
 		})
 
-	case "oom_killed":
+	case "oomkilled":
 		hints = append(hints, investigationHint{
 			Confidence: "high",
 			Title:      "Memory limit is below actual usage",
@@ -194,7 +194,7 @@ func investigationHints(issueType string, stateReason string, restarts int32, po
 			Reason:     "If OOM kills are periodic rather than immediate, a memory leak or batch job may be the cause.",
 		})
 
-	case "privileged":
+	case "privileged_container":
 		hints = append(hints, investigationHint{
 			Confidence: "high",
 			Title:      "Confirm privileged mode is actually required",
@@ -845,13 +845,13 @@ func buildOperationalSummary(data *investigationPageData) string {
 	case "crash_loop":
 		parts = append(parts,
 			"Investigation should begin with previous container logs. Estimated time: 5–10 minutes.")
-	case "image_pull":
+	case "image_pull_backoff":
 		parts = append(parts,
 			"Investigation should begin with registry credentials and image tag verification. Estimated time: 2–5 minutes.")
-	case "oom_killed":
+	case "oomkilled":
 		parts = append(parts,
 			"Investigation should begin with memory limit configuration. Estimated time: 5 minutes.")
-	case "privileged":
+	case "privileged_container":
 		parts = append(parts,
 			"Review whether privileged mode is genuinely required — most workloads can use specific capabilities instead.")
 	}
