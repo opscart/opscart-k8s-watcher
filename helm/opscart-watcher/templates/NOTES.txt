@@ -1,4 +1,4 @@
-{{ .Chart.Name }} {{ .Chart.AppVersion }} deployed.
+{{ .Chart.Name }} {{ .Values.image.tag }} deployed.
 
   Install into a fresh cluster with:
     helm install {{ .Release.Name }} ./helm/opscart-watcher -n {{ .Release.Namespace }} --create-namespace
