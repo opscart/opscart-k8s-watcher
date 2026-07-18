@@ -115,7 +115,7 @@ func (s *dashboardState) refresh(clusterList []string) error {
 		_ = s.db.WriteScanHistory(s.ctx, scanID, store.ScanMeta{
 			DurationMS: time.Since(start).Milliseconds(),
 			Success:    true,
-			Version:    "v1.3.0",
+			Version:    Version,
 		})
 	}
 
