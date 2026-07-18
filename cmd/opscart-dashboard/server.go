@@ -707,7 +707,7 @@ func buildOverviewData(scan *clusterScan, activeCtx string, clusterList []string
 		CPUUtilization:     cpuUtil,
 		MemUtilization:     memUtil,
 		NamespaceCount:     nsCount,
-		Version:            "v1.3.0",
+		Version:            Version,
 		DashHref:           "/" + q,
 		CostsHref:          "/costs" + q,
 		InfraHref:          "/infrastructure" + q,

@@ -1022,6 +1022,7 @@ type costPageData struct {
 	SecurityURL   string
 	WasteURL      string
 	ActivePage    string
+	Version       string
 }
 
 type costPoolRow struct {
@@ -1102,6 +1103,7 @@ func buildCostPageData(scan *clusterScan, activeCtx string, clusterList []string
 		SecurityURL:   "/security" + q,
 		WasteURL:      "/waste" + q,
 		ActivePage:    "costs",
+		Version:       Version,
 	}
 
 	if scan != nil && scan.report != nil {
