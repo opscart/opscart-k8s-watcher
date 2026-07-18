@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"fmt"
 	"html/template"
 	"math"
@@ -235,9 +236,12 @@ var getIncidentsTmpl = sync.OnceValue(func() *template.Template {
 })
 
 func renderIncidents(w http.ResponseWriter, data incidentsPageData) {
+	var buf bytes.Buffer
+	if err := getIncidentsTmpl().Execute(&buf, data); err != nil {
+		http.Error(w, "template error", http.StatusInternalServerError)
+		return
+	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-cache, no-store, must-revalidate")
-	if err := getIncidentsTmpl().Execute(w, data); err != nil {
-		http.Error(w, "template error", http.StatusInternalServerError)
-	}
+	w.Write(buf.Bytes())
 }
