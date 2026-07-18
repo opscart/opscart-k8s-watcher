@@ -27,6 +27,16 @@ var restartMilestones = []int{10, 50, 100, 500, 1000, 2500, 5000, 10000}
 // resolved/reopened churn in the timeline.
 const resolveThreshold = 3
 
+// flapAbsorptionWindow is the gap after a RESOLVED event within which a
+// reappearance is treated as a continuation of the same active period
+// rather than a genuine recurrence. Some issue types (e.g. probe_failure)
+// have underlying conditions that flap scan-to-scan, so the incident can
+// satisfy neither the crash-loop nor probe-failure detection criteria for
+// a scan or two, get resolved by the debounce above, and then immediately
+// reappear — producing thousands of alternating RESOLVED/REOPENED events
+// for what is really one continuous problem.
+const flapAbsorptionWindow = 15 * time.Minute
+
 const schema = `
 PRAGMA auto_vacuum = INCREMENTAL;
 
@@ -381,35 +391,85 @@ func (s *SQLiteStore) UpsertIncidents(cluster string, scanID string, incidents [
 				inc.RestartCount, inc.Severity, "active",
 				fmt.Sprintf("%s first detected", inc.IssueType))
 		case prevStatus == "resolved":
-			err = insertIncidentEvent(tx, incidentID, scanID, now, "REOPENED", "Reopened",
-				inc.RestartCount, inc.Severity, "active", "Incident reoccurred")
+			var absorbed bool
+			absorbed, err = absorbRecentResolution(tx, incidentID, now)
+			if err != nil {
+				return err
+			}
+			if !absorbed {
+				err = insertIncidentEvent(tx, incidentID, scanID, now, "REOPENED", "Reopened",
+					inc.RestartCount, inc.Severity, "active", "Incident reoccurred")
+			} else {
+				err = emitDriftEvents(tx, incidentID, scanID, now, prevSeverity, prevRestart, inc)
+			}
 		default:
-			if prevSeverity != inc.Severity {
-				if err = insertIncidentEvent(tx, incidentID, scanID, now, "UPDATED", "SeverityChanged",
-					inc.RestartCount, inc.Severity, "active",
-					fmt.Sprintf("Severity changed %s → %s", prevSeverity, inc.Severity)); err != nil {
-					return err
-				}
-			}
-			if milestone := highestMilestoneCrossed(prevRestart, inc.RestartCount); milestone > 0 {
-				var lastMilestone int
-				_ = tx.QueryRow(
-					`SELECT COALESCE(MAX(restart_count), 0) FROM incident_events
-					 WHERE incident_id=? AND event_reason='RestartMilestone'`,
-					incidentID,
-				).Scan(&lastMilestone)
-				if lastMilestone < milestone {
-					err = insertIncidentEvent(tx, incidentID, scanID, now, "UPDATED", "RestartMilestone",
-						inc.RestartCount, inc.Severity, "active",
-						fmt.Sprintf("Restart count exceeded %d", milestone))
-				}
-			}
+			err = emitDriftEvents(tx, incidentID, scanID, now, prevSeverity, prevRestart, inc)
 		}
 		if err != nil {
 			return err
 		}
 	}
 	return tx.Commit()
+}
+
+// absorbRecentResolution checks whether the incident's most recent RESOLVED
+// event occurred within flapAbsorptionWindow of now. If so, that RESOLVED
+// event was premature — it deletes it and returns true so the caller skips
+// emitting a REOPENED event, treating the reappearance as a continuation of
+// the same active period rather than a new one. Returns false (with no
+// changes) if the incident has no RESOLVED event or the gap is too large,
+// meaning the caller should treat this as a genuine recurrence.
+func absorbRecentResolution(tx *sql.Tx, incidentID int64, now int64) (bool, error) {
+	var eventID, occurredAt int64
+	err := tx.QueryRow(
+		`SELECT id, occurred_at FROM incident_events
+		 WHERE incident_id=? AND event_type='RESOLVED'
+		 ORDER BY occurred_at DESC LIMIT 1`,
+		incidentID,
+	).Scan(&eventID, &occurredAt)
+	if err == sql.ErrNoRows {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+
+	if time.Duration(now-occurredAt)*time.Second >= flapAbsorptionWindow {
+		return false, nil
+	}
+	if _, err := tx.Exec(`DELETE FROM incident_events WHERE id=?`, eventID); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+// emitDriftEvents records SeverityChanged/RestartMilestone events for an
+// incident that is already (or was just flap-absorbed back to) active,
+// comparing against its previously stored severity/restart count.
+func emitDriftEvents(tx *sql.Tx, incidentID int64, scanID string, now int64, prevSeverity string, prevRestart int, inc IncidentData) error {
+	if prevSeverity != inc.Severity {
+		if err := insertIncidentEvent(tx, incidentID, scanID, now, "UPDATED", "SeverityChanged",
+			inc.RestartCount, inc.Severity, "active",
+			fmt.Sprintf("Severity changed %s → %s", prevSeverity, inc.Severity)); err != nil {
+			return err
+		}
+	}
+	if milestone := highestMilestoneCrossed(prevRestart, inc.RestartCount); milestone > 0 {
+		var lastMilestone int
+		_ = tx.QueryRow(
+			`SELECT COALESCE(MAX(restart_count), 0) FROM incident_events
+			 WHERE incident_id=? AND event_reason='RestartMilestone'`,
+			incidentID,
+		).Scan(&lastMilestone)
+		if lastMilestone < milestone {
+			if err := insertIncidentEvent(tx, incidentID, scanID, now, "UPDATED", "RestartMilestone",
+				inc.RestartCount, inc.Severity, "active",
+				fmt.Sprintf("Restart count exceeded %d", milestone)); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
 }
 
 // ResolveMissing debounces resolution over resolveThreshold consecutive
