@@ -271,8 +271,8 @@
         </a>
         {{end}}
         {{range pageRange .Page .TotalPages}}
-        <a href="?cluster={{.ClusterName}}&q={{$.Filter.Text}}&ns={{$.Filter.Namespace}}&type={{$.Filter.IssueType}}&severity={{$.Filter.Severity}}&status={{$.Filter.Status}}&sort={{$.Filter.SortBy}}&page={{.}}">
-          <button class="inc-pg{{if eq . $.Page}} inc-pg-cur{{end}}">{{.}}</button>
+        <a href="?cluster={{$.ClusterName}}&q={{$.Filter.Text}}&ns={{$.Filter.Namespace}}&type={{$.Filter.IssueType}}&severity={{$.Filter.Severity}}&status={{$.Filter.Status}}&sort={{$.Filter.SortBy}}&page={{.}}">
+        <button class="inc-pg{{if eq . $.Page}} inc-pg-cur{{end}}">{{.}}</button>
         </a>
         {{end}}
         {{if lt .Page .TotalPages}}

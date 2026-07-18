@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"fmt"
 	"html/template"
+	"log"
 	"math"
 	"net/http"
 	"net/url"
@@ -238,6 +239,7 @@ var getIncidentsTmpl = sync.OnceValue(func() *template.Template {
 func renderIncidents(w http.ResponseWriter, data incidentsPageData) {
 	var buf bytes.Buffer
 	if err := getIncidentsTmpl().Execute(&buf, data); err != nil {
+		log.Printf("incidents template: %v", err)
 		http.Error(w, "template error", http.StatusInternalServerError)
 		return
 	}
