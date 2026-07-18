@@ -44,12 +44,13 @@ type investigationPageData struct {
 	Clusters      []sidebarCluster
 
 	// Pod identity
-	PodName   string
-	Namespace string
-	IssueType string // crash_loop, image_pull, oom_killed, privileged
-	Severity  string
-	OwnerKind string // Deployment / StatefulSet / Job / (none)
-	OwnerName string
+	PodName       string
+	Namespace     string
+	IssueType     string // crash_loop, image_pull_backoff, oomkilled, privileged_container, probe_failure...
+	Severity      string
+	OwnerKind     string // Deployment / StatefulSet / Job / (none)
+	OwnerName     string
+	ContainerName string // set when the finding is container-scoped (e.g. privileged_container); empty otherwis
 
 	// Status
 	Phase         string
@@ -658,7 +659,11 @@ func (srv *server) handleInvestigationPage(w http.ResponseWriter, r *http.Reques
 		http.Error(w, "cluster connection failed", http.StatusBadGateway)
 		return
 	}
-
+	if idx := strings.Index(podName, "/"); idx != -1 {
+		data.PodName = podName[:idx]
+		data.ContainerName = podName[idx+1:]
+		podName = podName[:idx]
+	}
 	pod, err := clientset.CoreV1().Pods(namespace).Get(context.TODO(), podName, metav1.GetOptions{})
 	if err != nil {
 		// Pod may have been deleted/recreated since the scan
