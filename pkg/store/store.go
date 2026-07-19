@@ -15,7 +15,7 @@ type Store interface {
 	GetIncidentTimeline(cluster string, fingerprint string) ([]IncidentEvent, error)
 	QueryIncidents(f IncidentFilter) (items []IncidentSummary, total int, err error)
 	GetMemoryScoreboard(cluster string) (*MemoryScoreboard, error)
-	GetRecentEvents(cluster string, limit int) ([]RecentEvent, error)
+	GetRecentEvents(cluster string, since time.Time, limit int) ([]RecentEvent, error)
 	GetChangesSince(cluster string, since time.Time, limit int) ([]RecentEvent, error)
 	PruneOlderThan(cluster string, cutoff time.Time) (pruned int, err error)
 	Close() error

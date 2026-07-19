@@ -1170,16 +1170,19 @@ func (s *SQLiteStore) GetMemoryScoreboard(cluster string) (*MemoryScoreboard, er
 	return sb, nil
 }
 
-// GetRecentEvents returns the most recent incident_events for cluster,
-// newest first, joined against their parent incident's resource name.
-func (s *SQLiteStore) GetRecentEvents(cluster string, limit int) ([]RecentEvent, error) {
+// GetRecentEvents returns the most recent incident_events for cluster that
+// occurred at or after since, newest first, joined against their parent
+// incident's resource name. Unlike GetChangesSince, this is intentionally
+// unfiltered by event_reason — every event type, not just
+// meaningfulEventReasons.
+func (s *SQLiteStore) GetRecentEvents(cluster string, since time.Time, limit int) ([]RecentEvent, error) {
 	rows, err := s.db.Query(
 		`SELECT incidents.resource, incident_events.event_reason, incident_events.occurred_at
 		 FROM incident_events
 		 JOIN incidents ON incident_events.incident_id = incidents.id
-		 WHERE incidents.cluster = ?
+		 WHERE incidents.cluster = ? AND incident_events.occurred_at >= ?
 		 ORDER BY incident_events.occurred_at DESC LIMIT ?`,
-		cluster, limit,
+		cluster, since.Unix(), limit,
 	)
 	if err != nil {
 		return nil, err
