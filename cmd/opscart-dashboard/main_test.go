@@ -6,6 +6,7 @@ import (
 	"net/http/httptest"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -340,4 +341,139 @@ func TestBuildWorkloadHealthGrid(t *testing.T) {
 			t.Fatalf("expected single orphan-svc/critical cell, got %+v", got)
 		}
 	})
+}
+
+// fullyPopulatedOverviewData builds an overviewPageData with every optional
+// field populated (non-nil Scoreboard with both memory-line branches
+// non-empty, non-empty TopIssues/ChangesSinceLastView/RecentEvents/
+// NamespaceHealthList/WorkloadHealthGrid, every delta text set, every
+// WorkloadHealthGrid severity value including "" for healthy) so rendering
+// it exercises every {{if}}/{{range}} branch in overview.html — not just
+// the all-empty path a fresh scan takes.
+func fullyPopulatedOverviewData() overviewPageData {
+	return overviewPageData{
+		ClusterName:    "prod-eastus",
+		NamespaceCount: 4,
+		ScannedAtMS:    time.Now().UnixMilli(),
+		VerdictLine1:   "3 workloads need attention. payments-api has been crash-looping for 2 day(s) and its restart rate is accelerating.",
+		VerdictLine2:   "2 incidents resolved since yesterday.",
+
+		TopIssues: []topIssue{
+			{
+				Rank: 1, Title: "3 pods crash-looping", Subtitle: "payments-api, payments-worker, checkout-api",
+				Action: "kubectl logs payments-api -n payments", Severity: "critical", SeverityLbl: "CRITICAL",
+				CountText: "3 pods", URL: "/warroom",
+			},
+			{
+				Rank: 2, Title: "2 namespaces missing NetworkPolicy", Subtitle: "Including checkout, payments",
+				Severity: "high", SeverityLbl: "HIGH", CountText: "2 ns", URL: "/warroom",
+			},
+		},
+
+		CostDeltaText:          "+$45",
+		IncidentScoreDeltaText: "-10",
+		SecurityScoreDeltaText: "+5",
+
+		Scoreboard: &store.MemoryScoreboard{
+			TotalSeen: 42, Resolved: 30, Reopened: 4, Accelerating: 2,
+			LongestActiveDays: 12, LongestActiveName: "payments-api",
+			MostUnstableNamespace: "payments", MostUnstableCount: 9,
+		},
+		RecentEvents: []store.RecentEvent{
+			{Resource: "payments-api", EventReason: "RestartMilestone", OccurredAt: time.Now().Add(-5 * time.Minute)},
+			{Resource: "checkout-worker", EventReason: "Resolved", OccurredAt: time.Now().Add(-2 * time.Hour)},
+		},
+
+		ChangesSinceLastView: []store.RecentEvent{
+			{Resource: "payments-api", EventReason: "SeverityChanged", OccurredAt: time.Now().Add(-1 * time.Minute)},
+			{Resource: "checkout-api", EventReason: "Detected", OccurredAt: time.Now().Add(-10 * time.Minute)},
+			{Resource: "checkout-api", EventReason: "Reopened", OccurredAt: time.Now().Add(-20 * time.Minute)},
+		},
+		LastViewedLabel: "24h ago",
+
+		NamespaceHealthList: []namespaceHealth{
+			{Name: "payments", Ready: 2, Total: 4},
+			{Name: "checkout", Ready: 3, Total: 3},
+			{Name: "idle-ns", Ready: 0, Total: 0},
+		},
+		WorkloadHealthGrid: []workloadHealthCell{
+			{Name: "payments-api", Severity: "critical"},
+			{Name: "checkout-api", Severity: "high"},
+			{Name: "payments-worker", Severity: "medium"},
+			{Name: "checkout-worker", Severity: ""},
+		},
+
+		NodePoolCount: 3, PodCount: 48, CPUUtilization: 92, MemUtilization: 61,
+
+		IncidentScore: 62, IncidentScoreColor: "orange", IncidentScoreLabel: "Needs attention",
+		SecurityScore: 78, WasteCount: 6, MonthlyCost: 1234.56,
+
+		CostsHref: "/costs", WasteHref: "/waste", WrURL: "/warroom", IncidentsHref: "/incidents",
+
+		ActivePage: "dashboard",
+		Version:    "test",
+	}
+}
+
+// TestOverviewTemplate_RendersFullyPopulatedData drives getOverviewTmpl()
+// directly (not through buildOverviewData) with every optional field
+// populated, so every {{if}}/{{range}} branch in overview.html — not just
+// the empty-scan path other tests exercise — is proven to execute without
+// a "can't evaluate field" template error.
+func TestOverviewTemplate_RendersFullyPopulatedData(t *testing.T) {
+	data := fullyPopulatedOverviewData()
+
+	var buf strings.Builder
+	if err := getOverviewTmpl().Execute(&buf, data); err != nil {
+		t.Fatalf("template execution failed: %v", err)
+	}
+
+	out := buf.String()
+	wantSubstrings := []string{
+		"prod-eastus",
+		"If you only fix one thing today",
+		data.VerdictLine1,
+		data.VerdictLine2,
+		"payments-api",
+		"Longest active",
+		"Most unstable namespace",
+		"What's Changed Since Last Scan",
+		"Recent Events",
+		"checkout", /* namespace health row */
+		// html/template escapes "+" as a numeric entity even in text
+		// nodes; "-10" needs no such escaping.
+		"&#43;$45 from last scan",
+		"-10 from last scan",
+		"&#43;5 from last scan",
+	}
+	for _, want := range wantSubstrings {
+		if !strings.Contains(out, want) {
+			t.Errorf("rendered output missing %q", want)
+		}
+	}
+}
+
+// TestOverviewTemplate_RendersEmptyData exercises the opposite path: every
+// optional/slice field at its zero value (nil Scoreboard, no TopIssues, no
+// feed entries, no health lists), proving the template's empty-state
+// branches also execute cleanly rather than panicking on a nil pointer.
+func TestOverviewTemplate_RendersEmptyData(t *testing.T) {
+	data := overviewPageData{
+		ClusterName: "empty-cluster",
+		ScannedAtMS: time.Now().UnixMilli(),
+		ActivePage:  "dashboard",
+	}
+
+	var buf strings.Builder
+	if err := getOverviewTmpl().Execute(&buf, data); err != nil {
+		t.Fatalf("template execution failed on empty data: %v", err)
+	}
+
+	out := buf.String()
+	if strings.Contains(out, "If you only fix one thing today") {
+		t.Errorf("expected fix-one-thing banner to be hidden when TopIssues is empty")
+	}
+	if !strings.Contains(out, "No operational memory yet") {
+		t.Errorf("expected Operational Memory empty state when Scoreboard is nil")
+	}
 }

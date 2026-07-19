@@ -7,115 +7,112 @@
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
 {{template "base" .}}
 <style>
-.overview-grid{display:grid;grid-template-columns:2fr 1fr;gap:1.5rem;align-items:start}
-@media(max-width:1280px){.overview-grid{grid-template-columns:1fr}}
+/* ── Page header ── */
+.ov-hdr{display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:1.5rem;flex-wrap:wrap;gap:1rem}
+.ov-hdr h1{font-size:1.75rem;font-weight:800}
+.ov-hdr-sub{color:var(--text-muted);font-size:0.85rem;margin-top:0.25rem}
+.ov-badges{display:flex;gap:0.5rem;margin-top:0.75rem;flex-wrap:wrap}
+.badge-ok{background:rgba(16,185,129,0.12);color:#34d399;border:1px solid rgba(16,185,129,0.2)}
+.badge-warn{background:rgba(245,158,11,0.12);color:#fbbf24;border:1px solid rgba(245,158,11,0.2)}
+.badge-danger{background:rgba(239,68,68,0.12);color:#f87171;border:1px solid rgba(239,68,68,0.2)}
 
-.page-meta-bar{display:flex;justify-content:space-between;align-items:center;margin-bottom:2rem;flex-wrap:wrap;gap:1rem}
-.cluster-selector{display:flex;align-items:center;gap:0.75rem;background:var(--surface);border:1px solid var(--border);border-radius:var(--radius-sm);padding:0.5rem 1rem;font-size:0.85rem}
-.cluster-selector strong{color:var(--text)}
-.refresh-badge{display:flex;align-items:center;gap:0.5rem;background:var(--surface);border:1px solid var(--border);border-radius:var(--radius-sm);padding:0.5rem 1rem;font-size:0.8rem;color:var(--text-muted)}
-.refresh-badge::before{content:'';width:6px;height:6px;border-radius:50%;background:var(--success);box-shadow:0 0 8px var(--success)}
+/* ── Fix-one-thing banner ── */
+.fix-one-banner{display:flex;align-items:center;gap:1rem;background:linear-gradient(180deg,rgba(239,68,68,0.06) 0%,var(--surface) 100%);border:1px solid rgba(239,68,68,0.3);border-radius:var(--radius);padding:1.1rem 1.4rem;margin-bottom:1.5rem;animation:fadeIn 0.3s ease both}
+.fix-one-icon{font-size:1.5rem;flex-shrink:0}
+.fix-one-body{flex:1;min-width:0}
+.fix-one-lbl{font-size:0.68rem;text-transform:uppercase;letter-spacing:0.6px;color:#f87171;font-weight:700;margin-bottom:0.25rem}
+.fix-one-title{font-size:1.02rem;font-weight:700;margin-bottom:0.2rem}
+.fix-one-sub{font-size:0.8rem;color:var(--text-muted)}
+.fix-one-btn{background:var(--danger);color:#fff;font-size:0.82rem;font-weight:600;padding:0.55rem 1.1rem;border-radius:6px;text-decoration:none;white-space:nowrap;transition:background .15s}
+.fix-one-btn:hover{background:#dc2626}
 
-.kpi-row{display:grid;grid-template-columns:repeat(5,1fr);gap:1rem;margin-bottom:1.5rem}
-@media(max-width:1100px){.kpi-row{grid-template-columns:repeat(2,1fr)}}
-.kpi-card{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:1.25rem;animation:fadeIn 0.3s ease both}
-.kpi-card.critical{border-color:rgba(239,68,68,0.35)}
-.kpi-icon{width:32px;height:32px;border-radius:8px;display:flex;align-items:center;justify-content:center;font-size:1rem;margin-bottom:0.75rem}
-.kpi-icon.red{background:rgba(239,68,68,0.15);color:var(--danger)}
-.kpi-icon.green{background:rgba(16,185,129,0.15);color:var(--success)}
-.kpi-icon.purple{background:rgba(139,92,246,0.15);color:#a78bfa}
-.kpi-icon.orange{background:rgba(245,158,11,0.15);color:var(--warning)}
-.kpi-icon.gold{background:rgba(234,179,8,0.15);color:#facc15}
-.kpi-label{font-size:0.7rem;text-transform:uppercase;letter-spacing:0.5px;color:var(--text-muted);margin-bottom:0.4rem;display:flex;align-items:center;gap:0.4rem}
-.kpi-value{font-size:1.85rem;font-weight:800;line-height:1;margin-bottom:0.5rem;font-variant-numeric:tabular-nums}
-.kpi-value.red{color:var(--danger)}
-.kpi-value.green{color:var(--success)}
-.kpi-value.orange{color:var(--warning)}
-.kpi-value.yellow{color:#eab308}
-.kpi-sub.red{color:var(--danger)}
-.kpi-sub.orange{color:var(--warning)}
-.kpi-sub.yellow{color:#eab308}
-.kpi-sub.green{color:var(--success)}
-.kpi-card-score{border-width:2px}
-.kpi-sub{font-size:0.7rem;color:var(--text-muted);min-height:1rem}
-.kpi-sub.red{color:var(--danger)}
-.kpi-trend{font-size:0.72rem;font-weight:600;margin-top:0.35rem;display:flex;align-items:center;gap:0.3rem}
-.kpi-trend.up-good{color:#4ade80}
-.kpi-trend.up-bad{color:#f87171}
-.kpi-trend.down-good{color:#4ade80}
-.kpi-trend.down-bad{color:#f87171}
-.kpi-trend.flat{color:#94a3b8}
-.trend-arrow{font-size:0.8rem;font-weight:700}
-.sparkline{display:flex;align-items:flex-end;gap:2px;height:36px;margin-top:0.5rem}
-.spark-bar{width:7px;border-radius:2px 2px 0 0;background:var(--primary-light);opacity:0.6;min-height:4px;transition:opacity .2s}
-.spark-bar:last-child{opacity:1}
-.spark-bar.spark-low{background:var(--danger)}
-.spark-bar.spark-mid{background:var(--warning)}
-.spark-bar.spark-high{background:var(--success)}
-
+/* ── Section card (shared) ── */
 .section-card{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:1.5rem;margin-bottom:1.5rem;animation:fadeIn 0.3s ease both}
-.section-hdr{margin-bottom:1.25rem}
 .section-title{font-size:1.05rem;font-weight:700;margin-bottom:0.25rem}
-.section-sub{font-size:0.78rem;color:var(--text-muted)}
-
-.top-issue{display:grid;grid-template-columns:36px 1fr auto auto auto;gap:1rem;align-items:center;padding:1rem;background:rgba(0,0,0,0.2);border:1px solid var(--border);border-radius:var(--radius-sm);margin-bottom:0.65rem;transition:border-color 0.15s}
-.top-issue:hover{border-color:rgba(99,102,241,0.4)}
-.top-issue-rank{width:32px;height:32px;border-radius:50%;background:rgba(99,102,241,0.15);color:var(--primary-light);display:flex;align-items:center;justify-content:center;font-weight:700;font-size:0.9rem}
-.top-issue-title{font-weight:600;font-size:0.92rem;margin-bottom:0.2rem}
-.top-issue-sub{font-size:0.75rem;color:var(--text-muted);line-height:1.4}
-.top-issue-action{font-size:0.72rem;color:var(--primary-light);margin-top:0.3rem;font-family:'Consolas','Monaco',monospace}
+.section-sub{font-size:0.78rem;color:var(--text-muted);margin-bottom:1rem}
+.empty-state-small{padding:2rem 1rem;text-align:center;color:var(--text-muted);font-size:0.85rem}
+.empty-state-small .icon{font-size:1.8rem;margin-bottom:0.5rem;display:block}
+.view-all-link{display:inline-flex;align-items:center;gap:0.4rem;color:var(--primary-light);font-size:0.85rem;margin-top:0.5rem;text-decoration:none}
+.view-all-link:hover{text-decoration:underline}
 .sev-badge{padding:3px 9px;border-radius:12px;font-size:0.66rem;font-weight:700;letter-spacing:0.5px;white-space:nowrap}
 .sev-badge.critical{background:rgba(239,68,68,0.18);color:#f87171}
 .sev-badge.high{background:rgba(245,158,11,0.18);color:#fbbf24}
 .sev-badge.medium{background:rgba(234,179,8,0.18);color:#facc15}
 .sev-badge.low{background:rgba(100,116,139,0.18);color:#94a3b8}
-.top-issue-count{font-size:0.75rem;color:var(--text-muted);white-space:nowrap}
-.top-issue-btn{background:transparent;border:1px solid var(--border);color:var(--text-secondary);font-size:0.78rem;padding:0.4rem 0.9rem;border-radius:6px;cursor:pointer;text-decoration:none;display:inline-flex;align-items:center;gap:0.3rem;transition:all 0.15s}
+
+/* ── Row 1: Situation Briefing (62%) + Operational Memory (38%) ── */
+.ov-row-briefing{display:grid;grid-template-columns:1.6fr 1fr;gap:1.5rem;align-items:stretch}
+@media(max-width:1100px){.ov-row-briefing{grid-template-columns:1fr}}
+.briefing-text{font-size:0.92rem;line-height:1.6;color:var(--text-secondary);margin-bottom:0.75rem}
+.briefing-text:last-child{margin-bottom:0}
+.mem-grid{display:grid;grid-template-columns:1fr 1fr;gap:0.75rem;margin-bottom:1rem}
+.mem-cell{background:rgba(0,0,0,0.2);border:1px solid var(--border);border-radius:var(--radius-sm);padding:0.85rem;text-align:center}
+.mem-num{font-size:1.5rem;font-weight:800;line-height:1;margin-bottom:0.25rem;font-variant-numeric:tabular-nums}
+.mem-lbl{font-size:0.66rem;text-transform:uppercase;letter-spacing:0.5px;color:var(--text-muted)}
+.mem-line{font-size:0.8rem;color:var(--text-secondary);padding-top:0.6rem;border-top:1px solid var(--border);margin-top:0.2rem}
+.mem-line strong{color:var(--text)}
+.mem-line+.mem-line{border-top:none;padding-top:0.3rem;margin-top:0}
+
+/* ── Row 2: Top 5 (65%) + Changes/Recent stacked (35%) ── */
+.ov-row-top5{display:grid;grid-template-columns:1.85fr 1fr;gap:1.5rem;align-items:start}
+@media(max-width:1100px){.ov-row-top5{grid-template-columns:1fr}}
+.top-issue{display:grid;grid-template-columns:36px 1fr auto auto;gap:1rem;align-items:center;padding:1rem;background:rgba(0,0,0,0.2);border:1px solid var(--border);border-radius:var(--radius-sm);margin-bottom:0.65rem;transition:border-color 0.15s}
+.top-issue:hover{border-color:rgba(99,102,241,0.4)}
+.top-issue-rank{width:32px;height:32px;border-radius:50%;background:rgba(99,102,241,0.15);color:var(--primary-light);display:flex;align-items:center;justify-content:center;font-weight:700;font-size:0.9rem}
+.top-issue-title{font-weight:600;font-size:0.92rem;margin-bottom:0.2rem}
+.top-issue-sub{font-size:0.75rem;color:var(--text-muted);line-height:1.4}
+.top-issue-action{font-size:0.72rem;color:var(--primary-light);margin-top:0.3rem;font-family:'Consolas','Monaco',monospace}
+.top-issue-btn{background:transparent;border:1px solid var(--border);color:var(--text-secondary);font-size:0.78rem;padding:0.4rem 0.9rem;border-radius:6px;cursor:pointer;text-decoration:none;display:inline-flex;align-items:center;gap:0.3rem;transition:all 0.15s;white-space:nowrap}
 .top-issue-btn:hover{background:var(--surface-hover);border-color:var(--primary);color:var(--text)}
-.view-all-link{display:inline-flex;align-items:center;gap:0.4rem;color:var(--primary-light);font-size:0.85rem;margin-top:0.75rem;text-decoration:none}
-.view-all-link:hover{text-decoration:underline}
 
-.empty-state-small{padding:2rem 1rem;text-align:center;color:var(--text-muted);font-size:0.85rem}
-.empty-state-small .icon{font-size:1.8rem;margin-bottom:0.5rem;display:block}
+.feed-card .section-card{margin-bottom:1.5rem}
+.feed-card:last-child .section-card{margin-bottom:0}
+.change-row{display:flex;align-items:center;gap:0.6rem;padding:0.6rem 0;border-bottom:1px solid rgba(51,65,85,0.5);font-size:0.8rem}
+.change-row:last-child{border-bottom:none}
+.change-reason{font-size:0.64rem;font-weight:700;text-transform:uppercase;letter-spacing:0.4px;padding:2px 7px;border-radius:10px;white-space:nowrap;flex-shrink:0}
+.change-reason.Detected{background:rgba(245,158,11,0.15);color:#fbbf24}
+.change-reason.Resolved{background:rgba(16,185,129,0.15);color:#4ade80}
+.change-reason.Reopened{background:rgba(239,68,68,0.15);color:#f87171}
+.change-reason.RestartMilestone{background:rgba(239,68,68,0.12);color:#f87171}
+.change-reason.SeverityChanged{background:rgba(99,102,241,0.15);color:var(--primary-light)}
+.change-resource{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--text-secondary)}
+.change-age{color:var(--text-muted);font-size:0.72rem;white-space:nowrap;flex-shrink:0}
 
-/* War Room featured panel */
-.wr-featured-hdr{display:flex;justify-content:space-between;align-items:center;margin-bottom:0.5rem}
-.wr-featured-title{font-size:1.05rem;font-weight:700;display:flex;align-items:center;gap:0.5rem}
-.wr-featured-count{background:rgba(239,68,68,0.18);color:#f87171;padding:3px 10px;border-radius:20px;font-size:0.7rem;font-weight:700}
-.wr-featured-sub{font-size:0.78rem;color:var(--text-muted);margin-bottom:1.25rem}
-.wr-issue-card{background:rgba(0,0,0,0.25);border:1px solid rgba(239,68,68,0.25);border-radius:var(--radius-sm);padding:1rem;margin-bottom:1rem}
-.wr-featured .wr-issue-card:first-of-type{border-color:rgba(239,68,68,0.5);box-shadow:0 0 24px rgba(239,68,68,0.08)}
-.wr-featured{background:var(--surface);border:1px solid rgba(239,68,68,0.35);border-radius:var(--radius);padding:1.5rem;margin-bottom:1.5rem;background:linear-gradient(180deg,rgba(239,68,68,0.03) 0%,var(--surface) 100%)}
-.wr-cards-body{max-height:520px;overflow-y:auto;margin:0 -1.5rem -1.5rem -1.5rem;padding:0 1.5rem 1.5rem 1.5rem}
-.wr-issue-top{display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:0.75rem}
-.wr-issue-name{font-size:0.95rem;font-weight:700;margin-bottom:0.3rem}
-.wr-issue-ns{font-size:0.75rem;color:var(--text-muted)}
-.wr-issue-section{margin-top:0.85rem;padding-top:0.85rem;border-top:1px solid rgba(255,255,255,0.05)}
-.wr-issue-label{font-size:0.7rem;text-transform:uppercase;letter-spacing:0.5px;color:var(--text-muted);margin-bottom:0.3rem}
-.wr-issue-text{font-size:0.83rem;line-height:1.5;color:var(--text-secondary)}
-.wr-issue-card{transition:border-color .2s,transform .2s}
-.wr-issue-card:hover{border-color:rgba(239,68,68,0.5);transform:translateX(3px)}
-.wr-issue-card:first-of-type{border-color:rgba(239,68,68,0.5);box-shadow:0 0 20px rgba(239,68,68,0.08)}
-.wr-quick-fix code{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1;min-width:0}
-.wr-quick-fix{background:rgba(0,0,0,0.4);border:1px solid var(--border);border-radius:6px;padding:0.55rem 0.75rem;margin-top:0.4rem;display:flex;align-items:center;gap:0.5rem;font-family:'Consolas','Monaco',monospace;font-size:0.72rem;color:var(--primary-light)}
-.wr-copy-btn{background:transparent;border:1px solid var(--border);color:var(--text-muted);font-size:0.65rem;padding:2px 8px;border-radius:4px;cursor:pointer;white-space:nowrap}
-.wr-copy-btn:hover{background:var(--surface-hover);color:var(--text)}
-.wr-view-details{display:inline-flex;align-items:center;gap:0.4rem;background:var(--danger);color:white;font-size:0.78rem;padding:0.5rem 1.25rem;border-radius:6px;text-decoration:none;font-weight:600;margin-top:0.75rem;transition:background .15s}
-.wr-view-details:hover{background:#dc2626}
-/* Cluster summary */
-.summary-grid{display:grid;grid-template-columns:repeat(5,1fr);gap:1rem}
-@media(max-width:900px){.summary-grid{grid-template-columns:repeat(2,1fr)}}
-.summary-card{background:rgba(0,0,0,0.15);border:1px solid var(--border);border-radius:var(--radius-sm);padding:1.1rem;text-align:left}
-.summary-icon{width:28px;height:28px;border-radius:6px;display:flex;align-items:center;justify-content:center;font-size:0.85rem;background:rgba(99,102,241,0.12);color:var(--primary-light);margin-bottom:0.6rem}
-.summary-num{font-size:1.5rem;font-weight:800;line-height:1;margin-bottom:0.25rem;font-variant-numeric:tabular-nums}
-.summary-lbl{font-size:0.7rem;text-transform:uppercase;letter-spacing:0.5px;color:var(--text-muted);margin-bottom:0.25rem}
-.summary-sub{font-size:0.7rem;color:var(--text-muted)}
+/* ── Row 3: Cluster Health / Namespace Health / Security Status ── */
+.ov-3col{display:grid;grid-template-columns:repeat(3,1fr);gap:1.5rem}
+@media(max-width:1100px){.ov-3col{grid-template-columns:1fr}}
+.ch-grid{display:grid;grid-template-columns:1fr 1fr;gap:0.75rem;margin-bottom:1rem}
+.ch-cell{background:rgba(0,0,0,0.15);border:1px solid var(--border);border-radius:var(--radius-sm);padding:0.85rem;text-align:center}
+.ch-num{font-size:1.3rem;font-weight:800;line-height:1;margin-bottom:0.2rem;font-variant-numeric:tabular-nums}
+.ch-lbl{font-size:0.64rem;text-transform:uppercase;letter-spacing:0.5px;color:var(--text-muted)}
+.ch-summary{font-size:0.78rem;padding:0.6rem 0.75rem;border-radius:var(--radius-sm);border:1px solid var(--border);display:flex;align-items:center;gap:0.5rem}
+.ch-summary.ok{color:#4ade80;border-color:rgba(16,185,129,0.25);background:rgba(16,185,129,0.06)}
+.ch-summary.warn{color:#fbbf24;border-color:rgba(245,158,11,0.25);background:rgba(245,158,11,0.06)}
+.wh-strip{display:flex;flex-wrap:wrap;gap:5px;margin-top:1rem;padding-top:1rem;border-top:1px solid var(--border)}
+.wh-strip-lbl{width:100%;font-size:0.64rem;text-transform:uppercase;letter-spacing:0.5px;color:var(--text-muted);margin-bottom:0.4rem}
+.wh-dot{width:9px;height:9px;border-radius:50%;flex-shrink:0}
+.wh-dot.critical{background:#f87171;box-shadow:0 0 5px rgba(248,113,113,0.5)}
+.wh-dot.high{background:#fbbf24}
+.wh-dot.medium{background:#facc15}
+.wh-dot.ok{background:#334155}
 
-/* Footer trust badges */
-.trust-footer{margin-top:2rem;padding:1.5rem 0;border-top:1px solid var(--border);text-align:center;color:var(--text-muted);font-size:0.78rem}
-.trust-footer strong{color:var(--text-secondary);font-weight:600}
-.trust-badge{display:inline-flex;align-items:center;gap:0.35rem;margin:0 0.75rem;color:var(--text-muted)}
-.trust-badge::before{content:'✓';color:var(--success);font-weight:700}
+.ns-health-row{display:flex;justify-content:space-between;align-items:center;padding:0.55rem 0;border-bottom:1px solid rgba(51,65,85,0.5);font-size:0.85rem}
+.ns-health-row:last-child{border-bottom:none}
+.ns-health-name{color:var(--text-secondary);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.ns-health-ratio{font-variant-numeric:tabular-nums;font-weight:700}
+
+.sec-checklist{list-style:none;font-size:0.83rem;color:var(--text-secondary);line-height:2.1}
+.sec-checklist li::before{content:'✓';color:var(--success);font-weight:700;margin-right:0.6rem}
+
+/* ── Row 4: Bottom strip (demoted) ── */
+.bottom-strip{display:flex;align-items:center;gap:2rem;flex-wrap:wrap;background:rgba(0,0,0,0.15);border:1px solid var(--border);border-radius:var(--radius);padding:1.1rem 1.5rem;margin-top:0.5rem}
+.bottom-metric{min-width:110px}
+.bottom-lbl{font-size:0.66rem;text-transform:uppercase;letter-spacing:0.5px;color:var(--text-muted);margin-bottom:0.2rem}
+.bottom-val{font-size:1.15rem;font-weight:700;font-variant-numeric:tabular-nums;color:var(--text-secondary)}
+.bottom-delta{font-size:0.7rem;color:var(--text-muted);margin-top:0.1rem}
+.bottom-actions{margin-left:auto;display:flex;gap:0.75rem;flex-wrap:wrap}
+.bottom-btn{border:1px solid var(--border);color:var(--text-secondary);font-size:0.8rem;font-weight:600;padding:0.5rem 1.1rem;border-radius:var(--radius-sm);text-decoration:none;transition:all 0.15s;white-space:nowrap}
+.bottom-btn:hover{background:var(--surface-hover);border-color:var(--primary);color:var(--text)}
 </style>
 </head>
 <body>
@@ -123,229 +120,263 @@
 {{template "sidebar.html" .}}
 <main class="main">
 
-<div class="page-meta-bar">
-  <div class="cluster-selector">
-    <span style="color:var(--text-muted)">Cluster:</span>
-    <strong>{{.ClusterName}}</strong>
-  </div>
-  <div class="refresh-badge">Auto refresh: 60s</div>
-</div>
-
-<div class="page-hdr">
+<!-- 1. Page header -->
+<div class="ov-hdr">
   <div>
     <h1>Overview</h1>
-    <p>Find what deserves attention first</p>
+    <div class="ov-hdr-sub">{{.ClusterName}} · {{.NamespaceCount}} namespace(s)</div>
+    <div class="ov-badges">
+      <span class="badge badge-ok">Read-only</span>
+      <span class="badge badge-ok">Operational memory</span>
+      <span class="badge badge-ok">Auth enabled</span>
+    </div>
+  </div>
+  <div class="page-meta">
+    <div>Last scanned: <strong id="ov-age">just now</strong></div>
   </div>
 </div>
 
-<!-- KPI Row -->
-<div class="kpi-row">
+<!-- 2. If you only fix one thing today -->
+{{if .TopIssues}}
+{{with index .TopIssues 0}}
+<div class="fix-one-banner">
+  <div class="fix-one-icon">⚡</div>
+  <div class="fix-one-body">
+    <div class="fix-one-lbl">If you only fix one thing today</div>
+    <div class="fix-one-title">{{.Title}}</div>
+    <div class="fix-one-sub">{{.Subtitle}}</div>
+  </div>
+  <span class="sev-badge {{.Severity}}">{{.SeverityLbl}}</span>
+  <a class="fix-one-btn" href="{{.URL}}">Fix now →</a>
+</div>
+{{end}}
+{{end}}
 
-  <div class="kpi-card kpi-card-score{{if eq .IncidentScoreColor "red"}} critical{{end}}">
-    <div class="kpi-icon {{.IncidentScoreColor}}"><span class="kpi-icon-svg"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3"/><path d="M12 9v4"/><path d="M12 17h.01"/></svg></span></div>
-    <div class="kpi-label">Incident Score</div>
-    <div class="kpi-value {{.IncidentScoreColor}}">{{.IncidentScore}}<span style="font-size:0.9rem;font-weight:600;color:var(--text-muted)">/100</span></div>
-    <div class="kpi-sub {{.IncidentScoreColor}}">{{.IncidentScoreLabel}}</div>
-    {{if and .Trend .Trend.HasHistory}}
-    <div class="kpi-trend {{if eq .Trend.IncidentScore.Direction "up"}}up-good{{else if eq .Trend.IncidentScore.Direction "down"}}down-bad{{else}}flat{{end}}">
-      <span class="trend-arrow">{{if eq .Trend.IncidentScore.Direction "up"}}↑{{else if eq .Trend.IncidentScore.Direction "down"}}↓{{else}}→{{end}}</span>
-      <span>{{if gt .Trend.IncidentScore.Delta 0}}+{{end}}{{.Trend.IncidentScore.Delta}} from last scan</span>
+<!-- 3. Situation Briefing + Operational Memory -->
+<div class="ov-row-briefing">
+  <div class="section-card">
+    <div class="section-title">Situation Briefing</div>
+    <p class="briefing-text">{{.VerdictLine1}}</p>
+    {{if .VerdictLine2}}<p class="briefing-text">{{.VerdictLine2}}</p>{{end}}
+  </div>
+
+  <div class="section-card">
+    <div class="section-title">Operational Memory</div>
+    <div class="section-sub">What this cluster's history shows</div>
+    {{if .Scoreboard}}
+    <div class="mem-grid">
+      <div class="mem-cell">
+        <div class="mem-num">{{.Scoreboard.TotalSeen}}</div>
+        <div class="mem-lbl">Total Seen</div>
+      </div>
+      <div class="mem-cell">
+        <div class="mem-num">{{.Scoreboard.Resolved}}</div>
+        <div class="mem-lbl">Resolved</div>
+      </div>
+      <div class="mem-cell">
+        <div class="mem-num">{{.Scoreboard.Reopened}}</div>
+        <div class="mem-lbl">Reopened</div>
+      </div>
+      <div class="mem-cell">
+        <div class="mem-num">{{.Scoreboard.Accelerating}}</div>
+        <div class="mem-lbl">Accelerating</div>
+      </div>
     </div>
-    {{if .Trend.ScoreHistory}}
-    <div class="sparkline">
-      {{range .Trend.ScoreHistory}}
-      <div class="spark-bar {{if lt . 40}}spark-low{{else if lt . 70}}spark-mid{{else}}spark-high{{end}}"
-           style="height:{{sparkHeight .}}px"
-           title="Score: {{.}}"></div>
+    {{if .Scoreboard.LongestActiveName}}
+    <div class="mem-line">Longest active: <strong>{{.Scoreboard.LongestActiveName}}</strong> — {{.Scoreboard.LongestActiveDays}}d</div>
+    {{end}}
+    {{if .Scoreboard.MostUnstableNamespace}}
+    <div class="mem-line">Most unstable namespace: <strong>{{.Scoreboard.MostUnstableNamespace}}</strong> ({{.Scoreboard.MostUnstableCount}} incidents)</div>
+    {{end}}
+    {{else}}
+    <div class="empty-state-small">
+      <span class="icon">🧠</span>
+      <div>No operational memory yet</div>
+    </div>
+    {{end}}
+  </div>
+</div>
+
+<!-- 4. Top 5 Things To Fix + What's Changed / Recent Events -->
+<div class="ov-row-top5">
+  <div class="section-card">
+    <div class="section-title">Top 5 Things To Fix</div>
+    <div class="section-sub">Prioritized by impact</div>
+
+    {{if not .TopIssues}}
+    <div class="empty-state-small">
+      <span class="icon">✅</span>
+      <div>No issues detected. Cluster looks healthy.</div>
+    </div>
+    {{else}}
+    {{range .TopIssues}}
+    <div class="top-issue">
+      <div class="top-issue-rank">{{.Rank}}</div>
+      <div>
+        <div class="top-issue-title">{{.Title}}</div>
+        <div class="top-issue-sub">{{.Subtitle}}</div>
+        {{if .Action}}<div class="top-issue-action">▸ {{.Action}}</div>{{end}}
+      </div>
+      <span class="sev-badge {{.Severity}}">{{.SeverityLbl}}</span>
+      <a class="top-issue-btn" href="{{.URL}}">View →</a>
+    </div>
+    {{end}}
+    <a class="view-all-link" href="{{.WrURL}}">View all issues in War Room →</a>
+    {{end}}
+  </div>
+
+  <div class="feed-card">
+    <div class="section-card">
+      <div class="section-title">What's Changed Since Last Scan</div>
+      <div class="section-sub">Since {{.LastViewedLabel}}</div>
+      {{if not .ChangesSinceLastView}}
+      <div class="empty-state-small">
+        <span class="icon">🕓</span>
+        <div>Nothing's changed since your last visit</div>
+      </div>
+      {{else}}
+      {{range .ChangesSinceLastView}}
+      <div class="change-row">
+        <span class="change-reason {{.EventReason}}">{{.EventReason}}</span>
+        <span class="change-resource">{{.Resource}}</span>
+        <span class="change-age">{{eventAge .OccurredAt}}</span>
+      </div>
+      {{end}}
+      {{end}}
+      <a class="view-all-link" href="{{.IncidentsHref}}">View all →</a>
+    </div>
+
+    <div class="section-card">
+      <div class="section-title">Recent Events</div>
+      <div class="section-sub">Cluster-wide activity feed</div>
+      {{if not .RecentEvents}}
+      <div class="empty-state-small">
+        <span class="icon">🕓</span>
+        <div>No activity recorded yet</div>
+      </div>
+      {{else}}
+      {{range .RecentEvents}}
+      <div class="change-row">
+        <span class="change-reason {{.EventReason}}">{{.EventReason}}</span>
+        <span class="change-resource">{{.Resource}}</span>
+        <span class="change-age">{{eventAge .OccurredAt}}</span>
+      </div>
+      {{end}}
+      {{end}}
+    </div>
+  </div>
+</div>
+
+<!-- 5. Cluster Health / Namespace Health / Security Status -->
+<div class="ov-3col">
+
+  <div class="section-card">
+    <div class="section-title">Cluster Health</div>
+    <div class="ch-grid">
+      <div class="ch-cell">
+        <div class="ch-num">{{.NodePoolCount}}</div>
+        <div class="ch-lbl">Node Pools</div>
+      </div>
+      <div class="ch-cell">
+        <div class="ch-num">{{.PodCount}}</div>
+        <div class="ch-lbl">Running Pods</div>
+      </div>
+      <div class="ch-cell">
+        <div class="ch-num">{{.CPUUtilization}}%</div>
+        <div class="ch-lbl">CPU Utilization</div>
+      </div>
+      <div class="ch-cell">
+        <div class="ch-num">{{.MemUtilization}}%</div>
+        <div class="ch-lbl">Memory Utilization</div>
+      </div>
+    </div>
+    {{if or (gt .CPUUtilization 85) (gt .MemUtilization 85)}}
+    <div class="ch-summary warn">⚠ Utilization running high</div>
+    {{else}}
+    <div class="ch-summary ok">✓ Utilization nominal</div>
+    {{end}}
+    {{if .WorkloadHealthGrid}}
+    <div class="wh-strip">
+      <div class="wh-strip-lbl">Workload Health ({{len .WorkloadHealthGrid}})</div>
+      {{range .WorkloadHealthGrid}}
+      <span class="wh-dot {{if .Severity}}{{.Severity}}{{else}}ok{{end}}" title="{{.Name}}{{if .Severity}} — {{.Severity}}{{end}}"></span>
       {{end}}
     </div>
     {{end}}
-    {{else if .Trend}}
-    <div class="kpi-trend flat"><span>Trend data building...</span></div>
-    {{end}}
   </div>
 
-  <div class="kpi-card{{if .CriticalCount}} critical{{end}}">
-    <div class="kpi-icon red"><span class="kpi-icon-svg"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg></span></div>
-    <div class="kpi-label">Critical Issues</div>
-    <div class="kpi-value{{if .CriticalCount}} red{{else}} green{{end}}">{{.CriticalCount}}</div>
-    <div class="kpi-sub{{if .CriticalCount}} red{{end}}">{{if .CriticalCount}}Needs immediate attention{{else}}All clear{{end}}</div>
-    {{if and .Trend .Trend.HasHistory}}
-    <div class="kpi-trend {{if eq .Trend.CriticalCount.Direction "up"}}up-bad{{else if eq .Trend.CriticalCount.Direction "down"}}down-good{{else}}flat{{end}}">
-      <span class="trend-arrow">{{if eq .Trend.CriticalCount.Direction "up"}}↑{{else if eq .Trend.CriticalCount.Direction "down"}}↓{{else}}→{{end}}</span>
-      <span>{{if gt .Trend.CriticalCount.Delta 0}}+{{end}}{{.Trend.CriticalCount.Delta}} from last scan</span>
+  <div class="section-card">
+    <div class="section-title">Namespace Health</div>
+    <div class="section-sub">Ready pods per namespace</div>
+    {{if not .NamespaceHealthList}}
+    <div class="empty-state-small">
+      <span class="icon">📁</span>
+      <div>No namespace data available</div>
+    </div>
+    {{else}}
+    {{range .NamespaceHealthList}}
+    <div class="ns-health-row">
+      <span class="ns-health-name">{{.Name}}</span>
+      <span class="badge badge-{{healthColor .Ready .Total}} ns-health-ratio">{{.Ready}}/{{.Total}}</span>
     </div>
     {{end}}
-  </div>
-
-  <div class="kpi-card">
-    <div class="kpi-icon purple"><span class="kpi-icon-svg"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg></span></div>
-    <div class="kpi-label">Security Score</div>
-    <div class="kpi-value">{{.SecurityScore}}<span style="font-size:0.7rem;color:var(--text-muted);font-weight:600">/100</span></div>
-    <div class="kpi-sub">{{if lt .SecurityScore 40}}High Risk{{else if lt .SecurityScore 70}}Medium Risk{{else}}Good{{end}}</div>
-    {{if and .Trend .Trend.HasHistory}}
-    <div class="kpi-trend {{if eq .Trend.SecurityScore.Direction "up"}}up-good{{else if eq .Trend.SecurityScore.Direction "down"}}down-bad{{else}}flat{{end}}">
-      <span class="trend-arrow">{{if eq .Trend.SecurityScore.Direction "up"}}↑{{else if eq .Trend.SecurityScore.Direction "down"}}↓{{else}}→{{end}}</span>
-      <span>{{if gt .Trend.SecurityScore.Delta 0}}+{{end}}{{.Trend.SecurityScore.Delta}} from last scan</span>
-    </div>
     {{end}}
   </div>
 
-  <div class="kpi-card">
-    <div class="kpi-icon orange"><span class="kpi-icon-svg"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14H6L5 6"/><path d="M10 11v6M14 11v6"/><path d="M9 6V4h6v2"/></svg></span></div>
-    <div class="kpi-label">Waste Resources</div>
-    <div class="kpi-value orange">{{.WasteCount}}</div>
-    <div class="kpi-sub">Resources found</div>
-    {{if and .Trend .Trend.HasHistory}}
-    <div class="kpi-trend {{if eq .Trend.WasteCount.Direction "up"}}up-bad{{else if eq .Trend.WasteCount.Direction "down"}}down-good{{else}}flat{{end}}">
-      <span class="trend-arrow">{{if eq .Trend.WasteCount.Direction "up"}}↑{{else if eq .Trend.WasteCount.Direction "down"}}↓{{else}}→{{end}}</span>
-      <span>{{if gt .Trend.WasteCount.Delta 0}}+{{end}}{{.Trend.WasteCount.Delta}} from last scan</span>
-    </div>
-    {{end}}
-  </div>
-
-  <div class="kpi-card">
-    <div class="kpi-icon gold"><span class="kpi-icon-svg"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="2" x2="12" y2="22"/><path d="M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"/></svg></span></div>
-    <div class="kpi-label">Monthly Cost</div>
-    <div class="kpi-value">${{.MonthlyCost | printf "%.0f"}}</div>
-    <div class="kpi-sub">Estimated</div>
+  <div class="section-card">
+    <div class="section-title">Security Status</div>
+    <div class="section-sub">How OpsCart operates in this cluster</div>
+    <ul class="sec-checklist">
+      <li>Read-only access</li>
+      <li>RBAC enforced</li>
+      <li>No agents installed</li>
+      <li>No outbound network calls</li>
+      <li>No secrets stored</li>
+    </ul>
   </div>
 
 </div>
 
-<!-- Two-column layout -->
-<div class="overview-grid">
-
-  <!-- LEFT: Top 5 + Cluster Summary -->
-  <div>
-    <div class="section-card">
-      <div class="section-hdr">
-        <div class="section-title">Top 5 Things To Fix</div>
-        <div class="section-sub">Prioritized by impact</div>
-      </div>
-
-      {{if not .TopIssues}}
-      <div class="empty-state-small">
-        <span class="icon">✅</span>
-        <div>No issues detected. Cluster looks healthy.</div>
-      </div>
-      {{else}}
-      {{range .TopIssues}}
-      <div class="top-issue">
-        <div class="top-issue-rank">{{.Rank}}</div>
-        <div>
-          <div class="top-issue-title">{{.Title}}</div>
-          <div class="top-issue-sub">{{.Subtitle}}</div>
-          {{if .Action}}<div class="top-issue-action">▸ {{.Action}}</div>{{end}}
-        </div>
-        <span class="sev-badge {{.Severity}}">{{.SeverityLbl}}</span>
-        <span class="top-issue-count">{{.CountText}}</span>
-        <a class="top-issue-btn" href="{{.URL}}">View →</a>
-      </div>
-      {{end}}
-      <a class="view-all-link" href="{{.WrURL}}">View all issues in War Room →</a>
-      {{end}}
-    </div>
-
-    <div class="section-card">
-      <div class="section-hdr">
-        <div style="display:flex;justify-content:space-between;align-items:center">
-          <div class="section-title">Cluster Summary</div>
-          <a class="view-all-link" href="{{.InfraURL}}">View infrastructure →</a>
-        </div>
-      </div>
-      <div class="summary-grid">
-        <div class="summary-card">
-          <div class="summary-icon">🖥</div>
-          <div class="summary-lbl">Node Pools</div>
-          <div class="summary-num">{{.NodePoolCount}}</div>
-          <div class="summary-sub">Pools</div>
-        </div>
-        <div class="summary-card">
-          <div class="summary-icon">📦</div>
-          <div class="summary-lbl">Running Pods</div>
-          <div class="summary-num">{{.PodCount}}</div>
-          <div class="summary-sub">Pods</div>
-        </div>
-        <div class="summary-card">
-          <div class="summary-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg></div>
-          <div class="summary-lbl">CPU Utilization</div>
-          <div class="summary-num">{{.CPUUtilization}}%</div>
-          <div class="summary-sub">Average</div>
-        </div>
-        <div class="summary-card">
-          <div class="summary-icon">🧠</div>
-          <div class="summary-lbl">Memory Utilization</div>
-          <div class="summary-num">{{.MemUtilization}}%</div>
-          <div class="summary-sub">Average</div>
-        </div>
-        <div class="summary-card">
-          <div class="summary-icon">📁</div>
-          <div class="summary-lbl">Namespaces</div>
-          <div class="summary-num">{{.NamespaceCount}}</div>
-          <div class="summary-sub">Namespaces</div>
-        </div>
-      </div>
-    </div>
+<!-- 6. Bottom strip (demoted) -->
+<div class="bottom-strip">
+  <div class="bottom-metric">
+    <div class="bottom-lbl">Incident Score</div>
+    <div class="bottom-val">{{.IncidentScore}}/100</div>
+    {{if .IncidentScoreDeltaText}}<div class="bottom-delta">{{.IncidentScoreDeltaText}} from last scan</div>{{end}}
   </div>
-
-<!-- RIGHT: War Room featured -->
-  <div>
-    <div class="wr-featured">
-
-      <!-- Sticky header -->
-      <div class="wr-featured-hdr">
-        <div class="wr-featured-title">War Room
-          {{if .HasFeatured}}<span class="wr-featured-count">{{.CriticalCount}} {{if eq .CriticalCount 1}}Critical{{else}}Issues{{end}}</span>{{end}}
-        </div>
-        <a class="view-all-link" href="{{.WrURL}}" style="margin-top:0">View all →</a>
-      </div>
-      <div class="wr-featured-sub">Issues that need your immediate attention</div>
-
-      {{if .HasFeatured}}
-      <!-- Scrollable cards body -->
-      <div class="wr-cards-body">
-        {{range .FeaturedIssues}}
-        <div class="wr-issue-card">
-          <div class="wr-issue-top">
-            <span class="sev-badge {{.Severity}}">{{if eq .Severity "critical"}}CRITICAL{{else if eq .Severity "high"}}HIGH{{else}}{{.Severity}}{{end}}</span>
-            <span class="top-issue-count">{{.Namespace}}</span>
-          </div>
-          <div class="wr-issue-name">{{.Message}}</div>
-          <div class="wr-issue-ns">{{.Namespace}} · {{.Resource}}</div>
-          {{if .KubectlCmd}}
-          <div class="wr-issue-section">
-            <div class="wr-issue-label">Quick Fix</div>
-            <div class="wr-quick-fix">
-              <code>{{.KubectlCmd}}</code>
-              <button class="wr-copy-btn" onclick="navigator.clipboard.writeText('{{.KubectlCmd}}')">Copy</button>
-            </div>
-          </div>
-          {{end}}
-        </div>
-        {{end}}
-        <a class="wr-view-details" href="{{$.WrURL}}">View All in War Room →</a>
-      </div>
-
-      {{else}}
-      <div class="empty-state-small">
-        <span class="icon">✅</span>
-        <div>No critical issues detected</div>
-      </div>
-      {{end}}
-
-    </div>
+  <div class="bottom-metric">
+    <div class="bottom-lbl">Security Score</div>
+    <div class="bottom-val">{{.SecurityScore}}/100</div>
+    {{if .SecurityScoreDeltaText}}<div class="bottom-delta">{{.SecurityScoreDeltaText}} from last scan</div>{{end}}
   </div>
-
-<!-- Footer trust badges -->
-<div class="trust-footer">
-  <strong>OpsCart {{.Version}}</strong>
-  <span class="trust-badge">Read-only</span>
-  <span class="trust-badge">No agents</span>
-  <span class="trust-badge">No cloud credentials</span>
+  <div class="bottom-metric">
+    <div class="bottom-lbl">Monthly Cost</div>
+    <div class="bottom-val">${{money .MonthlyCost}}</div>
+    {{if .CostDeltaText}}<div class="bottom-delta">{{.CostDeltaText}} from last scan</div>{{end}}
+  </div>
+  <div class="bottom-metric">
+    <div class="bottom-lbl">Reclaimable Waste</div>
+    <div class="bottom-val">{{.WasteCount}}</div>
+  </div>
+  <div class="bottom-actions">
+    <a class="bottom-btn" href="{{.CostsHref}}">Cost Intelligence →</a>
+    <a class="bottom-btn" href="{{.WasteHref}}">Waste &amp; Drift →</a>
+  </div>
 </div>
 
 </main>
 </div>
+<script>
+(function(){
+  var el = document.getElementById('ov-age');
+  var TS = {{.ScannedAtMS}};
+  function upd(){
+    var s = Math.floor((Date.now()-TS)/1000);
+    var t = s<5?'just now':s<60?s+'s ago':Math.floor(s/60)+'m ago';
+    if(el) el.textContent = t;
+  }
+  setInterval(upd,1000); upd();
+})();
+</script>
 </body>
 </html>
