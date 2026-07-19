@@ -22,6 +22,12 @@ type clusterScan struct {
 	cisResult  *analyzer.CISResult
 	wasteAudit *analyzer.WasteAudit
 	netAudit   *analyzer.NetworkPolicyAudit
+
+	// AllWorkloads is every Deployment/StatefulSet/DaemonSet the scan
+	// observed, regardless of the --breakdown flag — retained from the pod
+	// enumeration ResourceAnalyzer.AnalyzeClusterResources already performs
+	// for cost allocation, not a second cluster fetch.
+	AllWorkloads []models.WorkloadRef
 }
 
 // ── Per-cluster state ─────────────────────────────────────────────────────────

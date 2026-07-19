@@ -14,6 +14,9 @@ type Store interface {
 	GetIncidentHistory(cluster string, fingerprint string) (*IncidentRecord, error)
 	GetIncidentTimeline(cluster string, fingerprint string) ([]IncidentEvent, error)
 	QueryIncidents(f IncidentFilter) (items []IncidentSummary, total int, err error)
+	GetMemoryScoreboard(cluster string) (*MemoryScoreboard, error)
+	GetRecentEvents(cluster string, since time.Time, limit int) ([]RecentEvent, error)
+	GetChangesSince(cluster string, since time.Time, limit int) ([]RecentEvent, error)
 	PruneOlderThan(cluster string, cutoff time.Time) (pruned int, err error)
 	Close() error
 }
@@ -116,6 +119,26 @@ type IncidentSummary struct {
 	LastSeen     time.Time
 	RestartCount int
 	Trend        string // "accelerating" | "stable" | "recovering" | ""
+}
+
+// MemoryScoreboard summarizes a cluster's operational memory: how much
+// incident history it has accrued and how it is trending.
+type MemoryScoreboard struct {
+	TotalSeen             int
+	Resolved              int
+	Reopened              int // count of DISTINCT incidents with >=1 REOPENED event
+	Accelerating          int // count of active incidents whose Trend == "accelerating"
+	LongestActiveDays     int
+	LongestActiveName     string // resource name of that incident
+	MostUnstableNamespace string // namespace with the most incidents (active+resolved)
+	MostUnstableCount     int
+}
+
+// RecentEvent is one row of a cluster-wide recent-activity feed.
+type RecentEvent struct {
+	Resource    string
+	EventReason string // "Detected" | "Resolved" | "Reopened" | "RestartMilestone" | "SeverityChanged"
+	OccurredAt  time.Time
 }
 
 // RetentionCutoff computes the cutoff time for PruneOlderThan given a

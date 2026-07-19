@@ -19,6 +19,19 @@ type ClusterResourceAnalysis struct {
 
 	// Optimization opportunities
 	Optimizations []Optimization `json:"optimizations"`
+
+	// Workloads is every Deployment/StatefulSet/DaemonSet observed while
+	// enumerating pods for the namespace breakdown above — a rollup of the
+	// same pod list, not a second cluster fetch.
+	Workloads []WorkloadRef `json:"workloads,omitempty"`
+}
+
+// WorkloadRef identifies a single Deployment/StatefulSet/DaemonSet, derived
+// from pod OwnerReferences during resource analysis.
+type WorkloadRef struct {
+	Name      string `json:"name"`
+	Kind      string `json:"kind"` // "Deployment" | "StatefulSet" | "DaemonSet"
+	Namespace string `json:"namespace"`
 }
 
 // NamespaceResourceUsage represents resource usage for a single namespace

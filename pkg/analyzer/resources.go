@@ -3,6 +3,8 @@ package analyzer
 import (
 	"context"
 	"fmt"
+	"sort"
+	"strings"
 	"time"
 
 	"github.com/opscart/opscart-k8s-watcher/pkg/models"
@@ -44,6 +46,10 @@ func (ra *ResourceAnalyzer) AnalyzeClusterResources(namespace string) (*models.C
 	if err != nil {
 		return nil, fmt.Errorf("failed to list pods: %w", err)
 	}
+
+	// Roll the same pod list up to one entry per owning workload — no
+	// second cluster fetch, just a different view of data already in hand.
+	analysis.Workloads = workloadsFromPods(podList.Items)
 
 	// Analyze by namespace
 	namespaceMap := make(map[string]*models.NamespaceResourceUsage)
@@ -132,6 +138,84 @@ func (ra *ResourceAnalyzer) getClusterCapacity() (models.ResourceCapacity, error
 	}
 
 	return capacity, nil
+}
+
+// workloadsFromPods rolls a pod list up to one entry per owning
+// Deployment/StatefulSet/DaemonSet, deduplicating replicas. Pods with no
+// matching owner kind (bare pods, Jobs, CronJobs) are excluded — this
+// mirrors the Deployment/StatefulSet/DaemonSet scope callers expect.
+func workloadsFromPods(pods []corev1.Pod) []models.WorkloadRef {
+	seen := map[models.WorkloadRef]bool{}
+	var out []models.WorkloadRef
+	for _, pod := range pods {
+		ref, ok := workloadRefForPod(pod)
+		if !ok || seen[ref] {
+			continue
+		}
+		seen[ref] = true
+		out = append(out, ref)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Namespace != out[j].Namespace {
+			return out[i].Namespace < out[j].Namespace
+		}
+		return out[i].Name < out[j].Name
+	})
+	return out
+}
+
+// workloadRefForPod resolves a pod's owning Deployment/StatefulSet/DaemonSet
+// from its OwnerReferences. ReplicaSet-owned pods (the common Deployment
+// case) roll up to the Deployment name by stripping the ReplicaSet's own
+// hash suffix — the ReplicaSet object itself is not fetched, avoiding a
+// second API call. StatefulSet/DaemonSet owner names are used verbatim;
+// those controllers name pods deterministically, no suffix to strip.
+func workloadRefForPod(pod corev1.Pod) (models.WorkloadRef, bool) {
+	for _, owner := range pod.OwnerReferences {
+		switch owner.Kind {
+		case "ReplicaSet":
+			return models.WorkloadRef{Name: stripHashSuffix(owner.Name), Kind: "Deployment", Namespace: pod.Namespace}, true
+		case "StatefulSet":
+			return models.WorkloadRef{Name: owner.Name, Kind: "StatefulSet", Namespace: pod.Namespace}, true
+		case "DaemonSet":
+			return models.WorkloadRef{Name: owner.Name, Kind: "DaemonSet", Namespace: pod.Namespace}, true
+		}
+	}
+	return models.WorkloadRef{}, false
+}
+
+// stripHashSuffix removes a trailing ReplicaSet hash segment, e.g.
+// "payments-api-7d8f9c6b5" -> "payments-api".
+func stripHashSuffix(name string) string {
+	idx := strings.LastIndex(name, "-")
+	if idx < 0 {
+		return name
+	}
+	suffix := name[idx+1:]
+	if !looksLikeHash(suffix) {
+		return name
+	}
+	return name[:idx]
+}
+
+// looksLikeHash reports whether s looks like a ReplicaSet hash suffix:
+// 5-10 lowercase alphanumeric characters containing at least one digit.
+func looksLikeHash(s string) bool {
+	if len(s) < 5 || len(s) > 10 {
+		return false
+	}
+	hasDigit := false
+	for _, r := range s {
+		switch {
+		case r >= '0' && r <= '9':
+			hasDigit = true
+		case r >= 'a' && r <= 'z':
+			// ok
+		default:
+			return false
+		}
+	}
+	return hasDigit
 }
 
 // getPodResourceRequests calculates total resource requests for a pod
