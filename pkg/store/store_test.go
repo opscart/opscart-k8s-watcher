@@ -344,6 +344,10 @@ func TestNullStore(t *testing.T) {
 	if err != nil || events != nil {
 		t.Fatalf("GetRecentEvents: %+v, %v", events, err)
 	}
+	changes, err := s.GetChangesSince("c", time.Now(), 10)
+	if err != nil || changes != nil {
+		t.Fatalf("GetChangesSince: %+v, %v", changes, err)
+	}
 	if err := s.Close(); err != nil {
 		t.Fatalf("Close: %v", err)
 	}
@@ -1962,5 +1966,70 @@ func TestGetRecentEvents(t *testing.T) {
 	}
 	if !events[0].OccurredAt.After(events[1].OccurredAt) {
 		t.Fatalf("expected descending order by OccurredAt: %+v vs %+v", events[0].OccurredAt, events[1].OccurredAt)
+	}
+}
+
+func TestGetChangesSince(t *testing.T) {
+	s := openTestStore(t)
+	cluster := "test-cluster"
+
+	incA := IncidentData{Fingerprint: "default/Deployment/svc-a/crash_loop", Namespace: "default", Resource: "svc-a", IssueType: "crash_loop", Severity: "critical"}
+	incB := IncidentData{Fingerprint: "default/Deployment/svc-b/oom", Namespace: "default", Resource: "svc-b", IssueType: "oom", Severity: "warning"}
+	if err := s.UpsertIncidents(cluster, "scan-1", []IncidentData{incA, incB}); err != nil {
+		t.Fatalf("UpsertIncidents: %v", err)
+	}
+
+	var idA, idB int64
+	if err := s.db.QueryRow("SELECT id FROM incidents WHERE cluster=? AND fingerprint=?", cluster, incA.Fingerprint).Scan(&idA); err != nil {
+		t.Fatalf("lookup idA: %v", err)
+	}
+	if err := s.db.QueryRow("SELECT id FROM incidents WHERE cluster=? AND fingerprint=?", cluster, incB.Fingerprint).Scan(&idB); err != nil {
+		t.Fatalf("lookup idB: %v", err)
+	}
+
+	// idA and idB's DETECTED events (from UpsertIncidents above) sit well
+	// before the cursor. Layer explicit before/after events around a known
+	// cursor timestamp.
+	cursor := time.Now().Add(10 * time.Hour)
+	insertTestEvent(t, s, idA, cursor.Add(-time.Hour).Unix(), "SeverityChanged")   // before cursor: excluded
+	insertTestEvent(t, s, idB, cursor.Add(time.Minute).Unix(), "RestartMilestone") // after cursor: 2nd newest
+	insertTestEvent(t, s, idA, cursor.Add(time.Hour).Unix(), "Resolved")           // after cursor: newest
+	insertTestEvent(t, s, idB, cursor.Add(2*time.Hour).Unix(), "Reopened")         // after cursor: absolute newest, excluded by limit
+
+	events, err := s.GetChangesSince(cluster, cursor, 2)
+	if err != nil {
+		t.Fatalf("GetChangesSince: %v", err)
+	}
+	if len(events) != 2 {
+		t.Fatalf("expected limit=2 to return 2 events, got %d: %+v", len(events), events)
+	}
+	if events[0].Resource != "svc-b" || events[0].EventReason != "Reopened" {
+		t.Fatalf("expected newest event (svc-b/Reopened) first, got %+v", events[0])
+	}
+	if events[1].Resource != "svc-a" || events[1].EventReason != "Resolved" {
+		t.Fatalf("expected second-newest event (svc-a/Resolved) second, got %+v", events[1])
+	}
+	if !events[0].OccurredAt.After(events[1].OccurredAt) {
+		t.Fatalf("expected descending order by OccurredAt: %+v vs %+v", events[0].OccurredAt, events[1].OccurredAt)
+	}
+	for _, e := range events {
+		if e.OccurredAt.Before(cursor) {
+			t.Fatalf("expected only events at/after cursor %v, got %+v", cursor, e)
+		}
+	}
+
+	// Raise the limit to confirm the before-cursor SeverityChanged event
+	// never appears, no matter how high the limit goes.
+	all, err := s.GetChangesSince(cluster, cursor, 10)
+	if err != nil {
+		t.Fatalf("GetChangesSince(limit=10): %v", err)
+	}
+	if len(all) != 3 {
+		t.Fatalf("expected 3 events at/after cursor, got %d: %+v", len(all), all)
+	}
+	for _, e := range all {
+		if e.EventReason == "SeverityChanged" {
+			t.Fatalf("expected before-cursor SeverityChanged event to be excluded, got %+v", all)
+		}
 	}
 }

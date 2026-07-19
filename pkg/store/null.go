@@ -52,6 +52,10 @@ func (NullStore) GetRecentEvents(cluster string, limit int) ([]RecentEvent, erro
 	return nil, nil
 }
 
+func (NullStore) GetChangesSince(cluster string, since time.Time, limit int) ([]RecentEvent, error) {
+	return nil, nil
+}
+
 func (NullStore) PruneOlderThan(cluster string, cutoff time.Time) (int, error) {
 	return 0, nil
 }
