@@ -600,6 +600,10 @@ type overviewPageData struct {
 	ChangesSinceLastView []store.RecentEvent
 	LastViewedLabel      string
 
+	// Namespace Health + Workload Health grid
+	NamespaceHealthList []namespaceHealth
+	WorkloadHealthGrid  []workloadHealthCell
+
 	// War Room featured issue
 	FeaturedIssues []warRoomIssue
 	HasFeatured    bool
@@ -816,6 +820,9 @@ func buildOverviewData(scan *clusterScan, activeCtx string, clusterList []string
 
 		ChangesSinceLastView: changesSinceLastView,
 		LastViewedLabel:      lastViewedLabel,
+
+		NamespaceHealthList: buildNamespaceHealth(scan),
+		WorkloadHealthGrid:  buildWorkloadHealthGrid(scan),
 	}
 }
 
@@ -916,6 +923,142 @@ func humanizeIssueType(issueType string) string {
 	default:
 		return "failing"
 	}
+}
+
+// ── Namespace Health + Workload Health grid ────────────────────────────────
+
+// namespaceHealth is one row of the Namespace Health panel: how many pods
+// in a namespace are healthy vs. total.
+type namespaceHealth struct {
+	Name  string
+	Ready int
+	Total int
+}
+
+// workloadHealthCell is one cell of the Workload Health grid: a
+// Deployment/StatefulSet/DaemonSet colored by whether it currently has an
+// active incident (per collectWarRoomIssues) and at what severity.
+type workloadHealthCell struct {
+	Name     string
+	Severity string // "critical" | "high" | "medium" | "" (empty = healthy)
+}
+
+// workloadSeverityRank orders workloadHealthCell.Severity values from most
+// to least urgent; "" (healthy) always ranks last.
+var workloadSeverityRank = map[string]int{"critical": 3, "high": 2, "medium": 1}
+
+// buildNamespaceHealth groups pods by namespace using the same per-namespace
+// pod counts already computed for cost allocation (scan.report.NamespaceCosts
+// — populated on every scan, no new clientset call), and treats pods the
+// waste auditor already flagged as crash-looping/OOMKilled zombies
+// (scan.wasteAudit.StalePods) as not-ready. Sorted worst-health first,
+// matching the risk-first / pod-count-descending convention used for
+// NetworkPolicyAudit.UnprotectedNamespaces.
+func buildNamespaceHealth(scan *clusterScan) []namespaceHealth {
+	if scan == nil || scan.report == nil {
+		return nil
+	}
+
+	unhealthyByNS := map[string]int{}
+	if scan.wasteAudit != nil {
+		for _, pod := range scan.wasteAudit.StalePods {
+			if pod.Kind == analyzer.StalePodZombie {
+				unhealthyByNS[pod.Namespace]++
+			}
+		}
+	}
+
+	list := make([]namespaceHealth, 0, len(scan.report.NamespaceCosts))
+	for _, ns := range scan.report.NamespaceCosts {
+		total := ns.PodCount
+		unhealthy := unhealthyByNS[ns.Name]
+		if unhealthy > total {
+			unhealthy = total
+		}
+		list = append(list, namespaceHealth{Name: ns.Name, Ready: total - unhealthy, Total: total})
+	}
+
+	sort.SliceStable(list, func(i, j int) bool {
+		ri, rj := namespaceHealthRatio(list[i]), namespaceHealthRatio(list[j])
+		if ri != rj {
+			return ri < rj // worst health (lowest ready/total) first
+		}
+		return list[i].Total > list[j].Total
+	})
+	return list
+}
+
+// namespaceHealthRatio returns Ready/Total, treating an empty namespace
+// (Total == 0) as perfectly healthy so it sorts after any namespace with
+// at least one unhealthy pod.
+func namespaceHealthRatio(n namespaceHealth) float64 {
+	if n.Total == 0 {
+		return 1
+	}
+	return float64(n.Ready) / float64(n.Total)
+}
+
+// buildWorkloadHealthGrid maps every workload the scan currently knows
+// about to a severity, by reusing collectWarRoomIssues' output — never a
+// second incident query. Workload identity for a pod-level issue is
+// resolved with store.OwnerNameFromPod (pure string parsing, matching the
+// same owner-name convention used for incident fingerprints, not a new
+// clientset call). When the scan's deployment-level cost breakdown is
+// available (scan.report.NamespaceCosts[].Deployments) it's used to also
+// list healthy workloads with no active issue; otherwise the grid only
+// contains workloads an issue has actually implicated.
+func buildWorkloadHealthGrid(scan *clusterScan) []workloadHealthCell {
+	if scan == nil {
+		return nil
+	}
+
+	type workloadKey struct{ namespace, name string }
+	severityOf := map[workloadKey]string{}
+
+	for _, issue := range collectWarRoomIssues(scan, 0) {
+		if issue.Namespace == "" || issue.Resource == "" || issue.Resource == "namespace" {
+			continue // namespace-level issues (e.g. unprotected_namespace) aren't workloads
+		}
+		key := workloadKey{namespace: issue.Namespace, name: store.OwnerNameFromPod(issue.Resource)}
+		if existing, ok := severityOf[key]; !ok || workloadSeverityRank[issue.Severity] > workloadSeverityRank[existing] {
+			severityOf[key] = issue.Severity
+		}
+	}
+
+	seen := map[workloadKey]bool{}
+	var grid []workloadHealthCell
+
+	if scan.report != nil {
+		for _, ns := range scan.report.NamespaceCosts {
+			for _, d := range ns.Deployments {
+				key := workloadKey{namespace: d.Namespace, name: d.Name}
+				if seen[key] {
+					continue
+				}
+				seen[key] = true
+				grid = append(grid, workloadHealthCell{Name: d.Name, Severity: severityOf[key]})
+			}
+		}
+	}
+
+	// Always include workloads implied by an active issue, even when the
+	// deployment-level breakdown above isn't available.
+	for key, sev := range severityOf {
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		grid = append(grid, workloadHealthCell{Name: key.name, Severity: sev})
+	}
+
+	sort.SliceStable(grid, func(i, j int) bool {
+		si, sj := workloadSeverityRank[grid[i].Severity], workloadSeverityRank[grid[j].Severity]
+		if si != sj {
+			return si > sj // most severe first
+		}
+		return grid[i].Name < grid[j].Name
+	})
+	return grid
 }
 
 func buildTopIssues(scan *clusterScan, wrIssues []warRoomIssue) []topIssue {
