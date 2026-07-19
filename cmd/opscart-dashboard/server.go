@@ -586,6 +586,14 @@ type overviewPageData struct {
 	TopIssues []topIssue
 	Trend     *store.OverviewTrend
 
+	// "If you only fix one thing today" banner + Situation Briefing
+	// "Highest Priority" fact — mirrors TopIssues[0] after enrichment.
+	HasTopIssue    bool
+	TopIssueName   string // resource name, or Namespace for unprotected_namespace/idle_namespace
+	TopIssueNS     string
+	TopIssueTrend  string
+	TopIssueReopen int
+
 	// Trend deltas formatted for template display: "+N"/"-N", or "" when
 	// there's no history or no change.
 	CostDeltaText          string
@@ -628,6 +636,22 @@ type topIssue struct {
 	SeverityLbl string // "CRITICAL" | "HIGH" | "MEDIUM" | "LOW"
 	CountText   string // "8 pods", "~$40/mo", "14 checks"
 	URL         string
+
+	// Matching key for cross-referencing this row against the incident
+	// registry (db.QueryIncidents) in enrichTopIssues. Empty for rows with
+	// no single corresponding incident — the aggregated orphaned-PVCs/
+	// security-score/zero-replica rows below aren't tied to one resource.
+	Namespace string
+	Resource  string
+	IssueType string
+
+	// Enriched from the incident registry by enrichTopIssues, matched via
+	// Namespace+Resource+IssueType above. Zero-valued when no match was
+	// found (including for rows with no matching key at all).
+	FirstDetectedLabel string
+	ReopenCountVal     int // named _Val to read distinctly from store.IncidentSummary.ReopenCount
+	TrendVal           string
+	MemoryLine         string // "First detected 7d ago · reopened once · accelerating"
 }
 
 func convertToSidebarClusters(clusterList []string, activeCtx, basePath string) []sidebarCluster {
@@ -741,6 +765,10 @@ func buildOverviewData(scan *clusterScan, activeCtx string, clusterList []string
 	}
 	lastViewedLabel := humanAge(time.Since(since)) + " ago"
 
+	topIssues := buildTopIssues(scan, wrIssues)
+	topIssues = enrichTopIssues(topIssues, db, activeCtx)
+	hasTopIssue, topIssueName, topIssueNS, topIssueTrend, topIssueReopen := deriveTopIssueSummary(topIssues)
+
 	var costDeltaText, incidentScoreDeltaText, securityScoreDeltaText string
 	if trend != nil {
 		costDeltaText = formatCostDelta(trend.CostDelta, trend.HasHistory)
@@ -784,7 +812,12 @@ func buildOverviewData(scan *clusterScan, activeCtx string, clusterList []string
 		SecurityScore:      securityScore,
 		WasteCount:         wasteCount,
 		MonthlyCost:        monthlyCost,
-		TopIssues:          buildTopIssues(scan, wrIssues),
+		TopIssues:          topIssues,
+		HasTopIssue:        hasTopIssue,
+		TopIssueName:       topIssueName,
+		TopIssueNS:         topIssueNS,
+		TopIssueTrend:      topIssueTrend,
+		TopIssueReopen:     topIssueReopen,
 		FeaturedIssues:     featuredIssues,
 		HasFeatured:        len(featuredIssues) > 0,
 		NodePoolCount:      nodePoolCount,
@@ -1106,6 +1139,9 @@ func buildTopIssues(scan *clusterScan, wrIssues []warRoomIssue) []topIssue {
 
 		title, subtitle, countText, action := formatGroupedIssue(k.issueTyp, k.severity, grp)
 
+		// grp preserves collectWarRoomIssues' severity/restart-sorted
+		// order, so grp[0] is this group's highest-priority representative
+		// — the natural incident to cross-reference in enrichTopIssues.
 		issues = append(issues, topIssue{
 			Title:       title,
 			Subtitle:    subtitle,
@@ -1114,6 +1150,9 @@ func buildTopIssues(scan *clusterScan, wrIssues []warRoomIssue) []topIssue {
 			SeverityLbl: sevLbl,
 			CountText:   countText,
 			URL:         "/warroom",
+			Namespace:   grp[0].Namespace,
+			Resource:    grp[0].Resource,
+			IssueType:   k.issueTyp,
 		})
 		_ = count
 	}
@@ -1254,6 +1293,98 @@ func pluralS(n int) string {
 	return "s"
 }
 
+// postureOnlyIssueTypes are issue types with no restart-based trajectory —
+// static findings rather than something that "accelerates" — so
+// buildMemoryLine omits the trend clause for them.
+var postureOnlyIssueTypes = map[string]bool{
+	"privileged_container":  true,
+	"unprotected_namespace": true,
+	"idle_namespace":        true,
+}
+
+// enrichTopIssues cross-references each topIssue's matching key
+// (Namespace+Resource+IssueType, set in buildTopIssues) against the active
+// incident registry, filling in FirstDetectedLabel/ReopenCountVal/TrendVal/
+// MemoryLine for rows with a match. Rows with no matching key (the
+// aggregated orphaned-PVCs/security-score/zero-replica rows) or no
+// corresponding active incident are left at their zero values.
+func enrichTopIssues(issues []topIssue, db store.Store, cluster string) []topIssue {
+	if db == nil || len(issues) == 0 {
+		return issues
+	}
+	items, _, err := db.QueryIncidents(store.IncidentFilter{
+		Cluster: cluster,
+		Status:  "active",
+		PerPage: 200,
+	})
+	if err != nil || len(items) == 0 {
+		return issues
+	}
+
+	type matchKey struct{ namespace, resource, issueType string }
+	byKey := make(map[matchKey]store.IncidentSummary, len(items))
+	for _, it := range items {
+		byKey[matchKey{it.Namespace, it.Resource, it.IssueType}] = it
+	}
+
+	for i := range issues {
+		if issues[i].Namespace == "" || issues[i].Resource == "" || issues[i].IssueType == "" {
+			continue
+		}
+		match, ok := byKey[matchKey{issues[i].Namespace, issues[i].Resource, issues[i].IssueType}]
+		if !ok {
+			continue
+		}
+		issues[i].FirstDetectedLabel = humanAge(time.Since(match.FirstSeen)) + " ago"
+		issues[i].ReopenCountVal = match.ReopenCount
+		issues[i].TrendVal = match.Trend
+		issues[i].MemoryLine = buildMemoryLine(issues[i].FirstDetectedLabel, match.ReopenCount, match.Trend, issues[i].IssueType)
+	}
+	return issues
+}
+
+// buildMemoryLine composes the small muted "First detected 7d ago ·
+// reopened once · accelerating" line shown below a Top 5 row's subtitle.
+// The trend clause is omitted for postureOnlyIssueTypes, where a
+// restart-based trend doesn't apply.
+func buildMemoryLine(firstDetectedLabel string, reopenCount int, trend string, issueType string) string {
+	parts := []string{"First detected " + firstDetectedLabel}
+	switch {
+	case reopenCount == 1:
+		parts = append(parts, "reopened once")
+	case reopenCount > 1:
+		parts = append(parts, fmt.Sprintf("reopened ×%d", reopenCount))
+	}
+	if trend == "accelerating" && !postureOnlyIssueTypes[issueType] {
+		parts = append(parts, "accelerating")
+	}
+	return strings.Join(parts, " · ")
+}
+
+// topIssueResourceLabel mirrors buildOverviewVerdict's resourceLabel
+// substitution: unprotected_namespace/idle_namespace incidents store the
+// literal string "namespace" as Resource, so the real identifying context
+// is the incident's Namespace instead.
+func topIssueResourceLabel(resource, namespace, issueType string) string {
+	if issueType == "unprotected_namespace" || issueType == "idle_namespace" {
+		return namespace
+	}
+	return resource
+}
+
+// deriveTopIssueSummary promotes TopIssues[0] (after enrichTopIssues) into
+// the overviewPageData fields the "if you only fix one thing today" banner
+// and the Situation Briefing's "Highest Priority" fact use — same data,
+// rendered a second time, not a separate computation. Returns the zero
+// value for every field when issues is empty.
+func deriveTopIssueSummary(issues []topIssue) (has bool, name, namespace, trend string, reopenCount int) {
+	if len(issues) == 0 {
+		return false, "", "", "", 0
+	}
+	top := issues[0]
+	return true, topIssueResourceLabel(top.Resource, top.Namespace, top.IssueType), top.Namespace, top.TrendVal, top.ReopenCountVal
+}
+
 type costClusterLink struct {
 	Ctx      string
 	Label    string
@@ -1317,6 +1448,25 @@ var getOverviewTmpl = sync.OnceValue(func() *template.Template {
 				// fetched (overviewRecentEventsLimit); this only trims how
 				// many of those rows the page renders.
 				"limitSlice": func(items []store.RecentEvent, n int) []store.RecentEvent {
+					if len(items) <= n {
+						return items
+					}
+					return items[:n]
+				},
+				// limitNamespaceHealth/limitWorkloadHealth cap the two
+				// list-based cards in the Cluster/Namespace Health row the
+				// same way limitSlice caps the feed cards above. Go's
+				// text/template FuncMap dispatches by exact reflected
+				// argument type, so limitSlice's []store.RecentEvent
+				// signature can't be reused for these — same pattern,
+				// separate typed helpers.
+				"limitNamespaceHealth": func(items []namespaceHealth, n int) []namespaceHealth {
+					if len(items) <= n {
+						return items
+					}
+					return items[:n]
+				},
+				"limitWorkloadHealth": func(items []workloadHealthCell, n int) []workloadHealthCell {
 					if len(items) <= n {
 						return items
 					}
