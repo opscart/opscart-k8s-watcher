@@ -392,16 +392,16 @@ func fullyPopulatedOverviewData() overviewPageData {
 			LongestActiveDays: 12, LongestActiveName: "payments-api",
 			MostUnstableNamespace: "payments", MostUnstableCount: 9,
 		},
-		RecentEvents: []store.RecentEvent{
+		RecentEvents: formatChangeLines([]store.RecentEvent{
 			{Resource: "payments-api", EventReason: "RestartMilestone", OccurredAt: time.Now().Add(-5 * time.Minute)},
 			{Resource: "checkout-worker", EventReason: "Resolved", OccurredAt: time.Now().Add(-2 * time.Hour)},
-		},
+		}),
 
-		ChangesSinceLastView: []store.RecentEvent{
+		ChangesSinceLastView: formatChangeLines([]store.RecentEvent{
 			{Resource: "payments-api", EventReason: "SeverityChanged", OccurredAt: time.Now().Add(-1 * time.Minute)},
 			{Resource: "checkout-api", EventReason: "Detected", OccurredAt: time.Now().Add(-10 * time.Minute)},
 			{Resource: "checkout-api", EventReason: "Reopened", OccurredAt: time.Now().Add(-20 * time.Minute)},
-		},
+		}),
 		LastViewedLabel: "24h ago",
 
 		NamespaceHealthList: []namespaceHealth{
@@ -500,16 +500,16 @@ func TestOverviewTemplate_RendersEmptyData(t *testing.T) {
 func TestOverviewTemplate_FeedsCapAtFive(t *testing.T) {
 	data := fullyPopulatedOverviewData()
 
-	makeEvents := func(n int) []store.RecentEvent {
-		out := make([]store.RecentEvent, n)
+	makeEvents := func(n int) []changeLine {
+		raw := make([]store.RecentEvent, n)
 		for i := 0; i < n; i++ {
-			out[i] = store.RecentEvent{
+			raw[i] = store.RecentEvent{
 				Resource:    "svc-" + strconv.Itoa(i),
 				EventReason: "Detected",
 				OccurredAt:  time.Now().Add(-time.Duration(i) * time.Minute),
 			}
 		}
-		return out
+		return formatChangeLines(raw)
 	}
 	data.ChangesSinceLastView = makeEvents(9)
 	data.RecentEvents = makeEvents(7)
@@ -547,20 +547,18 @@ func (s *queryIncidentsStubStore) QueryIncidents(f store.IncidentFilter) ([]stor
 // pod/deployment involved) — the sentence must use Namespace instead, not
 // that placeholder.
 func TestBuildOverviewVerdict_UnprotectedNamespaceUsesNamespaceNotLiteralResource(t *testing.T) {
-	stub := &queryIncidentsStubStore{
-		items: []store.IncidentSummary{
-			{
-				Namespace: "payments-prod",
-				Resource:  "namespace",
-				IssueType: "unprotected_namespace",
-				Severity:  "high",
-				FirstSeen: time.Now().Add(-3 * 24 * time.Hour),
-			},
+	topIssues := []topIssue{
+		{
+			Title:              "1 namespace missing NetworkPolicy",
+			Namespace:          "payments-prod",
+			Resource:           "namespace",
+			IssueType:          "unprotected_namespace",
+			GroupSize:          1,
+			FirstDetectedLabel: "3d ago",
 		},
-		total: 1,
 	}
 
-	line1, _ := buildOverviewVerdict(stub, "test-cluster")
+	line1, _ := buildOverviewVerdict(topIssues, 0, time.Now())
 
 	if strings.Contains(line1, "namespace has been") {
 		t.Fatalf("expected verdict to use the real namespace, not the literal placeholder %q: got %q", "namespace", line1)
@@ -574,27 +572,163 @@ func TestBuildOverviewVerdict_UnprotectedNamespaceUsesNamespaceNotLiteralResourc
 // covers the same substitution for idle_namespace, and the ReopenCount
 // branch rather than the default one.
 func TestBuildOverviewVerdict_IdleNamespaceUsesNamespaceNotLiteralResource(t *testing.T) {
-	stub := &queryIncidentsStubStore{
-		items: []store.IncidentSummary{
-			{
-				Namespace:   "batch-jobs",
-				Resource:    "namespace",
-				IssueType:   "idle_namespace",
-				Severity:    "medium",
-				FirstSeen:   time.Now().Add(-5 * 24 * time.Hour),
-				ReopenCount: 2,
-			},
+	topIssues := []topIssue{
+		{
+			Title:              "1 idle namespace",
+			Namespace:          "batch-jobs",
+			Resource:           "namespace",
+			IssueType:          "idle_namespace",
+			GroupSize:          1,
+			FirstDetectedLabel: "5d ago",
+			ReopenCountVal:     2,
 		},
-		total: 1,
 	}
 
-	line1, _ := buildOverviewVerdict(stub, "test-cluster")
+	line1, _ := buildOverviewVerdict(topIssues, 0, time.Now())
 
 	if strings.Contains(line1, "namespace reoccurred") {
 		t.Fatalf("expected verdict to use the real namespace, not the literal placeholder %q: got %q", "namespace", line1)
 	}
 	if !strings.Contains(line1, "batch-jobs reoccurred") {
 		t.Fatalf("expected verdict to mention namespace %q, got: %q", "batch-jobs", line1)
+	}
+}
+
+// TestBuildOverviewVerdict_MatchesTopIssuesZero is Fix 2's core regression
+// test: the verdict sentence must be built from the exact same topIssues[0]
+// the "if you only fix one thing today" banner and Top 5's first row
+// render — previously buildOverviewVerdict ran its own independent
+// db.QueryIncidents call and could (and did) disagree with Top 5 about
+// which issue was "worst".
+func TestBuildOverviewVerdict_MatchesTopIssuesZero(t *testing.T) {
+	topIssues := []topIssue{
+		{
+			Title: "5 pods crash-looping", Namespace: "checkout", Resource: "checkout-api-abc123",
+			IssueType: "crash_loop", GroupSize: 5, FirstDetectedLabel: "2d ago", TrendVal: "accelerating",
+		},
+		{
+			Title: "2 namespaces missing NetworkPolicy", Namespace: "payments", Resource: "namespace",
+			IssueType: "unprotected_namespace", GroupSize: 2, FirstDetectedLabel: "1d ago",
+		},
+	}
+
+	line1, _ := buildOverviewVerdict(topIssues, 0, time.Now())
+
+	if !strings.Contains(line1, "checkout-api-abc123") {
+		t.Fatalf("expected verdict to describe topIssues[0] (checkout-api-abc123), got: %q", line1)
+	}
+	if strings.Contains(line1, "payments") {
+		t.Fatalf("expected verdict to NOT describe topIssues[1], got: %q", line1)
+	}
+	if !strings.Contains(line1, "5 workloads need attention") {
+		t.Fatalf("expected verdict's count to come from topIssues[0].GroupSize (5), got: %q", line1)
+	}
+}
+
+// TestBuildOverviewVerdict_EmptyTopIssues covers the "no active incidents"
+// fallback now that there's no db.QueryIncidents call to short-circuit on.
+func TestBuildOverviewVerdict_EmptyTopIssues(t *testing.T) {
+	line1, line2 := buildOverviewVerdict(nil, 0, time.Now())
+	if line1 != "No active incidents detected." || line2 != "" {
+		t.Fatalf("got line1=%q line2=%q, want the no-incidents fallback", line1, line2)
+	}
+}
+
+// TestBuildOverviewVerdict_AggregateRowFallsBackToTitle covers topIssues[0]
+// being an aggregate row (no single Namespace/Resource/IssueType) — e.g. a
+// cluster with only orphaned-PVC waste and no crash-looping pods.
+func TestBuildOverviewVerdict_AggregateRowFallsBackToTitle(t *testing.T) {
+	topIssues := []topIssue{
+		{Title: "3 orphaned PVCs wasting money", Severity: "medium"},
+	}
+	line1, _ := buildOverviewVerdict(topIssues, 0, time.Now())
+	if !strings.Contains(line1, "3 orphaned PVCs wasting money") {
+		t.Fatalf("expected verdict to fall back to the aggregate row's title, got: %q", line1)
+	}
+}
+
+// TestBuildOverviewVerdict_Line2ResolvedSinceCursor covers Fix 2: line2
+// shows the resolved-since-cursor count when >0, empty when 0 — and never
+// a hollow "0 incidents resolved" sentence. Also covers line2 appearing
+// even when there are no active incidents (topIssues empty) — confirming
+// resolved-since-cursor and topIssues are independent.
+func TestBuildOverviewVerdict_Line2ResolvedSinceCursor(t *testing.T) {
+	t.Run("zero resolved leaves line2 empty", func(t *testing.T) {
+		_, line2 := buildOverviewVerdict(nil, 0, time.Now().Add(-24*time.Hour))
+		if line2 != "" {
+			t.Fatalf("expected empty line2 for zero resolved, got %q", line2)
+		}
+	})
+
+	t.Run("one resolved uses singular wording", func(t *testing.T) {
+		_, line2 := buildOverviewVerdict(nil, 1, time.Now().Add(-24*time.Hour))
+		if line2 != "1 incident resolved since yesterday." {
+			t.Fatalf("line2 = %q, want %q", line2, "1 incident resolved since yesterday.")
+		}
+	})
+
+	t.Run("multiple resolved uses plural wording and correct count", func(t *testing.T) {
+		_, line2 := buildOverviewVerdict(nil, 3, time.Now().Add(-24*time.Hour))
+		if line2 != "3 incidents resolved since yesterday." {
+			t.Fatalf("line2 = %q, want %q", line2, "3 incidents resolved since yesterday.")
+		}
+	})
+
+	t.Run("line2 appears alongside a real line1 when there IS an active issue", func(t *testing.T) {
+		topIssues := []topIssue{
+			{Title: "1 pod crash-looping", Namespace: "payments", Resource: "payments-api-abc123", IssueType: "crash_loop", GroupSize: 1, FirstDetectedLabel: "2d ago"},
+		}
+		line1, line2 := buildOverviewVerdict(topIssues, 2, time.Now().Add(-24*time.Hour))
+		if !strings.Contains(line1, "payments-api-abc123") {
+			t.Fatalf("expected line1 to still describe the active issue, got %q", line1)
+		}
+		if line2 != "2 incidents resolved since yesterday." {
+			t.Fatalf("line2 = %q, want %q", line2, "2 incidents resolved since yesterday.")
+		}
+	})
+}
+
+// TestSinceCursorPhrase covers the "since yesterday" vs "since your last
+// visit" wording choice: "yesterday" only reads honestly when the cursor
+// is roughly a day old (the default for a first-time visitor); anything
+// meaningfully more recent or older uses the always-accurate fallback.
+func TestSinceCursorPhrase(t *testing.T) {
+	tests := []struct {
+		name    string
+		elapsed time.Duration
+		want    string
+	}{
+		{"exactly 24h (the first-time-visitor default) reads as yesterday", 24 * time.Hour, "since yesterday"},
+		{"18h lower bound reads as yesterday", 18 * time.Hour, "since yesterday"},
+		{"36h upper bound reads as yesterday", 36 * time.Hour, "since yesterday"},
+		{"a few minutes ago is not yesterday", 5 * time.Minute, "since your last visit"},
+		{"a week ago is not yesterday", 7 * 24 * time.Hour, "since your last visit"},
+		{"zero elapsed (impossible but defensive) is not yesterday", 0, "since your last visit"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := sinceCursorPhrase(tt.elapsed); got != tt.want {
+				t.Errorf("sinceCursorPhrase(%v) = %q, want %q", tt.elapsed, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestCountResolvedSince covers the reused-not-requeried plumbing: the
+// count comes from filtering the already-fetched changeLine slice
+// (GetChangesSince's result), not a second query.
+func TestCountResolvedSince(t *testing.T) {
+	changes := []changeLine{
+		{Phrase: "payments-api recovered", EventReason: "Resolved"},
+		{Phrase: "checkout-api reopened", EventReason: "Reopened"},
+		{Phrase: "New: fraud-svc", EventReason: "Detected"},
+		{Phrase: "orders-api recovered", EventReason: "Resolved"},
+	}
+	if got := countResolvedSince(changes); got != 2 {
+		t.Errorf("countResolvedSince = %d, want 2", got)
+	}
+	if got := countResolvedSince(nil); got != 0 {
+		t.Errorf("countResolvedSince(nil) = %d, want 0", got)
 	}
 }
 
@@ -930,6 +1064,44 @@ func TestBuildTopIssues_URLDeepLinksToInvestigation(t *testing.T) {
 	if issues[0].URL != want {
 		t.Errorf("URL = %q, want %q", issues[0].URL, want)
 	}
+	if issues[0].GroupSize != 1 {
+		t.Errorf("GroupSize = %d, want 1", issues[0].GroupSize)
+	}
+	if issues[0].ButtonLabel != "Fix now →" {
+		t.Errorf("ButtonLabel = %q, want %q", issues[0].ButtonLabel, "Fix now →")
+	}
+}
+
+// TestBuildTopIssues_MultiPodGroupRoutesToIncidentsRegistry covers a group
+// of more than one pod: rather than deep-linking to grp[0]'s pod as if it
+// were "the" incident, the row must route to the Incidents registry
+// filtered to this issue type, with a "View all N →" button.
+func TestBuildTopIssues_MultiPodGroupRoutesToIncidentsRegistry(t *testing.T) {
+	scan := &clusterScan{
+		wasteAudit: &analyzer.WasteAudit{
+			StalePods: []analyzer.StalePod{
+				{Name: "payments-api-abc123", Namespace: "payments", Kind: analyzer.StalePodZombie, Status: "CrashLoopBackOff", RestartCount: 10, AgeDays: 2},
+				{Name: "payments-worker-def456", Namespace: "payments", Kind: analyzer.StalePodZombie, Status: "CrashLoopBackOff", RestartCount: 5, AgeDays: 1},
+			},
+		},
+	}
+	wrIssues := collectWarRoomIssues(scan, 0)
+	issues := buildTopIssues(scan, wrIssues, "test-cluster")
+
+	if len(issues) == 0 {
+		t.Fatalf("expected at least one topIssue")
+	}
+	if issues[0].GroupSize != 2 {
+		t.Fatalf("expected GroupSize=2, got %d", issues[0].GroupSize)
+	}
+	wantURL := "/incidents?cluster=test-cluster&type=crash_loop&status=active"
+	if issues[0].URL != wantURL {
+		t.Errorf("URL = %q, want %q", issues[0].URL, wantURL)
+	}
+	wantLabel := "View all 2 →"
+	if issues[0].ButtonLabel != wantLabel {
+		t.Errorf("ButtonLabel = %q, want %q", issues[0].ButtonLabel, wantLabel)
+	}
 }
 
 // TestBuildTopIssues_AggregateRowsKeepTheirOwnURL proves the fix is scoped
@@ -954,5 +1126,85 @@ func TestBuildTopIssues_AggregateRowsKeepTheirOwnURL(t *testing.T) {
 	if issues[0].Namespace != "" || issues[0].Resource != "" || issues[0].IssueType != "" {
 		t.Errorf("expected aggregate row to have no matching key, got Namespace=%q Resource=%q IssueType=%q",
 			issues[0].Namespace, issues[0].Resource, issues[0].IssueType)
+	}
+	if issues[0].ButtonLabel != "View →" {
+		t.Errorf("expected aggregate row to keep its existing 'View →' label, got %q", issues[0].ButtonLabel)
+	}
+}
+
+// TestFormatChangeLine covers every event_reason category the What's
+// Changed / Recent Events feeds can show, asserting phrasing and that no
+// case produces empty or malformed text. RestartMilestone specifically
+// must NOT claim a trend judgment ("accelerating") or fabricate a
+// percentage — store.RecentEvent carries no restart count or trend data to
+// justify either.
+func TestFormatChangeLine(t *testing.T) {
+	tests := []struct {
+		eventReason string
+		wantPhrase  string
+	}{
+		{"Detected", "New: fraud-detection"},
+		{"Resolved", "fraud-detection recovered"},
+		{"Reopened", "fraud-detection reopened"},
+		{"RestartMilestone", "fraud-detection restart milestone reached"},
+		{"SeverityChanged", "fraud-detection severity changed"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.eventReason, func(t *testing.T) {
+			got := formatChangeLine(store.RecentEvent{
+				Resource: "fraud-detection", EventReason: tt.eventReason, OccurredAt: time.Now(),
+			})
+			if got.Phrase != tt.wantPhrase {
+				t.Errorf("Phrase = %q, want %q", got.Phrase, tt.wantPhrase)
+			}
+			if got.Phrase == "" {
+				t.Errorf("Phrase must not be empty for %q", tt.eventReason)
+			}
+			if got.EventReason != tt.eventReason {
+				t.Errorf("EventReason = %q, want %q (must match verbatim for the CSS class to resolve)", got.EventReason, tt.eventReason)
+			}
+			if strings.Contains(got.Phrase, "%") {
+				t.Errorf("Phrase %q must not fabricate a percentage — RestartMilestone carries no restart-count data", got.Phrase)
+			}
+			if strings.Contains(strings.ToLower(got.Phrase), "accelerat") {
+				t.Errorf("Phrase %q must not claim a trend judgment RecentEvent has no data to support", got.Phrase)
+			}
+		})
+	}
+
+	t.Run("unknown reason falls back to resource name, never empty", func(t *testing.T) {
+		got := formatChangeLine(store.RecentEvent{Resource: "mystery-svc", EventReason: "SomethingElse", OccurredAt: time.Now()})
+		if got.Phrase == "" {
+			t.Errorf("expected a non-empty fallback phrase, got empty")
+		}
+	})
+}
+
+// TestOverviewTemplate_ChangeDotCasingMatchesCSS is Fix 3's regression
+// test: for every event_reason category, the rendered .change-dot class
+// must match the CSS's Title-Case selectors (.change-dot.Detected,
+// .change-dot.Resolved, etc.) exactly — case-sensitive, as CSS class
+// matching always is.
+func TestOverviewTemplate_ChangeDotCasingMatchesCSS(t *testing.T) {
+	reasons := []string{"Detected", "Resolved", "Reopened", "RestartMilestone", "SeverityChanged"}
+
+	data := fullyPopulatedOverviewData()
+	var raw []store.RecentEvent
+	for _, r := range reasons {
+		raw = append(raw, store.RecentEvent{Resource: "svc", EventReason: r, OccurredAt: time.Now()})
+	}
+	data.RecentEvents = formatChangeLines(raw)
+
+	var buf strings.Builder
+	if err := getOverviewTmpl().Execute(&buf, data); err != nil {
+		t.Fatalf("template execution failed: %v", err)
+	}
+	out := buf.String()
+
+	for _, r := range reasons {
+		want := `class="change-dot ` + r + `"`
+		if !strings.Contains(out, want) {
+			t.Errorf("expected %q in rendered output (must match .change-dot.%s CSS exactly), not found", want, r)
+		}
 	}
 }

@@ -340,7 +340,7 @@ func TestNullStore(t *testing.T) {
 	if err != nil || sb == nil {
 		t.Fatalf("GetMemoryScoreboard: %+v, %v", sb, err)
 	}
-	events, err := s.GetRecentEvents("c", 10)
+	events, err := s.GetRecentEvents("c", time.Now(), 10)
 	if err != nil || events != nil {
 		t.Fatalf("GetRecentEvents: %+v, %v", events, err)
 	}
@@ -1951,7 +1951,7 @@ func TestGetRecentEvents(t *testing.T) {
 	insertTestEvent(t, s, idB, base+100, "RestartMilestone") // 2nd newest
 	insertTestEvent(t, s, idA, base+200, "SeverityChanged")  // newest
 
-	events, err := s.GetRecentEvents(cluster, 2)
+	events, err := s.GetRecentEvents(cluster, time.Now().Add(-time.Hour), 2)
 	if err != nil {
 		t.Fatalf("GetRecentEvents: %v", err)
 	}
@@ -1966,6 +1966,64 @@ func TestGetRecentEvents(t *testing.T) {
 	}
 	if !events[0].OccurredAt.After(events[1].OccurredAt) {
 		t.Fatalf("expected descending order by OccurredAt: %+v vs %+v", events[0].OccurredAt, events[1].OccurredAt)
+	}
+}
+
+// TestGetRecentEvents_WindowExcludesOlderEvents covers the fixed lookback
+// window (e.g. 7 days) buildOverviewData now passes: events older than
+// since must be excluded even though GetRecentEvents is otherwise
+// unfiltered by event_reason, ordering and limit still apply within the
+// window.
+func TestGetRecentEvents_WindowExcludesOlderEvents(t *testing.T) {
+	s := openTestStore(t)
+	cluster := "test-cluster"
+
+	inc := IncidentData{Fingerprint: "default/Deployment/svc-a/crash_loop", Namespace: "default", Resource: "svc-a", IssueType: "crash_loop", Severity: "critical"}
+	if err := s.UpsertIncidents(cluster, "scan-1", []IncidentData{inc}); err != nil {
+		t.Fatalf("UpsertIncidents: %v", err)
+	}
+
+	var id int64
+	if err := s.db.QueryRow("SELECT id FROM incidents WHERE cluster=? AND fingerprint=?", cluster, inc.Fingerprint).Scan(&id); err != nil {
+		t.Fatalf("lookup id: %v", err)
+	}
+
+	window := 7 * 24 * time.Hour
+	since := time.Now().Add(-window)
+
+	// One event well outside the window, two inside it.
+	insertTestEvent(t, s, id, since.Add(-48*time.Hour).Unix(), "SeverityChanged") // outside: excluded
+	insertTestEvent(t, s, id, since.Add(24*time.Hour).Unix(), "RestartMilestone") // inside: 2nd newest
+	insertTestEvent(t, s, id, since.Add(6*24*time.Hour).Unix(), "Reopened")       // inside: newest
+
+	events, err := s.GetRecentEvents(cluster, since, 20)
+	if err != nil {
+		t.Fatalf("GetRecentEvents: %v", err)
+	}
+	// +1 for the DETECTED event UpsertIncidents itself emitted (well
+	// within the window, since the test runs "now").
+	if len(events) != 3 {
+		t.Fatalf("expected 3 in-window events (Detected, RestartMilestone, Reopened), got %d: %+v", len(events), events)
+	}
+	for _, e := range events {
+		if e.OccurredAt.Before(since) {
+			t.Fatalf("expected only events at/after the window start %v, got %+v", since, e)
+		}
+	}
+	if events[0].EventReason != "Detected" {
+		t.Fatalf("expected the most recent event (Detected, from UpsertIncidents) first, got %+v", events[0])
+	}
+	if events[1].EventReason != "Reopened" || events[2].EventReason != "RestartMilestone" {
+		t.Fatalf("expected descending order Reopened, RestartMilestone, got %+v then %+v", events[1], events[2])
+	}
+
+	// Limit still applies within the window.
+	limited, err := s.GetRecentEvents(cluster, since, 1)
+	if err != nil {
+		t.Fatalf("GetRecentEvents(limit=1): %v", err)
+	}
+	if len(limited) != 1 || limited[0].EventReason != "Detected" {
+		t.Fatalf("expected limit=1 to return only the newest (Detected) event, got %+v", limited)
 	}
 }
 

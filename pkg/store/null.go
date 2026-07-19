@@ -48,7 +48,7 @@ func (NullStore) GetMemoryScoreboard(cluster string) (*MemoryScoreboard, error) 
 	return &MemoryScoreboard{}, nil
 }
 
-func (NullStore) GetRecentEvents(cluster string, limit int) ([]RecentEvent, error) {
+func (NullStore) GetRecentEvents(cluster string, since time.Time, limit int) ([]RecentEvent, error) {
 	return nil, nil
 }
 

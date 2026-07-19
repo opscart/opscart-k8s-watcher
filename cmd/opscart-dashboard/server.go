@@ -602,10 +602,10 @@ type overviewPageData struct {
 
 	// Memory scoreboard + cluster-wide recent activity
 	Scoreboard   *store.MemoryScoreboard
-	RecentEvents []store.RecentEvent
+	RecentEvents []changeLine
 
 	// What's changed since this browser last loaded the Overview page
-	ChangesSinceLastView []store.RecentEvent
+	ChangesSinceLastView []changeLine
 	LastViewedLabel      string
 
 	// Namespace Health + Workload Health grid
@@ -636,6 +636,8 @@ type topIssue struct {
 	SeverityLbl string // "CRITICAL" | "HIGH" | "MEDIUM" | "LOW"
 	CountText   string // "8 pods", "~$40/mo", "14 checks"
 	URL         string
+	ButtonLabel string // "Fix now →" | "View all N →" | "View →" (aggregated rows)
+	GroupSize   int    // number of underlying pods/incidents this row represents; 0 for aggregated rows
 
 	// Matching key for cross-referencing this row against the incident
 	// registry (db.QueryIncidents) in enrichTopIssues. Empty for rows with
@@ -743,11 +745,12 @@ func buildOverviewData(scan *clusterScan, activeCtx string, clusterList []string
 	incidentScore, incidentScoreColor, incidentScoreLabel := calcIncidentScore(scan)
 	_ = secFailed // reserved for future use
 
+	topIssues := buildTopIssues(scan, wrIssues, activeCtx)
+
 	var trend *store.OverviewTrend
 	var scoreboard *store.MemoryScoreboard
-	var recentEvents []store.RecentEvent
-	var changesSinceLastView []store.RecentEvent
-	var verdictLine1, verdictLine2 string
+	var recentEvents []changeLine
+	var changesSinceLastView []changeLine
 	if db != nil {
 		if t, err := db.GetOverviewTrend(activeCtx); err == nil {
 			trend = t
@@ -755,18 +758,22 @@ func buildOverviewData(scan *clusterScan, activeCtx string, clusterList []string
 		if sb, err := db.GetMemoryScoreboard(activeCtx); err == nil {
 			scoreboard = sb
 		}
-		if events, err := db.GetRecentEvents(activeCtx, overviewRecentEventsLimit); err == nil {
-			recentEvents = events
+		if events, err := db.GetRecentEvents(activeCtx, time.Now().Add(-recentEventsWindow), recentEventsLimit); err == nil {
+			recentEvents = formatChangeLines(events)
 		}
 		if changes, err := db.GetChangesSince(activeCtx, since, overviewRecentEventsLimit); err == nil {
-			changesSinceLastView = changes
+			changesSinceLastView = formatChangeLines(changes)
 		}
-		verdictLine1, verdictLine2 = buildOverviewVerdict(db, activeCtx)
+		topIssues = enrichTopIssues(topIssues, db, activeCtx)
 	}
+	// Same topIssues slice Top 5 and the fix-one-thing banner render — one
+	// source of truth for "the worst issue" (see buildOverviewVerdict).
+	// resolvedSinceCursor reuses changesSinceLastView (already fetched via
+	// GetChangesSince above) rather than issuing a second query.
+	resolvedSinceCursor := countResolvedSince(changesSinceLastView)
+	verdictLine1, verdictLine2 := buildOverviewVerdict(topIssues, resolvedSinceCursor, since)
 	lastViewedLabel := humanAge(time.Since(since)) + " ago"
 
-	topIssues := buildTopIssues(scan, wrIssues, activeCtx)
-	topIssues = enrichTopIssues(topIssues, db, activeCtx)
 	hasTopIssue, topIssueName, topIssueNS, topIssueTrend, topIssueReopen := deriveTopIssueSummary(topIssues)
 
 	var costDeltaText, incidentScoreDeltaText, securityScoreDeltaText string
@@ -859,9 +866,18 @@ func buildOverviewData(scan *clusterScan, activeCtx string, clusterList []string
 	}
 }
 
-// overviewRecentEventsLimit caps the cluster-wide recent-activity feed shown
-// on the overview page.
+// overviewRecentEventsLimit caps the cursor-scoped "what's changed since
+// last visit" feed (GetChangesSince).
 const overviewRecentEventsLimit = 15
+
+// recentEventsWindow/recentEventsLimit govern the cluster-wide Recent
+// Events feed (GetRecentEvents) — a fixed 7-day lookback independent of
+// the opscart_last_viewed cursor, so it reliably shows more/older activity
+// than the cursor-scoped ChangesSinceLastView even on a quiet day. Capped
+// higher than overviewRecentEventsLimit since a real week of activity
+// needs more rows to feel substantive than a single visit's worth of change.
+const recentEventsWindow = 7 * 24 * time.Hour
+const recentEventsLimit = 20
 
 // formatIntDelta renders the change between two integer metric readings as
 // "+N"/"-N" for template display. Returns "" when there's no history to
@@ -890,58 +906,96 @@ func formatCostDelta(delta float64, hasHistory bool) string {
 	return fmt.Sprintf("-$%.0f", -delta)
 }
 
-// buildOverviewVerdict produces the two-sentence cluster assessment shown
-// at the top of the Overview page. Priority: accelerating > reopened >
-// stable-but-critical > all-clear. line2 (resolved-since-yesterday) is
-// filled in separately once the memory scoreboard data is available.
-func buildOverviewVerdict(db store.Store, cluster string) (line1, line2 string) {
-	items, total, err := db.QueryIncidents(store.IncidentFilter{
-		Cluster:  cluster,
-		Status:   "active",
-		SortBy:   "severity",
-		SortDesc: true,
-		PerPage:  20,
-	})
-	if err != nil || len(items) == 0 {
-		return "No active incidents detected.", ""
-	}
-
-	worst := &items[0]
-	for i := range items {
-		if items[i].Trend == "accelerating" {
-			worst = &items[i]
-			break
+// countResolvedSince counts changesSinceLastView entries representing a
+// Resolved event, for the verdict's "N incidents resolved ..." clause.
+// Reuses the changeLine slice buildOverviewData already fetched via
+// GetChangesSince — never a second query.
+func countResolvedSince(changes []changeLine) int {
+	count := 0
+	for _, c := range changes {
+		if c.EventReason == "Resolved" {
+			count++
 		}
 	}
+	return count
+}
 
-	ageDays := int(time.Since(worst.FirstSeen).Hours() / 24)
-	issueLabel := humanizeIssueType(worst.IssueType)
+// sinceCursorPhrase anchors the verdict's resolved-since clause to how old
+// the visitor's opscart_last_viewed cursor actually is. "since yesterday"
+// only reads honestly when the cursor is roughly a day old — the default
+// for a first-time visitor (readLastViewedCursor: now-24h) and for anyone
+// who checks back about once a day. A cursor meaningfully more recent
+// (checking every few minutes) or older (checking every few weeks) uses
+// the always-accurate "since your last visit" instead.
+func sinceCursorPhrase(elapsed time.Duration) string {
+	if elapsed >= 18*time.Hour && elapsed <= 36*time.Hour {
+		return "since yesterday"
+	}
+	return "since your last visit"
+}
+
+// buildOverviewVerdict produces the two-sentence cluster assessment shown
+// at the top of the Overview page. line1's priority: accelerating >
+// reopened > stable-but-critical > all-clear, built from topIssues[0] —
+// the SAME row the "if you only fix one thing today" banner and the Top 5
+// list's first entry already show, so there's exactly one source of truth
+// for "the worst issue" (previously this ran its own independent
+// db.QueryIncidents call and could disagree with what Top 5 displayed).
+// line2 is the resolved-since-cursor clause, or "" if nothing resolved.
+func buildOverviewVerdict(topIssues []topIssue, resolvedSinceCursor int, cursorSince time.Time) (line1, line2 string) {
+	if resolvedSinceCursor > 0 {
+		line2 = fmt.Sprintf("%d incident%s resolved %s.",
+			resolvedSinceCursor, pluralS(resolvedSinceCursor), sinceCursorPhrase(time.Since(cursorSince)))
+	}
+
+	if len(topIssues) == 0 {
+		return "No active incidents detected.", line2
+	}
+
+	worst := topIssues[0]
+
+	// Aggregated rows (orphaned PVCs, security score, zero-replica
+	// workloads) have no single Namespace/Resource/IssueType to build a
+	// resource/trend sentence from — fall back to the row's own title,
+	// which is always meaningful on its own.
+	if worst.Namespace == "" || worst.Resource == "" || worst.IssueType == "" {
+		return fmt.Sprintf("Cluster needs attention: %s.", worst.Title), line2
+	}
+
+	total := worst.GroupSize
+	if total < 1 {
+		total = 1
+	}
 	workloadWord := "workload needs"
 	if total > 1 {
 		workloadWord = "workloads need"
 	}
 
+	issueLabel := humanizeIssueType(worst.IssueType)
+
 	// unprotected_namespace/idle_namespace incidents store the literal
 	// string "namespace" as Resource (there's no pod/deployment involved);
 	// the incident's real identifying context is its Namespace.
-	resourceLabel := worst.Resource
-	if worst.IssueType == "unprotected_namespace" || worst.IssueType == "idle_namespace" {
-		resourceLabel = worst.Namespace
+	resourceLabel := topIssueResourceLabel(worst.Resource, worst.Namespace, worst.IssueType)
+
+	firstDetected := worst.FirstDetectedLabel
+	if firstDetected == "" {
+		firstDetected = "recently"
 	}
 
 	switch {
-	case worst.Trend == "accelerating":
+	case worst.TrendVal == "accelerating":
 		line1 = fmt.Sprintf(
-			"%d %s attention. %s has been %s for %d day(s) and its restart rate is accelerating.",
-			total, workloadWord, resourceLabel, issueLabel, ageDays)
-	case worst.ReopenCount > 0:
+			"%d %s attention. %s has been %s, first detected %s, and its restart rate is accelerating.",
+			total, workloadWord, resourceLabel, issueLabel, firstDetected)
+	case worst.ReopenCountVal > 0:
 		line1 = fmt.Sprintf(
 			"%d %s attention. %s reoccurred after a recovery — reopened %d time(s).",
-			total, workloadWord, resourceLabel, worst.ReopenCount)
+			total, workloadWord, resourceLabel, worst.ReopenCountVal)
 	default:
 		line1 = fmt.Sprintf(
-			"%d %s attention. %s has been %s for %d day(s).",
-			total, workloadWord, resourceLabel, issueLabel, ageDays)
+			"%d %s attention. %s has been %s, first detected %s.",
+			total, workloadWord, resourceLabel, issueLabel, firstDetected)
 	}
 
 	return line1, line2
@@ -964,6 +1018,58 @@ func humanizeIssueType(issueType string) string {
 	default:
 		return "failing"
 	}
+}
+
+// changeLine is one formatted row of the What's Changed Since Last Scan /
+// Recent Events feeds: a short human phrase plus the EventReason driving
+// its colored dot (reusing the exact Detected/Resolved/Reopened/
+// RestartMilestone/SeverityChanged categories and casing the CSS already
+// defines for .change-dot — see overview.html).
+type changeLine struct {
+	Phrase      string
+	EventReason string
+	OccurredAt  time.Time
+}
+
+// formatChangeLine turns a raw store.RecentEvent — which carries only
+// Resource/EventReason/OccurredAt, nothing else — into a short readable
+// phrase. Some illustrative designs for this feed show extra detail (a
+// restart-rate percentage, an incident's total active duration, a trend
+// judgment); none of that is available on RecentEvent without an extra
+// per-event query, which would be an N+1 pattern this function
+// deliberately avoids — so those clauses are omitted rather than
+// fabricated.
+func formatChangeLine(e store.RecentEvent) changeLine {
+	var phrase string
+	switch e.EventReason {
+	case "Detected":
+		phrase = fmt.Sprintf("New: %s", e.Resource)
+	case "Resolved":
+		phrase = fmt.Sprintf("%s recovered", e.Resource)
+	case "Reopened":
+		phrase = fmt.Sprintf("%s reopened", e.Resource)
+	case "RestartMilestone":
+		// Not "...restart rate accelerating" — RecentEvent carries no
+		// restart count or trend, so there's nothing to justify a trend
+		// judgment. "Milestone reached" is the honest description of what
+		// this event actually records (see insertIncidentEvent's
+		// RestartMilestone case in pkg/store/sqlite.go).
+		phrase = fmt.Sprintf("%s restart milestone reached", e.Resource)
+	case "SeverityChanged":
+		phrase = fmt.Sprintf("%s severity changed", e.Resource)
+	default:
+		phrase = e.Resource
+	}
+	return changeLine{Phrase: phrase, EventReason: e.EventReason, OccurredAt: e.OccurredAt}
+}
+
+// formatChangeLines maps formatChangeLine over a whole feed.
+func formatChangeLines(events []store.RecentEvent) []changeLine {
+	out := make([]changeLine, len(events))
+	for i, e := range events {
+		out[i] = formatChangeLine(e)
+	}
+	return out
 }
 
 // ── Namespace Health + Workload Health grid ────────────────────────────────
@@ -1156,8 +1262,19 @@ func buildTopIssues(scan *clusterScan, wrIssues []warRoomIssue, activeCtx string
 
 		// grp preserves collectWarRoomIssues' severity/restart-sorted
 		// order, so grp[0] is this group's highest-priority representative
-		// — the natural incident to cross-reference in enrichTopIssues, and
-		// the row this deep-link points at.
+		// — the natural incident to cross-reference in enrichTopIssues. A
+		// group of exactly one pod deep-links straight to that pod's
+		// Investigation page; a group of several pods deep-links to the
+		// Incidents registry filtered to this issue type instead of
+		// arbitrarily picking grp[0]'s pod as "the" incident.
+		issueURL := investigateURL(grp[0].Namespace, grp[0].Resource, k.issueTyp, activeCtx)
+		buttonLabel := "Fix now →"
+		if count > 1 {
+			issueURL = fmt.Sprintf("/incidents?cluster=%s&type=%s&status=active",
+				url.QueryEscape(activeCtx), url.QueryEscape(k.issueTyp))
+			buttonLabel = fmt.Sprintf("View all %d →", count)
+		}
+
 		issues = append(issues, topIssue{
 			Title:       title,
 			Subtitle:    subtitle,
@@ -1165,12 +1282,13 @@ func buildTopIssues(scan *clusterScan, wrIssues []warRoomIssue, activeCtx string
 			Severity:    k.severity,
 			SeverityLbl: sevLbl,
 			CountText:   countText,
-			URL:         investigateURL(grp[0].Namespace, grp[0].Resource, k.issueTyp, activeCtx),
+			URL:         issueURL,
+			ButtonLabel: buttonLabel,
+			GroupSize:   count,
 			Namespace:   grp[0].Namespace,
 			Resource:    grp[0].Resource,
 			IssueType:   k.issueTyp,
 		})
-		_ = count
 	}
 
 	// Waste: orphaned PVCs (single aggregated row)
@@ -1190,6 +1308,7 @@ func buildTopIssues(scan *clusterScan, wrIssues []warRoomIssue, activeCtx string
 				SeverityLbl: "MEDIUM",
 				CountText:   cost,
 				URL:         "/optimizations",
+				ButtonLabel: "View →",
 			})
 		}
 	}
@@ -1203,6 +1322,7 @@ func buildTopIssues(scan *clusterScan, wrIssues []warRoomIssue, activeCtx string
 			SeverityLbl: "MEDIUM",
 			CountText:   fmt.Sprintf("%d/%d failed", scan.cisResult.FailedChecks, scan.cisResult.TotalChecks),
 			URL:         "/warroom",
+			ButtonLabel: "View →",
 		})
 	}
 
@@ -1216,6 +1336,7 @@ func buildTopIssues(scan *clusterScan, wrIssues []warRoomIssue, activeCtx string
 			SeverityLbl: "LOW",
 			CountText:   fmt.Sprintf("%d workload%s", count, pluralS(count)),
 			URL:         "/optimizations",
+			ButtonLabel: "View →",
 		})
 	}
 
@@ -1459,11 +1580,11 @@ var getOverviewTmpl = sync.OnceValue(func() *template.Template {
 						return "danger"
 					}
 				},
-				// limitSlice caps a RecentEvent feed's DISPLAY length —
+				// limitSlice caps a changeLine feed's DISPLAY length —
 				// GetRecentEvents/GetChangesSince already cap what's
 				// fetched (overviewRecentEventsLimit); this only trims how
 				// many of those rows the page renders.
-				"limitSlice": func(items []store.RecentEvent, n int) []store.RecentEvent {
+				"limitSlice": func(items []changeLine, n int) []changeLine {
 					if len(items) <= n {
 						return items
 					}

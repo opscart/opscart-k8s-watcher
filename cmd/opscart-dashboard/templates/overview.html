@@ -44,6 +44,14 @@
 /* ── Row 1: Situation Briefing (62%) + Operational Memory (38%) ── */
 .ov-row-briefing{display:grid;grid-template-columns:1.6fr 1fr;gap:1.5rem;align-items:stretch}
 @media(max-width:1100px){.ov-row-briefing{grid-template-columns:1fr}}
+/* align-items:stretch above makes both cards match height — intentional,
+   matches the target look. Each card is its own flex column so content
+   still reads top-to-bottom normally; only Briefing's trailing CTA button
+   is pinned to the bottom via margin-top:auto (see .briefing-cta) so a
+   taller Memory card doesn't leave dead space below an early-ending
+   button. This rule is scoped to .ov-row-briefing specifically — it must
+   not affect the Cluster Health/Namespace Health/Security Status row. */
+.ov-row-briefing .section-card{display:flex;flex-direction:column}
 .briefing-text{font-size:0.92rem;line-height:1.6;color:var(--text-secondary);margin-bottom:0.75rem}
 .briefing-text:last-child{margin-bottom:0}
 .briefing{border-color:rgba(239,68,68,.35);background:rgba(239,68,68,.03)}
@@ -51,7 +59,7 @@
 .briefing-facts{display:flex;gap:1.5rem;flex-wrap:wrap;margin-top:1rem;padding-top:1rem;border-top:1px solid var(--border)}
 .bf-label{font-size:0.66rem;text-transform:uppercase;letter-spacing:0.5px;color:var(--text-muted);margin-bottom:0.25rem}
 .bf-val{font-size:1.05rem;font-weight:700;color:var(--text);max-width:320px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.briefing-cta{margin-top:1.1rem}
+.briefing-cta{margin-top:auto;padding-top:1.1rem}
 .btn-primary{display:inline-block;background:var(--primary-light);border:none;border-radius:var(--radius-sm);color:#fff;font-size:0.82rem;font-weight:600;padding:0.55rem 1.1rem;text-decoration:none;white-space:nowrap;transition:opacity .15s}
 .btn-primary:hover{opacity:.85}
 .mem-grid{display:grid;grid-template-columns:1fr 1fr;gap:0.75rem;margin-bottom:1rem}
@@ -79,13 +87,13 @@
 .feed-card .section-card:last-child{margin-bottom:0}
 .change-row{display:flex;align-items:center;gap:0.6rem;padding:0.6rem 0;border-bottom:1px solid rgba(51,65,85,0.5);font-size:0.8rem}
 .change-row:last-child{border-bottom:none}
-.change-reason{font-size:0.64rem;font-weight:700;text-transform:uppercase;letter-spacing:0.4px;padding:2px 7px;border-radius:10px;white-space:nowrap;flex-shrink:0}
-.change-reason.Detected{background:rgba(245,158,11,0.15);color:#fbbf24}
-.change-reason.Resolved{background:rgba(16,185,129,0.15);color:#4ade80}
-.change-reason.Reopened{background:rgba(239,68,68,0.15);color:#f87171}
-.change-reason.RestartMilestone{background:rgba(239,68,68,0.12);color:#f87171}
-.change-reason.SeverityChanged{background:rgba(99,102,241,0.15);color:var(--primary-light)}
-.change-resource{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--text-secondary)}
+.change-dot{width:8px;height:8px;border-radius:50%;flex-shrink:0}
+.change-dot.Detected{background:#fbbf24}
+.change-dot.Resolved{background:#4ade80}
+.change-dot.Reopened{background:#f87171;box-shadow:0 0 5px rgba(248,113,113,.5)}
+.change-dot.RestartMilestone{background:#f87171;box-shadow:0 0 5px rgba(248,113,113,.5)}
+.change-dot.SeverityChanged{background:var(--primary-light)}
+.change-phrase{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--text-secondary)}
 .change-age{color:var(--text-muted);font-size:0.72rem;white-space:nowrap;flex-shrink:0}
 
 /* ── Row 3: Cluster Health / Namespace Health / Security Status ── */
@@ -165,7 +173,7 @@
     <div class="fix-one-sub">{{.Subtitle}}{{if $.TopIssueNS}} · {{$.TopIssueNS}}{{end}}</div>
   </div>
   <span class="sev-badge {{.Severity}}">{{.SeverityLbl}}</span>
-  <a class="fix-one-btn" href="{{.URL}}">Fix now →</a>
+  <a class="fix-one-btn" href="{{.URL}}">{{.ButtonLabel}}</a>
 </div>
 {{end}}
 {{end}}
@@ -244,7 +252,7 @@
         {{if .Action}}<div class="top-issue-action">▸ {{.Action}}</div>{{end}}
       </div>
       <span class="sev-badge {{.Severity}}">{{.SeverityLbl}}</span>
-      <a class="top-issue-btn" href="{{.URL}}">View →</a>
+      <a class="top-issue-btn" href="{{.URL}}">{{.ButtonLabel}}</a>
     </div>
     {{end}}
     <a class="view-all-link" href="{{.WrURL}}">View all issues in War Room →</a>
@@ -263,8 +271,8 @@
       {{else}}
       {{range limitSlice .ChangesSinceLastView 5}}
       <div class="change-row">
-        <span class="change-reason {{.EventReason}}">{{.EventReason}}</span>
-        <span class="change-resource">{{.Resource}}</span>
+        <span class="change-dot {{.EventReason}}"></span>
+        <span class="change-phrase">{{.Phrase}}</span>
         <span class="change-age">{{eventAge .OccurredAt}}</span>
       </div>
       {{end}}
@@ -283,8 +291,8 @@
       {{else}}
       {{range limitSlice .RecentEvents 5}}
       <div class="change-row">
-        <span class="change-reason {{.EventReason}}">{{.EventReason}}</span>
-        <span class="change-resource">{{.Resource}}</span>
+        <span class="change-dot {{.EventReason}}"></span>
+        <span class="change-phrase">{{.Phrase}}</span>
         <span class="change-age">{{eventAge .OccurredAt}}</span>
       </div>
       {{end}}
