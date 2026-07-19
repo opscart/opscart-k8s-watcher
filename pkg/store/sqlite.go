@@ -1203,6 +1203,59 @@ func (s *SQLiteStore) GetRecentEvents(cluster string, limit int) ([]RecentEvent,
 	return out, rows.Err()
 }
 
+// meaningfulEventReasons are the event_reason values worth surfacing in a
+// "what changed" diff — every reason insertIncidentEvent ever writes (see
+// UpsertIncidents/ResolveMissing/emitDriftEvents). There is currently no
+// internal/housekeeping event_reason to exclude, but the allowlist is kept
+// explicit so a future addition doesn't leak into this feed silently.
+var meaningfulEventReasons = []string{"Detected", "Resolved", "Reopened", "RestartMilestone", "SeverityChanged"}
+
+// GetChangesSince returns incident_events for cluster that occurred at or
+// after since, newest first, limited to meaningfulEventReasons — a
+// cursor-bounded diff of "what changed" rather than GetRecentEvents'
+// unfiltered feed.
+func (s *SQLiteStore) GetChangesSince(cluster string, since time.Time, limit int) ([]RecentEvent, error) {
+	reasonPlaceholders := make([]string, len(meaningfulEventReasons))
+	args := make([]any, 0, len(meaningfulEventReasons)+2)
+	args = append(args, cluster)
+	for i, reason := range meaningfulEventReasons {
+		reasonPlaceholders[i] = "?"
+		args = append(args, reason)
+	}
+	args = append(args, since.Unix(), limit)
+
+	rows, err := s.db.Query(fmt.Sprintf(
+		`SELECT incidents.resource, incident_events.event_reason, incident_events.occurred_at
+		 FROM incident_events
+		 JOIN incidents ON incident_events.incident_id = incidents.id
+		 WHERE incidents.cluster = ?
+		   AND incident_events.event_reason IN (%s)
+		   AND incident_events.occurred_at >= ?
+		 ORDER BY incident_events.occurred_at DESC LIMIT ?`,
+		strings.Join(reasonPlaceholders, ","),
+	), args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var out []RecentEvent
+	for rows.Next() {
+		var resource string
+		var eventReason sql.NullString
+		var occurredAt int64
+		if err := rows.Scan(&resource, &eventReason, &occurredAt); err != nil {
+			return nil, err
+		}
+		out = append(out, RecentEvent{
+			Resource:    resource,
+			EventReason: eventReason.String,
+			OccurredAt:  time.Unix(occurredAt, 0),
+		})
+	}
+	return out, rows.Err()
+}
+
 // PruneOlderThan removes data older than cutoff for cluster, in one
 // transaction:
 //   - Resolved incidents (and their full event history) are deleted once

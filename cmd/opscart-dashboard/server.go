@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/url"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -102,6 +103,41 @@ func (srv *server) activeCtx(r *http.Request) string {
 	return srv.clusterList[0]
 }
 
+// lastViewedCookieName holds the Unix-seconds timestamp of the last time
+// this browser loaded the Overview page, used as the cursor for the
+// "what's changed since last scan" feed.
+const lastViewedCookieName = "opscart_last_viewed"
+
+// lastViewedMaxAge is how long the cursor cookie persists — long enough to
+// survive a browser restart, since it's a "last visit" marker, not a
+// session token.
+const lastViewedMaxAge = 30 * 24 * time.Hour
+
+// readLastViewedCursor reads the lastViewedCookieName cookie and returns the
+// time it encodes. A missing or unparseable cookie (first-ever visit, or a
+// tampered/stale value) defaults to 24h ago so first-time visitors see a
+// day of history instead of nothing.
+func readLastViewedCursor(r *http.Request) time.Time {
+	c, err := r.Cookie(lastViewedCookieName)
+	if err != nil {
+		return time.Now().Add(-24 * time.Hour)
+	}
+	sec, err := strconv.ParseInt(c.Value, 10, 64)
+	if err != nil {
+		return time.Now().Add(-24 * time.Hour)
+	}
+	return time.Unix(sec, 0)
+}
+
+func setLastViewedCursor(w http.ResponseWriter, at time.Time) {
+	http.SetCookie(w, &http.Cookie{
+		Name:   lastViewedCookieName,
+		Value:  strconv.FormatInt(at.Unix(), 10),
+		Path:   "/",
+		MaxAge: int(lastViewedMaxAge.Seconds()),
+	})
+}
+
 func (srv *server) handleOverviewPage(w http.ResponseWriter, r *http.Request) {
 	ctx := srv.activeCtx(r)
 	state := srv.getState(ctx)
@@ -120,7 +156,8 @@ func (srv *server) handleOverviewPage(w http.ResponseWriter, r *http.Request) {
 		state.mu.RUnlock()
 	}
 
-	data := buildOverviewData(scan, ctx, srv.clusterList, srv.db)
+	since := readLastViewedCursor(r)
+	data := buildOverviewData(scan, ctx, srv.clusterList, srv.db, since)
 
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-cache, no-store, must-revalidate")
@@ -131,6 +168,12 @@ func (srv *server) handleOverviewPage(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "template error", http.StatusInternalServerError)
 		return
 	}
+
+	// Set the cursor to now only after using the previous value to query
+	// changes above — otherwise this request's own changes would never be
+	// visible as "new".
+	setLastViewedCursor(w, time.Now())
+
 	w.Write([]byte(buf.String()))
 }
 
@@ -553,6 +596,10 @@ type overviewPageData struct {
 	Scoreboard   *store.MemoryScoreboard
 	RecentEvents []store.RecentEvent
 
+	// What's changed since this browser last loaded the Overview page
+	ChangesSinceLastView []store.RecentEvent
+	LastViewedLabel      string
+
 	// War Room featured issue
 	FeaturedIssues []warRoomIssue
 	HasFeatured    bool
@@ -598,7 +645,7 @@ func convertToSidebarClusters(clusterList []string, activeCtx, basePath string) 
 	return out
 }
 
-func buildOverviewData(scan *clusterScan, activeCtx string, clusterList []string, db store.Store) overviewPageData {
+func buildOverviewData(scan *clusterScan, activeCtx string, clusterList []string, db store.Store, since time.Time) overviewPageData {
 
 	clusterName := displayName(activeCtx)
 	var monthlyCost, savings float64
@@ -671,6 +718,7 @@ func buildOverviewData(scan *clusterScan, activeCtx string, clusterList []string
 	var trend *store.OverviewTrend
 	var scoreboard *store.MemoryScoreboard
 	var recentEvents []store.RecentEvent
+	var changesSinceLastView []store.RecentEvent
 	var verdictLine1, verdictLine2 string
 	if db != nil {
 		if t, err := db.GetOverviewTrend(activeCtx); err == nil {
@@ -682,8 +730,12 @@ func buildOverviewData(scan *clusterScan, activeCtx string, clusterList []string
 		if events, err := db.GetRecentEvents(activeCtx, overviewRecentEventsLimit); err == nil {
 			recentEvents = events
 		}
+		if changes, err := db.GetChangesSince(activeCtx, since, overviewRecentEventsLimit); err == nil {
+			changesSinceLastView = changes
+		}
 		verdictLine1, verdictLine2 = buildOverviewVerdict(db, activeCtx)
 	}
+	lastViewedLabel := humanAge(time.Since(since)) + " ago"
 
 	var costDeltaText, incidentScoreDeltaText, securityScoreDeltaText string
 	if trend != nil {
@@ -761,6 +813,9 @@ func buildOverviewData(scan *clusterScan, activeCtx string, clusterList []string
 		RecentEvents: recentEvents,
 		VerdictLine1: verdictLine1,
 		VerdictLine2: verdictLine2,
+
+		ChangesSinceLastView: changesSinceLastView,
+		LastViewedLabel:      lastViewedLabel,
 	}
 }
 

@@ -5,7 +5,9 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strconv"
 	"testing"
+	"time"
 
 	"github.com/opscart/opscart-k8s-watcher/pkg/store"
 )
@@ -83,6 +85,114 @@ func TestFormatIntDelta(t *testing.T) {
 				t.Errorf("formatIntDelta(%d, %d, %v) = %q, want %q", tt.current, tt.previous, tt.hasHistory, got, tt.want)
 			}
 		})
+	}
+}
+
+func TestReadLastViewedCursor(t *testing.T) {
+	t.Run("missing cookie defaults to 24h ago", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/", nil)
+		got := readLastViewedCursor(req)
+		want := time.Now().Add(-24 * time.Hour)
+		if diff := got.Sub(want); diff < -time.Minute || diff > time.Minute {
+			t.Fatalf("expected ~24h ago, got %v (want ~%v)", got, want)
+		}
+	})
+
+	t.Run("unparseable cookie defaults to 24h ago", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/", nil)
+		req.AddCookie(&http.Cookie{Name: lastViewedCookieName, Value: "not-a-timestamp"})
+		got := readLastViewedCursor(req)
+		want := time.Now().Add(-24 * time.Hour)
+		if diff := got.Sub(want); diff < -time.Minute || diff > time.Minute {
+			t.Fatalf("expected ~24h ago, got %v (want ~%v)", got, want)
+		}
+	})
+
+	t.Run("valid cookie is parsed exactly", func(t *testing.T) {
+		want := time.Now().Add(-3 * time.Hour).Truncate(time.Second)
+		req := httptest.NewRequest(http.MethodGet, "/", nil)
+		req.AddCookie(&http.Cookie{Name: lastViewedCookieName, Value: strconv.FormatInt(want.Unix(), 10)})
+		got := readLastViewedCursor(req)
+		if !got.Equal(want) {
+			t.Fatalf("readLastViewedCursor = %v, want %v", got, want)
+		}
+	})
+}
+
+// sinceCapturingStore wraps a real Store and records the `since` argument
+// passed to GetChangesSince, so tests can verify the query used the cursor
+// from the incoming request rather than one already advanced to "now".
+type sinceCapturingStore struct {
+	store.Store
+	capturedSince time.Time
+}
+
+func (s *sinceCapturingStore) GetChangesSince(cluster string, since time.Time, limit int) ([]store.RecentEvent, error) {
+	s.capturedSince = since
+	return s.Store.GetChangesSince(cluster, since, limit)
+}
+
+// TestHandleOverviewPage_CursorSetAfterQuery drives the real handler
+// end-to-end (not just the query function in isolation) to verify that the
+// cursor cookie is refreshed to "now" only after it has been used to query
+// GetChangesSince — otherwise this request's own changes would never be
+// visible as "new" on the very next page load.
+func TestHandleOverviewPage_CursorSetAfterQuery(t *testing.T) {
+	sqlDB, err := store.OpenSQLite(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatalf("OpenSQLite: %v", err)
+	}
+	defer sqlDB.Close()
+	wrapped := &sinceCapturingStore{Store: sqlDB}
+
+	srv := newServer([]string{"test-ctx"}, wrapped, 90, true)
+
+	// Seed a scan directly so the handler doesn't attempt a real cluster
+	// scan (unavailable in this test environment).
+	state := srv.getState("test-ctx")
+	state.mu.Lock()
+	state.scan = &clusterScan{}
+	state.mu.Unlock()
+
+	oldCursor := time.Now().Add(-2 * time.Hour).Truncate(time.Second)
+	req := httptest.NewRequest(http.MethodGet, "/?cluster=test-ctx", nil)
+	req.AddCookie(&http.Cookie{Name: lastViewedCookieName, Value: strconv.FormatInt(oldCursor.Unix(), 10)})
+	rec := httptest.NewRecorder()
+
+	srv.handleOverviewPage(rec, req)
+
+	resp := rec.Result()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body: %s", resp.StatusCode, rec.Body.String())
+	}
+
+	// The query must have used the cursor from the incoming cookie, proving
+	// it wasn't already overwritten before being read.
+	if !wrapped.capturedSince.Equal(oldCursor) {
+		t.Fatalf("GetChangesSince called with since=%v, want incoming cookie value %v", wrapped.capturedSince, oldCursor)
+	}
+
+	var newCookie *http.Cookie
+	for _, c := range resp.Cookies() {
+		if c.Name == lastViewedCookieName {
+			newCookie = c
+		}
+	}
+	if newCookie == nil {
+		t.Fatalf("expected Set-Cookie %s in response", lastViewedCookieName)
+	}
+	newSec, err := strconv.ParseInt(newCookie.Value, 10, 64)
+	if err != nil {
+		t.Fatalf("parse new cookie value %q: %v", newCookie.Value, err)
+	}
+	if newSec <= oldCursor.Unix() {
+		t.Fatalf("expected refreshed cookie newer than the cursor used for the query: new=%d old=%d", newSec, oldCursor.Unix())
+	}
+	if newCookie.Path != "/" {
+		t.Fatalf("expected cookie Path=/, got %q", newCookie.Path)
+	}
+	if newCookie.MaxAge != int(lastViewedMaxAge.Seconds()) {
+		t.Fatalf("expected MaxAge=%d, got %d", int(lastViewedMaxAge.Seconds()), newCookie.MaxAge)
 	}
 }
 
