@@ -1267,6 +1267,43 @@ var getOverviewTmpl = sync.OnceValue(func() *template.Template {
 					}
 					return 3 + (score * 28 / 100)
 				},
+				// eventAge renders a RecentEvent/ChangesSinceLastView
+				// timestamp the same way incidents.html's firstDetected/
+				// lastSeen render IncidentSummary timestamps.
+				"eventAge": func(t time.Time) string {
+					if t.IsZero() {
+						return "—"
+					}
+					d := time.Since(t)
+					switch {
+					case d < time.Minute:
+						return "just now"
+					case d < time.Hour:
+						return fmt.Sprintf("%dm ago", int(d.Minutes()))
+					case d < 24*time.Hour:
+						return fmt.Sprintf("%dh ago", int(d.Hours()))
+					case d < 48*time.Hour:
+						return "yesterday"
+					default:
+						return fmt.Sprintf("%d days ago", int(d.Hours()/24))
+					}
+				},
+				// healthColor classifies a namespaceHealth ready/total pair
+				// into "ok"/"warn"/"danger" for badge coloring.
+				"healthColor": func(ready, total int) string {
+					if total == 0 {
+						return "ok"
+					}
+					ratio := float64(ready) / float64(total)
+					switch {
+					case ratio >= 1:
+						return "ok"
+					case ratio >= 0.5:
+						return "warn"
+					default:
+						return "danger"
+					}
+				},
 			}).
 			ParseFS(templateFS, "templates/base.html", "templates/sidebar.html", "templates/overview.html"),
 	)
