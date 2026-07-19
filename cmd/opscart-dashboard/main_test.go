@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -363,12 +364,24 @@ func fullyPopulatedOverviewData() overviewPageData {
 				Rank: 1, Title: "3 pods crash-looping", Subtitle: "payments-api, payments-worker, checkout-api",
 				Action: "kubectl logs payments-api -n payments", Severity: "critical", SeverityLbl: "CRITICAL",
 				CountText: "3 pods", URL: "/warroom",
+				Namespace: "payments", Resource: "payments-api-7d8f9c6b5-abc12", IssueType: "crash_loop",
+				FirstDetectedLabel: "2d ago", ReopenCountVal: 1, TrendVal: "accelerating",
+				MemoryLine: "First detected 2d ago · reopened once · accelerating",
 			},
 			{
 				Rank: 2, Title: "2 namespaces missing NetworkPolicy", Subtitle: "Including checkout, payments",
 				Severity: "high", SeverityLbl: "HIGH", CountText: "2 ns", URL: "/warroom",
+				Namespace: "checkout", Resource: "namespace", IssueType: "unprotected_namespace",
+				FirstDetectedLabel: "5d ago",
+				MemoryLine:         "First detected 5d ago",
 			},
 		},
+
+		HasTopIssue:    true,
+		TopIssueName:   "payments-api-7d8f9c6b5-abc12",
+		TopIssueNS:     "payments",
+		TopIssueTrend:  "accelerating",
+		TopIssueReopen: 1,
 
 		CostDeltaText:          "+$45",
 		IncidentScoreDeltaText: "-10",
@@ -408,7 +421,7 @@ func fullyPopulatedOverviewData() overviewPageData {
 		IncidentScore: 62, IncidentScoreColor: "orange", IncidentScoreLabel: "Needs attention",
 		SecurityScore: 78, WasteCount: 6, MonthlyCost: 1234.56,
 
-		CostsHref: "/costs", WasteHref: "/waste", WrURL: "/warroom", IncidentsHref: "/incidents",
+		CostsHref: "/costs", WasteHref: "/waste", WrURL: "/warroom", IncidentsHref: "/incidents", NSsURL: "/namespaces",
 
 		ActivePage: "dashboard",
 		Version:    "test",
@@ -445,6 +458,8 @@ func TestOverviewTemplate_RendersFullyPopulatedData(t *testing.T) {
 		"&#43;$45 from last scan",
 		"-10 from last scan",
 		"&#43;5 from last scan",
+		"First detected 2d ago · reopened once · accelerating", // MemoryLine
+		"payments", // TopIssueNS in the "Highest Priority" bf-item
 	}
 	for _, want := range wantSubstrings {
 		if !strings.Contains(out, want) {
@@ -580,5 +595,273 @@ func TestBuildOverviewVerdict_IdleNamespaceUsesNamespaceNotLiteralResource(t *te
 	}
 	if !strings.Contains(line1, "batch-jobs reoccurred") {
 		t.Fatalf("expected verdict to mention namespace %q, got: %q", "batch-jobs", line1)
+	}
+}
+
+func TestBuildMemoryLine(t *testing.T) {
+	tests := []struct {
+		name               string
+		firstDetectedLabel string
+		reopenCount        int
+		trend              string
+		issueType          string
+		want               string
+	}{
+		{
+			name: "no reopens, no trend", firstDetectedLabel: "3d ago", reopenCount: 0, trend: "stable", issueType: "crash_loop",
+			want: "First detected 3d ago",
+		},
+		{
+			name: "one reopen", firstDetectedLabel: "3d ago", reopenCount: 1, trend: "stable", issueType: "crash_loop",
+			want: "First detected 3d ago · reopened once",
+		},
+		{
+			name: "multiple reopens use ×N", firstDetectedLabel: "3d ago", reopenCount: 4, trend: "stable", issueType: "crash_loop",
+			want: "First detected 3d ago · reopened ×4",
+		},
+		{
+			name: "accelerating trend included for restart-based issue type", firstDetectedLabel: "3d ago", reopenCount: 0, trend: "accelerating", issueType: "crash_loop",
+			want: "First detected 3d ago · accelerating",
+		},
+		{
+			name: "non-accelerating trend never shown", firstDetectedLabel: "3d ago", reopenCount: 0, trend: "stable", issueType: "crash_loop",
+			want: "First detected 3d ago",
+		},
+		{
+			name: "accelerating omitted for privileged_container (posture-only)", firstDetectedLabel: "3d ago", reopenCount: 0, trend: "accelerating", issueType: "privileged_container",
+			want: "First detected 3d ago",
+		},
+		{
+			name: "accelerating omitted for unprotected_namespace (posture-only)", firstDetectedLabel: "3d ago", reopenCount: 0, trend: "accelerating", issueType: "unprotected_namespace",
+			want: "First detected 3d ago",
+		},
+		{
+			name: "accelerating omitted for idle_namespace (posture-only)", firstDetectedLabel: "3d ago", reopenCount: 0, trend: "accelerating", issueType: "idle_namespace",
+			want: "First detected 3d ago",
+		},
+		{
+			name: "reopen and trend both present, joined with middle dot", firstDetectedLabel: "7d ago", reopenCount: 1, trend: "accelerating", issueType: "crash_loop",
+			want: "First detected 7d ago · reopened once · accelerating",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := buildMemoryLine(tt.firstDetectedLabel, tt.reopenCount, tt.trend, tt.issueType)
+			if got != tt.want {
+				t.Errorf("buildMemoryLine(%q, %d, %q, %q) = %q, want %q", tt.firstDetectedLabel, tt.reopenCount, tt.trend, tt.issueType, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestTopIssueResourceLabel(t *testing.T) {
+	tests := []struct {
+		name, resource, namespace, issueType, want string
+	}{
+		{"crash_loop uses resource", "payments-api-abc123", "payments", "crash_loop", "payments-api-abc123"},
+		{"unprotected_namespace uses namespace", "namespace", "payments", "unprotected_namespace", "payments"},
+		{"idle_namespace uses namespace", "namespace", "batch-jobs", "idle_namespace", "batch-jobs"},
+		{"privileged_container uses resource", "web-abc123", "default", "privileged_container", "web-abc123"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := topIssueResourceLabel(tt.resource, tt.namespace, tt.issueType); got != tt.want {
+				t.Errorf("topIssueResourceLabel(%q, %q, %q) = %q, want %q", tt.resource, tt.namespace, tt.issueType, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestDeriveTopIssueSummary(t *testing.T) {
+	t.Run("empty issues yields all zero values", func(t *testing.T) {
+		has, name, ns, trend, reopen := deriveTopIssueSummary(nil)
+		if has || name != "" || ns != "" || trend != "" || reopen != 0 {
+			t.Fatalf("expected all zero values for empty issues, got has=%v name=%q ns=%q trend=%q reopen=%d", has, name, ns, trend, reopen)
+		}
+	})
+
+	t.Run("mirrors TopIssues[0]", func(t *testing.T) {
+		issues := []topIssue{
+			{
+				Namespace: "payments", Resource: "payments-api-abc123", IssueType: "crash_loop",
+				TrendVal: "accelerating", ReopenCountVal: 2,
+			},
+			{Namespace: "checkout", Resource: "checkout-api-xyz789", IssueType: "oom_killed"},
+		}
+		has, name, ns, trend, reopen := deriveTopIssueSummary(issues)
+		if !has {
+			t.Fatalf("expected has=true")
+		}
+		if name != "payments-api-abc123" {
+			t.Errorf("name = %q, want %q", name, "payments-api-abc123")
+		}
+		if ns != "payments" {
+			t.Errorf("ns = %q, want %q", ns, "payments")
+		}
+		if trend != "accelerating" {
+			t.Errorf("trend = %q, want %q", trend, "accelerating")
+		}
+		if reopen != 2 {
+			t.Errorf("reopen = %d, want %d", reopen, 2)
+		}
+	})
+
+	t.Run("unprotected_namespace/idle_namespace use Namespace for name too", func(t *testing.T) {
+		issues := []topIssue{
+			{Namespace: "checkout", Resource: "namespace", IssueType: "unprotected_namespace"},
+		}
+		_, name, ns, _, _ := deriveTopIssueSummary(issues)
+		if name != "checkout" {
+			t.Errorf("name = %q, want %q (should use Namespace, not the literal placeholder %q)", name, "checkout", "namespace")
+		}
+		if ns != "checkout" {
+			t.Errorf("ns = %q, want %q", ns, "checkout")
+		}
+	})
+}
+
+func TestEnrichTopIssues(t *testing.T) {
+	stub := &queryIncidentsStubStore{
+		items: []store.IncidentSummary{
+			{
+				Namespace: "payments", Resource: "payments-api-abc123", IssueType: "crash_loop",
+				FirstSeen: time.Now().Add(-2 * 24 * time.Hour), ReopenCount: 1, Trend: "accelerating",
+			},
+		},
+		total: 1,
+	}
+
+	issues := []topIssue{
+		{Namespace: "payments", Resource: "payments-api-abc123", IssueType: "crash_loop"}, // matches
+		{Namespace: "", Resource: "", IssueType: ""},                                      // aggregate row, no matching key
+		{Namespace: "checkout", Resource: "checkout-api-xyz", IssueType: "oom_killed"},    // matching key, but no incident
+	}
+
+	got := enrichTopIssues(issues, stub, "test-cluster")
+
+	if got[0].MemoryLine == "" {
+		t.Fatalf("expected matched row to be enriched, got %+v", got[0])
+	}
+	if !strings.Contains(got[0].MemoryLine, "reopened once") || !strings.Contains(got[0].MemoryLine, "accelerating") {
+		t.Errorf("unexpected MemoryLine: %q", got[0].MemoryLine)
+	}
+	if got[0].ReopenCountVal != 1 || got[0].TrendVal != "accelerating" {
+		t.Errorf("unexpected enrichment fields: %+v", got[0])
+	}
+
+	if got[1].MemoryLine != "" {
+		t.Errorf("expected row with no matching key to stay unenriched, got %+v", got[1])
+	}
+	if got[2].MemoryLine != "" {
+		t.Errorf("expected row with a matching key but no incident to stay unenriched, got %+v", got[2])
+	}
+}
+
+func TestEnrichTopIssues_NilDBOrEmptyIssues(t *testing.T) {
+	issues := []topIssue{{Namespace: "payments", Resource: "payments-api", IssueType: "crash_loop"}}
+	if got := enrichTopIssues(issues, nil, "test-cluster"); len(got) != 1 || got[0].MemoryLine != "" {
+		t.Fatalf("expected passthrough with nil db, got %+v", got)
+	}
+	stub := &queryIncidentsStubStore{}
+	if got := enrichTopIssues(nil, stub, "test-cluster"); len(got) != 0 {
+		t.Fatalf("expected empty passthrough, got %+v", got)
+	}
+}
+
+// TestOverviewTemplate_BriefingClassByCriticalCount covers Fix 3: the
+// Situation Briefing card is danger-tinted ("briefing") when there's an
+// active critical issue, success-tinted ("briefing-ok") otherwise.
+func TestOverviewTemplate_BriefingClassByCriticalCount(t *testing.T) {
+	t.Run("critical issues present uses briefing (danger tint)", func(t *testing.T) {
+		data := fullyPopulatedOverviewData()
+		data.CriticalCount = 2
+
+		var buf strings.Builder
+		if err := getOverviewTmpl().Execute(&buf, data); err != nil {
+			t.Fatalf("template execution failed: %v", err)
+		}
+		out := buf.String()
+		if !strings.Contains(out, `class="section-card briefing"`) {
+			t.Errorf("expected briefing class when CriticalCount>0")
+		}
+		if strings.Contains(out, `class="section-card briefing-ok"`) {
+			t.Errorf("did not expect briefing-ok class when CriticalCount>0")
+		}
+	})
+
+	t.Run("no critical issues uses briefing-ok (success tint)", func(t *testing.T) {
+		data := fullyPopulatedOverviewData()
+		data.CriticalCount = 0
+
+		var buf strings.Builder
+		if err := getOverviewTmpl().Execute(&buf, data); err != nil {
+			t.Fatalf("template execution failed: %v", err)
+		}
+		out := buf.String()
+		if !strings.Contains(out, `class="section-card briefing-ok"`) {
+			t.Errorf("expected briefing-ok class when CriticalCount==0")
+		}
+		if strings.Contains(out, `class="section-card briefing"`) {
+			t.Errorf("did not expect plain briefing class when CriticalCount==0")
+		}
+	})
+}
+
+// TestOverviewTemplate_HealthCardsCapAndShowViewAll covers Fix 5: the
+// Namespace Health list and Cluster Health's Workload Health dot strip are
+// capped, with a "View all" link appearing once content exceeds the cap.
+func TestOverviewTemplate_HealthCardsCapAndShowViewAll(t *testing.T) {
+	data := fullyPopulatedOverviewData()
+
+	nsList := make([]namespaceHealth, 9)
+	for i := range nsList {
+		nsList[i] = namespaceHealth{Name: fmt.Sprintf("ns-%d", i), Ready: i, Total: i + 1}
+	}
+	data.NamespaceHealthList = nsList
+
+	whList := make([]workloadHealthCell, 45)
+	for i := range whList {
+		whList[i] = workloadHealthCell{Name: fmt.Sprintf("wl-%d", i)}
+	}
+	data.WorkloadHealthGrid = whList
+
+	var buf strings.Builder
+	if err := getOverviewTmpl().Execute(&buf, data); err != nil {
+		t.Fatalf("template execution failed: %v", err)
+	}
+	out := buf.String()
+
+	if got := strings.Count(out, `class="ns-health-row"`); got != 6 {
+		t.Errorf("expected 6 namespace health rows (capped from 9), got %d", got)
+	}
+	if !strings.Contains(out, "View all 9 namespaces") {
+		t.Errorf("expected a 'View all 9 namespaces' link")
+	}
+
+	if got := strings.Count(out, `class="wh-dot`); got != 40 {
+		t.Errorf("expected 40 workload health dots (capped from 45), got %d", got)
+	}
+	if !strings.Contains(out, "View all 45 workloads") {
+		t.Errorf("expected a 'View all 45 workloads' link")
+	}
+}
+
+// TestOverviewTemplate_HealthCardsNoViewAllUnderCap proves the "View all"
+// links only appear once content actually exceeds the cap — fullyPopulated
+// OverviewData's fixture has 3 namespaces and 4 workloads, both under it.
+func TestOverviewTemplate_HealthCardsNoViewAllUnderCap(t *testing.T) {
+	data := fullyPopulatedOverviewData()
+
+	var buf strings.Builder
+	if err := getOverviewTmpl().Execute(&buf, data); err != nil {
+		t.Fatalf("template execution failed: %v", err)
+	}
+	out := buf.String()
+
+	if strings.Contains(out, "View all 3 namespaces") {
+		t.Errorf("did not expect a namespaces View all link under the cap")
+	}
+	if strings.Contains(out, "View all 4 workloads") {
+		t.Errorf("did not expect a workloads View all link under the cap")
 	}
 }

@@ -46,6 +46,8 @@
 @media(max-width:1100px){.ov-row-briefing{grid-template-columns:1fr}}
 .briefing-text{font-size:0.92rem;line-height:1.6;color:var(--text-secondary);margin-bottom:0.75rem}
 .briefing-text:last-child{margin-bottom:0}
+.briefing{border-color:rgba(239,68,68,.35);background:rgba(239,68,68,.03)}
+.briefing-ok{border-color:rgba(74,222,128,.3)}
 .briefing-facts{display:flex;gap:1.5rem;flex-wrap:wrap;margin-top:1rem;padding-top:1rem;border-top:1px solid var(--border)}
 .bf-label{font-size:0.66rem;text-transform:uppercase;letter-spacing:0.5px;color:var(--text-muted);margin-bottom:0.25rem}
 .bf-val{font-size:1.05rem;font-weight:700;color:var(--text);max-width:320px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
@@ -69,6 +71,7 @@
 .top-issue-title{font-weight:600;font-size:0.92rem;margin-bottom:0.2rem}
 .top-issue-sub{font-size:0.75rem;color:var(--text-muted);line-height:1.4}
 .top-issue-action{font-size:0.72rem;color:var(--primary-light);margin-top:0.3rem;font-family:'Consolas','Monaco',monospace}
+.top-issue-memory{font-size:0.7rem;color:var(--text-muted);margin-top:0.2rem}
 .top-issue-btn{background:transparent;border:1px solid var(--border);color:var(--text-secondary);font-size:0.78rem;padding:0.4rem 0.9rem;border-radius:6px;cursor:pointer;text-decoration:none;display:inline-flex;align-items:center;gap:0.3rem;transition:all 0.15s;white-space:nowrap}
 .top-issue-btn:hover{background:var(--surface-hover);border-color:var(--primary);color:var(--text)}
 
@@ -122,6 +125,12 @@
 .bottom-actions{margin-left:auto;display:flex;gap:0.75rem;flex-wrap:wrap}
 .bottom-btn{border:1px solid var(--border);color:var(--text-secondary);font-size:0.8rem;font-weight:600;padding:0.5rem 1.1rem;border-radius:var(--radius-sm);text-decoration:none;transition:all 0.15s;white-space:nowrap}
 .bottom-btn:hover{background:var(--surface-hover);border-color:var(--primary);color:var(--text)}
+.bs-item{display:flex;flex-direction:column;gap:2px;padding-right:1.5rem;border-right:1px solid var(--border)}
+.bs-item:last-of-type{border-right:none}
+.bs-item .n{font-size:1.1rem;font-weight:700}
+.bs-item .l{font-size:.68rem;text-transform:uppercase;letter-spacing:.5px;color:var(--text-muted)}
+.bs-btn{margin-left:auto;font-size:.8rem;color:var(--primary-light);font-weight:600;text-decoration:none;border:1px solid rgba(129,140,248,.4);border-radius:8px;padding:.5rem 1rem;white-space:nowrap}
+.bs-btn:hover{background:rgba(129,140,248,.1)}
 </style>
 </head>
 <body>
@@ -146,14 +155,14 @@
 </div>
 
 <!-- 2. If you only fix one thing today -->
-{{if .TopIssues}}
+{{if .HasTopIssue}}
 {{with index .TopIssues 0}}
 <div class="fix-one-banner">
   <div class="fix-one-icon"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg></div>
   <div class="fix-one-body">
     <div class="fix-one-lbl">If you only fix one thing today</div>
     <div class="fix-one-title">{{.Title}}</div>
-    <div class="fix-one-sub">{{.Subtitle}}</div>
+    <div class="fix-one-sub">{{.Subtitle}}{{if $.TopIssueNS}} · {{$.TopIssueNS}}{{end}}</div>
   </div>
   <span class="sev-badge {{.Severity}}">{{.SeverityLbl}}</span>
   <a class="fix-one-btn" href="{{.URL}}">Fix now →</a>
@@ -163,14 +172,14 @@
 
 <!-- 3. Situation Briefing + Operational Memory -->
 <div class="ov-row-briefing">
-  <div class="section-card">
+  <div class="section-card{{if gt .CriticalCount 0}} briefing{{else}} briefing-ok{{end}}">
     <div class="section-title">Situation Briefing</div>
     <p class="briefing-text">{{.VerdictLine1}}</p>
     {{if .VerdictLine2}}<p class="briefing-text">{{.VerdictLine2}}</p>{{end}}
     <div class="briefing-facts">
       <div class="bf-item"><div class="bf-label">Active Critical</div><div class="bf-val">{{.CriticalCount}}</div></div>
-      {{if .TopIssues}}
-      <div class="bf-item"><div class="bf-label">Highest Priority</div><div class="bf-val">{{with index .TopIssues 0}}{{.Title}}{{end}}</div></div>
+      {{if .HasTopIssue}}
+      <div class="bf-item"><div class="bf-label">Highest Priority</div><div class="bf-val">{{.TopIssueNS}}</div></div>
       {{end}}
     </div>
     <div class="briefing-cta"><a href="{{.WrURL}}" class="btn-primary">Open War Room →</a></div>
@@ -231,6 +240,7 @@
       <div>
         <div class="top-issue-title">{{.Title}}</div>
         <div class="top-issue-sub">{{.Subtitle}}</div>
+        {{if .MemoryLine}}<div class="top-issue-memory">{{.MemoryLine}}</div>{{end}}
         {{if .Action}}<div class="top-issue-action">▸ {{.Action}}</div>{{end}}
       </div>
       <span class="sev-badge {{.Severity}}">{{.SeverityLbl}}</span>
@@ -315,8 +325,11 @@
     {{if .WorkloadHealthGrid}}
     <div class="wh-strip">
       <div class="wh-strip-lbl">Workload Health ({{len .WorkloadHealthGrid}})</div>
-      {{range .WorkloadHealthGrid}}
+      {{range limitWorkloadHealth .WorkloadHealthGrid 40}}
       <span class="wh-dot {{if .Severity}}{{.Severity}}{{else}}ok{{end}}" title="{{.Name}}{{if .Severity}} — {{.Severity}}{{end}}"></span>
+      {{end}}
+      {{if gt (len .WorkloadHealthGrid) 40}}
+      <a class="view-all-link" href="{{$.WrURL}}">View all {{len .WorkloadHealthGrid}} workloads →</a>
       {{end}}
     </div>
     {{end}}
@@ -331,11 +344,14 @@
       <div>No namespace data available</div>
     </div>
     {{else}}
-    {{range .NamespaceHealthList}}
+    {{range limitNamespaceHealth .NamespaceHealthList 6}}
     <div class="ns-health-row">
       <span class="ns-health-name">{{.Name}}</span>
       <span class="badge badge-{{healthColor .Ready .Total}} ns-health-ratio">{{.Ready}}/{{.Total}}</span>
     </div>
+    {{end}}
+    {{if gt (len .NamespaceHealthList) 6}}
+    <a class="view-all-link" href="{{.NSsURL}}">View all {{len .NamespaceHealthList}} namespaces →</a>
     {{end}}
     {{end}}
   </div>
@@ -356,28 +372,28 @@
 
 <!-- 6. Bottom strip (demoted) -->
 <div class="bottom-strip">
-  <div class="bottom-metric">
-    <div class="bottom-lbl">Incident Score</div>
-    <div class="bottom-val">{{.IncidentScore}}/100</div>
+  <div class="bottom-metric bs-item">
+    <div class="bottom-lbl l">Incident Score</div>
+    <div class="bottom-val n">{{.IncidentScore}}/100</div>
     {{if .IncidentScoreDeltaText}}<div class="bottom-delta">{{.IncidentScoreDeltaText}} from last scan</div>{{end}}
   </div>
-  <div class="bottom-metric">
-    <div class="bottom-lbl">Security Score</div>
-    <div class="bottom-val">{{.SecurityScore}}/100</div>
+  <div class="bottom-metric bs-item">
+    <div class="bottom-lbl l">Security Score</div>
+    <div class="bottom-val n">{{.SecurityScore}}/100</div>
     {{if .SecurityScoreDeltaText}}<div class="bottom-delta">{{.SecurityScoreDeltaText}} from last scan</div>{{end}}
   </div>
-  <div class="bottom-metric">
-    <div class="bottom-lbl">Monthly Cost</div>
-    <div class="bottom-val">${{money .MonthlyCost}}</div>
+  <div class="bottom-metric bs-item">
+    <div class="bottom-lbl l">Monthly Cost</div>
+    <div class="bottom-val n">${{money .MonthlyCost}}</div>
     {{if .CostDeltaText}}<div class="bottom-delta">{{.CostDeltaText}} from last scan</div>{{end}}
   </div>
-  <div class="bottom-metric">
-    <div class="bottom-lbl">Reclaimable Waste</div>
-    <div class="bottom-val">{{.WasteCount}}</div>
+  <div class="bottom-metric bs-item">
+    <div class="bottom-lbl l">Reclaimable Waste</div>
+    <div class="bottom-val n">{{.WasteCount}}</div>
   </div>
   <div class="bottom-actions">
-    <a class="bottom-btn" href="{{.CostsHref}}">Cost Intelligence →</a>
-    <a class="bottom-btn" href="{{.WasteHref}}">Waste &amp; Drift →</a>
+    <a class="bottom-btn bs-btn" href="{{.CostsHref}}">Cost Intelligence →</a>
+    <a class="bottom-btn bs-btn" href="{{.WasteHref}}">Waste &amp; Drift →</a>
   </div>
 </div>
 
