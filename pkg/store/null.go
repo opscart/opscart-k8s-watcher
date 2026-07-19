@@ -44,6 +44,14 @@ func (NullStore) QueryIncidents(f IncidentFilter) ([]IncidentSummary, int, error
 	return nil, 0, nil
 }
 
+func (NullStore) GetMemoryScoreboard(cluster string) (*MemoryScoreboard, error) {
+	return &MemoryScoreboard{}, nil
+}
+
+func (NullStore) GetRecentEvents(cluster string, limit int) ([]RecentEvent, error) {
+	return nil, nil
+}
+
 func (NullStore) PruneOlderThan(cluster string, cutoff time.Time) (int, error) {
 	return 0, nil
 }
