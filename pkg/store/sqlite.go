@@ -1054,6 +1054,155 @@ func (s *SQLiteStore) QueryIncidents(f IncidentFilter) ([]IncidentSummary, int, 
 	return items, total, nil
 }
 
+// countAccelerating counts active incidents whose Trend (computed the same
+// way QueryIncidents derives it) is "accelerating".
+func (s *SQLiteStore) countAccelerating(cluster string) (int, error) {
+	rows, err := s.db.Query(
+		`SELECT id, current_restart_count, first_seen FROM incidents
+		 WHERE cluster = ? AND status = 'active'`,
+		cluster,
+	)
+	if err != nil {
+		return 0, err
+	}
+	type activeRow struct {
+		id           int64
+		restartCount int
+		firstSeen    int64
+	}
+	var actives []activeRow
+	for rows.Next() {
+		var r activeRow
+		if err := rows.Scan(&r.id, &r.restartCount, &r.firstSeen); err != nil {
+			rows.Close()
+			return 0, err
+		}
+		actives = append(actives, r)
+	}
+	if err := rows.Err(); err != nil {
+		return 0, err
+	}
+	rows.Close()
+
+	if len(actives) == 0 {
+		return 0, nil
+	}
+
+	ids := make([]int64, len(actives))
+	for i, r := range actives {
+		ids[i] = r.id
+	}
+	trendInputs, err := s.batchTrendEvents(ids)
+	if err != nil {
+		return 0, err
+	}
+
+	count := 0
+	for _, r := range actives {
+		if deriveTrend(trendInputs[r.id], r.restartCount, r.firstSeen) == "accelerating" {
+			count++
+		}
+	}
+	return count, nil
+}
+
+// GetMemoryScoreboard summarizes a cluster's accrued incident history:
+// totals, reopen/acceleration counts, the longest-running active incident,
+// and the namespace with the most incident history.
+func (s *SQLiteStore) GetMemoryScoreboard(cluster string) (*MemoryScoreboard, error) {
+	sb := &MemoryScoreboard{}
+
+	if err := s.db.QueryRow(
+		`SELECT COUNT(*) FROM incidents WHERE cluster = ?`, cluster,
+	).Scan(&sb.TotalSeen); err != nil {
+		return nil, err
+	}
+
+	if err := s.db.QueryRow(
+		`SELECT COUNT(*) FROM incidents WHERE cluster = ? AND status = 'resolved'`, cluster,
+	).Scan(&sb.Resolved); err != nil {
+		return nil, err
+	}
+
+	if err := s.db.QueryRow(
+		`SELECT COUNT(DISTINCT e.incident_id) FROM incident_events e
+		 JOIN incidents i ON i.id = e.incident_id
+		 WHERE i.cluster = ? AND e.event_type = 'REOPENED'`, cluster,
+	).Scan(&sb.Reopened); err != nil {
+		return nil, err
+	}
+
+	accelerating, err := s.countAccelerating(cluster)
+	if err != nil {
+		return nil, err
+	}
+	sb.Accelerating = accelerating
+
+	var longestName sql.NullString
+	var longestFirstSeen sql.NullInt64
+	err = s.db.QueryRow(
+		`SELECT resource, first_seen FROM incidents
+		 WHERE cluster = ? AND status = 'active'
+		 ORDER BY first_seen ASC LIMIT 1`, cluster,
+	).Scan(&longestName, &longestFirstSeen)
+	if err != nil && err != sql.ErrNoRows {
+		return nil, err
+	}
+	if longestFirstSeen.Valid {
+		sb.LongestActiveName = longestName.String
+		sb.LongestActiveDays = int(time.Since(time.Unix(longestFirstSeen.Int64, 0)).Hours() / 24)
+	}
+
+	var unstableNS sql.NullString
+	var unstableCount sql.NullInt64
+	err = s.db.QueryRow(
+		`SELECT namespace, COUNT(*) AS c FROM incidents WHERE cluster = ?
+		 GROUP BY namespace ORDER BY c DESC LIMIT 1`, cluster,
+	).Scan(&unstableNS, &unstableCount)
+	if err != nil && err != sql.ErrNoRows {
+		return nil, err
+	}
+	if unstableNS.Valid {
+		sb.MostUnstableNamespace = unstableNS.String
+		sb.MostUnstableCount = int(unstableCount.Int64)
+	}
+
+	return sb, nil
+}
+
+// GetRecentEvents returns the most recent incident_events for cluster,
+// newest first, joined against their parent incident's resource name.
+func (s *SQLiteStore) GetRecentEvents(cluster string, limit int) ([]RecentEvent, error) {
+	rows, err := s.db.Query(
+		`SELECT incidents.resource, incident_events.event_reason, incident_events.occurred_at
+		 FROM incident_events
+		 JOIN incidents ON incident_events.incident_id = incidents.id
+		 WHERE incidents.cluster = ?
+		 ORDER BY incident_events.occurred_at DESC LIMIT ?`,
+		cluster, limit,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var out []RecentEvent
+	for rows.Next() {
+		var resource string
+		var eventReason sql.NullString
+		var occurredAt int64
+		if err := rows.Scan(&resource, &eventReason, &occurredAt); err != nil {
+			return nil, err
+		}
+		out = append(out, RecentEvent{
+			Resource:    resource,
+			EventReason: eventReason.String,
+			OccurredAt:  time.Unix(occurredAt, 0),
+		})
+	}
+	return out, rows.Err()
+}
+
 // PruneOlderThan removes data older than cutoff for cluster, in one
 // transaction:
 //   - Resolved incidents (and their full event history) are deleted once

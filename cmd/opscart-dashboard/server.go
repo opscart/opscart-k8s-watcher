@@ -500,17 +500,19 @@ var getSidebarTmpl = sync.OnceValue(func() *template.Template {
 // ── Overview page (executive summary) ─────────────────────────────────────────
 
 type overviewPageData struct {
-	ClusterName string
-	ActiveCtx   string
-	ClusterList []costClusterLink
-	DashURL     string
-	InfraURL    string
-	NSsURL      string
-	OptURL      string
-	WrURL       string
-	CostsURL    string
-	ScannedAtMS int64
-	CostsHref   string
+	ClusterName  string
+	ActiveCtx    string
+	ClusterList  []costClusterLink
+	DashURL      string
+	InfraURL     string
+	NSsURL       string
+	OptURL       string
+	WrURL        string
+	CostsURL     string
+	ScannedAtMS  int64
+	CostsHref    string
+	VerdictLine1 string
+	VerdictLine2 string
 
 	// Sidebar aliases (matches sidebar.html template)
 	DashHref      string
@@ -540,6 +542,16 @@ type overviewPageData struct {
 	// Top 5 Things to Fix
 	TopIssues []topIssue
 	Trend     *store.OverviewTrend
+
+	// Trend deltas formatted for template display: "+N"/"-N", or "" when
+	// there's no history or no change.
+	CostDeltaText          string
+	IncidentScoreDeltaText string
+	SecurityScoreDeltaText string
+
+	// Memory scoreboard + cluster-wide recent activity
+	Scoreboard   *store.MemoryScoreboard
+	RecentEvents []store.RecentEvent
 
 	// War Room featured issue
 	FeaturedIssues []warRoomIssue
@@ -657,10 +669,27 @@ func buildOverviewData(scan *clusterScan, activeCtx string, clusterList []string
 	_ = secFailed // reserved for future use
 
 	var trend *store.OverviewTrend
+	var scoreboard *store.MemoryScoreboard
+	var recentEvents []store.RecentEvent
+	var verdictLine1, verdictLine2 string
 	if db != nil {
 		if t, err := db.GetOverviewTrend(activeCtx); err == nil {
 			trend = t
 		}
+		if sb, err := db.GetMemoryScoreboard(activeCtx); err == nil {
+			scoreboard = sb
+		}
+		if events, err := db.GetRecentEvents(activeCtx, overviewRecentEventsLimit); err == nil {
+			recentEvents = events
+		}
+		verdictLine1, verdictLine2 = buildOverviewVerdict(db, activeCtx)
+	}
+
+	var costDeltaText, incidentScoreDeltaText, securityScoreDeltaText string
+	if trend != nil {
+		costDeltaText = formatCostDelta(trend.CostDelta, trend.HasHistory)
+		incidentScoreDeltaText = formatIntDelta(trend.IncidentScore.Current, trend.IncidentScore.Previous, trend.HasHistory)
+		securityScoreDeltaText = formatIntDelta(trend.SecurityScore.Current, trend.SecurityScore.Previous, trend.HasHistory)
 	}
 
 	q := ""
@@ -723,6 +752,114 @@ func buildOverviewData(scan *clusterScan, activeCtx string, clusterList []string
 		IncidentScoreColor: incidentScoreColor,
 		IncidentScoreLabel: incidentScoreLabel,
 		Trend:              trend,
+
+		CostDeltaText:          costDeltaText,
+		IncidentScoreDeltaText: incidentScoreDeltaText,
+		SecurityScoreDeltaText: securityScoreDeltaText,
+
+		Scoreboard:   scoreboard,
+		RecentEvents: recentEvents,
+		VerdictLine1: verdictLine1,
+		VerdictLine2: verdictLine2,
+	}
+}
+
+// overviewRecentEventsLimit caps the cluster-wide recent-activity feed shown
+// on the overview page.
+const overviewRecentEventsLimit = 15
+
+// formatIntDelta renders the change between two integer metric readings as
+// "+N"/"-N" for template display. Returns "" when there's no history to
+// compare against or the value hasn't changed, so the template never claims
+// a change that didn't happen.
+func formatIntDelta(current, previous int, hasHistory bool) string {
+	if !hasHistory || current == previous {
+		return ""
+	}
+	if current > previous {
+		return fmt.Sprintf("+%d", current-previous)
+	}
+	return fmt.Sprintf("-%d", previous-current)
+}
+
+// formatCostDelta renders a monthly-cost delta as "+$45"/"-$12" for template
+// display. Returns "" when there's no history to compare against or the
+// cost hasn't changed.
+func formatCostDelta(delta float64, hasHistory bool) string {
+	if !hasHistory || delta == 0 {
+		return ""
+	}
+	if delta > 0 {
+		return fmt.Sprintf("+$%.0f", delta)
+	}
+	return fmt.Sprintf("-$%.0f", -delta)
+}
+
+// buildOverviewVerdict produces the two-sentence cluster assessment shown
+// at the top of the Overview page. Priority: accelerating > reopened >
+// stable-but-critical > all-clear. line2 (resolved-since-yesterday) is
+// filled in separately once the memory scoreboard data is available.
+func buildOverviewVerdict(db store.Store, cluster string) (line1, line2 string) {
+	items, total, err := db.QueryIncidents(store.IncidentFilter{
+		Cluster:  cluster,
+		Status:   "active",
+		SortBy:   "severity",
+		SortDesc: true,
+		PerPage:  20,
+	})
+	if err != nil || len(items) == 0 {
+		return "No active incidents detected.", ""
+	}
+
+	worst := &items[0]
+	for i := range items {
+		if items[i].Trend == "accelerating" {
+			worst = &items[i]
+			break
+		}
+	}
+
+	ageDays := int(time.Since(worst.FirstSeen).Hours() / 24)
+	issueLabel := humanizeIssueType(worst.IssueType)
+	workloadWord := "workload needs"
+	if total > 1 {
+		workloadWord = "workloads need"
+	}
+
+	switch {
+	case worst.Trend == "accelerating":
+		line1 = fmt.Sprintf(
+			"%d %s attention. %s has been %s for %d day(s) and its restart rate is accelerating.",
+			total, workloadWord, worst.Resource, issueLabel, ageDays)
+	case worst.ReopenCount > 0:
+		line1 = fmt.Sprintf(
+			"%d %s attention. %s reoccurred after a recovery — reopened %d time(s).",
+			total, workloadWord, worst.Resource, worst.ReopenCount)
+	default:
+		line1 = fmt.Sprintf(
+			"%d %s attention. %s has been %s for %d day(s).",
+			total, workloadWord, worst.Resource, issueLabel, ageDays)
+	}
+
+	return line1, line2
+}
+
+func humanizeIssueType(issueType string) string {
+	switch issueType {
+	case "crash_loop":
+		return "crash-looping"
+	case "probe_failure":
+		return "failing its startup/liveness probe"
+	case "image_pull_backoff":
+		return "unable to pull its image"
+	case "oomkilled":
+		return "being OOM-killed"
+	case "privileged_container":
+		return "running privileged"
+	case "unprotected_namespace", "idle_namespace":
+		return "flagged"
+	default:
+		return "failing"
 	}
 }
 

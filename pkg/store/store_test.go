@@ -336,6 +336,14 @@ func TestNullStore(t *testing.T) {
 	if err != nil || tl != nil {
 		t.Fatalf("GetIncidentTimeline: %+v, %v", tl, err)
 	}
+	sb, err := s.GetMemoryScoreboard("c")
+	if err != nil || sb == nil {
+		t.Fatalf("GetMemoryScoreboard: %+v, %v", sb, err)
+	}
+	events, err := s.GetRecentEvents("c", 10)
+	if err != nil || events != nil {
+		t.Fatalf("GetRecentEvents: %+v, %v", events, err)
+	}
 	if err := s.Close(); err != nil {
 		t.Fatalf("Close: %v", err)
 	}
@@ -1808,5 +1816,151 @@ func TestPruneOlderThan(t *testing.T) {
 	}
 	if count != 1 {
 		t.Fatalf("expected recent scan_history kept, got %d rows", count)
+	}
+}
+
+// ── Memory scoreboard / recent events ───────────────────────────────────────
+
+// setIncidentFirstSeen backdates an incident's first_seen column directly,
+// simulating a long-lived incident without sleeping in tests. UpsertIncidents
+// never overwrites first_seen on conflict, so this survives later upserts.
+func setIncidentFirstSeen(t *testing.T, s *SQLiteStore, cluster, fingerprint string, firstSeen time.Time) {
+	t.Helper()
+	if _, err := s.db.Exec(
+		`UPDATE incidents SET first_seen=? WHERE cluster=? AND fingerprint=?`,
+		firstSeen.Unix(), cluster, fingerprint,
+	); err != nil {
+		t.Fatalf("set first_seen: %v", err)
+	}
+}
+
+// insertTestEvent writes a synthetic incident_events row with an explicit
+// occurred_at, letting ordering tests control timestamps precisely instead
+// of relying on real wall-clock gaps between fast test operations.
+func insertTestEvent(t *testing.T, s *SQLiteStore, incidentID int64, occurredAt int64, eventReason string) {
+	t.Helper()
+	if _, err := s.db.Exec(
+		`INSERT INTO incident_events (
+			incident_id, scan_id, occurred_at, event_type, event_reason,
+			restart_count, severity, state, message
+		) VALUES (?, 'test-scan', ?, 'UPDATED', ?, 0, 'warning', 'active', 'test event')`,
+		incidentID, occurredAt, eventReason,
+	); err != nil {
+		t.Fatalf("insert test event: %v", err)
+	}
+}
+
+func TestGetMemoryScoreboard(t *testing.T) {
+	s := openTestStore(t)
+	cluster := "test-cluster"
+
+	// ns-a: a1 stays active and is driven "accelerating"; a2 resolves and
+	// stays resolved.
+	a1 := IncidentData{Fingerprint: "ns-a/Deployment/svc-a1/crash_loop", Namespace: "ns-a", Resource: "svc-a1", IssueType: "crash_loop", Severity: "critical", RestartCount: 5}
+	a2 := IncidentData{Fingerprint: "ns-a/Deployment/svc-a2/oom", Namespace: "ns-a", Resource: "svc-a2", IssueType: "oom", Severity: "warning"}
+
+	// ns-b: b1 resolves then genuinely reopens; b2 resolves and stays
+	// resolved; b3 stays active with no restart movement ("stable").
+	b1 := IncidentData{Fingerprint: "ns-b/Deployment/svc-b1/crash_loop", Namespace: "ns-b", Resource: "svc-b1", IssueType: "crash_loop", Severity: "critical"}
+	b2 := IncidentData{Fingerprint: "ns-b/Deployment/svc-b2/oom", Namespace: "ns-b", Resource: "svc-b2", IssueType: "oom", Severity: "warning"}
+	b3 := IncidentData{Fingerprint: "ns-b/Deployment/svc-b3/probe_failure", Namespace: "ns-b", Resource: "svc-b3", IssueType: "probe_failure", Severity: "warning"}
+
+	if err := s.UpsertIncidents(cluster, "scan-1", []IncidentData{a1, a2, b1, b2, b3}); err != nil {
+		t.Fatalf("UpsertIncidents(initial): %v", err)
+	}
+
+	// Cross a1's 10-restart milestone so it has two DETECTED/RestartMilestone
+	// events for deriveTrend to compare.
+	time.Sleep(1100 * time.Millisecond)
+	a1.RestartCount = 20
+	if err := s.UpsertIncidents(cluster, "scan-2", []IncidentData{a1, a2, b1, b2, b3}); err != nil {
+		t.Fatalf("UpsertIncidents(a1 restart bump): %v", err)
+	}
+	// Backdate a1's first_seen so its lifetime restart rate is low, making
+	// the recent restart burst read as "accelerating" rather than "stable".
+	setIncidentFirstSeen(t, s, cluster, a1.Fingerprint, time.Now().Add(-10*24*time.Hour-time.Hour))
+
+	// Resolve a2 and b2 — absent from every scan below, they stay resolved.
+	driveToResolved(t, s, cluster, []IncidentData{a1, b1, b3}, "scan-resolve-a2b2")
+
+	// Resolve b1, then reopen it past the flap-absorption window (a genuine
+	// recurrence, not a flap).
+	driveToResolved(t, s, cluster, []IncidentData{a1, b3}, "scan-resolve-b1")
+	backdateIncidentEvents(t, s, cluster, b1.Fingerprint, flapAbsorptionWindow+time.Minute)
+	if err := s.UpsertIncidents(cluster, "scan-reopen-b1", []IncidentData{a1, b1, b3}); err != nil {
+		t.Fatalf("UpsertIncidents(reopen b1): %v", err)
+	}
+
+	sb, err := s.GetMemoryScoreboard(cluster)
+	if err != nil {
+		t.Fatalf("GetMemoryScoreboard: %v", err)
+	}
+
+	if sb.TotalSeen != 5 {
+		t.Fatalf("expected TotalSeen=5, got %d", sb.TotalSeen)
+	}
+	if sb.Resolved != 2 {
+		t.Fatalf("expected Resolved=2 (a2, b2), got %d", sb.Resolved)
+	}
+	if sb.Reopened != 1 {
+		t.Fatalf("expected Reopened=1 (b1), got %d", sb.Reopened)
+	}
+	if sb.Accelerating != 1 {
+		t.Fatalf("expected Accelerating=1 (a1), got %d", sb.Accelerating)
+	}
+	if sb.LongestActiveName != "svc-a1" {
+		t.Fatalf("expected LongestActiveName=svc-a1, got %q", sb.LongestActiveName)
+	}
+	if sb.LongestActiveDays < 9 || sb.LongestActiveDays > 11 {
+		t.Fatalf("expected LongestActiveDays ~10, got %d", sb.LongestActiveDays)
+	}
+	if sb.MostUnstableNamespace != "ns-b" {
+		t.Fatalf("expected MostUnstableNamespace=ns-b, got %q", sb.MostUnstableNamespace)
+	}
+	if sb.MostUnstableCount != 3 {
+		t.Fatalf("expected MostUnstableCount=3, got %d", sb.MostUnstableCount)
+	}
+}
+
+func TestGetRecentEvents(t *testing.T) {
+	s := openTestStore(t)
+	cluster := "test-cluster"
+
+	incA := IncidentData{Fingerprint: "default/Deployment/svc-a/crash_loop", Namespace: "default", Resource: "svc-a", IssueType: "crash_loop", Severity: "critical"}
+	incB := IncidentData{Fingerprint: "default/Deployment/svc-b/oom", Namespace: "default", Resource: "svc-b", IssueType: "oom", Severity: "warning"}
+	if err := s.UpsertIncidents(cluster, "scan-1", []IncidentData{incA, incB}); err != nil {
+		t.Fatalf("UpsertIncidents: %v", err)
+	}
+
+	var idA, idB int64
+	if err := s.db.QueryRow("SELECT id FROM incidents WHERE cluster=? AND fingerprint=?", cluster, incA.Fingerprint).Scan(&idA); err != nil {
+		t.Fatalf("lookup idA: %v", err)
+	}
+	if err := s.db.QueryRow("SELECT id FROM incidents WHERE cluster=? AND fingerprint=?", cluster, incB.Fingerprint).Scan(&idB); err != nil {
+		t.Fatalf("lookup idB: %v", err)
+	}
+
+	// idA and idB each already have a DETECTED event from UpsertIncidents
+	// above; layer two more, newest last, with explicit timestamps so
+	// ordering doesn't depend on real wall-clock gaps.
+	base := time.Now().Unix()
+	insertTestEvent(t, s, idB, base+100, "RestartMilestone") // 2nd newest
+	insertTestEvent(t, s, idA, base+200, "SeverityChanged")  // newest
+
+	events, err := s.GetRecentEvents(cluster, 2)
+	if err != nil {
+		t.Fatalf("GetRecentEvents: %v", err)
+	}
+	if len(events) != 2 {
+		t.Fatalf("expected limit=2 to return 2 events, got %d: %+v", len(events), events)
+	}
+	if events[0].Resource != "svc-a" || events[0].EventReason != "SeverityChanged" {
+		t.Fatalf("expected newest event (svc-a/SeverityChanged) first, got %+v", events[0])
+	}
+	if events[1].Resource != "svc-b" || events[1].EventReason != "RestartMilestone" {
+		t.Fatalf("expected second-newest event (svc-b/RestartMilestone) second, got %+v", events[1])
+	}
+	if !events[0].OccurredAt.After(events[1].OccurredAt) {
+		t.Fatalf("expected descending order by OccurredAt: %+v vs %+v", events[0].OccurredAt, events[1].OccurredAt)
 	}
 }

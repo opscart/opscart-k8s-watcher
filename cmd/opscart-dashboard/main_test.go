@@ -64,3 +64,45 @@ func TestHandleHealth(t *testing.T) {
 		})
 	}
 }
+
+func TestFormatIntDelta(t *testing.T) {
+	tests := []struct {
+		name              string
+		current, previous int
+		hasHistory        bool
+		want              string
+	}{
+		{name: "no history", current: 50, previous: 40, hasHistory: false, want: ""},
+		{name: "increase", current: 55, previous: 40, hasHistory: true, want: "+15"},
+		{name: "decrease", current: 30, previous: 40, hasHistory: true, want: "-10"},
+		{name: "unchanged", current: 40, previous: 40, hasHistory: true, want: ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := formatIntDelta(tt.current, tt.previous, tt.hasHistory); got != tt.want {
+				t.Errorf("formatIntDelta(%d, %d, %v) = %q, want %q", tt.current, tt.previous, tt.hasHistory, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestFormatCostDelta(t *testing.T) {
+	tests := []struct {
+		name       string
+		delta      float64
+		hasHistory bool
+		want       string
+	}{
+		{name: "no history", delta: 45, hasHistory: false, want: ""},
+		{name: "increase", delta: 45, hasHistory: true, want: "+$45"},
+		{name: "decrease", delta: -12, hasHistory: true, want: "-$12"},
+		{name: "unchanged", delta: 0, hasHistory: true, want: ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := formatCostDelta(tt.delta, tt.hasHistory); got != tt.want {
+				t.Errorf("formatCostDelta(%v, %v) = %q, want %q", tt.delta, tt.hasHistory, got, tt.want)
+			}
+		})
+	}
+}
