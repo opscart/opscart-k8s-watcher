@@ -18,7 +18,7 @@
 
 /* ── Fix-one-thing banner ── */
 .fix-one-banner{display:flex;align-items:center;gap:1rem;background:linear-gradient(180deg,rgba(239,68,68,0.06) 0%,var(--surface) 100%);border:1px solid rgba(239,68,68,0.3);border-radius:var(--radius);padding:1.1rem 1.4rem;margin-bottom:1.5rem;animation:fadeIn 0.3s ease both}
-.fix-one-icon{font-size:1.5rem;flex-shrink:0}
+.fix-one-icon{flex-shrink:0;color:#f87171;display:flex}
 .fix-one-body{flex:1;min-width:0}
 .fix-one-lbl{font-size:0.68rem;text-transform:uppercase;letter-spacing:0.6px;color:#f87171;font-weight:700;margin-bottom:0.25rem}
 .fix-one-title{font-size:1.02rem;font-weight:700;margin-bottom:0.2rem}
@@ -31,7 +31,8 @@
 .section-title{font-size:1.05rem;font-weight:700;margin-bottom:0.25rem}
 .section-sub{font-size:0.78rem;color:var(--text-muted);margin-bottom:1rem}
 .empty-state-small{padding:2rem 1rem;text-align:center;color:var(--text-muted);font-size:0.85rem}
-.empty-state-small .icon{font-size:1.8rem;margin-bottom:0.5rem;display:block}
+.empty-state-small .icon{display:flex;justify-content:center;margin-bottom:0.5rem}
+.empty-state-small .icon svg{width:28px;height:28px}
 .view-all-link{display:inline-flex;align-items:center;gap:0.4rem;color:var(--primary-light);font-size:0.85rem;margin-top:0.5rem;text-decoration:none}
 .view-all-link:hover{text-decoration:underline}
 .sev-badge{padding:3px 9px;border-radius:12px;font-size:0.66rem;font-weight:700;letter-spacing:0.5px;white-space:nowrap}
@@ -45,6 +46,12 @@
 @media(max-width:1100px){.ov-row-briefing{grid-template-columns:1fr}}
 .briefing-text{font-size:0.92rem;line-height:1.6;color:var(--text-secondary);margin-bottom:0.75rem}
 .briefing-text:last-child{margin-bottom:0}
+.briefing-facts{display:flex;gap:1.5rem;flex-wrap:wrap;margin-top:1rem;padding-top:1rem;border-top:1px solid var(--border)}
+.bf-label{font-size:0.66rem;text-transform:uppercase;letter-spacing:0.5px;color:var(--text-muted);margin-bottom:0.25rem}
+.bf-val{font-size:1.05rem;font-weight:700;color:var(--text);max-width:320px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.briefing-cta{margin-top:1.1rem}
+.btn-primary{display:inline-block;background:var(--primary-light);border:none;border-radius:var(--radius-sm);color:#fff;font-size:0.82rem;font-weight:600;padding:0.55rem 1.1rem;text-decoration:none;white-space:nowrap;transition:opacity .15s}
+.btn-primary:hover{opacity:.85}
 .mem-grid{display:grid;grid-template-columns:1fr 1fr;gap:0.75rem;margin-bottom:1rem}
 .mem-cell{background:rgba(0,0,0,0.2);border:1px solid var(--border);border-radius:var(--radius-sm);padding:0.85rem;text-align:center}
 .mem-num{font-size:1.5rem;font-weight:800;line-height:1;margin-bottom:0.25rem;font-variant-numeric:tabular-nums}
@@ -66,7 +73,7 @@
 .top-issue-btn:hover{background:var(--surface-hover);border-color:var(--primary);color:var(--text)}
 
 .feed-card .section-card{margin-bottom:1.5rem}
-.feed-card:last-child .section-card{margin-bottom:0}
+.feed-card .section-card:last-child{margin-bottom:0}
 .change-row{display:flex;align-items:center;gap:0.6rem;padding:0.6rem 0;border-bottom:1px solid rgba(51,65,85,0.5);font-size:0.8rem}
 .change-row:last-child{border-bottom:none}
 .change-reason{font-size:0.64rem;font-weight:700;text-transform:uppercase;letter-spacing:0.4px;padding:2px 7px;border-radius:10px;white-space:nowrap;flex-shrink:0}
@@ -86,6 +93,7 @@
 .ch-num{font-size:1.3rem;font-weight:800;line-height:1;margin-bottom:0.2rem;font-variant-numeric:tabular-nums}
 .ch-lbl{font-size:0.64rem;text-transform:uppercase;letter-spacing:0.5px;color:var(--text-muted)}
 .ch-summary{font-size:0.78rem;padding:0.6rem 0.75rem;border-radius:var(--radius-sm);border:1px solid var(--border);display:flex;align-items:center;gap:0.5rem}
+.ch-summary svg{flex-shrink:0}
 .ch-summary.ok{color:#4ade80;border-color:rgba(16,185,129,0.25);background:rgba(16,185,129,0.06)}
 .ch-summary.warn{color:#fbbf24;border-color:rgba(245,158,11,0.25);background:rgba(245,158,11,0.06)}
 .wh-strip{display:flex;flex-wrap:wrap;gap:5px;margin-top:1rem;padding-top:1rem;border-top:1px solid var(--border)}
@@ -101,8 +109,9 @@
 .ns-health-name{color:var(--text-secondary);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .ns-health-ratio{font-variant-numeric:tabular-nums;font-weight:700}
 
-.sec-checklist{list-style:none;font-size:0.83rem;color:var(--text-secondary);line-height:2.1}
-.sec-checklist li::before{content:'✓';color:var(--success);font-weight:700;margin-right:0.6rem}
+.sec-checklist{list-style:none;font-size:0.83rem;color:var(--text-secondary)}
+.sec-checklist li{display:flex;align-items:center;gap:0.6rem;padding:0.35rem 0}
+.sec-checklist svg{color:var(--success);flex-shrink:0}
 
 /* ── Row 4: Bottom strip (demoted) ── */
 .bottom-strip{display:flex;align-items:center;gap:2rem;flex-wrap:wrap;background:rgba(0,0,0,0.15);border:1px solid var(--border);border-radius:var(--radius);padding:1.1rem 1.5rem;margin-top:0.5rem}
@@ -140,7 +149,7 @@
 {{if .TopIssues}}
 {{with index .TopIssues 0}}
 <div class="fix-one-banner">
-  <div class="fix-one-icon">⚡</div>
+  <div class="fix-one-icon"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg></div>
   <div class="fix-one-body">
     <div class="fix-one-lbl">If you only fix one thing today</div>
     <div class="fix-one-title">{{.Title}}</div>
@@ -158,6 +167,13 @@
     <div class="section-title">Situation Briefing</div>
     <p class="briefing-text">{{.VerdictLine1}}</p>
     {{if .VerdictLine2}}<p class="briefing-text">{{.VerdictLine2}}</p>{{end}}
+    <div class="briefing-facts">
+      <div class="bf-item"><div class="bf-label">Active Critical</div><div class="bf-val">{{.CriticalCount}}</div></div>
+      {{if .TopIssues}}
+      <div class="bf-item"><div class="bf-label">Highest Priority</div><div class="bf-val">{{with index .TopIssues 0}}{{.Title}}{{end}}</div></div>
+      {{end}}
+    </div>
+    <div class="briefing-cta"><a href="{{.WrURL}}" class="btn-primary">Open War Room →</a></div>
   </div>
 
   <div class="section-card">
@@ -190,7 +206,7 @@
     {{end}}
     {{else}}
     <div class="empty-state-small">
-      <span class="icon">🧠</span>
+      <span class="icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9.5 2A2.5 2.5 0 0 0 7 4.5v.5A2.5 2.5 0 0 0 4.5 7.5v1A2.5 2.5 0 0 0 2 11v1a2.5 2.5 0 0 0 2.5 2.5h1"/><path d="M14.5 2A2.5 2.5 0 0 1 17 4.5v.5a2.5 2.5 0 0 1 2.5 2.5v1A2.5 2.5 0 0 1 22 11v1a2.5 2.5 0 0 1-2.5 2.5h-1"/><path d="M6 18a4 4 0 0 0 4 4h4a4 4 0 0 0 4-4"/><path d="M12 2v20"/></svg></span>
       <div>No operational memory yet</div>
     </div>
     {{end}}
@@ -205,7 +221,7 @@
 
     {{if not .TopIssues}}
     <div class="empty-state-small">
-      <span class="icon">✅</span>
+      <span class="icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="m9 12 2 2 4-4"/></svg></span>
       <div>No issues detected. Cluster looks healthy.</div>
     </div>
     {{else}}
@@ -231,11 +247,11 @@
       <div class="section-sub">Since {{.LastViewedLabel}}</div>
       {{if not .ChangesSinceLastView}}
       <div class="empty-state-small">
-        <span class="icon">🕓</span>
+        <span class="icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg></span>
         <div>Nothing's changed since your last visit</div>
       </div>
       {{else}}
-      {{range .ChangesSinceLastView}}
+      {{range limitSlice .ChangesSinceLastView 5}}
       <div class="change-row">
         <span class="change-reason {{.EventReason}}">{{.EventReason}}</span>
         <span class="change-resource">{{.Resource}}</span>
@@ -251,11 +267,11 @@
       <div class="section-sub">Cluster-wide activity feed</div>
       {{if not .RecentEvents}}
       <div class="empty-state-small">
-        <span class="icon">🕓</span>
+        <span class="icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg></span>
         <div>No activity recorded yet</div>
       </div>
       {{else}}
-      {{range .RecentEvents}}
+      {{range limitSlice .RecentEvents 5}}
       <div class="change-row">
         <span class="change-reason {{.EventReason}}">{{.EventReason}}</span>
         <span class="change-resource">{{.Resource}}</span>
@@ -263,6 +279,7 @@
       </div>
       {{end}}
       {{end}}
+      <a class="view-all-link" href="{{.IncidentsHref}}">View all →</a>
     </div>
   </div>
 </div>
@@ -291,9 +308,9 @@
       </div>
     </div>
     {{if or (gt .CPUUtilization 85) (gt .MemUtilization 85)}}
-    <div class="ch-summary warn">⚠ Utilization running high</div>
+    <div class="ch-summary warn"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3"/><path d="M12 9v4"/><path d="M12 17h.01"/></svg> Utilization running high</div>
     {{else}}
-    <div class="ch-summary ok">✓ Utilization nominal</div>
+    <div class="ch-summary ok"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="m9 12 2 2 4-4"/></svg> Utilization nominal</div>
     {{end}}
     {{if .WorkloadHealthGrid}}
     <div class="wh-strip">
@@ -310,7 +327,7 @@
     <div class="section-sub">Ready pods per namespace</div>
     {{if not .NamespaceHealthList}}
     <div class="empty-state-small">
-      <span class="icon">📁</span>
+      <span class="icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z"/></svg></span>
       <div>No namespace data available</div>
     </div>
     {{else}}
@@ -327,11 +344,11 @@
     <div class="section-title">Security Status</div>
     <div class="section-sub">How OpsCart operates in this cluster</div>
     <ul class="sec-checklist">
-      <li>Read-only access</li>
-      <li>RBAC enforced</li>
-      <li>No agents installed</li>
-      <li>No outbound network calls</li>
-      <li>No secrets stored</li>
+      <li><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="m9 12 2 2 4-4"/></svg> Read-only access</li>
+      <li><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="m9 12 2 2 4-4"/></svg> RBAC enforced</li>
+      <li><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="m9 12 2 2 4-4"/></svg> No agents installed</li>
+      <li><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="m9 12 2 2 4-4"/></svg> No outbound network calls</li>
+      <li><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="m9 12 2 2 4-4"/></svg> No secrets stored</li>
     </ul>
   </div>
 

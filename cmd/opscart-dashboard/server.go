@@ -888,19 +888,27 @@ func buildOverviewVerdict(db store.Store, cluster string) (line1, line2 string) 
 		workloadWord = "workloads need"
 	}
 
+	// unprotected_namespace/idle_namespace incidents store the literal
+	// string "namespace" as Resource (there's no pod/deployment involved);
+	// the incident's real identifying context is its Namespace.
+	resourceLabel := worst.Resource
+	if worst.IssueType == "unprotected_namespace" || worst.IssueType == "idle_namespace" {
+		resourceLabel = worst.Namespace
+	}
+
 	switch {
 	case worst.Trend == "accelerating":
 		line1 = fmt.Sprintf(
 			"%d %s attention. %s has been %s for %d day(s) and its restart rate is accelerating.",
-			total, workloadWord, worst.Resource, issueLabel, ageDays)
+			total, workloadWord, resourceLabel, issueLabel, ageDays)
 	case worst.ReopenCount > 0:
 		line1 = fmt.Sprintf(
 			"%d %s attention. %s reoccurred after a recovery — reopened %d time(s).",
-			total, workloadWord, worst.Resource, worst.ReopenCount)
+			total, workloadWord, resourceLabel, worst.ReopenCount)
 	default:
 		line1 = fmt.Sprintf(
 			"%d %s attention. %s has been %s for %d day(s).",
-			total, workloadWord, worst.Resource, issueLabel, ageDays)
+			total, workloadWord, resourceLabel, issueLabel, ageDays)
 	}
 
 	return line1, line2
@@ -1303,6 +1311,16 @@ var getOverviewTmpl = sync.OnceValue(func() *template.Template {
 					default:
 						return "danger"
 					}
+				},
+				// limitSlice caps a RecentEvent feed's DISPLAY length —
+				// GetRecentEvents/GetChangesSince already cap what's
+				// fetched (overviewRecentEventsLimit); this only trims how
+				// many of those rows the page renders.
+				"limitSlice": func(items []store.RecentEvent, n int) []store.RecentEvent {
+					if len(items) <= n {
+						return items
+					}
+					return items[:n]
 				},
 			}).
 			ParseFS(templateFS, "templates/base.html", "templates/sidebar.html", "templates/overview.html"),

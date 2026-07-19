@@ -477,3 +477,108 @@ func TestOverviewTemplate_RendersEmptyData(t *testing.T) {
 		t.Errorf("expected Operational Memory empty state when Scoreboard is nil")
 	}
 }
+
+// TestOverviewTemplate_FeedsCapAtFive drives getOverviewTmpl with more than
+// five ChangesSinceLastView/RecentEvents rows and asserts the rendered
+// output shows exactly five rows per feed — the display cap the limitSlice
+// FuncMap helper enforces, independent of how many rows were fetched.
+func TestOverviewTemplate_FeedsCapAtFive(t *testing.T) {
+	data := fullyPopulatedOverviewData()
+
+	makeEvents := func(n int) []store.RecentEvent {
+		out := make([]store.RecentEvent, n)
+		for i := 0; i < n; i++ {
+			out[i] = store.RecentEvent{
+				Resource:    "svc-" + strconv.Itoa(i),
+				EventReason: "Detected",
+				OccurredAt:  time.Now().Add(-time.Duration(i) * time.Minute),
+			}
+		}
+		return out
+	}
+	data.ChangesSinceLastView = makeEvents(9)
+	data.RecentEvents = makeEvents(7)
+
+	var buf strings.Builder
+	if err := getOverviewTmpl().Execute(&buf, data); err != nil {
+		t.Fatalf("template execution failed: %v", err)
+	}
+
+	out := buf.String()
+	// `class="change-row"` (the literal HTML attribute) rather than just
+	// "change-row" — the latter also matches the CSS selector rules
+	// earlier in the same document and would inflate the count.
+	if got := strings.Count(out, `class="change-row"`); got != 10 {
+		t.Fatalf("expected 5 change-row entries per feed (10 total) regardless of 9/7 fetched, got %d", got)
+	}
+}
+
+// queryIncidentsStubStore returns a fixed QueryIncidents result, embedding
+// store.Store so only the one method buildOverviewVerdict actually calls
+// needs a real implementation.
+type queryIncidentsStubStore struct {
+	store.Store
+	items []store.IncidentSummary
+	total int
+}
+
+func (s *queryIncidentsStubStore) QueryIncidents(f store.IncidentFilter) ([]store.IncidentSummary, int, error) {
+	return s.items, s.total, nil
+}
+
+// TestBuildOverviewVerdict_UnprotectedNamespaceUsesNamespaceNotLiteralResource
+// covers the unprotected_namespace/idle_namespace case, where
+// IncidentSummary.Resource is literally the string "namespace" (there's no
+// pod/deployment involved) — the sentence must use Namespace instead, not
+// that placeholder.
+func TestBuildOverviewVerdict_UnprotectedNamespaceUsesNamespaceNotLiteralResource(t *testing.T) {
+	stub := &queryIncidentsStubStore{
+		items: []store.IncidentSummary{
+			{
+				Namespace: "payments-prod",
+				Resource:  "namespace",
+				IssueType: "unprotected_namespace",
+				Severity:  "high",
+				FirstSeen: time.Now().Add(-3 * 24 * time.Hour),
+			},
+		},
+		total: 1,
+	}
+
+	line1, _ := buildOverviewVerdict(stub, "test-cluster")
+
+	if strings.Contains(line1, "namespace has been") {
+		t.Fatalf("expected verdict to use the real namespace, not the literal placeholder %q: got %q", "namespace", line1)
+	}
+	if !strings.Contains(line1, "payments-prod has been") {
+		t.Fatalf("expected verdict to mention namespace %q, got: %q", "payments-prod", line1)
+	}
+}
+
+// TestBuildOverviewVerdict_IdleNamespaceUsesNamespaceNotLiteralResource
+// covers the same substitution for idle_namespace, and the ReopenCount
+// branch rather than the default one.
+func TestBuildOverviewVerdict_IdleNamespaceUsesNamespaceNotLiteralResource(t *testing.T) {
+	stub := &queryIncidentsStubStore{
+		items: []store.IncidentSummary{
+			{
+				Namespace:   "batch-jobs",
+				Resource:    "namespace",
+				IssueType:   "idle_namespace",
+				Severity:    "medium",
+				FirstSeen:   time.Now().Add(-5 * 24 * time.Hour),
+				ReopenCount: 2,
+			},
+		},
+		total: 1,
+	}
+
+	line1, _ := buildOverviewVerdict(stub, "test-cluster")
+
+	if strings.Contains(line1, "namespace reoccurred") {
+		t.Fatalf("expected verdict to use the real namespace, not the literal placeholder %q: got %q", "namespace", line1)
+	}
+	if !strings.Contains(line1, "batch-jobs reoccurred") {
+		t.Fatalf("expected verdict to mention namespace %q, got: %q", "batch-jobs", line1)
+	}
+}
