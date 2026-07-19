@@ -279,22 +279,10 @@ func TestBuildWorkloadHealthGrid(t *testing.T) {
 
 	t.Run("mixed healthy and unhealthy workloads", func(t *testing.T) {
 		scan := &clusterScan{
-			report: &models.CloudCostReport{
-				NamespaceCosts: []models.NamespaceCostInfo{
-					{
-						Name: "payments", PodCount: 3,
-						Deployments: []models.DeploymentCostInfo{
-							{Name: "payments-api", Kind: "Deployment", Namespace: "payments", Replicas: 2},
-							{Name: "payments-worker", Kind: "Deployment", Namespace: "payments", Replicas: 1},
-						},
-					},
-					{
-						Name: "checkout", PodCount: 1,
-						Deployments: []models.DeploymentCostInfo{
-							{Name: "checkout-api", Kind: "Deployment", Namespace: "checkout", Replicas: 1},
-						},
-					},
-				},
+			AllWorkloads: []models.WorkloadRef{
+				{Name: "payments-api", Kind: "Deployment", Namespace: "payments"},
+				{Name: "payments-worker", Kind: "Deployment", Namespace: "payments"},
+				{Name: "checkout-api", Kind: "Deployment", Namespace: "checkout"},
 			},
 			wasteAudit: &analyzer.WasteAudit{
 				StalePods: []analyzer.StalePod{
@@ -339,7 +327,7 @@ func TestBuildWorkloadHealthGrid(t *testing.T) {
 		}
 	})
 
-	t.Run("issue with no matching Deployments enumeration still surfaces", func(t *testing.T) {
+	t.Run("issue with no matching AllWorkloads entry still surfaces", func(t *testing.T) {
 		scan := &clusterScan{
 			wasteAudit: &analyzer.WasteAudit{
 				StalePods: []analyzer.StalePod{
