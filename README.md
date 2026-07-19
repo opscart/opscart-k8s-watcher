@@ -108,6 +108,16 @@ For team deployments, authenticate at the ingress layer instead with [oauth2-pro
 
 ## Features
 
+### Overview
+
+The entry point isn't a KPI grid — it's a written assessment. **Situation Briefing** states what's actually wrong in plain sentences ("fraud-detection has been crash-looping for 7 days and its restart rate is accelerating"), not a wall of gauges. Below it:
+- **Operational Memory scoreboard** — total incidents ever seen, resolved, reopened, currently accelerating, longest-running incident, most unstable namespace — numbers only possible because OpsCart remembers, not just observes
+- **What's Changed Since Last Scan** — a cursor-based feed showing only what happened since you last opened the dashboard
+- **Top 5 Things To Fix** — ranked by severity and restart rate, each with a memory line (first detected, reopen count, trend) and a direct link to investigate
+- **Cluster Health, Namespace Health, and Security Status** at a glance
+
+No competitor in this space — Grafana, Lens, k9s — can produce any of this, because none of them remember anything between scans.
+
 ### Operational Triage
 
 **Incident Score** — A single 0–100 score derived from crash loops, image pull failures, security posture, waste, and network policy gaps. Trend arrows and a 7-point sparkline show whether the cluster is getting better or worse.
@@ -213,7 +223,6 @@ go build -o opscart-scan ./cmd/opscart-scan
 - Root cause confidence scoring (deterministic, evidence-based)
 - Native OIDC authentication + namespace-scoped authorization (SubjectAccessReview-based)
 - Slack and Teams notifications
-
 ---
 
 ## Disclaimer
