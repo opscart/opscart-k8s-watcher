@@ -9,6 +9,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/opscart/opscart-k8s-watcher/pkg/analyzer"
+	"github.com/opscart/opscart-k8s-watcher/pkg/models"
 	"github.com/opscart/opscart-k8s-watcher/pkg/store"
 )
 
@@ -215,4 +217,139 @@ func TestFormatCostDelta(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestBuildNamespaceHealth(t *testing.T) {
+	t.Run("nil scan returns nil, no panic", func(t *testing.T) {
+		if got := buildNamespaceHealth(nil); got != nil {
+			t.Fatalf("expected nil, got %+v", got)
+		}
+	})
+
+	t.Run("scan with no report returns nil, no panic", func(t *testing.T) {
+		if got := buildNamespaceHealth(&clusterScan{}); got != nil {
+			t.Fatalf("expected nil, got %+v", got)
+		}
+	})
+
+	t.Run("mixed ready/not-ready pods across namespaces", func(t *testing.T) {
+		scan := &clusterScan{
+			report: &models.CloudCostReport{
+				NamespaceCosts: []models.NamespaceCostInfo{
+					{Name: "payments", PodCount: 4},
+					{Name: "checkout", PodCount: 3},
+				},
+			},
+			wasteAudit: &analyzer.WasteAudit{
+				StalePods: []analyzer.StalePod{
+					{Name: "payments-api-abc123", Namespace: "payments", Kind: analyzer.StalePodZombie, Status: "CrashLoopBackOff", RestartCount: 10, AgeDays: 2},
+					{Name: "payments-api-def456", Namespace: "payments", Kind: analyzer.StalePodZombie, Status: "OOMKilled", RestartCount: 5, AgeDays: 1},
+					// Idle (not zombie) — must NOT count against readiness.
+					{Name: "checkout-worker-ghi789", Namespace: "checkout", Kind: analyzer.StalePodIdle, AgeDays: 20},
+				},
+			},
+		}
+
+		got := buildNamespaceHealth(scan)
+		if len(got) != 2 {
+			t.Fatalf("expected 2 namespaces, got %d: %+v", len(got), got)
+		}
+		// worst health first: payments (2/4 = 0.5) before checkout (3/3 = 1.0)
+		if got[0] != (namespaceHealth{Name: "payments", Ready: 2, Total: 4}) {
+			t.Fatalf("got[0] = %+v, want payments 2/4", got[0])
+		}
+		if got[1] != (namespaceHealth{Name: "checkout", Ready: 3, Total: 3}) {
+			t.Fatalf("got[1] = %+v, want checkout 3/3", got[1])
+		}
+	})
+}
+
+func TestBuildWorkloadHealthGrid(t *testing.T) {
+	t.Run("nil scan returns nil, no panic", func(t *testing.T) {
+		if got := buildWorkloadHealthGrid(nil); got != nil {
+			t.Fatalf("expected nil, got %+v", got)
+		}
+	})
+
+	t.Run("empty scan returns empty, no panic", func(t *testing.T) {
+		if got := buildWorkloadHealthGrid(&clusterScan{}); len(got) != 0 {
+			t.Fatalf("expected empty, got %+v", got)
+		}
+	})
+
+	t.Run("mixed healthy and unhealthy workloads", func(t *testing.T) {
+		scan := &clusterScan{
+			report: &models.CloudCostReport{
+				NamespaceCosts: []models.NamespaceCostInfo{
+					{
+						Name: "payments", PodCount: 3,
+						Deployments: []models.DeploymentCostInfo{
+							{Name: "payments-api", Kind: "Deployment", Namespace: "payments", Replicas: 2},
+							{Name: "payments-worker", Kind: "Deployment", Namespace: "payments", Replicas: 1},
+						},
+					},
+					{
+						Name: "checkout", PodCount: 1,
+						Deployments: []models.DeploymentCostInfo{
+							{Name: "checkout-api", Kind: "Deployment", Namespace: "checkout", Replicas: 1},
+						},
+					},
+				},
+			},
+			wasteAudit: &analyzer.WasteAudit{
+				StalePods: []analyzer.StalePod{
+					{Name: "payments-api-abc123", Namespace: "payments", Kind: analyzer.StalePodZombie, Status: "CrashLoopBackOff", RestartCount: 50, AgeDays: 3},
+				},
+			},
+			secAudit: &models.SecurityAudit{
+				Issues: []models.SecurityIssue{
+					{Type: "privileged_container", Severity: "critical", Namespace: "checkout", Name: "checkout-api-xyz789", Resource: "pod"},
+				},
+			},
+			netAudit: &analyzer.NetworkPolicyAudit{
+				// Namespace-level issue — must NOT appear as a workload cell.
+				UnprotectedNamespaces: []analyzer.NamespaceNetworkStatus{
+					{Name: "payments", RiskLevel: "HIGH", PodCount: 3},
+				},
+			},
+		}
+
+		got := buildWorkloadHealthGrid(scan)
+		byName := map[string]string{}
+		for _, cell := range got {
+			byName[cell.Name] = cell.Severity
+		}
+
+		if len(got) != 3 {
+			t.Fatalf("expected 3 workload cells, got %d: %+v", len(got), got)
+		}
+		if sev := byName["payments-api"]; sev != "critical" {
+			t.Fatalf("payments-api severity = %q, want critical", sev)
+		}
+		if sev := byName["checkout-api"]; sev != "critical" {
+			t.Fatalf("checkout-api severity = %q, want critical", sev)
+		}
+		if sev, ok := byName["payments-worker"]; !ok || sev != "" {
+			t.Fatalf("payments-worker severity = %q (present=%v), want \"\" (healthy)", sev, ok)
+		}
+
+		// most-severe-first, alphabetical tiebreak; healthy entries last.
+		if got[0].Name != "checkout-api" || got[1].Name != "payments-api" || got[2].Name != "payments-worker" {
+			t.Fatalf("unexpected order: %+v", got)
+		}
+	})
+
+	t.Run("issue with no matching Deployments enumeration still surfaces", func(t *testing.T) {
+		scan := &clusterScan{
+			wasteAudit: &analyzer.WasteAudit{
+				StalePods: []analyzer.StalePod{
+					{Name: "orphan-svc-abc123", Namespace: "default", Kind: analyzer.StalePodZombie, Status: "CrashLoopBackOff", RestartCount: 8, AgeDays: 1},
+				},
+			},
+		}
+		got := buildWorkloadHealthGrid(scan)
+		if len(got) != 1 || got[0].Name != "orphan-svc" || got[0].Severity != "critical" {
+			t.Fatalf("expected single orphan-svc/critical cell, got %+v", got)
+		}
+	})
 }
