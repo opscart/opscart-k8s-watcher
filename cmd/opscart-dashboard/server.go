@@ -765,7 +765,7 @@ func buildOverviewData(scan *clusterScan, activeCtx string, clusterList []string
 	}
 	lastViewedLabel := humanAge(time.Since(since)) + " ago"
 
-	topIssues := buildTopIssues(scan, wrIssues)
+	topIssues := buildTopIssues(scan, wrIssues, activeCtx)
 	topIssues = enrichTopIssues(topIssues, db, activeCtx)
 	hasTopIssue, topIssueName, topIssueNS, topIssueTrend, topIssueReopen := deriveTopIssueSummary(topIssues)
 
@@ -1100,7 +1100,22 @@ func buildWorkloadHealthGrid(scan *clusterScan) []workloadHealthCell {
 	return grid
 }
 
-func buildTopIssues(scan *clusterScan, wrIssues []warRoomIssue) []topIssue {
+// investigateURL builds a deep link to the Investigation page for a single
+// incident, matching the exact query params handleInvestigationPage reads
+// (pod, ns, type, cluster, from). Falls back to "/warroom" when namespace/
+// resource/issueType aren't all known — the aggregated rows built later in
+// buildTopIssues (orphaned PVCs, security score, zero-replica workloads)
+// have no single corresponding incident to deep-link to.
+func investigateURL(namespace, resource, issueType, activeCtx string) string {
+	if namespace == "" || resource == "" || issueType == "" {
+		return "/warroom"
+	}
+	return fmt.Sprintf("/investigate?pod=%s&ns=%s&type=%s&cluster=%s&from=warroom",
+		url.QueryEscape(resource), url.QueryEscape(namespace),
+		url.QueryEscape(issueType), url.QueryEscape(activeCtx))
+}
+
+func buildTopIssues(scan *clusterScan, wrIssues []warRoomIssue, activeCtx string) []topIssue {
 	var issues []topIssue
 
 	// Group war room issues by Severity + Type
@@ -1141,7 +1156,8 @@ func buildTopIssues(scan *clusterScan, wrIssues []warRoomIssue) []topIssue {
 
 		// grp preserves collectWarRoomIssues' severity/restart-sorted
 		// order, so grp[0] is this group's highest-priority representative
-		// — the natural incident to cross-reference in enrichTopIssues.
+		// — the natural incident to cross-reference in enrichTopIssues, and
+		// the row this deep-link points at.
 		issues = append(issues, topIssue{
 			Title:       title,
 			Subtitle:    subtitle,
@@ -1149,7 +1165,7 @@ func buildTopIssues(scan *clusterScan, wrIssues []warRoomIssue) []topIssue {
 			Severity:    k.severity,
 			SeverityLbl: sevLbl,
 			CountText:   countText,
-			URL:         "/warroom",
+			URL:         investigateURL(grp[0].Namespace, grp[0].Resource, k.issueTyp, activeCtx),
 			Namespace:   grp[0].Namespace,
 			Resource:    grp[0].Resource,
 			IssueType:   k.issueTyp,

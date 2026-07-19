@@ -865,3 +865,94 @@ func TestOverviewTemplate_HealthCardsNoViewAllUnderCap(t *testing.T) {
 		t.Errorf("did not expect a workloads View all link under the cap")
 	}
 }
+
+func TestInvestigateURL(t *testing.T) {
+	tests := []struct {
+		name                                string
+		namespace, resource, issueType, ctx string
+		want                                string
+	}{
+		{
+			name:      "all fields present builds deep link with escaped params",
+			namespace: "payments prod", resource: "payments-api/abc123", issueType: "crash_loop", ctx: "my cluster",
+			want: "/investigate?pod=payments-api%2Fabc123&ns=payments+prod&type=crash_loop&cluster=my+cluster&from=warroom",
+		},
+		{
+			name:      "empty namespace falls back to /warroom",
+			namespace: "", resource: "payments-api", issueType: "crash_loop", ctx: "test-cluster",
+			want: "/warroom",
+		},
+		{
+			name:      "empty resource falls back to /warroom",
+			namespace: "payments", resource: "", issueType: "crash_loop", ctx: "test-cluster",
+			want: "/warroom",
+		},
+		{
+			name:      "empty issueType falls back to /warroom",
+			namespace: "payments", resource: "payments-api", issueType: "", ctx: "test-cluster",
+			want: "/warroom",
+		},
+		{
+			name:      "all three empty falls back to /warroom",
+			namespace: "", resource: "", issueType: "", ctx: "test-cluster",
+			want: "/warroom",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := investigateURL(tt.namespace, tt.resource, tt.issueType, tt.ctx); got != tt.want {
+				t.Errorf("investigateURL(%q, %q, %q, %q) = %q, want %q", tt.namespace, tt.resource, tt.issueType, tt.ctx, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestBuildTopIssues_URLDeepLinksToInvestigation drives buildTopIssues
+// end-to-end from a scan fixture (through collectWarRoomIssues, matching
+// how buildOverviewData actually calls it) and asserts the grouped
+// crash_loop row's URL is a real Investigation deep link, not the old
+// hardcoded "/warroom".
+func TestBuildTopIssues_URLDeepLinksToInvestigation(t *testing.T) {
+	scan := &clusterScan{
+		wasteAudit: &analyzer.WasteAudit{
+			StalePods: []analyzer.StalePod{
+				{Name: "payments-api-abc123", Namespace: "payments", Kind: analyzer.StalePodZombie, Status: "CrashLoopBackOff", RestartCount: 10, AgeDays: 2},
+			},
+		},
+	}
+	wrIssues := collectWarRoomIssues(scan, 0)
+	issues := buildTopIssues(scan, wrIssues, "test-cluster")
+
+	if len(issues) == 0 {
+		t.Fatalf("expected at least one topIssue")
+	}
+	want := "/investigate?pod=payments-api-abc123&ns=payments&type=crash_loop&cluster=test-cluster&from=warroom"
+	if issues[0].URL != want {
+		t.Errorf("URL = %q, want %q", issues[0].URL, want)
+	}
+}
+
+// TestBuildTopIssues_AggregateRowsKeepTheirOwnURL proves the fix is scoped
+// to grouped incident rows: the orphaned-PVCs aggregate row has no single
+// Namespace/Resource/IssueType to deep-link to, so it must keep its
+// existing "/optimizations" URL rather than falling back to "/warroom".
+func TestBuildTopIssues_AggregateRowsKeepTheirOwnURL(t *testing.T) {
+	scan := &clusterScan{
+		wasteAudit: &analyzer.WasteAudit{
+			OrphanedPVCs: []analyzer.OrphanedPVC{
+				{Name: "pvc-1", Namespace: "default", SizeGB: 10, Status: analyzer.PVCReleased, AgeDays: 30},
+			},
+		},
+	}
+	issues := buildTopIssues(scan, nil, "test-cluster")
+	if len(issues) == 0 {
+		t.Fatalf("expected at least one topIssue")
+	}
+	if issues[0].URL != "/optimizations" {
+		t.Errorf("expected aggregated orphaned-PVC row to keep its own URL, got %q", issues[0].URL)
+	}
+	if issues[0].Namespace != "" || issues[0].Resource != "" || issues[0].IssueType != "" {
+		t.Errorf("expected aggregate row to have no matching key, got Namespace=%q Resource=%q IssueType=%q",
+			issues[0].Namespace, issues[0].Resource, issues[0].IssueType)
+	}
+}
