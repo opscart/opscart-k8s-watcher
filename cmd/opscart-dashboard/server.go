@@ -1003,10 +1003,11 @@ func namespaceHealthRatio(n namespaceHealth) float64 {
 // second incident query. Workload identity for a pod-level issue is
 // resolved with store.OwnerNameFromPod (pure string parsing, matching the
 // same owner-name convention used for incident fingerprints, not a new
-// clientset call). When the scan's deployment-level cost breakdown is
-// available (scan.report.NamespaceCosts[].Deployments) it's used to also
-// list healthy workloads with no active issue; otherwise the grid only
-// contains workloads an issue has actually implicated.
+// clientset call). The workload universe itself comes from scan.AllWorkloads
+// — every Deployment/StatefulSet/DaemonSet the scan observed while
+// enumerating pods for cost allocation, retained regardless of the
+// --breakdown flag — so healthy workloads with no active issue are always
+// represented, not just the ones an issue happens to name.
 func buildWorkloadHealthGrid(scan *clusterScan) []workloadHealthCell {
 	if scan == nil {
 		return nil
@@ -1028,21 +1029,18 @@ func buildWorkloadHealthGrid(scan *clusterScan) []workloadHealthCell {
 	seen := map[workloadKey]bool{}
 	var grid []workloadHealthCell
 
-	if scan.report != nil {
-		for _, ns := range scan.report.NamespaceCosts {
-			for _, d := range ns.Deployments {
-				key := workloadKey{namespace: d.Namespace, name: d.Name}
-				if seen[key] {
-					continue
-				}
-				seen[key] = true
-				grid = append(grid, workloadHealthCell{Name: d.Name, Severity: severityOf[key]})
-			}
+	for _, w := range scan.AllWorkloads {
+		key := workloadKey{namespace: w.Namespace, name: w.Name}
+		if seen[key] {
+			continue
 		}
+		seen[key] = true
+		grid = append(grid, workloadHealthCell{Name: w.Name, Severity: severityOf[key]})
 	}
 
-	// Always include workloads implied by an active issue, even when the
-	// deployment-level breakdown above isn't available.
+	// Always include workloads implied by an active issue, even when
+	// AllWorkloads didn't independently observe them (e.g. a test fixture
+	// or a partial scan).
 	for key, sev := range severityOf {
 		if seen[key] {
 			continue
@@ -1368,6 +1366,9 @@ func runFullScan(ctx string) (*clusterScan, error) {
 	if err != nil {
 		return nil, fmt.Errorf("resource analysis: %w", err)
 	}
+	// Retained regardless of --breakdown — this is the same pod enumeration
+	// already fetched above, not a second cluster call.
+	scan.AllWorkloads = resourceAnalysis.Workloads
 
 	nsCosts := npCostAnalyzer.AllocateNamespaceCosts(
 		poolCosts, resourceAnalysis.Namespaces,
