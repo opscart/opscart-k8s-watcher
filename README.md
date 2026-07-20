@@ -31,10 +31,11 @@ OpsCart    →  shows what deserves attention first
 
 A healthy dashboard does not always mean a healthy cluster.
 
-Metrics tell you whether your services are meeting SLOs. OpsCart tells you which operational problems have quietly accumulated over weeks — crash-looping pods, probe failures, image pull failures, privileged containers, missing NetworkPolicies, orphaned PVCs, and cost waste — none of which trigger a metrics alert.
+Metrics tell you whether your services are meeting SLOs. OpsCart tells you which operational problems have quietly accumulated over weeks — crash-looping pods, image pull failures, privileged containers, missing NetworkPolicies, orphaned PVCs, and cost waste — none of which trigger a metrics alert.
 
-Instead of dozens of dashboards, you get a prioritized list of what deserves attention first.
+This isn't alert aggregation. OpsCart remembers what happened between scans — when a problem was first detected, whether it's been resolved and come back, whether it's getting worse. A pod that's been crash-looping for 11 days and a pod that started crashing 5 minutes ago look identical to a metrics dashboard; they're a completely different problem to OpsCart, because it has a memory and metrics tools don't.
 
+Instead of dozens of dashboards, you get a prioritized list of what deserves attention first — with the history to know why.
 Designed for platform engineers managing Kubernetes clusters who want fast operational triage without deploying agents or modifying workloads.
 
 ---
