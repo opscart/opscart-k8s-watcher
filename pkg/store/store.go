@@ -13,6 +13,8 @@ type Store interface {
 	GetLatestSnapshot(cluster string) (*SnapshotData, error)
 	GetIncidentHistory(cluster string, fingerprint string) (*IncidentRecord, error)
 	GetIncidentTimeline(cluster string, fingerprint string) ([]IncidentEvent, error)
+	BatchGetIncidentHistory(cluster string, fingerprints []string) (map[string]*IncidentRecord, error)
+	BatchGetReopenCounts(ids []int64) (map[int64]int, error)
 	QueryIncidents(f IncidentFilter) (items []IncidentSummary, total int, err error)
 	GetMemoryScoreboard(cluster string) (*MemoryScoreboard, error)
 	GetRecentEvents(cluster string, since time.Time, limit int) ([]RecentEvent, error)
@@ -70,6 +72,7 @@ type OverviewTrend struct {
 }
 
 type IncidentRecord struct {
+	ID          int64 // 0 when unset (e.g. GetIncidentHistory does not look it up)
 	Fingerprint string
 	FirstSeen   time.Time
 	LastSeen    time.Time

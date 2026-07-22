@@ -40,6 +40,14 @@ func (NullStore) GetIncidentTimeline(cluster string, fingerprint string) ([]Inci
 	return nil, nil
 }
 
+func (NullStore) BatchGetIncidentHistory(cluster string, fingerprints []string) (map[string]*IncidentRecord, error) {
+	return nil, nil
+}
+
+func (NullStore) BatchGetReopenCounts(ids []int64) (map[int64]int, error) {
+	return nil, nil
+}
+
 func (NullStore) QueryIncidents(f IncidentFilter) ([]IncidentSummary, int, error) {
 	return nil, 0, nil
 }
