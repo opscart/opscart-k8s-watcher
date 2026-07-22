@@ -64,14 +64,20 @@ func parseClusterList() []string {
 	var list []string
 	add := func(ctx string) {
 		ctx = strings.TrimSpace(ctx)
-		if !seen[ctx] {
-			seen[ctx] = true
-			list = append(list, ctx)
+		if seen[ctx] {
+			return
 		}
+		seen[ctx] = true
+		list = append(list, ctx)
 	}
 	add(cluster)
-	for _, ctx := range strings.Split(clustersFlag, ",") {
-		add(ctx)
+	if clustersFlag != "" {
+		for _, ctx := range strings.Split(clustersFlag, ",") {
+			ctx = strings.TrimSpace(ctx)
+			if ctx != "" { // only skip empties from the --clusters split, not from --cluster itself
+				add(ctx)
+			}
+		}
 	}
 	return list
 }

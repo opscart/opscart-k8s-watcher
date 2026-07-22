@@ -18,6 +18,7 @@ import (
 	"github.com/opscart/opscart-k8s-watcher/pkg/models"
 	"github.com/opscart/opscart-k8s-watcher/pkg/store"
 	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
 )
 
@@ -97,7 +98,7 @@ func (srv *server) getState(ctx string) *dashboardState {
 }
 
 func (srv *server) activeCtx(r *http.Request) string {
-	if ctx := r.URL.Query().Get("cluster"); ctx != "" {
+	if ctx := r.URL.Query().Get("cluster"); ctx != "" && ctx != displayName("") {
 		return ctx
 	}
 	return srv.clusterList[0]
@@ -1795,6 +1796,17 @@ func runFullScan(ctx string) (*clusterScan, error) {
 }
 
 func kubeClient(ctx string) (*kubernetes.Clientset, error) {
+	// In-cluster deployments have no context name and typically no
+	// kubeconfig file at all — authenticate via the mounted ServiceAccount
+	// instead of trying to resolve a named context.
+	if ctx == "" {
+		if cfg, err := rest.InClusterConfig(); err == nil {
+			cfg.QPS = 50
+			cfg.Burst = 100
+			return kubernetes.NewForConfig(cfg)
+		}
+	}
+
 	loadingRules := clientcmd.NewDefaultClientConfigLoadingRules()
 	configOverrides := &clientcmd.ConfigOverrides{CurrentContext: ctx}
 	kubeConfig := clientcmd.NewNonInteractiveDeferredLoadingClientConfig(loadingRules, configOverrides)
