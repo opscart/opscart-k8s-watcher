@@ -46,7 +46,16 @@ func main() {
 		Short: "OpsCart Kubernetes War Room Scanner",
 		Long: `Emergency Kubernetes cluster scanner for war room situations.
 Quickly find broken resources, idle workloads, security issues, and generate reports across multiple clusters.`,
+		PersistentPreRun: func(cmd *cobra.Command, args []string) {
+			opStore = initStore()
+		},
+		PersistentPostRun: func(cmd *cobra.Command, args []string) {
+			opStore.Close()
+		},
 	}
+
+	rootCmd.PersistentFlags().BoolVar(&stateless, "stateless", false, "Disable operational memory persistence (restores fully-stateless behavior)")
+	rootCmd.PersistentFlags().StringVar(&dbPath, "db-path", "", "Path to operational memory database (default: ~/.opscart/scan.db; ignored with --stateless)")
 
 	// ================================================================
 	// NEW: Config command
