@@ -84,30 +84,39 @@ func mapIssuesToIncidents(issues []models.EmergencyIssue) []store.IncidentData {
 	return incidents
 }
 
-// enrichIssues looks up each issue's operational memory. Missing history,
-// a nil lookup, or a NullStore (stateless mode) all degrade silently to no
-// enrichment — never an error shown to the user.
+// enrichIssues looks up every issue's operational memory in two batched
+// calls covering all fingerprints at once, rather than a pair of queries
+// per issue. Missing history, a lookup error, or a NullStore (stateless
+// mode) all degrade silently to no enrichment — never an error shown to
+// the user.
 func enrichIssues(db store.Store, clusterContext string, issues []models.EmergencyIssue) []enrichedIssue {
 	enriched := make([]enrichedIssue, len(issues))
+	fingerprints := make([]string, len(issues))
 	for i, issue := range issues {
 		enriched[i] = enrichedIssue{EmergencyIssue: issue}
+		fingerprints[i] = incidentFingerprint(issue)
+	}
 
-		fingerprint := incidentFingerprint(issue)
-		rec, err := db.GetIncidentHistory(clusterContext, fingerprint)
-		if err != nil || rec == nil {
+	history, err := db.BatchGetIncidentHistory(clusterContext, fingerprints)
+	if err != nil {
+		return enriched
+	}
+
+	ids := make([]int64, 0, len(history))
+	for _, rec := range history {
+		ids = append(ids, rec.ID)
+	}
+	// A failed reopen-count lookup still leaves FirstDetected enriched
+	// below; reopenCounts stays nil, and indexing a nil map yields 0.
+	reopenCounts, _ := db.BatchGetReopenCounts(ids)
+
+	for i, fingerprint := range fingerprints {
+		rec, ok := history[fingerprint]
+		if !ok || rec == nil {
 			continue
 		}
 		enriched[i].FirstDetected = formatDuration(time.Since(rec.FirstSeen))
-
-		events, err := db.GetIncidentTimeline(clusterContext, fingerprint)
-		if err != nil {
-			continue
-		}
-		for _, e := range events {
-			if e.EventType == "REOPENED" {
-				enriched[i].ReopenCount++
-			}
-		}
+		enriched[i].ReopenCount = reopenCounts[rec.ID]
 	}
 	return enriched
 }
