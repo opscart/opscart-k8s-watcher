@@ -2,7 +2,7 @@
 
 image:
   repository: ghcr.io/opscart/opscart-dashboard
-  tag: "v1.9.1"
+  tag: "v1.9.3"
   # For local development with a locally-built image (e.g. minikube):
   # the image must be loaded under the EXACT repository:tag rendered by
   # this chart — kubelet does no fuzzy matching with pullPolicy Never.
