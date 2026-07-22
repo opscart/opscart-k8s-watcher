@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"fmt"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -583,6 +584,133 @@ func TestTimeline_ReopenedAfterResolve(t *testing.T) {
 	}
 	if events[2].EventType != "REOPENED" || events[2].EventReason != "Reopened" {
 		t.Fatalf("event[2] = %+v", events[2])
+	}
+}
+
+// ── Batched incident lookups ────────────────────────────────────────────────
+
+// TestBatchGetIncidentHistory_ReturnsAllKeyed seeds 5 incidents and confirms
+// a single BatchGetIncidentHistory call returns every one of them, correctly
+// keyed by fingerprint, plus its incident id (needed to chain into
+// BatchGetReopenCounts) — rather than requiring one GetIncidentHistory call
+// per fingerprint.
+func TestBatchGetIncidentHistory_ReturnsAllKeyed(t *testing.T) {
+	s := openTestStore(t)
+
+	var incs []IncidentData
+	for i := 0; i < 5; i++ {
+		incs = append(incs, IncidentData{
+			Fingerprint: fmt.Sprintf("default/Deployment/svc-%d/crash_loop", i),
+			Namespace:   "default",
+			Resource:    fmt.Sprintf("svc-%d", i),
+			IssueType:   "crash_loop",
+			Severity:    "critical",
+			DetailsJSON: fmt.Sprintf(`{"n":%d}`, i),
+		})
+	}
+	if err := s.UpsertIncidents("test-cluster", "scan-1", incs); err != nil {
+		t.Fatalf("UpsertIncidents: %v", err)
+	}
+	// A fingerprint with no incident must simply be absent from the result.
+	fingerprints := []string{
+		"default/Deployment/svc-0/crash_loop",
+		"default/Deployment/svc-1/crash_loop",
+		"default/Deployment/svc-2/crash_loop",
+		"default/Deployment/svc-3/crash_loop",
+		"default/Deployment/svc-4/crash_loop",
+		"default/Deployment/nonexistent/crash_loop",
+	}
+
+	got, err := s.BatchGetIncidentHistory("test-cluster", fingerprints)
+	if err != nil {
+		t.Fatalf("BatchGetIncidentHistory: %v", err)
+	}
+	if len(got) != 5 {
+		t.Fatalf("expected 5 records, got %d: %+v", len(got), got)
+	}
+	if _, ok := got["default/Deployment/nonexistent/crash_loop"]; ok {
+		t.Fatalf("expected no record for a fingerprint with no incident")
+	}
+
+	seenIDs := make(map[int64]bool)
+	for i, inc := range incs {
+		rec, ok := got[inc.Fingerprint]
+		if !ok {
+			t.Fatalf("missing record for %s", inc.Fingerprint)
+		}
+		if rec.Fingerprint != inc.Fingerprint {
+			t.Errorf("record %d: Fingerprint = %q, want %q", i, rec.Fingerprint, inc.Fingerprint)
+		}
+		if rec.Status != "active" {
+			t.Errorf("record %d: Status = %q, want active", i, rec.Status)
+		}
+		if rec.ID == 0 {
+			t.Errorf("record %d: expected non-zero incident id", i)
+		}
+		if seenIDs[rec.ID] {
+			t.Errorf("record %d: id %d reused across incidents", i, rec.ID)
+		}
+		seenIDs[rec.ID] = true
+		if !strings.Contains(rec.DetailsJSON, fmt.Sprintf(`"n":%d`, i)) {
+			t.Errorf("record %d: DetailsJSON = %q, want it to contain n:%d", i, rec.DetailsJSON, i)
+		}
+	}
+}
+
+func TestBatchGetIncidentHistory_EmptyInput(t *testing.T) {
+	s := openTestStore(t)
+	got, err := s.BatchGetIncidentHistory("test-cluster", nil)
+	if err != nil {
+		t.Fatalf("BatchGetIncidentHistory: %v", err)
+	}
+	if len(got) != 0 {
+		t.Fatalf("expected empty result for empty input, got %+v", got)
+	}
+}
+
+// TestBatchGetReopenCounts_MatchesQueryIncidentsReopenCount confirms the
+// exported BatchGetReopenCounts wrapper returns the same counts QueryIncidents
+// already derives internally via the unexported batchReopenCounts it wraps.
+func TestBatchGetReopenCounts_MatchesQueryIncidentsReopenCount(t *testing.T) {
+	s := openTestStore(t)
+
+	inc := IncidentData{Fingerprint: "default/Deployment/svc-a/crash_loop", Namespace: "default", Resource: "svc-a", IssueType: "crash_loop", Severity: "critical"}
+	if err := s.UpsertIncidents("test-cluster", "scan-1", []IncidentData{inc}); err != nil {
+		t.Fatalf("UpsertIncidents(1): %v", err)
+	}
+	driveToResolved(t, s, "test-cluster", nil, "scan-miss")
+	backdateIncidentEvents(t, s, "test-cluster", inc.Fingerprint, flapAbsorptionWindow+time.Minute)
+	if err := s.UpsertIncidents("test-cluster", "scan-reopen", []IncidentData{inc}); err != nil {
+		t.Fatalf("UpsertIncidents(reopen): %v", err)
+	}
+
+	rec, err := s.GetIncidentHistory("test-cluster", inc.Fingerprint)
+	if err != nil || rec == nil {
+		t.Fatalf("GetIncidentHistory: %v, %+v", err, rec)
+	}
+
+	var incidentID int64
+	if err := s.db.QueryRow(
+		"SELECT id FROM incidents WHERE cluster=? AND fingerprint=?",
+		"test-cluster", inc.Fingerprint,
+	).Scan(&incidentID); err != nil {
+		t.Fatalf("lookup incident id: %v", err)
+	}
+
+	counts, err := s.BatchGetReopenCounts([]int64{incidentID})
+	if err != nil {
+		t.Fatalf("BatchGetReopenCounts: %v", err)
+	}
+	if counts[incidentID] != 1 {
+		t.Fatalf("BatchGetReopenCounts[%d] = %d, want 1", incidentID, counts[incidentID])
+	}
+
+	items, _, err := s.QueryIncidents(IncidentFilter{Cluster: "test-cluster"})
+	if err != nil {
+		t.Fatalf("QueryIncidents: %v", err)
+	}
+	if len(items) != 1 || items[0].ReopenCount != counts[incidentID] {
+		t.Fatalf("QueryIncidents ReopenCount diverges from BatchGetReopenCounts: %+v vs %d", items, counts[incidentID])
 	}
 }
 

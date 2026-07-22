@@ -754,6 +754,61 @@ func (s *SQLiteStore) GetIncidentTimeline(cluster string, fingerprint string) ([
 	return out, rows.Err()
 }
 
+// BatchGetIncidentHistory returns operational-memory history for every
+// fingerprint in fingerprints, keyed by fingerprint. One query for the
+// whole set — never one query per fingerprint. Fingerprints with no
+// matching incident are simply absent from the returned map.
+func (s *SQLiteStore) BatchGetIncidentHistory(cluster string, fingerprints []string) (map[string]*IncidentRecord, error) {
+	out := make(map[string]*IncidentRecord, len(fingerprints))
+	if len(fingerprints) == 0 {
+		return out, nil
+	}
+
+	placeholders := make([]string, len(fingerprints))
+	args := make([]any, 0, len(fingerprints)+1)
+	args = append(args, cluster)
+	for i, fp := range fingerprints {
+		placeholders[i] = "?"
+		args = append(args, fp)
+	}
+
+	rows, err := s.db.Query(fmt.Sprintf(
+		`SELECT id, fingerprint, first_seen, last_seen, status, details_json
+		 FROM incidents
+		 WHERE cluster = ? AND fingerprint IN (%s)`,
+		strings.Join(placeholders, ","),
+	), args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var id, firstSeen, lastSeen int64
+		var fingerprint string
+		var status, detailsJSON sql.NullString
+		if err := rows.Scan(&id, &fingerprint, &firstSeen, &lastSeen, &status, &detailsJSON); err != nil {
+			return nil, err
+		}
+		out[fingerprint] = &IncidentRecord{
+			ID:          id,
+			Fingerprint: fingerprint,
+			FirstSeen:   time.Unix(firstSeen, 0),
+			LastSeen:    time.Unix(lastSeen, 0),
+			Status:      status.String,
+			DetailsJSON: detailsJSON.String,
+		}
+	}
+	return out, rows.Err()
+}
+
+// BatchGetReopenCounts exports batchReopenCounts (already used internally
+// by QueryIncidents) for callers outside this package that need reopen
+// counts for a batch of incident ids without a per-id query.
+func (s *SQLiteStore) BatchGetReopenCounts(ids []int64) (map[int64]int, error) {
+	return s.batchReopenCounts(ids)
+}
+
 // inClause builds a "?,?,?" placeholder string and matching args slice for
 // an IN(...) clause over ids. Callers must guard len(ids) == 0 themselves
 // (an empty IN() is invalid SQL).

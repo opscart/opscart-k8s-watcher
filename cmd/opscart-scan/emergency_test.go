@@ -32,6 +32,41 @@ func (f *fakeStore) GetIncidentTimeline(cluster, fingerprint string) ([]store.In
 	return f.timeline, f.timelineErr
 }
 
+// BatchGetIncidentHistory mirrors GetIncidentHistory's single fake record
+// across every requested fingerprint, so tests written against the old
+// per-issue API still exercise the same scenarios against the batched one.
+func (f *fakeStore) BatchGetIncidentHistory(cluster string, fingerprints []string) (map[string]*store.IncidentRecord, error) {
+	if f.historyErr != nil {
+		return nil, f.historyErr
+	}
+	out := make(map[string]*store.IncidentRecord)
+	if f.history != nil {
+		for _, fp := range fingerprints {
+			out[fp] = f.history
+		}
+	}
+	return out, nil
+}
+
+// BatchGetReopenCounts mirrors GetIncidentTimeline's fake REOPENED count
+// for every requested id.
+func (f *fakeStore) BatchGetReopenCounts(ids []int64) (map[int64]int, error) {
+	if f.timelineErr != nil {
+		return nil, f.timelineErr
+	}
+	count := 0
+	for _, e := range f.timeline {
+		if e.EventType == "REOPENED" {
+			count++
+		}
+	}
+	out := make(map[int64]int, len(ids))
+	for _, id := range ids {
+		out[id] = count
+	}
+	return out, nil
+}
+
 func (f *fakeStore) UpsertIncidents(cluster, scanID string, incidents []store.IncidentData) error {
 	return f.upsertErr
 }
@@ -102,6 +137,93 @@ func TestMapIssuesToIncidents(t *testing.T) {
 	}
 	if !strings.Contains(inc.DetailsJSON, "crash looping") {
 		t.Errorf("DetailsJSON missing message, got %s", inc.DetailsJSON)
+	}
+}
+
+// countingStore counts calls made to each Store lookup method, so tests can
+// assert enrichIssues batches its operational-memory lookups instead of
+// regressing to the old N+1 pattern of one GetIncidentHistory/
+// GetIncidentTimeline call per issue.
+type countingStore struct {
+	store.NullStore
+
+	historyCalls      int // legacy per-fingerprint GetIncidentHistory
+	timelineCalls     int // legacy per-fingerprint GetIncidentTimeline
+	batchHistoryCalls int
+	batchReopenCalls  int
+
+	records      map[string]*store.IncidentRecord
+	reopenCounts map[int64]int
+}
+
+func (c *countingStore) GetIncidentHistory(cluster, fingerprint string) (*store.IncidentRecord, error) {
+	c.historyCalls++
+	return nil, nil
+}
+
+func (c *countingStore) GetIncidentTimeline(cluster, fingerprint string) ([]store.IncidentEvent, error) {
+	c.timelineCalls++
+	return nil, nil
+}
+
+func (c *countingStore) BatchGetIncidentHistory(cluster string, fingerprints []string) (map[string]*store.IncidentRecord, error) {
+	c.batchHistoryCalls++
+	out := make(map[string]*store.IncidentRecord)
+	for _, fp := range fingerprints {
+		if rec, ok := c.records[fp]; ok {
+			out[fp] = rec
+		}
+	}
+	return out, nil
+}
+
+func (c *countingStore) BatchGetReopenCounts(ids []int64) (map[int64]int, error) {
+	c.batchReopenCalls++
+	out := make(map[int64]int, len(ids))
+	for _, id := range ids {
+		out[id] = c.reopenCounts[id]
+	}
+	return out, nil
+}
+
+func TestEnrichIssues_BatchesLookups_NoPerIssueQueries(t *testing.T) {
+	issues := []models.EmergencyIssue{
+		{Namespace: "prod", Name: "checkout-7d9f8b6c5-x7z2m9", Reason: "CrashLoopBackOff", Severity: "critical"},
+		{Namespace: "prod", Name: "billing-6c9f8b6c5-x7z2m9", Reason: "OOMKilled", Severity: "critical"},
+		{Namespace: "prod", Name: "auth-5c9f8b6c5-x7z2m9", Reason: "CrashLoopBackOff", Severity: "high"},
+	}
+	fp0 := incidentFingerprint(issues[0])
+	fp1 := incidentFingerprint(issues[1])
+
+	cs := &countingStore{
+		records: map[string]*store.IncidentRecord{
+			fp0: {ID: 1, FirstSeen: time.Now().Add(-2 * 24 * time.Hour)},
+			fp1: {ID: 2, FirstSeen: time.Now().Add(-1 * time.Hour)},
+			// issues[2]'s fingerprint has no record: brand-new issue.
+		},
+		reopenCounts: map[int64]int{1: 3, 2: 0},
+	}
+
+	enriched := enrichIssues(cs, "prod-cluster", issues)
+
+	if cs.historyCalls != 0 || cs.timelineCalls != 0 {
+		t.Fatalf("expected no per-issue lookups, got historyCalls=%d timelineCalls=%d", cs.historyCalls, cs.timelineCalls)
+	}
+	if cs.batchHistoryCalls != 1 {
+		t.Errorf("batchHistoryCalls = %d, want exactly 1 regardless of issue count", cs.batchHistoryCalls)
+	}
+	if cs.batchReopenCalls != 1 {
+		t.Errorf("batchReopenCalls = %d, want exactly 1 regardless of issue count", cs.batchReopenCalls)
+	}
+
+	if enriched[0].FirstDetected != "2d" || enriched[0].ReopenCount != 3 {
+		t.Errorf("issue 0 = %+v, want FirstDetected=2d ReopenCount=3", enriched[0])
+	}
+	if enriched[1].FirstDetected != "1h" || enriched[1].ReopenCount != 0 {
+		t.Errorf("issue 1 = %+v, want FirstDetected=1h ReopenCount=0", enriched[1])
+	}
+	if enriched[2].FirstDetected != "" || enriched[2].ReopenCount != 0 {
+		t.Errorf("issue 2 (no history) = %+v, want zero enrichment", enriched[2])
 	}
 }
 
