@@ -81,6 +81,16 @@ OpsCart requires authentication by default — there is no configuration that di
 ```bash
 kubectl logs deploy/opscart-watcher -n opscart-system | grep "auth:"
 ```
+Get the user name and password
+
+```bash
+kubectl get secret opscart-auth -n opscart-system -o jsonpath='{.data.username}' | base64 -d
+echo
+admin
+kubectl get secret opscart-auth -n opscart-system -o jsonpath='{.data.password}' | base64 -d
+echo
+mypassxxx
+```
 
 You'll see something like:
 
