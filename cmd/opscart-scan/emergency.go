@@ -24,7 +24,6 @@ type enrichedIssue struct {
 	FirstDetected string // formatDuration(time since first seen); "" when no history
 	ReopenCount   int
 	firstSeenAt   time.Time // raw form of FirstDetected, used only to pick a group's representative
-	probeFailure  bool      // true when a CrashLoopBackOff pod's recent events show a probe-failure signature (see annotateProbeFailures)
 }
 
 func runEmergencyScan(clusterContext string) error {
@@ -34,29 +33,175 @@ func runEmergencyScan(clusterContext string) error {
 		return fmt.Errorf("connecting to cluster: %w", err)
 	}
 
-	issues, err := s.FindEmergencyIssues(namespace)
+	rawIssues, err := s.FindEmergencyIssues(namespace)
 	if err != nil {
 		return fmt.Errorf("scanning cluster: %w", err)
 	}
+
+	probeFailures := detectProbeFailures(clusterContext, rawIssues)
+	issues := classifyIssues(rawIssues, probeFailures)
 
 	// Persist findings to operational memory (best-effort, never blocks
 	// printing results — this is secondary to the CLI's primary job).
 	persistFindings(opStore, clusterContext, newScanID(), issues)
 
 	enriched := enrichIssues(opStore, clusterContext, issues)
-	enriched = annotateProbeFailures(clusterContext, enriched)
+	enriched = applyCriticalDebounce(opStore, clusterContext, enriched)
 	printEmergencyIssuesEnriched(os.Stdout, enriched)
 	return nil
 }
 
-// annotateProbeFailures checks each CrashLoopBackOff issue's recent pod
-// events for a probe-failure signature (see hasProbeFailureSignature) and
-// records the result on the issue for mergeCrashLoopOOM/printCriticalItem
-// to act on at print time. Best-effort: a pod with no CrashLoopBackOff
-// issues never triggers a clientset connection at all, and any lookup
-// failure (can't connect, can't list events for one pod) just leaves that
-// issue's classification as plain CrashLoopBackOff — exactly like today.
-func annotateProbeFailures(clusterContext string, issues []enrichedIssue) []enrichedIssue {
+// classifiablePodReasons is the set of per-container "health" reasons
+// analyzePodForIssues (pkg/scanner/cluster.go) can emit for a pod:
+// CrashLoopBackOff, OOMKilled, ImagePullBackOff/ErrImagePull, and
+// HighRestartCount are each their own independent `if`, not an if/else
+// chain, so the SAME pod commonly produces two or more of these in a
+// single scan (e.g. a container with >10 restarts that also happens to
+// be Waiting in CrashLoopBackOff this instant satisfies both the
+// CrashLoopBackOff check and the HighRestartCount check at once). A
+// crash-looping pod's own brief post-backoff Running window can also
+// make different single reasons from this set appear on consecutive
+// scans, even with no real change in the pod's health. classifyPod
+// collapses whichever of these reasons a pod has this run into exactly
+// one verdict, so a physical pod problem never produces more than one
+// fingerprint/incident. Reasons outside this set (PodFailed, Pending,
+// PVC issues) are unaffected — classifyIssues passes them through
+// untouched.
+var classifiablePodReasons = map[string]bool{
+	"CrashLoopBackOff": true,
+	"OOMKilled":        true,
+	"ImagePullBackOff": true,
+	"ErrImagePull":     true,
+	"HighRestartCount": true,
+}
+
+// classifyPod picks exactly one issue to represent a single pod's
+// classifiable issues (see classifiablePodReasons), in this exact
+// priority order, first match wins:
+//
+//  1. OOMKilled + CrashLoopBackOff -> "CrashLoopBackOff (OOMKilled)", CRITICAL
+//  2. ProbeFailure signature + CrashLoopBackOff -> "CrashLoopBackOff (ProbeFailure)", CRITICAL
+//  3. Plain CrashLoopBackOff (neither of the above) -> "CrashLoopBackOff", CRITICAL
+//  4. ImagePullBackOff / ErrImagePull -> unchanged (HIGH, exactly as the scanner classifies it)
+//  5. HighRestartCount, only if none of 1-4 matched -> "HighRestartCount", MEDIUM
+//  6. Otherwise -> ok is false: podIssues held nothing classifiable
+//
+// One case sits outside that 6-step list but is required to preserve
+// pre-existing behavior: OOMKilled with NO CrashLoopBackOff present.
+// cs.LastTerminationState is sticky — it keeps reporting "OOMKilled"
+// until the container's next restart, long after the container is back
+// to Running — so a pod that OOM'd once and stabilized still carries a
+// live OOMKilled signal indefinitely. That's already CRITICAL and no
+// less real for lacking a current crash loop, so it's checked directly
+// after case 3, before ImagePullBackOff/HighRestartCount, on the same
+// "CRITICAL beats everything below it" logic as cases 1-3.
+//
+// probeFailure is detectProbeFailures' pre-computed result for this pod:
+// checking recent events needs a clientset call per pod, done once up
+// front (see detectProbeFailures) rather than inside this pure function.
+//
+// podIssues must all share the same namespace/name (one physical pod);
+// callers (classifyIssues, tests) are responsible for that grouping.
+func classifyPod(podIssues []models.EmergencyIssue, probeFailure bool) (models.EmergencyIssue, bool) {
+	var crashLoop, oom, imagePull, highRestart *models.EmergencyIssue
+	for i := range podIssues {
+		switch podIssues[i].Reason {
+		case "CrashLoopBackOff":
+			crashLoop = &podIssues[i]
+		case "OOMKilled":
+			oom = &podIssues[i]
+		case "ImagePullBackOff", "ErrImagePull":
+			imagePull = &podIssues[i]
+		case "HighRestartCount":
+			highRestart = &podIssues[i]
+		}
+	}
+
+	if crashLoop != nil && oom != nil {
+		out := *crashLoop
+		out.Reason = "CrashLoopBackOff (OOMKilled)"
+		container := extractCrashLoopContainer(crashLoop.Message)
+		out.Message = fmt.Sprintf("Container %s is being OOM-killed, causing the crash loop — check resources.limits.memory", container)
+		return out, true
+	}
+	if crashLoop != nil && probeFailure {
+		out := *crashLoop
+		out.Reason = "CrashLoopBackOff (ProbeFailure)"
+		container := extractCrashLoopContainer(crashLoop.Message)
+		out.Message = fmt.Sprintf("Container %s is being killed by its startup/liveness probe before it can stabilize — check probe initialDelaySeconds/periodSeconds/failureThreshold against actual container startup time", container)
+		return out, true
+	}
+	if crashLoop != nil {
+		return *crashLoop, true
+	}
+	if oom != nil {
+		return *oom, true
+	}
+	if imagePull != nil {
+		return *imagePull, true
+	}
+	if highRestart != nil {
+		return *highRestart, true
+	}
+	return models.EmergencyIssue{}, false
+}
+
+// classifyIssues is this task's root fix applied to a full scan: every
+// pod-resource issue whose Reason is in classifiablePodReasons is grouped
+// by pod and reduced to classifyPod's single verdict. Every other issue —
+// a non-pod resource (e.g. PVC) or a pod issue classifyPod doesn't cover
+// (PodFailed, Pending) — passes through untouched, exactly once. A pod's
+// classified verdict takes the position of that pod's first classifiable
+// raw issue, so scan order is preserved as closely as collapsing allows.
+func classifyIssues(issues []models.EmergencyIssue, probeFailureByPod map[string]bool) []models.EmergencyIssue {
+	groups := make(map[string][]models.EmergencyIssue)
+	slot := make(map[string]int)
+	var podOrder []string
+
+	out := make([]models.EmergencyIssue, 0, len(issues))
+	for _, iss := range issues {
+		if iss.Resource != "pod" || !classifiablePodReasons[iss.Reason] {
+			out = append(out, iss)
+			continue
+		}
+		key := podKey(iss.Namespace, iss.Name)
+		if _, seen := groups[key]; !seen {
+			podOrder = append(podOrder, key)
+			slot[key] = len(out)
+			out = append(out, models.EmergencyIssue{})
+		}
+		groups[key] = append(groups[key], iss)
+	}
+
+	for _, key := range podOrder {
+		if classified, ok := classifyPod(groups[key], probeFailureByPod[key]); ok {
+			out[slot[key]] = classified
+		}
+	}
+
+	// Drop the zero-value placeholder for any pod whose classifiable
+	// issues, against all expectation, still failed to classify (see
+	// classifyPod's step 6) — every reason in classifiablePodReasons is
+	// handled explicitly above, so this is defensive, not reachable today.
+	filtered := out[:0]
+	for _, iss := range out {
+		if iss.Reason == "" && iss.Name == "" && iss.Namespace == "" {
+			continue
+		}
+		filtered = append(filtered, iss)
+	}
+	return filtered
+}
+
+// detectProbeFailures checks, for every distinct pod with a raw
+// CrashLoopBackOff issue in issues, whether its recent events show a
+// probe-failure signature (see hasProbeFailureSignature) — the input
+// classifyPod's priority 2 needs. Best-effort: a scan with no
+// CrashLoopBackOff issues never triggers a clientset connection at all,
+// and any lookup failure (can't connect, can't list events for one pod)
+// just leaves that pod out of the returned map, which classifyPod treats
+// identically to "no signature found".
+func detectProbeFailures(clusterContext string, issues []models.EmergencyIssue) map[string]bool {
 	hasCrashLoop := false
 	for _, issue := range issues {
 		if issue.Reason == "CrashLoopBackOff" {
@@ -65,27 +210,32 @@ func annotateProbeFailures(clusterContext string, issues []enrichedIssue) []enri
 		}
 	}
 	if !hasCrashLoop {
-		return issues
+		return nil
 	}
 
 	clientset, err := getKubernetesClient(clusterContext)
 	if err != nil {
 		log.Printf("opscart-scan: could not check probe-failure events: %v", err)
-		return issues
+		return nil
 	}
 
-	for i, issue := range issues {
+	result := make(map[string]bool)
+	for _, issue := range issues {
 		if issue.Reason != "CrashLoopBackOff" {
 			continue
+		}
+		key := podKey(issue.Namespace, issue.Name)
+		if _, done := result[key]; done {
+			continue // already checked this pod (multi-container case)
 		}
 		messages, err := recentPodEventMessages(clientset, issue.Namespace, issue.Name)
 		if err != nil {
 			log.Printf("opscart-scan: could not list events for %s/%s: %v", issue.Namespace, issue.Name, err)
 			continue
 		}
-		issues[i].probeFailure = hasProbeFailureSignature(messages)
+		result[key] = hasProbeFailureSignature(messages)
 	}
-	return issues
+	return result
 }
 
 // hasProbeFailureSignature reports whether any event message shows a
@@ -109,6 +259,132 @@ func hasProbeFailureSignature(messages []string) bool {
 		}
 	}
 	return false
+}
+
+// criticalDebounceReasons are every Reason classifyPod can produce at
+// CRITICAL severity — the crash-loop family whose underlying symptom (a
+// crash loop, an OOM kill) is one Kubernetes' own exponential backoff can
+// make transiently invisible to a single point-in-time scan. A
+// crash-looping pod cycles crash -> wait -> briefly Running -> crash
+// again, and a scan landing in that "briefly Running" window sees only
+// a high restart count (HighRestartCount, MEDIUM) instead of the
+// CrashLoopBackOff/OOMKilled that's still, moments later, exactly what
+// it is.
+var criticalDebounceReasons = []string{
+	"CrashLoopBackOff (OOMKilled)",
+	"CrashLoopBackOff (ProbeFailure)",
+	"CrashLoopBackOff",
+	"OOMKilled",
+}
+
+// applyCriticalDebounce is this task's fix: consult operational memory
+// before letting a pod's severity drop below CRITICAL for this run's
+// display. It mirrors what ResolveMissing's 3-consecutive-scan
+// missing_scans counter already does for the dashboard (pkg/store/
+// sqlite.go) — treat a single contradicting live snapshot as noise, not
+// truth, when memory disagrees — applied here to the CLI's classification
+// step instead of the store's resolve step.
+//
+// For every issue about to display below CRITICAL, it checks whether an
+// active CRITICAL incident already exists in memory for the same pod
+// under one of criticalDebounceReasons. If so, this run's display keeps
+// the issue at CRITICAL under that reason, on the theory that a pod
+// which was crash-looping moments ago and has no confirmed resolution
+// yet is still crash-looping now, not fixed. A brand-new issue with no
+// prior CRITICAL history is left exactly as classified — this never
+// inflates a genuinely new, milder problem. A RESOLVED incident is never
+// resurrected, since only Status == "active" qualifies.
+//
+// This affects only what THIS run prints/counts. persistFindings (see
+// above) already wrote and resolved this scan's classified findings
+// before this function runs, and the store's own ResolveMissing debounce
+// remains the sole authority on when an incident is actually resolved —
+// this function never touches that pipeline.
+//
+// In --stateless mode, this smoothing has no effect — a pod's severity
+// can still flicker scan-to-scan, since there is no memory to defend the
+// previous classification. This is an inherent tradeoff of choosing no
+// persistence, not a bug. No explicit stateless check is needed: on
+// NullStore, BatchGetIncidentHistory always returns an empty map (see
+// pkg/store/null.go), so the lookup below naturally finds nothing and
+// today's exact live-classification behavior falls through unchanged.
+//
+// classifyIssues (see above) already guarantees at most one issue per pod
+// by the time issues reaches this function, so the alreadyCritical guard
+// below only ever needs to skip a pod whose single issue is already
+// CRITICAL under one of criticalDebounceReasons — it can no longer also
+// be defending against a second, coexisting non-critical entry for that
+// same pod.
+func applyCriticalDebounce(db store.Store, clusterContext string, issues []enrichedIssue) []enrichedIssue {
+	alreadyCritical := make(map[string]bool)
+	var candidates []string
+	for _, issue := range issues {
+		if issue.Resource != "pod" {
+			continue
+		}
+		if issue.Severity == "critical" {
+			if isCriticalDebounceReason(issue.Reason) {
+				alreadyCritical[podKey(issue.Namespace, issue.Name)] = true
+			}
+			continue
+		}
+		owner := store.OwnerNameFromPod(issue.Name)
+		for _, reason := range criticalDebounceReasons {
+			candidates = append(candidates, store.Fingerprint(issue.Namespace, "Workload", owner, reason))
+		}
+	}
+	if len(candidates) == 0 {
+		return issues
+	}
+
+	history, err := db.BatchGetIncidentHistory(clusterContext, candidates)
+	if err != nil || len(history) == 0 {
+		return issues
+	}
+
+	for i, issue := range issues {
+		if issue.Resource != "pod" || issue.Severity == "critical" {
+			continue
+		}
+		if alreadyCritical[podKey(issue.Namespace, issue.Name)] {
+			continue
+		}
+		owner := store.OwnerNameFromPod(issue.Name)
+		for _, reason := range criticalDebounceReasons {
+			rec, ok := history[store.Fingerprint(issue.Namespace, "Workload", owner, reason)]
+			if !ok || rec == nil || rec.Status != "active" {
+				continue
+			}
+			issues[i].Severity = "critical"
+			issues[i].Reason = reason
+			issues[i].Message = criticalDebounceMessage(reason)
+			break
+		}
+	}
+	return issues
+}
+
+// isCriticalDebounceReason reports whether reason is one of
+// criticalDebounceReasons.
+func isCriticalDebounceReason(reason string) bool {
+	for _, r := range criticalDebounceReasons {
+		if reason == r {
+			return true
+		}
+	}
+	return false
+}
+
+// criticalDebounceMessage produces the display message for a pod
+// relabeled by applyCriticalDebounce — deliberately distinct from the
+// scanner's own CrashLoopBackOff/OOMKilled messages (cluster.go), which
+// name the specific container from a live probe this run didn't take, so
+// as not to imply detail this scan didn't actually observe.
+func criticalDebounceMessage(reason string) string {
+	if reason == "OOMKilled" {
+		return "Pod's container was OOMKilled and has not been confirmed resolved; this scan caught it between kills"
+	}
+	return "Pod is in an active CrashLoopBackOff cycle; this scan caught it mid-backoff, during its brief Running window"
 }
 
 // persistFindings writes this scan's findings to operational memory and
@@ -193,11 +469,14 @@ func enrichIssues(db store.Store, clusterContext string, issues []models.Emergen
 // grouping and box-drawing style exactly, with memory-context lines
 // appended to each issue block when available.
 //
-// Before printing, HIGH and MEDIUM tiers are deduplicated and lightly
-// grouped (see dedupeHighTier, dedupeMediumTier, groupIssues below) to
-// collapse redundant entries that describe the same underlying workload
-// problem. CRITICAL stays one-line-per-pod, unchanged, as it's the tier
-// operators act on first and its detail shouldn't be compressed.
+// Before printing, HIGH and MEDIUM tiers are lightly grouped (see
+// dedupeHighTier, groupIssues below) to collapse redundant entries that
+// describe the same underlying workload problem across DIFFERENT pods.
+// CRITICAL stays one-line-per-pod, unchanged, as it's the tier operators
+// act on first and its detail shouldn't be compressed. Unlike HIGH/MEDIUM,
+// CRITICAL needs no same-pod dedup here: classifyIssues (see above)
+// already guarantees at most one issue per pod before issues ever reaches
+// this function.
 func printEmergencyIssuesEnriched(w io.Writer, issues []enrichedIssue) {
 	if len(issues) == 0 {
 		fmt.Fprintln(w, "✅ No critical issues found!")
@@ -216,28 +495,25 @@ func printEmergencyIssuesEnriched(w io.Writer, issues []enrichedIssue) {
 		}
 	}
 
-	medium = dedupeMediumTier(medium, critical)
 	high = dedupeHighTier(high)
-	criticalItems := mergeCrashLoopOOM(critical)
 	highGroups := groupIssues(high)
 	mediumGroups := groupIssues(medium)
 
 	fmt.Fprintln(w, "╔════════════════════════════════════════════════════════════╗")
 	fmt.Fprintln(w, "║             WAR ROOM - EMERGENCY ISSUES                    ║")
 	fmt.Fprintln(w, "╚════════════════════════════════════════════════════════════╝")
-	// These counts are printed-entry counts (a 3-pod group or a merged
-	// pair counts as 1), not underlying pod counts — the header answers
-	// "how many things do I need to read," and must match what a reader
-	// can literally count below it. Underlying pod counts still show up
-	// inside a grouped entry's own title/body (e.g. "3 pods cannot pull
-	// image from ...").
-	fmt.Fprintf(w, "\n🔴 CRITICAL: %d    🟡 HIGH: %d    🟠 MEDIUM: %d\n\n", len(criticalItems), len(highGroups), len(mediumGroups))
+	// These counts are printed-entry counts (a 3-pod group counts as 1),
+	// not underlying pod counts — the header answers "how many things do
+	// I need to read," and must match what a reader can literally count
+	// below it. Underlying pod counts still show up inside a grouped
+	// entry's own title/body (e.g. "3 pods cannot pull image from ...").
+	fmt.Fprintf(w, "\n🔴 CRITICAL: %d    🟡 HIGH: %d    🟠 MEDIUM: %d\n\n", len(critical), len(highGroups), len(mediumGroups))
 
-	if len(criticalItems) > 0 {
+	if len(critical) > 0 {
 		fmt.Fprintln(w, "🔴 CRITICAL ISSUES:")
 		fmt.Fprintln(w, strings.Repeat("═", 80))
-		for _, item := range criticalItems {
-			printCriticalItem(w, item)
+		for _, issue := range critical {
+			printEnrichedIssue(w, issue)
 		}
 		fmt.Fprintln(w)
 	}
@@ -259,38 +535,19 @@ func printEmergencyIssuesEnriched(w io.Writer, issues []enrichedIssue) {
 // podKey identifies a pod for dedup purposes. EmergencyIssue has no
 // separate container field (the container name only ever appears inside
 // Message's free text), so namespace+pod name is the finest-grained key
-// available; in practice every duplicate case this file's Fix 1/2 handle
-// is a whole pod reported twice, not two different containers in it.
+// available; in practice every case this file's classification and
+// dedup logic handle is a whole pod reported twice, not two different
+// containers in it.
 func podKey(namespace, name string) string {
 	return namespace + "/" + name
 }
 
-// dedupeMediumTier implements Fix 1: a pod already shown under CRITICAL
-// as CrashLoopBackOff or OOMKilled has its restart count printed there
-// already, so a MEDIUM HighRestartCount entry for the same pod is pure
-// noise. A pod that reaches MEDIUM on its own (no CRITICAL entry) keeps
-// its HighRestartCount line.
-func dedupeMediumTier(medium, critical []enrichedIssue) []enrichedIssue {
-	criticalKeys := make(map[string]bool, len(critical))
-	for _, issue := range critical {
-		if issue.Reason == "CrashLoopBackOff" || issue.Reason == "OOMKilled" {
-			criticalKeys[podKey(issue.Namespace, issue.Name)] = true
-		}
-	}
-
-	var out []enrichedIssue
-	for _, issue := range medium {
-		if issue.Reason == "HighRestartCount" && criticalKeys[podKey(issue.Namespace, issue.Name)] {
-			continue
-		}
-		out = append(out, issue)
-	}
-	return out
-}
-
-// dedupeHighTier implements Fix 2: a pod stuck Pending because its image
-// can't be pulled shows up once as Pending and once as ImagePullBackOff/
-// ErrImagePull for the same root cause. Keep only the more actionable
+// dedupeHighTier: a pod stuck Pending because its image can't be pulled
+// shows up once as Pending (from analyzePodForIssues' pod-phase check)
+// and once as ImagePullBackOff/ErrImagePull (from its per-container
+// check) for the same root cause — these are two different reasons, so
+// classifyPod's single-pod collapse (scoped to classifiablePodReasons)
+// doesn't touch Pending at all. Keep only the more actionable
 // ImagePullBackOff/ErrImagePull entry. A Pending pod with no matching
 // image-pull entry is a distinct, real scenario and is left alone.
 func dedupeHighTier(high []enrichedIssue) []enrichedIssue {
@@ -312,10 +569,9 @@ func dedupeHighTier(high []enrichedIssue) []enrichedIssue {
 }
 
 // issueGroup holds one or more issues collapsed under the same
-// fingerprint (see groupKeyFor) within a single severity tier.
-// len(issues) == 1 is the common case and prints exactly as before; 2+
-// prints as one grouped entry (Fix 3 of the prior task / this task's
-// Fix 1).
+// fingerprint (see groupKeyFor) within a single severity tier. len(issues)
+// == 1 is the common case and prints exactly as before; 2+ prints as one
+// grouped entry.
 type issueGroup struct {
 	issues []enrichedIssue
 }
@@ -376,8 +632,7 @@ func groupIssues(tier []enrichedIssue) []issueGroup {
 //     happening to run a container with the same name is a coincidence,
 //     not one incident.
 //   - Anything else falls back to the previous heuristic: the message
-//     text after its first ": ", un-namespaced, same as before this
-//     task's fingerprinting was added.
+//     text after its first ": ", un-namespaced.
 func groupKeyFor(issue enrichedIssue) groupKey {
 	switch issue.Reason {
 	case "ImagePullBackOff", "ErrImagePull":
@@ -464,9 +719,9 @@ func extractRestartContainer(message string) string {
 
 // extractCrashLoopContainer pulls the container name out of a
 // CrashLoopBackOff message (see cluster.go's "Container %s is crash
-// looping: %s" format), for the merged CrashLoopBackOff+OOMKilled
-// message (Fix 3). Falls back to a generic noun if the message doesn't
-// match the expected shape.
+// looping: %s" format), for classifyPod's merged CrashLoopBackOff+
+// OOMKilled/ProbeFailure message. Falls back to a generic noun if the
+// message doesn't match the expected shape.
 func extractCrashLoopContainer(message string) string {
 	if m := crashLoopContainerRe.FindStringSubmatch(message); len(m) == 2 {
 		return m[1]
@@ -566,113 +821,6 @@ func printGroupedIssue(w io.Writer, issues []enrichedIssue) {
 	}
 	if rep.ReopenCount > 0 {
 		fmt.Fprintf(w, "  └─ Reopened: %dx (%s)\n", rep.ReopenCount, rep.Name)
-	}
-	fmt.Fprintln(w)
-}
-
-// criticalItem is a printable CRITICAL-tier entry: either a single issue
-// (the common case, unchanged from before), a CrashLoopBackOff merged
-// with the same-pod OOMKilled that caused it (Fix 3 of the prior task),
-// or a CrashLoopBackOff relabeled with a probe-failure root cause found
-// in its recent events (this task's fix).
-type criticalItem struct {
-	issue        enrichedIssue
-	oomCause     *enrichedIssue // non-nil only when issue is a merged CrashLoopBackOff+OOMKilled
-	probeFailure bool           // true only when issue is CrashLoopBackOff, has no OOMKilled cause, and its events show a probe-failure signature
-}
-
-// mergeCrashLoopOOM implements Fix 3 of the prior task (CrashLoopBackOff+
-// OOMKilled merge) and this task's probe-failure relabeling, narrowly
-// scoped in the same way: when the SAME pod (see podKey's container-
-// granularity caveat) appears as both CrashLoopBackOff and OOMKilled at
-// CRITICAL, the OOMKilled is the cause of the crash loop, not a second,
-// independent problem — merge the pair into one entry. When a
-// CrashLoopBackOff pod has no OOMKilled cause but annotateProbeFailures
-// found a probe-failure signature in its recent events, relabel it as
-// caused by its probe instead. Every other CRITICAL issue (including a
-// pod that's ONLY CrashLoopBackOff with neither signal, or ONLY
-// OOMKilled with no crash loop) is left exactly as-is, one line per pod,
-// per the existing CRITICAL format.
-//
-// Precedence when a pod has BOTH an OOMKilled cause and a probe-failure
-// event signature: OOMKilled wins, and the probe signal is dropped
-// silently. An observed OOM is a direct, first-hand cause; a
-// probe-failure event only correlates with the crash loop (the pod could
-// still be crashing from the same memory pressure that trips its probe).
-// Showing both would just be noise once we already have the more certain
-// cause.
-//
-// This is intentionally narrow: it does not attempt to detect or merge
-// any other status pair. PodFailed following an OOMKilled, for instance,
-// looks like it could be a similarly causal pair, but there's no
-// evidence yet that it needs the same treatment — flagged in the task
-// summary as a possible follow-up rather than guessed at here.
-func mergeCrashLoopOOM(critical []enrichedIssue) []criticalItem {
-	oomIndexByPod := make(map[string]int, len(critical))
-	for i, issue := range critical {
-		if issue.Reason == "OOMKilled" {
-			oomIndexByPod[podKey(issue.Namespace, issue.Name)] = i
-		}
-	}
-
-	skip := make(map[int]bool, len(critical))
-	var out []criticalItem
-	for i, issue := range critical {
-		if skip[i] {
-			continue
-		}
-		if issue.Reason == "CrashLoopBackOff" {
-			if oomIdx, ok := oomIndexByPod[podKey(issue.Namespace, issue.Name)]; ok {
-				oom := critical[oomIdx]
-				out = append(out, criticalItem{issue: issue, oomCause: &oom})
-				skip[oomIdx] = true
-				continue
-			}
-			if issue.probeFailure {
-				out = append(out, criticalItem{issue: issue, probeFailure: true})
-				continue
-			}
-		}
-		out = append(out, criticalItem{issue: issue})
-	}
-	return out
-}
-
-func printCriticalItem(w io.Writer, item criticalItem) {
-	switch {
-	case item.oomCause != nil:
-		rep := groupRepresentative([]enrichedIssue{item.issue, *item.oomCause})
-		container := extractCrashLoopContainer(item.issue.Message)
-		printMergedCriticalItem(w, item.issue, rep, "OOMKilled",
-			fmt.Sprintf("Container %s is being OOM-killed, causing the crash loop — check resources.limits.memory", container))
-	case item.probeFailure:
-		container := extractCrashLoopContainer(item.issue.Message)
-		printMergedCriticalItem(w, item.issue, item.issue, "ProbeFailure",
-			fmt.Sprintf("Container %s is being killed by its startup/liveness probe before it can stabilize — check probe initialDelaySeconds/periodSeconds/failureThreshold against actual container startup time", container))
-	default:
-		printEnrichedIssue(w, item.issue)
-	}
-}
-
-// printMergedCriticalItem prints a CrashLoopBackOff issue relabeled with
-// a merged root cause (OOMKilled or ProbeFailure). rep supplies the
-// First detected/Reopened enrichment shown — for an OOMKilled merge
-// that's groupRepresentative's pick between the two constituent issues;
-// for a probe-failure relabel there's only ever the one issue, so rep is
-// always item.issue itself.
-func printMergedCriticalItem(w io.Writer, issue, rep enrichedIssue, causeLabel, causeMessage string) {
-	fmt.Fprintf(w, "  %s/%s\n", issue.Namespace, issue.Name)
-	fmt.Fprintf(w, "  └─ Status: CrashLoopBackOff (%s)", causeLabel)
-	if issue.Restarts > 0 {
-		fmt.Fprintf(w, " | Restarts: %d", issue.Restarts)
-	}
-	fmt.Fprintf(w, " | Age: %s\n", formatDuration(issue.Age))
-	fmt.Fprintf(w, "  └─ %s\n", causeMessage)
-	if rep.FirstDetected != "" {
-		fmt.Fprintf(w, "  └─ First detected: %s ago\n", rep.FirstDetected)
-	}
-	if rep.ReopenCount > 0 {
-		fmt.Fprintf(w, "  └─ Reopened: %dx\n", rep.ReopenCount)
 	}
 	fmt.Fprintln(w)
 }
