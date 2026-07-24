@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/opscart/opscart-k8s-watcher/pkg/models"
 )
@@ -20,49 +19,6 @@ func issue(ns, name, severity, reason, message string, restarts int) enrichedIss
 			Message:   message,
 			Restarts:  restarts,
 		},
-	}
-}
-
-// A pod at CRITICAL (CrashLoopBackOff) whose same restart count also
-// shows up in the raw MEDIUM candidates (HighRestartCount) should only be
-// printed once, under CRITICAL.
-func TestDedupe_SuppressesHighRestartCountAlreadyCritical(t *testing.T) {
-	critical := []enrichedIssue{
-		issue("prod", "token-service-786498c5c-phg2g", "critical", "CrashLoopBackOff",
-			"Container app is crash looping: back-off restarting failed container", 6228),
-	}
-	medium := []enrichedIssue{
-		issue("prod", "token-service-786498c5c-phg2g", "medium", "HighRestartCount",
-			"Container app has restarted 6228 times", 6228),
-	}
-
-	got := dedupeMediumTier(medium, critical)
-	if len(got) != 0 {
-		t.Fatalf("expected MEDIUM HighRestartCount to be suppressed, got %+v", got)
-	}
-
-	var buf bytes.Buffer
-	all := append(append([]enrichedIssue{}, critical...), medium...)
-	printEmergencyIssuesEnriched(&buf, all)
-	out := buf.String()
-	if strings.Count(out, "token-service-786498c5c-phg2g") != 1 {
-		t.Errorf("expected pod name to appear exactly once, got:\n%s", out)
-	}
-	if strings.Contains(out, "MEDIUM PRIORITY") {
-		t.Errorf("expected no MEDIUM section since its only entry was suppressed, got:\n%s", out)
-	}
-}
-
-// A MEDIUM-only high-restart-count pod (no matching CRITICAL entry) must
-// keep its HighRestartCount line.
-func TestDedupe_KeepsHighRestartCountWithoutCriticalMatch(t *testing.T) {
-	medium := []enrichedIssue{
-		issue("prod", "worker-abc123", "medium", "HighRestartCount",
-			"Container app has restarted 15 times", 15),
-	}
-	got := dedupeMediumTier(medium, nil)
-	if len(got) != 1 {
-		t.Fatalf("expected HighRestartCount entry to survive, got %+v", got)
 	}
 }
 
@@ -269,99 +225,17 @@ func TestGroupIssues_HighRestartCountDifferentNamespaceNotGrouped(t *testing.T) 
 	}
 }
 
-// Fix 3: the SAME pod+container appearing as both CrashLoopBackOff and
-// OOMKilled at CRITICAL is one causal event, not two — merge into a
-// single entry. Matches the exact stream-processor case from the corp
-// cluster report.
-func TestMergeCrashLoopOOM_StreamProcessorCase(t *testing.T) {
-	age := 23 * 24 * time.Hour
-	crashLoop := enrichedIssue{
-		EmergencyIssue: models.EmergencyIssue{
-			Severity: "critical", Resource: "pod",
-			Namespace: "data-pipeline", Name: "stream-processor-66c474d5fd-9zpwq",
-			Reason:   "CrashLoopBackOff",
-			Message:  "Container stress is crash looping: back-off restarting failed container",
-			Age:      age,
-			Restarts: 6301,
-		},
-		FirstDetected: "14h",
-	}
-	oom := enrichedIssue{
-		EmergencyIssue: models.EmergencyIssue{
-			Severity: "critical", Resource: "pod",
-			Namespace: "data-pipeline", Name: "stream-processor-66c474d5fd-9zpwq",
-			Reason:   "OOMKilled",
-			Message:  "Container stress killed due to out of memory",
-			Age:      age,
-			Restarts: 6301,
-		},
-	}
-
-	items := mergeCrashLoopOOM([]enrichedIssue{crashLoop, oom})
-	if len(items) != 1 {
-		t.Fatalf("expected 1 merged critical item, got %d: %+v", len(items), items)
-	}
-	if items[0].oomCause == nil {
-		t.Fatalf("expected item to be merged (oomCause set), got %+v", items[0])
-	}
-
-	var buf bytes.Buffer
-	printCriticalItem(&buf, items[0])
-	out := buf.String()
-
-	if strings.Count(out, "stream-processor-66c474d5fd-9zpwq") != 1 {
-		t.Errorf("expected exactly 1 printed block for the pod (not 2 separate CRITICAL entries), got:\n%s", out)
-	}
-	if !strings.Contains(out, "data-pipeline/stream-processor-66c474d5fd-9zpwq") {
-		t.Errorf("missing pod identity, got:\n%s", out)
-	}
-	if !strings.Contains(out, "Status: CrashLoopBackOff (OOMKilled) | Restarts: 6301 | Age: 23d") {
-		t.Errorf("missing combined status line, got:\n%s", out)
-	}
-	if !strings.Contains(out, "Container stress is being OOM-killed, causing the crash loop — check resources.limits.memory") {
-		t.Errorf("missing causal message, got:\n%s", out)
-	}
-	if !strings.Contains(out, "First detected: 14h ago") {
-		t.Errorf("missing enrichment line, got:\n%s", out)
-	}
-}
-
-// A pod with ONLY CrashLoopBackOff (no OOMKilled) must be left exactly
-// as before: a single, unmerged, normal entry.
-func TestMergeCrashLoopOOM_OnlyCrashLoopUnaffected(t *testing.T) {
-	critical := []enrichedIssue{
-		issue("prod", "solo-crash-pod", "critical", "CrashLoopBackOff",
-			"Container app is crash looping: back-off restarting failed container", 12),
-	}
-
-	items := mergeCrashLoopOOM(critical)
-	if len(items) != 1 || items[0].oomCause != nil {
-		t.Fatalf("expected unmerged single entry, got %+v", items)
-	}
-
-	var buf bytes.Buffer
-	printCriticalItem(&buf, items[0])
-	out := buf.String()
-	if !strings.Contains(out, "Status: CrashLoopBackOff | Restarts: 12") {
-		t.Errorf("expected unchanged status line, got:\n%s", out)
-	}
-	if strings.Contains(out, "(OOMKilled)") {
-		t.Errorf("should not show merged status when there's no OOMKilled pair, got:\n%s", out)
-	}
-}
-
-// Fix 2: the severity header must count PRINTED entries (a merged pair
-// or an N-pod group each count as 1), not underlying pod counts.
+// The severity header must count PRINTED entries (an N-pod group counts
+// as 1), not underlying pod counts. A same-pod CRITICAL+HIGH pairing is
+// no longer possible by the time issues reach the printer (classifyIssues
+// already collapsed it upstream — see emergency_classify_test.go), so
+// this exercises grouping across DIFFERENT pods only.
 func TestHeaderCount_MatchesPrintedEntries(t *testing.T) {
 	var all []enrichedIssue
 
-	// CRITICAL: a merged pair (2 raw issues -> 1 printed entry) + 1
-	// standalone entry -> 2 printed CRITICAL entries.
 	all = append(all,
 		issue("data-pipeline", "stream-processor-66c474d5fd-9zpwq", "critical", "CrashLoopBackOff",
-			"Container stress is crash looping: back-off restarting failed container", 6301),
-		issue("data-pipeline", "stream-processor-66c474d5fd-9zpwq", "critical", "OOMKilled",
-			"Container stress killed due to out of memory", 6301),
+			"Container stress is being OOM-killed, causing the crash loop — check resources.limits.memory", 6301),
 		issue("prod", "solo-crash-pod", "critical", "CrashLoopBackOff",
 			"Container app is crash looping: back-off restarting failed container", 12),
 	)
@@ -380,89 +254,94 @@ func TestHeaderCount_MatchesPrintedEntries(t *testing.T) {
 	out := buf.String()
 
 	if !strings.Contains(out, "🔴 CRITICAL: 2") {
-		t.Errorf("expected CRITICAL header to count printed entries (2: merged pair + solo), got:\n%s", out)
+		t.Errorf("expected CRITICAL header to count printed entries (2), got:\n%s", out)
 	}
 	if !strings.Contains(out, "🟡 HIGH: 2") {
 		t.Errorf("expected HIGH header to count printed entries (2: group of 3 + solo), got:\n%s", out)
 	}
 	// The header must never regress to reporting the underlying pod
-	// count (5 CRITICAL pods across 2 entries, 4 HIGH pods across 2
-	// entries).
-	if strings.Contains(out, "🔴 CRITICAL: 3") || strings.Contains(out, "🟡 HIGH: 4") {
+	// count (4 HIGH pods across 2 entries).
+	if strings.Contains(out, "🟡 HIGH: 4") {
 		t.Errorf("header appears to count underlying pods instead of printed entries, got:\n%s", out)
 	}
 }
 
-// Reproduces the representative mixed-workload scenario used by this test:
-// dozens of raw candidate entries describing a handful of distinct
-// workloads, once CRITICAL merge + HIGH/MEDIUM dedup + fingerprint-based
-// grouping are applied. Specifically covers all three bugs fixed this
-// task: the 3 image-pull pods now group despite differing per-pod text,
-// all 3 node-exporter pods group despite differing restart counts, and
-// the stream-processor CrashLoopBackOff+OOMKilled pair merges into one
-// CRITICAL entry.
+// Reproduces the representative mixed-workload scenario used by this test,
+// run through the real pipeline order (classifyIssues first, exactly as
+// runEmergencyScan does): dozens of raw candidate entries describing a
+// handful of distinct workloads collapse via classification (same-pod)
+// and fingerprint-based grouping (cross-pod). Covers: the
+// stream-processor CrashLoopBackOff+OOMKilled pair classifying to one
+// CRITICAL entry, the 3 image-pull pods grouping despite differing
+// per-pod text, and all 3 node-exporter pods grouping despite differing
+// restart counts.
 func TestPrintEmergencyIssuesEnriched_MixedWorkloadShape(t *testing.T) {
-	var all []enrichedIssue
+	var raw []models.EmergencyIssue
 
-	// CRITICAL: stream-processor's CrashLoopBackOff+OOMKilled pair (merges
-	// to 1), token-service CrashLoopBackOff (+ a duplicate MEDIUM
-	// HighRestartCount candidate, suppressed by Fix 1 of the prior task),
-	// and 3 more distinct, unrelated CrashLoopBackOff pods.
-	age := 23 * 24 * time.Hour
-	all = append(all,
-		issue("data-pipeline", "stream-processor-66c474d5fd-9zpwq", "critical", "CrashLoopBackOff",
+	// CRITICAL: stream-processor's CrashLoopBackOff+OOMKilled pair
+	// (classifies to 1), token-service CrashLoopBackOff (+ a coexisting
+	// raw MEDIUM HighRestartCount candidate, collapsed away by
+	// classifyIssues), and 3 more distinct, unrelated CrashLoopBackOff
+	// pods.
+	raw = append(raw,
+		rawIssue("data-pipeline", "stream-processor-66c474d5fd-9zpwq", "critical", "CrashLoopBackOff",
 			"Container stress is crash looping: back-off restarting failed container", 6301),
-		issue("data-pipeline", "stream-processor-66c474d5fd-9zpwq", "critical", "OOMKilled",
+		rawIssue("data-pipeline", "stream-processor-66c474d5fd-9zpwq", "critical", "OOMKilled",
 			"Container stress killed due to out of memory", 6301),
-		issue("prod", "token-service-786498c5c-phg2g", "critical", "CrashLoopBackOff",
+		rawIssue("prod", "token-service-786498c5c-phg2g", "critical", "CrashLoopBackOff",
 			"Container app is crash looping: back-off restarting failed container", 6228),
-		issue("prod", "token-service-786498c5c-phg2g", "medium", "HighRestartCount",
+		rawIssue("prod", "token-service-786498c5c-phg2g", "medium", "HighRestartCount",
 			"Container app has restarted 6228 times", 6228),
 	)
-	all[0].Age, all[1].Age = age, age
 	for _, name := range []string{"payments-worker-1", "payments-worker-2", "payments-worker-3"} {
-		all = append(all, issue("prod", name, "critical", "CrashLoopBackOff",
+		raw = append(raw, rawIssue("prod", name, "critical", "CrashLoopBackOff",
 			"Container app is crash looping: back-off restarting failed container", 50))
 	}
 
-	// HIGH: batch-importer's Pending+ImagePullBackOff duplicate (Fix 2 of
-	// the prior task), plus 2 more distinct pods hitting the SAME registry
-	// host with DIFFERENT per-pod message text (Fix 1 of this task), and a
-	// standalone Pending pod unrelated to image pulls.
-	all = append(all,
-		issue("data-pipeline", "batch-importer-5849fd86bb-q9r8m", "high", "Pending",
+	// HIGH: batch-importer's Pending+ImagePullBackOff duplicate, plus 2
+	// more distinct pods hitting the SAME registry host with DIFFERENT
+	// per-pod message text, and a standalone Pending pod unrelated to
+	// image pulls.
+	raw = append(raw,
+		rawIssue("data-pipeline", "batch-importer-5849fd86bb-q9r8m", "high", "Pending",
 			"Pod pending for extended period", 0),
-		issue("data-pipeline", "batch-importer-5849fd86bb-q9r8m", "high", "ImagePullBackOff",
+		rawIssue("data-pipeline", "batch-importer-5849fd86bb-q9r8m", "high", "ImagePullBackOff",
 			"Cannot pull image for container app: dial tcp: lookup company-registry.internal on 192.168.65.254:53: no such host", 0),
-		issue("inventory", "catalog-indexer-64dcbcb975-qqdmd", "high", "ImagePullBackOff",
+		rawIssue("inventory", "catalog-indexer-64dcbcb975-qqdmd", "high", "ImagePullBackOff",
 			`Cannot pull image for container worker: Back-off pulling image "company-registry.internal/catalog-indexer:v2.4.1"`, 0),
-		issue("notifications", "email-dispatcher-574556c86c-j44l6", "high", "ImagePullBackOff",
+		rawIssue("notifications", "email-dispatcher-574556c86c-j44l6", "high", "ImagePullBackOff",
 			`Cannot pull image for container app: Back-off pulling image "company-registry.internal/email-dispatcher@sha256:abc123def456"`, 0),
-		issue("prod", "resource-hog-xyz", "high", "Pending",
+		rawIssue("prod", "resource-hog-xyz", "high", "Pending",
 			"Pod pending for extended period", 0),
 	)
 
-	// MEDIUM: 3 node-exporter pods with different restart counts (Fix 1 of
-	// this task), plus 1 unrelated standalone HighRestartCount pod.
-	all = append(all,
-		issue("monitoring", "node-exporter-aaa", "medium", "HighRestartCount",
+	// MEDIUM: 3 node-exporter pods with different restart counts, plus 1
+	// unrelated standalone HighRestartCount pod.
+	raw = append(raw,
+		rawIssue("monitoring", "node-exporter-aaa", "medium", "HighRestartCount",
 			"Container node-exporter has restarted 26 times", 26),
-		issue("monitoring", "node-exporter-bbb", "medium", "HighRestartCount",
+		rawIssue("monitoring", "node-exporter-bbb", "medium", "HighRestartCount",
 			"Container node-exporter has restarted 26 times", 26),
-		issue("monitoring", "node-exporter-ccc", "medium", "HighRestartCount",
+		rawIssue("monitoring", "node-exporter-ccc", "medium", "HighRestartCount",
 			"Container node-exporter has restarted 88 times", 88),
-		issue("staging", "noisy-solo", "medium", "HighRestartCount",
+		rawIssue("staging", "noisy-solo", "medium", "HighRestartCount",
 			"Container sidecar has restarted 40 times", 40),
 	)
+
+	classified := classifyIssues(raw, nil)
+	var all []enrichedIssue
+	for _, iss := range classified {
+		all = append(all, enrichedIssue{EmergencyIssue: iss})
+	}
 
 	var buf bytes.Buffer
 	printEmergencyIssuesEnriched(&buf, all)
 	out := buf.String()
 
 	// 16 raw issues in, but the printed entries should be: CRITICAL 5
-	// (merged pair + token-service + 3 payments-workers), HIGH 2 (grouped
-	// image-pull trio + solo Pending), MEDIUM 2 (grouped node-exporter
-	// trio + solo). The header must match exactly.
+	// (stream-processor merge + token-service + 3 payments-workers), HIGH
+	// 2 (grouped image-pull trio + solo Pending), MEDIUM 2 (grouped
+	// node-exporter trio + solo). The header must match exactly.
 	if !strings.Contains(out, "🔴 CRITICAL: 5    🟡 HIGH: 2    🟠 MEDIUM: 2") {
 		t.Errorf("expected header CRITICAL:5 HIGH:2 MEDIUM:2, got:\n%s", out)
 	}
@@ -477,7 +356,7 @@ func TestPrintEmergencyIssuesEnriched_MixedWorkloadShape(t *testing.T) {
 		t.Errorf("expected all 3 node-exporter pods to group despite differing restart counts, got:\n%s", out)
 	}
 	if strings.Count(out, "token-service-786498c5c-phg2g") != 1 {
-		t.Errorf("expected token-service's duplicate MEDIUM entry to stay suppressed, got:\n%s", out)
+		t.Errorf("expected token-service's duplicate MEDIUM entry to stay collapsed away, got:\n%s", out)
 	}
 
 	lineCount := len(strings.Split(strings.TrimRight(out, "\n"), "\n"))
