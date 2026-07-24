@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"fmt"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -391,3 +392,272 @@ func TestPersistFindings_FakeStoreErrorsDoNotCrash(t *testing.T) {
 type errString string
 
 func (e errString) Error() string { return string(e) }
+
+// TestApplyCriticalDebounce_KeepsCriticalWhenActiveIncidentExists is the
+// core fixture: a pod with an existing active CRITICAL incident in the
+// store, whose live scan this run shows as milder (Running/high-restart),
+// must still display CRITICAL, not the live MEDIUM classification.
+// fakeStore mirrors its single fake record across every fingerprint
+// queried (see fakeStore.BatchGetIncidentHistory's doc comment), so it
+// can't distinguish which of criticalDebounceReasons is "really" active —
+// applyCriticalDebounce takes the first match in priority order, which is
+// "CrashLoopBackOff (OOMKilled)".
+func TestApplyCriticalDebounce_KeepsCriticalWhenActiveIncidentExists(t *testing.T) {
+	live := []enrichedIssue{
+		issue("prod", "payment-processor-6c9f8b6c5-x7z2m9", "medium", "HighRestartCount",
+			"Container app has restarted 6412 times", 6412),
+	}
+	fs := &fakeStore{
+		history: &store.IncidentRecord{Status: "active"},
+	}
+
+	got := applyCriticalDebounce(fs, "prod-cluster", live)
+
+	if len(got) != 1 {
+		t.Fatalf("expected 1 issue, got %d", len(got))
+	}
+	if got[0].Severity != "critical" {
+		t.Errorf("Severity = %q, want critical", got[0].Severity)
+	}
+	if !isCriticalDebounceReason(got[0].Reason) {
+		t.Errorf("Reason = %q, want one of criticalDebounceReasons", got[0].Reason)
+	}
+	if got[0].Restarts != 6412 {
+		t.Errorf("Restarts = %d, want unchanged 6412", got[0].Restarts)
+	}
+}
+
+// TestApplyCriticalDebounce_NewIssueStaysAtLiveSeverity is the "genuinely
+// new issue" fixture: no existing incident in the store means a
+// MEDIUM-level live finding is left exactly as classified, not inflated
+// to CRITICAL just because the debounce check ran.
+func TestApplyCriticalDebounce_NewIssueStaysAtLiveSeverity(t *testing.T) {
+	live := []enrichedIssue{
+		issue("prod", "worker-6c9f8b6c5-x7z2m9", "medium", "HighRestartCount",
+			"Container app has restarted 12 times", 12),
+	}
+	fs := &fakeStore{} // no history for any fingerprint
+
+	got := applyCriticalDebounce(fs, "prod-cluster", live)
+
+	if got[0].Severity != "medium" || got[0].Reason != "HighRestartCount" {
+		t.Errorf("brand-new issue was altered: %+v", got[0])
+	}
+}
+
+// TestApplyCriticalDebounce_ResolvedIncidentNotResurrected is the
+// "existing RESOLVED incident, live scan shows it healthy" fixture: a
+// resolved incident must never resurrect a milder live finding into
+// CRITICAL.
+func TestApplyCriticalDebounce_ResolvedIncidentNotResurrected(t *testing.T) {
+	live := []enrichedIssue{
+		issue("prod", "worker-6c9f8b6c5-x7z2m9", "medium", "HighRestartCount",
+			"Container app has restarted 11 times", 11),
+	}
+	fs := &fakeStore{
+		history: &store.IncidentRecord{Status: "resolved"},
+	}
+
+	got := applyCriticalDebounce(fs, "prod-cluster", live)
+
+	if got[0].Severity != "medium" || got[0].Reason != "HighRestartCount" {
+		t.Errorf("resolved incident was incorrectly resurrected: %+v", got[0])
+	}
+}
+
+// TestApplyCriticalDebounce_NullStore_IsExactNoOp is the "--stateless
+// equivalent" fixture: on NullStore, output must be byte-identical to
+// running with applyCriticalDebounce's code path entirely absent, proving
+// the no-explicit-stateless-branch design goal actually degrades
+// correctly rather than by coincidence.
+func TestApplyCriticalDebounce_NullStore_IsExactNoOp(t *testing.T) {
+	live := []enrichedIssue{
+		issue("prod", "worker-6c9f8b6c5-x7z2m9", "medium", "HighRestartCount",
+			"Container app has restarted 11 times", 11),
+	}
+
+	withDebounce := applyCriticalDebounce(&store.NullStore{}, "prod-cluster", append([]enrichedIssue{}, live...))
+
+	var got, want bytes.Buffer
+	printEmergencyIssuesEnriched(&got, withDebounce)
+	printEmergencyIssuesEnriched(&want, live)
+
+	if got.String() != want.String() {
+		t.Errorf("NullStore output diverges from debounce-absent output:\ngot:\n%s\nwant:\n%s", got.String(), want.String())
+	}
+}
+
+// TestApplyCriticalDebounce_RealScenario_PaymentProcessor reproduces the
+// exact session scenario that motivated this task: payment-processor was
+// CRITICAL (CrashLoopBackOff) in run 1, and run 2 — five minutes later,
+// landing during the pod's brief post-backoff Running window — saw it as
+// milder. Run 2's display must still report it CRITICAL, using run 1's
+// persisted state.
+func TestApplyCriticalDebounce_RealScenario_PaymentProcessor(t *testing.T) {
+	// Run 1: persisted to the store as an active CRITICAL incident.
+	run1 := []models.EmergencyIssue{
+		{Namespace: "prod", Name: "payment-processor-6c9f8b6c5-x7z2m9", Reason: "CrashLoopBackOff",
+			Severity: "critical", Message: "Container app is crash looping: back-off restarting failed container", Restarts: 8},
+	}
+	fs := &fakeStore{
+		history: &store.IncidentRecord{Status: "active"},
+	}
+	persistFindings(fs, "corp-cluster", "scan-1", run1)
+
+	// Run 2: live scan lands mid-backoff and classifies it milder.
+	run2 := []enrichedIssue{
+		issue("prod", "payment-processor-6c9f8b6c5-x7z2m9", "medium", "HighRestartCount",
+			"Container app has restarted 9 times", 9),
+	}
+
+	got := applyCriticalDebounce(fs, "corp-cluster", run2)
+
+	if got[0].Severity != "critical" {
+		t.Errorf("Severity = %q, want critical (run 1's persisted state should have been consulted)", got[0].Severity)
+	}
+	if !isCriticalDebounceReason(got[0].Reason) {
+		t.Errorf("Reason = %q, want one of criticalDebounceReasons", got[0].Reason)
+	}
+
+	var buf bytes.Buffer
+	printEmergencyIssuesEnriched(&buf, got)
+	if !strings.Contains(buf.String(), "CrashLoopBackOff") {
+		t.Errorf("printed output should still show CrashLoopBackOff, got:\n%s", buf.String())
+	}
+	if strings.Contains(buf.String(), "MEDIUM PRIORITY") {
+		t.Errorf("payment-processor should not be counted under MEDIUM this run, got:\n%s", buf.String())
+	}
+	if !strings.Contains(buf.String(), "🟠 MEDIUM: 0") {
+		t.Errorf("expected MEDIUM count of 0 in header, got:\n%s", buf.String())
+	}
+}
+
+// countPodBlocks counts how many times a pod identity line ("namespace/
+// pod-name") appears in printed output — the number of separate entry
+// blocks for that pod, regardless of tier or merge shape.
+func countPodBlocks(output, namespace, name string) int {
+	return strings.Count(output, namespace+"/"+name)
+}
+
+// TestFullPipeline_NoDuplicateWhenPodAlreadyLiveCritical is the regression
+// fixture for the reported bug, run through the real pipeline order
+// (classifyIssues, then enrich/debounce, then print): cluster.go's
+// analyzePodForIssues runs independent per-container checks (not an
+// if/else chain), so a pod that's genuinely CRITICAL this run (live
+// OOMKilled, LastTerminationState persisting through a brief Running
+// window) commonly ALSO produces a raw MEDIUM HighRestartCount signal for
+// the same container in the same scan. classifyIssues collapses that pair
+// to one issue before debounce or printing ever sees it, so — unlike the
+// old print-time dedup this replaces — there is no second, synthetic
+// entry to guard against downstream. History shows an active
+// CrashLoopBackOff incident for this pod (from an earlier scan), which
+// debounce is free to ignore since the live signal is already CRITICAL.
+func TestFullPipeline_NoDuplicateWhenPodAlreadyLiveCritical(t *testing.T) {
+	raw := []models.EmergencyIssue{
+		// Raw order mirrors cluster.go's fixed per-container append
+		// order: OOMKilled is appended before HighRestartCount.
+		rawIssue("data-pipeline", "stream-processor-66c474d5fd-9zpwq", "critical", "OOMKilled",
+			"Container stress killed due to out of memory", 6301),
+		rawIssue("data-pipeline", "stream-processor-66c474d5fd-9zpwq", "medium", "HighRestartCount",
+			"Container stress has restarted 6301 times", 6301),
+	}
+	fs := &fakeStore{
+		history: &store.IncidentRecord{Status: "active"},
+	}
+
+	classified := classifyIssues(raw, nil)
+	got := applyCriticalDebounce(fs, "corp-cluster", enrichIssues(fs, "corp-cluster", classified))
+
+	var buf bytes.Buffer
+	printEmergencyIssuesEnriched(&buf, got)
+	out := buf.String()
+
+	if n := countPodBlocks(out, "data-pipeline", "stream-processor-66c474d5fd-9zpwq"); n != 1 {
+		t.Errorf("expected exactly 1 printed block for stream-processor, got %d:\n%s", n, out)
+	}
+	if !strings.Contains(out, "🔴 CRITICAL: 1") {
+		t.Errorf("expected CRITICAL count of 1, got:\n%s", out)
+	}
+	if strings.Contains(out, "container ") || strings.Contains(out, "Container container") {
+		t.Errorf("placeholder container name leaked into output, got:\n%s", out)
+	}
+	if !strings.Contains(out, "Container stress killed due to out of memory") {
+		t.Errorf("expected the real, live OOMKilled message to survive, got:\n%s", out)
+	}
+}
+
+// TestApplyCriticalDebounce_NoIncidentNoLiveIssue_AddsNothing is the
+// "genuinely healthy pod" fixture: with no existing incident and nothing
+// found live, applyCriticalDebounce must not manufacture an entry.
+func TestApplyCriticalDebounce_NoIncidentNoLiveIssue_AddsNothing(t *testing.T) {
+	fs := &fakeStore{} // no history for any fingerprint
+
+	got := applyCriticalDebounce(fs, "corp-cluster", nil)
+	if len(got) != 0 {
+		t.Errorf("expected no issues added for a pod with no live entry and no history, got %+v", got)
+	}
+}
+
+// TestFullPipeline_EightPodsNotSixteen reproduces the full session
+// scenario through the real pipeline order (classifyIssues first, then
+// enrich/debounce, then print): 8 pods, each with an existing active
+// CRITICAL incident, in a mix of raw states (still genuinely CRITICAL,
+// CRITICAL+coexisting MEDIUM raw signals for the same container, and
+// MEDIUM-only caught mid-backoff). classifyIssues collapses each pod to
+// one issue before debounce ever runs. The final CRITICAL count must be
+// 8, not 16 — every pod must appear exactly once.
+func TestFullPipeline_EightPodsNotSixteen(t *testing.T) {
+	var raw []models.EmergencyIssue
+	raw = append(raw,
+		// pod1: still genuinely CrashLoopBackOff this run.
+		rawIssue("prod", "pod1-abc", "critical", "CrashLoopBackOff",
+			"Container app is crash looping: back-off restarting failed container", 100),
+		// pod2: live OOMKilled + coexisting raw MEDIUM HighRestartCount for the same container.
+		rawIssue("prod", "pod2-abc", "critical", "OOMKilled",
+			"Container app killed due to out of memory", 200),
+		rawIssue("prod", "pod2-abc", "medium", "HighRestartCount",
+			"Container app has restarted 200 times", 200),
+		// pod3: caught mid-backoff, MEDIUM-only this run.
+		rawIssue("prod", "pod3-abc", "medium", "HighRestartCount",
+			"Container app has restarted 300 times", 300),
+		// pod4: both CrashLoopBackOff and OOMKilled live (real merge case).
+		rawIssue("prod", "pod4-abc", "critical", "CrashLoopBackOff",
+			"Container app is crash looping: back-off restarting failed container", 400),
+		rawIssue("prod", "pod4-abc", "critical", "OOMKilled",
+			"Container app killed due to out of memory", 400),
+		// pod5: caught mid-backoff, MEDIUM-only this run.
+		rawIssue("prod", "pod5-abc", "medium", "HighRestartCount",
+			"Container app has restarted 500 times", 500),
+		// pod6: live CrashLoopBackOff + coexisting raw MEDIUM for the same container.
+		rawIssue("prod", "pod6-abc", "critical", "CrashLoopBackOff",
+			"Container app is crash looping: back-off restarting failed container", 600),
+		rawIssue("prod", "pod6-abc", "medium", "HighRestartCount",
+			"Container app has restarted 600 times", 600),
+		// pod7: live OOMKilled only, no crash loop.
+		rawIssue("prod", "pod7-abc", "critical", "OOMKilled",
+			"Container app killed due to out of memory", 700),
+		// pod8: caught mid-backoff, MEDIUM-only this run.
+		rawIssue("prod", "pod8-abc", "medium", "HighRestartCount",
+			"Container app has restarted 800 times", 800),
+	)
+	fs := &fakeStore{
+		history: &store.IncidentRecord{Status: "active"},
+	}
+
+	classified := classifyIssues(raw, nil)
+	got := applyCriticalDebounce(fs, "corp-cluster", enrichIssues(fs, "corp-cluster", classified))
+
+	var buf bytes.Buffer
+	printEmergencyIssuesEnriched(&buf, got)
+	out := buf.String()
+
+	if !strings.Contains(out, "🔴 CRITICAL: 8") {
+		t.Errorf("expected CRITICAL count of 8, got:\n%s", out)
+	}
+	for i := 1; i <= 8; i++ {
+		name := fmt.Sprintf("pod%d-abc", i)
+		if n := countPodBlocks(out, "prod", name); n != 1 {
+			t.Errorf("expected exactly 1 printed block for %s, got %d:\n%s", name, n, out)
+		}
+	}
+}
