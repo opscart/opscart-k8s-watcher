@@ -967,9 +967,9 @@ func buildOverviewVerdict(topIssues []topIssue, resolvedSinceCursor int, cursorS
 	if total < 1 {
 		total = 1
 	}
-	workloadWord := "workload needs"
+	workloadWord := "workload has an active incident"
 	if total > 1 {
-		workloadWord = "workloads need"
+		workloadWord = "workloads have active incidents"
 	}
 
 	issueLabel := humanizeIssueType(worst.IssueType)
@@ -987,15 +987,15 @@ func buildOverviewVerdict(topIssues []topIssue, resolvedSinceCursor int, cursorS
 	switch {
 	case worst.TrendVal == "accelerating":
 		line1 = fmt.Sprintf(
-			"%d %s attention. %s has been %s, first detected %s, and its restart rate is accelerating.",
+			"%d %s. %s has been %s, first detected %s, and its restart rate is accelerating.",
 			total, workloadWord, resourceLabel, issueLabel, firstDetected)
 	case worst.ReopenCountVal > 0:
 		line1 = fmt.Sprintf(
-			"%d %s attention. %s reoccurred after a recovery — reopened %d time(s).",
+			"%d %s. %s reoccurred after a recovery — reopened %d time(s).",
 			total, workloadWord, resourceLabel, worst.ReopenCountVal)
 	default:
 		line1 = fmt.Sprintf(
-			"%d %s attention. %s has been %s, first detected %s.",
+			"%d %s. %s has been %s, first detected %s.",
 			total, workloadWord, resourceLabel, issueLabel, firstDetected)
 	}
 

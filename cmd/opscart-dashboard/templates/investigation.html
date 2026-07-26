@@ -138,7 +138,7 @@
     <div class="inv-chip danger">
       <div>
         <div class="inv-badge">CRITICAL</div>
-        {{if .StateReason}}<div class="inv-state-reason">{{.StateReason}}</div>{{end}}
+        {{if .StateReason}}<div class="inv-state-reason">{{.StateReason}}{{if eq .IssueType "probe_failure"}} (ProbeFailure){{end}}</div>{{end}}
       </div>
     </div>
     <div class="inv-chip">
@@ -233,7 +233,7 @@
       </div>
       <div class="inv-evidence-chip">
         <div class="inv-evidence-label">State</div>
-        <div class="inv-evidence-value">{{if .StateReason}}{{.StateReason}}{{else}}Unknown{{end}}</div>
+        <div class="inv-evidence-value">{{if .StateReason}}{{.StateReason}}{{if eq .IssueType "probe_failure"}} (ProbeFailure){{end}}{{else}}Unknown{{end}}</div>
       </div>
       <div class="inv-evidence-chip">
         <div class="inv-evidence-label">Age</div>
