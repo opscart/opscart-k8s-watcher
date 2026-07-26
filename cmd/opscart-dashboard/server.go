@@ -792,6 +792,12 @@ func buildOverviewData(scan *clusterScan, activeCtx string, clusterList []string
 		incidentScoreDeltaText = formatIntDelta(trend.IncidentScore.Current, trend.IncidentScore.Previous, trend.HasHistory)
 		securityScoreDeltaText = formatIntDelta(trend.SecurityScore.Current, trend.SecurityScore.Previous, trend.HasHistory)
 	}
+	if trend == nil {
+		log.Printf("overview: trend is nil")
+	} else {
+		log.Printf("overview: hasHistory=%v incidentScore current=%d previous=%d text=%q",
+			trend.HasHistory, trend.IncidentScore.Current, trend.IncidentScore.Previous, incidentScoreDeltaText)
+	}
 
 	q := ""
 	if activeCtx != "" {
@@ -1033,7 +1039,6 @@ func humanizeIssueType(issueType string) string {
 	}
 }
 
-// changeLine is one formatted row of the What's Changed Since Last Scan /
 // Recent Events feeds: a short human phrase plus the EventReason driving
 // its colored dot (reusing the exact Detected/Resolved/Reopened/
 // RestartMilestone/SeverityChanged categories and casing the CSS already
@@ -1078,10 +1083,39 @@ func formatChangeLine(e store.RecentEvent) changeLine {
 
 // formatChangeLines maps formatChangeLine over a whole feed.
 func formatChangeLines(events []store.RecentEvent) []changeLine {
-	out := make([]changeLine, len(events))
-	for i, e := range events {
-		out[i] = formatChangeLine(e)
+	out := make([]changeLine, 0, len(events))
+
+	// Collapse consecutive RestartMilestone events for the same resource
+	// into a single row. A pod crossing several thresholds in a row
+	// (10 → 50 → 100 …) is one story, not four — without this, a single
+	// noisy workload crowds every other event out of the feed.
+	var lastResource, lastReason string
+	milestoneRun := 0
+
+	flush := func() {
+		if milestoneRun > 1 {
+			// Rewrite the most recent milestone row to note the run.
+			last := &out[len(out)-1]
+			last.Phrase = fmt.Sprintf("%s (%d restart milestones)", last.Phrase, milestoneRun)
+		}
+		milestoneRun = 0
 	}
+
+	for _, e := range events {
+		if e.EventReason == "RestartMilestone" && e.Resource == lastResource && lastReason == "RestartMilestone" {
+			milestoneRun++
+			continue // skip — folded into the row already emitted
+		}
+		flush()
+
+		out = append(out, formatChangeLine(e))
+		lastResource, lastReason = e.Resource, e.EventReason
+		if e.EventReason == "RestartMilestone" {
+			milestoneRun = 1
+		}
+	}
+	flush()
+
 	return out
 }
 
@@ -1546,7 +1580,8 @@ var getOverviewTmpl = sync.OnceValue(func() *template.Template {
 	return template.Must(
 		template.New("overview.html").
 			Funcs(template.FuncMap{
-				"money": formatMoney,
+				"money":     formatMoney,
+				"hasPrefix": strings.HasPrefix,
 				"sparkHeight": func(score int) int {
 					if score <= 0 {
 						return 4

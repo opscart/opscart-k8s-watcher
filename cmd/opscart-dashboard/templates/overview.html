@@ -66,7 +66,7 @@
 .mem-cell{background:rgba(0,0,0,0.2);border:1px solid var(--border);border-radius:var(--radius-sm);padding:0.85rem;text-align:center}
 .mem-num{font-size:1.5rem;font-weight:800;line-height:1;margin-bottom:0.25rem;font-variant-numeric:tabular-nums}
 .mem-lbl{font-size:0.66rem;text-transform:uppercase;letter-spacing:0.5px;color:var(--text-muted)}
-.mem-line{font-size:0.8rem;color:var(--text-secondary);padding-top:0.6rem;border-top:1px solid var(--border);margin-top:0.2rem}
+.mem-line{font-size:0.9rem;color:var(--text);padding-top:0.7rem;border-top:1px solid var(--border);margin-top:0.2rem}
 .mem-line strong{color:var(--text)}
 .mem-line+.mem-line{border-top:none;padding-top:0.3rem;margin-top:0}
 
@@ -138,7 +138,9 @@
 .bottom-metric{min-width:110px}
 .bottom-lbl{font-size:0.66rem;text-transform:uppercase;letter-spacing:0.5px;color:var(--text-muted);margin-bottom:0.2rem}
 .bottom-val{font-size:1.15rem;font-weight:700;font-variant-numeric:tabular-nums;color:var(--text-secondary)}
-.bottom-delta{font-size:0.7rem;color:var(--text-muted);margin-top:0.1rem}
+.bottom-delta{font-size:0.7rem;margin-top:0.1rem;color:var(--text-muted)}
+.bottom-delta.good{color:#4ade80}
+.bottom-delta.bad{color:#f87171}
 .bottom-actions{margin-left:auto;display:flex;gap:0.75rem;flex-wrap:wrap}
 .bottom-btn{border:1px solid var(--border);color:var(--text-secondary);font-size:0.8rem;font-weight:600;padding:0.5rem 1.1rem;border-radius:var(--radius-sm);text-decoration:none;transition:all 0.15s;white-space:nowrap}
 .bottom-btn:hover{background:var(--surface-hover);border-color:var(--primary);color:var(--text)}
@@ -387,17 +389,17 @@
   <div class="bottom-metric bs-item">
     <div class="bottom-lbl l">Incident Score</div>
     <div class="bottom-val n">{{.IncidentScore}}/100</div>
-    {{if .IncidentScoreDeltaText}}<div class="bottom-delta">{{.IncidentScoreDeltaText}} from last scan</div>{{end}}
+    {{if .IncidentScoreDeltaText}}<div class="bottom-delta {{if hasPrefix .IncidentScoreDeltaText "+"}}bad{{else}}good{{end}}">{{.IncidentScoreDeltaText}} from last scan</div>{{end}}
   </div>
   <div class="bottom-metric bs-item">
     <div class="bottom-lbl l">Security Score</div>
     <div class="bottom-val n">{{.SecurityScore}}/100</div>
-    {{if .SecurityScoreDeltaText}}<div class="bottom-delta">{{.SecurityScoreDeltaText}} from last scan</div>{{end}}
+    {{if .SecurityScoreDeltaText}}<div class="bottom-delta {{if hasPrefix .SecurityScoreDeltaText "+"}}good{{else}}bad{{end}}">{{.SecurityScoreDeltaText}} from last scan</div>{{end}}
   </div>
   <div class="bottom-metric bs-item">
     <div class="bottom-lbl l">Monthly Cost</div>
     <div class="bottom-val n">${{money .MonthlyCost}}</div>
-    {{if .CostDeltaText}}<div class="bottom-delta">{{.CostDeltaText}} from last scan</div>{{end}}
+    {{if .CostDeltaText}}<div class="bottom-delta {{if hasPrefix .CostDeltaText "+"}}good{{else}}bad{{end}}">{{.CostDeltaText}} from last scan</div>{{end}}
   </div>
   <div class="bottom-metric bs-item">
     <div class="bottom-lbl l">Reclaimable Waste</div>

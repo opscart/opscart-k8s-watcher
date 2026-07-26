@@ -123,7 +123,6 @@ For team deployments, authenticate at the ingress layer instead with [oauth2-pro
 
 The entry point isn't a KPI grid — it's a written assessment. **Situation Briefing** states what's actually wrong in plain sentences ("fraud-detection has been crash-looping for 7 days and its restart rate is accelerating"), not a wall of gauges. Below it:
 - **Operational Memory scoreboard** — total incidents ever seen, resolved, reopened, currently accelerating, longest-running incident, most unstable namespace — numbers only possible because OpsCart remembers, not just observes
-- **What's Changed Since Last Scan** — a cursor-based feed showing only what happened since you last opened the dashboard
 - **Top 5 Things To Fix** — ranked by severity and restart rate, each with a memory line (first detected, reopen count, trend) and a direct link to investigate
 - **Cluster Health, Namespace Health, and Security Status** at a glance
 

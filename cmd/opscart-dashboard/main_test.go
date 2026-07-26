@@ -450,7 +450,6 @@ func TestOverviewTemplate_RendersFullyPopulatedData(t *testing.T) {
 		"payments-api",
 		"Longest active",
 		"Most unstable namespace",
-		"What's Changed Since Last Scan",
 		"Recent Events",
 		"checkout", /* namespace health row */
 		// html/template escapes "+" as a numeric entity even in text
@@ -520,11 +519,10 @@ func TestOverviewTemplate_FeedsCapAtFive(t *testing.T) {
 	}
 
 	out := buf.String()
-	// `class="change-row"` (the literal HTML attribute) rather than just
-	// "change-row" — the latter also matches the CSS selector rules
-	// earlier in the same document and would inflate the count.
-	if got := strings.Count(out, `class="change-row"`); got != 10 {
-		t.Fatalf("expected 5 change-row entries per feed (10 total) regardless of 9/7 fetched, got %d", got)
+	// One feed now (What's Changed was removed); it caps at 10, and the
+	// fixture supplies 7, so all 7 render.
+	if got := strings.Count(out, `class="change-row"`); got != 7 {
+		t.Fatalf("expected 7 change-row entries from the single Recent Events feed, got %d", got)
 	}
 }
 
@@ -972,8 +970,9 @@ func TestOverviewTemplate_HealthCardsCapAndShowViewAll(t *testing.T) {
 		t.Errorf("expected a 'View all 9 namespaces' link")
 	}
 
-	if got := strings.Count(out, `class="wh-dot`); got != 40 {
-		t.Errorf("expected 40 workload health dots (capped from 45), got %d", got)
+	// 40 strip dots (capped from 45) + 3 legend dots in the label line.
+	if got := strings.Count(out, `class="wh-dot`); got != 43 {
+		t.Errorf("expected 43 wh-dot occurrences (40 strip + 3 legend), got %d", got)
 	}
 	if !strings.Contains(out, "View all 45 workloads") {
 		t.Errorf("expected a 'View all 45 workloads' link")

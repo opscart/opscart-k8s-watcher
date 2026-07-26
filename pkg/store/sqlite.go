@@ -572,16 +572,16 @@ type snapshotRow struct {
 	NodeCount      sql.NullInt64
 }
 
-func (s *SQLiteStore) recentSnapshots(cluster string, limit int) ([]snapshotRow, error) {
+func (s *SQLiteStore) recentSnapshots(cluster string, since time.Time, limit int) ([]snapshotRow, error) {
 	rows, err := s.db.Query(
 		`SELECT scanned_at, incident_score, critical_count, warning_count,
-			security_score, waste_count, monthly_cost, pod_count,
-			namespace_count, node_count
+		        security_score, waste_count, monthly_cost, pod_count,
+		        namespace_count, node_count
 		 FROM cluster_snapshots
-		 WHERE cluster = ?
+		 WHERE cluster = ? AND scanned_at >= ?
 		 ORDER BY scanned_at DESC
 		 LIMIT ?`,
-		cluster, limit,
+		cluster, since.Unix(), limit,
 	)
 	if err != nil {
 		return nil, err
@@ -620,7 +620,7 @@ func trend(current, previous int) MetricTrend {
 }
 
 func (s *SQLiteStore) GetOverviewTrend(cluster string) (*OverviewTrend, error) {
-	rows, err := s.recentSnapshots(cluster, 7)
+	rows, err := s.recentSnapshots(cluster, time.Now().Add(-7*24*time.Hour), 20000)
 	if err != nil {
 		return nil, err
 	}
@@ -669,7 +669,7 @@ func (s *SQLiteStore) GetOverviewTrend(cluster string) (*OverviewTrend, error) {
 }
 
 func (s *SQLiteStore) GetLatestSnapshot(cluster string) (*SnapshotData, error) {
-	rows, err := s.recentSnapshots(cluster, 1)
+	rows, err := s.recentSnapshots(cluster, time.Time{}, 1)
 	if err != nil {
 		return nil, err
 	}
