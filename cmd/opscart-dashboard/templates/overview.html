@@ -82,6 +82,8 @@
 .top-issue-memory{font-size:0.7rem;color:var(--text-muted);margin-top:0.2rem}
 .top-issue-btn{background:transparent;border:1px solid var(--border);color:var(--text-secondary);font-size:0.78rem;padding:0.4rem 0.9rem;border-radius:6px;cursor:pointer;text-decoration:none;display:inline-flex;align-items:center;gap:0.3rem;transition:all 0.15s;white-space:nowrap}
 .top-issue-btn:hover{background:var(--surface-hover);border-color:var(--primary);color:var(--text)}
+.top-issue-btn.primary{background:var(--primary);border-color:var(--primary);color:#fff}
+.top-issue-btn.primary:hover{background:var(--primary-light);border-color:var(--primary-light);color:#fff}
 
 .feed-card .section-card{margin-bottom:1.5rem}
 .feed-card .section-card:last-child{margin-bottom:0}
@@ -109,12 +111,13 @@
 .ch-summary.warn{color:#fbbf24;border-color:rgba(245,158,11,0.25);background:rgba(245,158,11,0.06)}
 .wh-strip{display:flex;flex-wrap:wrap;gap:5px;margin-top:1rem;padding-top:1rem;border-top:1px solid var(--border)}
 .wh-strip-lbl{width:100%;font-size:0.64rem;text-transform:uppercase;letter-spacing:0.5px;color:var(--text-muted);margin-bottom:0.4rem}
-.wh-dot{width:9px;height:9px;border-radius:50%;flex-shrink:0}
+.wh-dot{width:9px;height:9px;border-radius:50%;flex-shrink:0;cursor:help}
 .wh-dot.critical{background:#f87171;box-shadow:0 0 5px rgba(248,113,113,0.5)}
 .wh-dot.high{background:#fbbf24}
 .wh-dot.medium{background:#facc15}
 .wh-dot.ok{background:#334155}
-
+.wh-legend{text-transform:none;letter-spacing:0}
+.wh-legend .wh-dot{display:inline-block;vertical-align:middle;margin:0 2px 0 6px;cursor:default}
 .ns-health-row{display:flex;justify-content:space-between;align-items:center;padding:0.55rem 0;border-bottom:1px solid rgba(51,65,85,0.5);font-size:0.85rem}
 .ns-health-row:last-child{border-bottom:none}
 .ns-health-name{color:var(--text-secondary);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
@@ -252,7 +255,7 @@
         {{if .Action}}<div class="top-issue-action">▸ {{.Action}}</div>{{end}}
       </div>
       <span class="sev-badge {{.Severity}}">{{.SeverityLbl}}</span>
-      <a class="top-issue-btn" href="{{.URL}}">{{.ButtonLabel}}</a>
+      <a class="top-issue-btn{{if le .GroupSize 1}} primary{{end}}" href="{{.URL}}">{{.ButtonLabel}}</a>
     </div>
     {{end}}
     <a class="view-all-link" href="{{.WrURL}}">View all issues in War Room →</a>
@@ -260,26 +263,6 @@
   </div>
 
   <div class="feed-card">
-    <div class="section-card">
-      <div class="section-title">What's Changed Since Last Scan</div>
-      <div class="section-sub">Since {{.LastViewedLabel}}</div>
-      {{if not .ChangesSinceLastView}}
-      <div class="empty-state-small">
-        <span class="icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg></span>
-        <div>Nothing's changed since your last visit</div>
-      </div>
-      {{else}}
-      {{range limitSlice .ChangesSinceLastView 5}}
-      <div class="change-row">
-        <span class="change-dot {{.EventReason}}"></span>
-        <span class="change-phrase">{{.Phrase}}</span>
-        <span class="change-age">{{eventAge .OccurredAt}}</span>
-      </div>
-      {{end}}
-      {{end}}
-      <a class="view-all-link" href="{{.IncidentsHref}}">View all →</a>
-    </div>
-
     <div class="section-card">
       <div class="section-title">Recent Events</div>
       <div class="section-sub">Cluster-wide activity feed</div>
@@ -289,7 +272,7 @@
         <div>No activity recorded yet</div>
       </div>
       {{else}}
-      {{range limitSlice .RecentEvents 5}}
+      {{range limitSlice .RecentEvents 12}}
       <div class="change-row">
         <span class="change-dot {{.EventReason}}"></span>
         <span class="change-phrase">{{.Phrase}}</span>
@@ -332,7 +315,7 @@
     {{end}}
     {{if .WorkloadHealthGrid}}
     <div class="wh-strip">
-      <div class="wh-strip-lbl">Workload Health ({{len .WorkloadHealthGrid}})</div>
+      <div class="wh-strip-lbl">Workload Health ({{len .WorkloadHealthGrid}}) · <span class="wh-legend"><i class="wh-dot critical"></i> critical <i class="wh-dot high"></i> high <i class="wh-dot ok"></i> healthy</span> · hover for names</div>
       {{range limitWorkloadHealth .WorkloadHealthGrid 40}}
       <span class="wh-dot {{if .Severity}}{{.Severity}}{{else}}ok{{end}}" title="{{.Name}}{{if .Severity}} — {{.Severity}}{{end}}"></span>
       {{end}}
