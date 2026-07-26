@@ -119,6 +119,12 @@
 .wh-legend{text-transform:none;letter-spacing:0}
 .wh-legend .wh-dot{display:inline-block;vertical-align:middle;margin:0 2px 0 6px;cursor:default}
 .ns-health-row{display:flex;justify-content:space-between;align-items:center;padding:0.55rem 0;border-bottom:1px solid rgba(51,65,85,0.5);font-size:0.85rem}
+.sec-row{display:flex;justify-content:space-between;align-items:center;padding:0.55rem 0;border-bottom:1px solid rgba(51,65,85,0.5);font-size:0.85rem}
+.sec-row:last-of-type{border-bottom:none}
+.sec-label{color:var(--text-secondary)}
+.sec-val{font-weight:700;font-variant-numeric:tabular-nums;color:#4ade80}
+.sec-val.warn{color:#fbbf24}
+.sec-val.bad{color:#f87171}
 .ns-health-row:last-child{border-bottom:none}
 .ns-health-name{color:var(--text-secondary);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .ns-health-ratio{font-variant-numeric:tabular-nums;font-weight:700}
@@ -348,15 +354,30 @@
   </div>
 
   <div class="section-card">
-    <div class="section-title">Security Status</div>
-    <div class="section-sub">How OpsCart operates in this cluster</div>
-    <ul class="sec-checklist">
-      <li><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="m9 12 2 2 4-4"/></svg> Read-only access</li>
-      <li><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="m9 12 2 2 4-4"/></svg> RBAC enforced</li>
-      <li><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="m9 12 2 2 4-4"/></svg> No agents installed</li>
-      <li><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="m9 12 2 2 4-4"/></svg> No outbound network calls</li>
-      <li><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="m9 12 2 2 4-4"/></svg> No secrets stored</li>
-    </ul>
+<div class="section-title">Security Posture</div>
+    <div class="section-sub">Current cluster security findings</div>
+
+    <div class="sec-row">
+      <span class="sec-label">CIS benchmark score</span>
+      <span class="sec-val{{if lt .SecurityScore 50}} bad{{else if lt .SecurityScore 80}} warn{{end}}">{{.SecurityScore}}/100</span>
+    </div>
+
+    <div class="sec-row">
+      <span class="sec-label">Privileged containers</span>
+      <span class="sec-val{{if gt .PrivilegedContainers 0}} bad{{end}}">{{.PrivilegedContainers}}</span>
+    </div>
+
+    <div class="sec-row">
+      <span class="sec-label">Running as root</span>
+      <span class="sec-val{{if gt .RunningAsRoot 0}} warn{{end}}">{{.RunningAsRoot}}</span>
+    </div>
+
+    <div class="sec-row">
+      <span class="sec-label">High-risk namespaces</span>
+      <span class="sec-val{{if gt .UnprotectedNamespaceCount 0}} warn{{end}}">{{.UnprotectedNamespaceCount}}</span>
+    </div>
+
+    <a class="view-all-link" href="{{.SecurityHref}}" style="margin-top:0.75rem;display:inline-block">View full security posture →</a>
   </div>
 
 </div>
