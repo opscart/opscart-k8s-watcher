@@ -620,7 +620,7 @@ func TestBuildOverviewVerdict_MatchesTopIssuesZero(t *testing.T) {
 	if strings.Contains(line1, "payments") {
 		t.Fatalf("expected verdict to NOT describe topIssues[1], got: %q", line1)
 	}
-	if !strings.Contains(line1, "5 workloads need attention") {
+	if !strings.Contains(line1, "5 workloads have active incidents") {
 		t.Fatalf("expected verdict's count to come from topIssues[0].GroupSize (5), got: %q", line1)
 	}
 }
