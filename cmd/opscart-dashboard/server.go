@@ -25,6 +25,9 @@ import (
 //go:embed templates
 var templateFS embed.FS
 
+//go:embed static
+var staticFS embed.FS
+
 func displayName(ctx string) string {
 	if ctx == "" {
 		return "current-context"
@@ -181,6 +184,7 @@ func (srv *server) handleOverviewPage(w http.ResponseWriter, r *http.Request) {
 func (srv *server) newMux() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", srv.handleOverviewPage)
+	mux.Handle("/static/", http.FileServer(http.FS(staticFS)))
 	mux.HandleFunc("/costs", srv.handleDashboard)
 	mux.HandleFunc("/refresh", srv.handleRefresh)
 	mux.HandleFunc("/api/report", srv.handleReportJSON)
@@ -571,12 +575,15 @@ type overviewPageData struct {
 	Clusters      []sidebarCluster
 
 	// KPI bar
-	CriticalCount    int
-	SavingsPotential float64
-	SecurityScore    int
-	SecurityColor    string
-	WasteCount       int
-	MonthlyCost      float64
+	CriticalCount             int
+	SavingsPotential          float64
+	SecurityScore             int
+	SecurityColor             string
+	WasteCount                int
+	MonthlyCost               float64
+	PrivilegedContainers      int
+	RunningAsRoot             int
+	UnprotectedNamespaceCount int
 
 	// Incident Score
 	IncidentScore      int
@@ -686,7 +693,7 @@ func buildOverviewData(scan *clusterScan, activeCtx string, clusterList []string
 	var wrIssues []warRoomIssue
 	var featuredIssues []warRoomIssue
 	var criticalCount int
-
+	var privilegedContainers, runningAsRoot, unprotectedNamespaces int
 	if scan != nil {
 		wrIssues = collectWarRoomIssues(scan, 0)
 		for _, w := range wrIssues {
@@ -732,6 +739,12 @@ func buildOverviewData(scan *clusterScan, activeCtx string, clusterList []string
 
 		if scan.secAudit != nil {
 			podCount = scan.secAudit.TotalPodsAudited
+			privilegedContainers = scan.secAudit.Risks.PrivilegedContainers
+			runningAsRoot = scan.secAudit.Risks.RunningAsRoot
+		}
+
+		if scan.netAudit != nil {
+			unprotectedNamespaces = scan.netAudit.HighRiskNamespaces
 		}
 
 		if scan.cisResult != nil {
@@ -783,6 +796,12 @@ func buildOverviewData(scan *clusterScan, activeCtx string, clusterList []string
 		incidentScoreDeltaText = formatIntDelta(trend.IncidentScore.Current, trend.IncidentScore.Previous, trend.HasHistory)
 		securityScoreDeltaText = formatIntDelta(trend.SecurityScore.Current, trend.SecurityScore.Previous, trend.HasHistory)
 	}
+	if trend == nil {
+		log.Printf("overview: trend is nil")
+	} else {
+		log.Printf("overview: hasHistory=%v incidentScore current=%d previous=%d text=%q",
+			trend.HasHistory, trend.IncidentScore.Current, trend.IncidentScore.Previous, incidentScoreDeltaText)
+	}
 
 	q := ""
 	if activeCtx != "" {
@@ -805,50 +824,53 @@ func buildOverviewData(scan *clusterScan, activeCtx string, clusterList []string
 	}
 
 	return overviewPageData{
-		ClusterName:        clusterName,
-		ActiveCtx:          activeCtx,
-		ClusterList:        clusters,
-		DashURL:            "/" + q,
-		InfraURL:           "/infrastructure" + q,
-		NSsURL:             "/namespaces" + q,
-		OptURL:             "/optimizations" + q,
-		WrURL:              "/warroom" + q,
-		CostsURL:           "/costs" + q,
-		ScannedAtMS:        time.Now().UnixMilli(),
-		CriticalCount:      criticalCount,
-		SavingsPotential:   savings,
-		SecurityScore:      securityScore,
-		WasteCount:         wasteCount,
-		MonthlyCost:        monthlyCost,
-		TopIssues:          topIssues,
-		HasTopIssue:        hasTopIssue,
-		TopIssueName:       topIssueName,
-		TopIssueNS:         topIssueNS,
-		TopIssueTrend:      topIssueTrend,
-		TopIssueReopen:     topIssueReopen,
-		FeaturedIssues:     featuredIssues,
-		HasFeatured:        len(featuredIssues) > 0,
-		NodePoolCount:      nodePoolCount,
-		PodCount:           podCount,
-		CPUUtilization:     cpuUtil,
-		MemUtilization:     memUtil,
-		NamespaceCount:     nsCount,
-		Version:            Version,
-		DashHref:           "/" + q,
-		CostsHref:          "/costs" + q,
-		InfraHref:          "/infrastructure" + q,
-		NsHref:             "/namespaces" + q,
-		OptHref:            "/optimizations" + q,
-		WrHref:             "/warroom" + q,
-		IncidentsHref:      "/incidents" + q,
-		SecurityHref:       "/security" + q,
-		WasteHref:          "/waste" + q,
-		ActivePage:         "dashboard",
-		Clusters:           convertToSidebarClusters(clusterList, activeCtx, "/"),
-		IncidentScore:      incidentScore,
-		IncidentScoreColor: incidentScoreColor,
-		IncidentScoreLabel: incidentScoreLabel,
-		Trend:              trend,
+		ClusterName:               clusterName,
+		ActiveCtx:                 activeCtx,
+		ClusterList:               clusters,
+		DashURL:                   "/" + q,
+		InfraURL:                  "/infrastructure" + q,
+		NSsURL:                    "/namespaces" + q,
+		OptURL:                    "/optimizations" + q,
+		WrURL:                     "/warroom" + q,
+		CostsURL:                  "/costs" + q,
+		ScannedAtMS:               time.Now().UnixMilli(),
+		CriticalCount:             criticalCount,
+		SavingsPotential:          savings,
+		SecurityScore:             securityScore,
+		PrivilegedContainers:      privilegedContainers,
+		RunningAsRoot:             runningAsRoot,
+		UnprotectedNamespaceCount: unprotectedNamespaces,
+		WasteCount:                wasteCount,
+		MonthlyCost:               monthlyCost,
+		TopIssues:                 topIssues,
+		HasTopIssue:               hasTopIssue,
+		TopIssueName:              topIssueName,
+		TopIssueNS:                topIssueNS,
+		TopIssueTrend:             topIssueTrend,
+		TopIssueReopen:            topIssueReopen,
+		FeaturedIssues:            featuredIssues,
+		HasFeatured:               len(featuredIssues) > 0,
+		NodePoolCount:             nodePoolCount,
+		PodCount:                  podCount,
+		CPUUtilization:            cpuUtil,
+		MemUtilization:            memUtil,
+		NamespaceCount:            nsCount,
+		Version:                   Version,
+		DashHref:                  "/" + q,
+		CostsHref:                 "/costs" + q,
+		InfraHref:                 "/infrastructure" + q,
+		NsHref:                    "/namespaces" + q,
+		OptHref:                   "/optimizations" + q,
+		WrHref:                    "/warroom" + q,
+		IncidentsHref:             "/incidents" + q,
+		SecurityHref:              "/security" + q,
+		WasteHref:                 "/waste" + q,
+		ActivePage:                "dashboard",
+		Clusters:                  convertToSidebarClusters(clusterList, activeCtx, "/"),
+		IncidentScore:             incidentScore,
+		IncidentScoreColor:        incidentScoreColor,
+		IncidentScoreLabel:        incidentScoreLabel,
+		Trend:                     trend,
 
 		CostDeltaText:          costDeltaText,
 		IncidentScoreDeltaText: incidentScoreDeltaText,
@@ -967,9 +989,9 @@ func buildOverviewVerdict(topIssues []topIssue, resolvedSinceCursor int, cursorS
 	if total < 1 {
 		total = 1
 	}
-	workloadWord := "workload needs"
+	workloadWord := "workload has an active incident"
 	if total > 1 {
-		workloadWord = "workloads need"
+		workloadWord = "workloads have active incidents"
 	}
 
 	issueLabel := humanizeIssueType(worst.IssueType)
@@ -987,15 +1009,15 @@ func buildOverviewVerdict(topIssues []topIssue, resolvedSinceCursor int, cursorS
 	switch {
 	case worst.TrendVal == "accelerating":
 		line1 = fmt.Sprintf(
-			"%d %s attention. %s has been %s, first detected %s, and its restart rate is accelerating.",
+			"%d %s. %s has been %s, first detected %s, and its restart rate is accelerating.",
 			total, workloadWord, resourceLabel, issueLabel, firstDetected)
 	case worst.ReopenCountVal > 0:
 		line1 = fmt.Sprintf(
-			"%d %s attention. %s reoccurred after a recovery — reopened %d time(s).",
+			"%d %s. %s reoccurred after a recovery — reopened %d time(s).",
 			total, workloadWord, resourceLabel, worst.ReopenCountVal)
 	default:
 		line1 = fmt.Sprintf(
-			"%d %s attention. %s has been %s, first detected %s.",
+			"%d %s. %s has been %s, first detected %s.",
 			total, workloadWord, resourceLabel, issueLabel, firstDetected)
 	}
 
@@ -1021,7 +1043,6 @@ func humanizeIssueType(issueType string) string {
 	}
 }
 
-// changeLine is one formatted row of the What's Changed Since Last Scan /
 // Recent Events feeds: a short human phrase plus the EventReason driving
 // its colored dot (reusing the exact Detected/Resolved/Reopened/
 // RestartMilestone/SeverityChanged categories and casing the CSS already
@@ -1066,10 +1087,39 @@ func formatChangeLine(e store.RecentEvent) changeLine {
 
 // formatChangeLines maps formatChangeLine over a whole feed.
 func formatChangeLines(events []store.RecentEvent) []changeLine {
-	out := make([]changeLine, len(events))
-	for i, e := range events {
-		out[i] = formatChangeLine(e)
+	out := make([]changeLine, 0, len(events))
+
+	// Collapse consecutive RestartMilestone events for the same resource
+	// into a single row. A pod crossing several thresholds in a row
+	// (10 → 50 → 100 …) is one story, not four — without this, a single
+	// noisy workload crowds every other event out of the feed.
+	var lastResource, lastReason string
+	milestoneRun := 0
+
+	flush := func() {
+		if milestoneRun > 1 {
+			// Rewrite the most recent milestone row to note the run.
+			last := &out[len(out)-1]
+			last.Phrase = fmt.Sprintf("%s (%d restart milestones)", last.Phrase, milestoneRun)
+		}
+		milestoneRun = 0
 	}
+
+	for _, e := range events {
+		if e.EventReason == "RestartMilestone" && e.Resource == lastResource && lastReason == "RestartMilestone" {
+			milestoneRun++
+			continue // skip — folded into the row already emitted
+		}
+		flush()
+
+		out = append(out, formatChangeLine(e))
+		lastResource, lastReason = e.Resource, e.EventReason
+		if e.EventReason == "RestartMilestone" {
+			milestoneRun = 1
+		}
+	}
+	flush()
+
 	return out
 }
 
@@ -1309,7 +1359,8 @@ func buildTopIssues(scan *clusterScan, wrIssues []warRoomIssue, activeCtx string
 				SeverityLbl: "MEDIUM",
 				CountText:   cost,
 				URL:         "/optimizations",
-				ButtonLabel: "View →",
+				GroupSize:   len(wa.OrphanedPVCs),
+				ButtonLabel: fmt.Sprintf("View all %d →", len(wa.OrphanedPVCs)),
 			})
 		}
 	}
@@ -1534,7 +1585,8 @@ var getOverviewTmpl = sync.OnceValue(func() *template.Template {
 	return template.Must(
 		template.New("overview.html").
 			Funcs(template.FuncMap{
-				"money": formatMoney,
+				"money":     formatMoney,
+				"hasPrefix": strings.HasPrefix,
 				"sparkHeight": func(score int) int {
 					if score <= 0 {
 						return 4

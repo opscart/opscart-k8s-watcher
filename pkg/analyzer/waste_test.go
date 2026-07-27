@@ -126,3 +126,208 @@ func TestDefaultNamespaceNotSkipped(t *testing.T) {
 		t.Errorf("pod in 'default' namespace not detected; StalePods = %+v", audit.StalePods)
 	}
 }
+
+// crashLoopPod builds a pod in Waiting/CrashLoopBackOff state with a high
+// restart count and a not-ready container — the state a probe-killed pod
+// lands in when a scan happens to catch it mid-restart.
+func crashLoopPod(name, namespace string) *corev1.Pod {
+	return &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:              name,
+			Namespace:         namespace,
+			CreationTimestamp: metav1.Time{Time: time.Now().Add(-48 * time.Hour)},
+		},
+		Status: corev1.PodStatus{
+			Phase: corev1.PodRunning,
+			ContainerStatuses: []corev1.ContainerStatus{
+				{
+					Name:         "app",
+					RestartCount: 20,
+					Ready:        false,
+					State: corev1.ContainerState{
+						Waiting: &corev1.ContainerStateWaiting{
+							Reason: "CrashLoopBackOff",
+						},
+					},
+				},
+			},
+		},
+	}
+}
+
+// runningNotReadyPod builds a pod caught mid-Running with a high restart
+// count and a not-ready container — the alternate state the same
+// probe-killed pod flickers into on the next scan.
+func runningNotReadyPod(name, namespace string) *corev1.Pod {
+	return &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:              name,
+			Namespace:         namespace,
+			CreationTimestamp: metav1.Time{Time: time.Now().Add(-48 * time.Hour)},
+		},
+		Status: corev1.PodStatus{
+			Phase: corev1.PodRunning,
+			ContainerStatuses: []corev1.ContainerStatus{
+				{
+					Name:         "app",
+					RestartCount: 20,
+					Ready:        false,
+				},
+			},
+		},
+	}
+}
+
+// probeFailureEvent builds a Pod event whose message matches the
+// probe-failure signature (mirrors hasProbeFailureSignature's matched
+// strings in cmd/opscart-scan/emergency.go).
+func probeFailureEvent(name, podName, namespace string) *corev1.Event {
+	return &corev1.Event{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      name,
+			Namespace: namespace,
+		},
+		InvolvedObject: corev1.ObjectReference{
+			Kind:      "Pod",
+			Name:      podName,
+			Namespace: namespace,
+		},
+		Message: "Liveness probe failed: HTTP probe failed with statuscode: 500",
+		Type:    "Warning",
+		Reason:  "Unhealthy",
+	}
+}
+
+func findStalePod(pods []StalePod, namespace, name string) (StalePod, bool) {
+	for _, sp := range pods {
+		if sp.Namespace == namespace && sp.Name == name {
+			return sp, true
+		}
+	}
+	return StalePod{}, false
+}
+
+func TestProbeFailureEventOverridesCrashLoopClassification(t *testing.T) {
+	pod := crashLoopPod("stream-processor", "default")
+	ev := probeFailureEvent("stream-processor.probe1", "stream-processor", "default")
+
+	wa := newTestAuditor(1, pod, ev)
+	audit, err := wa.AuditWaste("")
+	if err != nil {
+		t.Fatalf("AuditWaste: %v", err)
+	}
+
+	sp, found := findStalePod(audit.StalePods, "default", "stream-processor")
+	if !found {
+		t.Fatalf("pod not found in StalePods; got %+v", audit.StalePods)
+	}
+	if sp.Status != "ProbeFailure" {
+		t.Errorf("Status = %q, want %q (event evidence must override instantaneous CrashLoopBackOff state)", sp.Status, "ProbeFailure")
+	}
+}
+
+func TestCrashLoopWithoutProbeEventStaysCrashLoop(t *testing.T) {
+	pod := crashLoopPod("real-crasher", "default")
+
+	wa := newTestAuditor(1, pod)
+	audit, err := wa.AuditWaste("")
+	if err != nil {
+		t.Fatalf("AuditWaste: %v", err)
+	}
+
+	sp, found := findStalePod(audit.StalePods, "default", "real-crasher")
+	if !found {
+		t.Fatalf("pod not found in StalePods; got %+v", audit.StalePods)
+	}
+	if sp.Status != "CrashLoopBackOff" {
+		t.Errorf("Status = %q, want %q (no probe-failure evidence, must keep today's behavior)", sp.Status, "CrashLoopBackOff")
+	}
+}
+
+func TestProbeFailureFallbackWithoutEvents(t *testing.T) {
+	pod := runningNotReadyPod("flaky-runner", "default")
+
+	wa := newTestAuditor(1, pod)
+	audit, err := wa.AuditWaste("")
+	if err != nil {
+		t.Fatalf("AuditWaste: %v", err)
+	}
+
+	sp, found := findStalePod(audit.StalePods, "default", "flaky-runner")
+	if !found {
+		t.Fatalf("pod not found in StalePods; got %+v", audit.StalePods)
+	}
+	if sp.Status != "ProbeFailure" {
+		t.Errorf("Status = %q, want %q (fallback phase-based path with no event evidence)", sp.Status, "ProbeFailure")
+	}
+}
+
+// TestClassificationDeterministicAcrossPhaseFlicker is the core regression
+// test for the incident: a single pod alternating Waiting/CrashLoopBackOff
+// and Running from one scan to the next (because a failing probe keeps
+// killing it) must classify identically both times once probe-failure
+// event evidence is present — otherwise the fingerprint flips and incidents
+// churn resolved/reoccurred every scan.
+func TestClassificationDeterministicAcrossPhaseFlicker(t *testing.T) {
+	ev := probeFailureEvent("stream-processor.probe1", "stream-processor", "default")
+
+	waitingPod := crashLoopPod("stream-processor", "default")
+	waWaiting := newTestAuditor(1, waitingPod, ev)
+	auditWaiting, err := waWaiting.AuditWaste("")
+	if err != nil {
+		t.Fatalf("AuditWaste (waiting): %v", err)
+	}
+	spWaiting, found := findStalePod(auditWaiting.StalePods, "default", "stream-processor")
+	if !found {
+		t.Fatalf("pod not found in StalePods (waiting run); got %+v", auditWaiting.StalePods)
+	}
+
+	runningPod := runningNotReadyPod("stream-processor", "default")
+	waRunning := newTestAuditor(1, runningPod, ev)
+	auditRunning, err := waRunning.AuditWaste("")
+	if err != nil {
+		t.Fatalf("AuditWaste (running): %v", err)
+	}
+	spRunning, found := findStalePod(auditRunning.StalePods, "default", "stream-processor")
+	if !found {
+		t.Fatalf("pod not found in StalePods (running run); got %+v", auditRunning.StalePods)
+	}
+
+	if spWaiting.Status != spRunning.Status {
+		t.Errorf("classification flickered across phases: waiting-scan Status=%q, running-scan Status=%q — fingerprint would churn", spWaiting.Status, spRunning.Status)
+	}
+	if spWaiting.Status != "ProbeFailure" {
+		t.Errorf("Status = %q, want %q", spWaiting.Status, "ProbeFailure")
+	}
+}
+
+func TestEventsFetchedOncePerNamespaceNotPerPod(t *testing.T) {
+	ev := probeFailureEvent("shared.probe1", "pod-a", "default")
+
+	wa := newTestAuditor(1,
+		crashLoopPod("pod-a", "default"),
+		crashLoopPod("pod-b", "default"),
+		crashLoopPod("pod-c", "default"),
+		ev,
+	)
+
+	if _, err := wa.AuditWaste(""); err != nil {
+		t.Fatalf("AuditWaste: %v", err)
+	}
+
+	fakeClient, ok := wa.clientset.(*fake.Clientset)
+	if !ok {
+		t.Fatalf("clientset is not *fake.Clientset")
+	}
+
+	eventListCalls := 0
+	for _, action := range fakeClient.Actions() {
+		if action.GetVerb() == "list" && action.GetResource().Resource == "events" {
+			eventListCalls++
+		}
+	}
+
+	if eventListCalls != 1 {
+		t.Errorf("events List called %d times for 3 pods in one namespace, want exactly 1 (must be batched per-namespace, not per-pod)", eventListCalls)
+	}
+}

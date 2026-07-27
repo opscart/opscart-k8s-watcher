@@ -450,7 +450,6 @@ func TestOverviewTemplate_RendersFullyPopulatedData(t *testing.T) {
 		"payments-api",
 		"Longest active",
 		"Most unstable namespace",
-		"What's Changed Since Last Scan",
 		"Recent Events",
 		"checkout", /* namespace health row */
 		// html/template escapes "+" as a numeric entity even in text
@@ -520,11 +519,10 @@ func TestOverviewTemplate_FeedsCapAtFive(t *testing.T) {
 	}
 
 	out := buf.String()
-	// `class="change-row"` (the literal HTML attribute) rather than just
-	// "change-row" — the latter also matches the CSS selector rules
-	// earlier in the same document and would inflate the count.
-	if got := strings.Count(out, `class="change-row"`); got != 10 {
-		t.Fatalf("expected 5 change-row entries per feed (10 total) regardless of 9/7 fetched, got %d", got)
+	// One feed now (What's Changed was removed); it caps at 10, and the
+	// fixture supplies 7, so all 7 render.
+	if got := strings.Count(out, `class="change-row"`); got != 7 {
+		t.Fatalf("expected 7 change-row entries from the single Recent Events feed, got %d", got)
 	}
 }
 
@@ -620,7 +618,7 @@ func TestBuildOverviewVerdict_MatchesTopIssuesZero(t *testing.T) {
 	if strings.Contains(line1, "payments") {
 		t.Fatalf("expected verdict to NOT describe topIssues[1], got: %q", line1)
 	}
-	if !strings.Contains(line1, "5 workloads need attention") {
+	if !strings.Contains(line1, "5 workloads have active incidents") {
 		t.Fatalf("expected verdict's count to come from topIssues[0].GroupSize (5), got: %q", line1)
 	}
 }
@@ -972,8 +970,9 @@ func TestOverviewTemplate_HealthCardsCapAndShowViewAll(t *testing.T) {
 		t.Errorf("expected a 'View all 9 namespaces' link")
 	}
 
-	if got := strings.Count(out, `class="wh-dot`); got != 40 {
-		t.Errorf("expected 40 workload health dots (capped from 45), got %d", got)
+	// 40 strip dots (capped from 45) + 3 legend dots in the label line.
+	if got := strings.Count(out, `class="wh-dot`); got != 43 {
+		t.Errorf("expected 43 wh-dot occurrences (40 strip + 3 legend), got %d", got)
 	}
 	if !strings.Contains(out, "View all 45 workloads") {
 		t.Errorf("expected a 'View all 45 workloads' link")
@@ -1127,8 +1126,11 @@ func TestBuildTopIssues_AggregateRowsKeepTheirOwnURL(t *testing.T) {
 		t.Errorf("expected aggregate row to have no matching key, got Namespace=%q Resource=%q IssueType=%q",
 			issues[0].Namespace, issues[0].Resource, issues[0].IssueType)
 	}
-	if issues[0].ButtonLabel != "View →" {
-		t.Errorf("expected aggregate row to keep its existing 'View →' label, got %q", issues[0].ButtonLabel)
+	if issues[0].ButtonLabel != "View all 1 →" {
+		t.Errorf("expected aggregate row's button label to reflect its real PVC count, got %q", issues[0].ButtonLabel)
+	}
+	if issues[0].GroupSize != 1 {
+		t.Errorf("expected aggregate row's GroupSize to reflect its real PVC count, got %d", issues[0].GroupSize)
 	}
 }
 
