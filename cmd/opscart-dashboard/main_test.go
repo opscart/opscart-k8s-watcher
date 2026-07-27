@@ -1126,8 +1126,11 @@ func TestBuildTopIssues_AggregateRowsKeepTheirOwnURL(t *testing.T) {
 		t.Errorf("expected aggregate row to have no matching key, got Namespace=%q Resource=%q IssueType=%q",
 			issues[0].Namespace, issues[0].Resource, issues[0].IssueType)
 	}
-	if issues[0].ButtonLabel != "View →" {
-		t.Errorf("expected aggregate row to keep its existing 'View →' label, got %q", issues[0].ButtonLabel)
+	if issues[0].ButtonLabel != "View all 1 →" {
+		t.Errorf("expected aggregate row's button label to reflect its real PVC count, got %q", issues[0].ButtonLabel)
+	}
+	if issues[0].GroupSize != 1 {
+		t.Errorf("expected aggregate row's GroupSize to reflect its real PVC count, got %d", issues[0].GroupSize)
 	}
 }
 
