@@ -25,6 +25,9 @@ import (
 //go:embed templates
 var templateFS embed.FS
 
+//go:embed static
+var staticFS embed.FS
+
 func displayName(ctx string) string {
 	if ctx == "" {
 		return "current-context"
@@ -181,6 +184,7 @@ func (srv *server) handleOverviewPage(w http.ResponseWriter, r *http.Request) {
 func (srv *server) newMux() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", srv.handleOverviewPage)
+	mux.Handle("/static/", http.FileServer(http.FS(staticFS)))
 	mux.HandleFunc("/costs", srv.handleDashboard)
 	mux.HandleFunc("/refresh", srv.handleRefresh)
 	mux.HandleFunc("/api/report", srv.handleReportJSON)
@@ -1355,7 +1359,8 @@ func buildTopIssues(scan *clusterScan, wrIssues []warRoomIssue, activeCtx string
 				SeverityLbl: "MEDIUM",
 				CountText:   cost,
 				URL:         "/optimizations",
-				ButtonLabel: "View →",
+				GroupSize:   len(wa.OrphanedPVCs),
+				ButtonLabel: fmt.Sprintf("View all %d →", len(wa.OrphanedPVCs)),
 			})
 		}
 	}
