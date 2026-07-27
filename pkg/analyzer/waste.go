@@ -346,6 +346,45 @@ func (w *WasteAuditor) detectAbandonedNamespaces(audit *WasteAudit, filterNamesp
 // 2. Stale Pods
 // ================================================================
 
+// probeFailurePodsByNamespace fetches Pod events for a namespace ONCE and
+// returns the set of pod names that have at least one probe-failure event
+// (kubelet killing the container because a liveness/startup probe failed).
+//
+// This is the discriminator between "the probe is killing an otherwise-viable
+// container" (ProbeFailure) and "the process is crashing on its own"
+// (CrashLoopBackOff/OOMKilled/etc.) — instantaneous pod state alone cannot
+// tell these apart, since a probe-killed pod alternates between Waiting and
+// Running from one scan to the next.
+//
+// Best-effort: any error here (RBAC, timeout, API unavailable) is logged and
+// swallowed, returning an empty map so classification simply falls back to
+// today's phase-based behavior. A failed event lookup must never break the
+// waste audit.
+func (w *WasteAuditor) probeFailurePodsByNamespace(namespace string) map[string]bool {
+	result := make(map[string]bool)
+
+	events, err := w.clientset.CoreV1().Events(namespace).List(w.ctx, metav1.ListOptions{
+		FieldSelector:  "involvedObject.kind=Pod",
+		TimeoutSeconds: int64Ptr(10),
+	})
+	if err != nil {
+		fmt.Printf("⚠️  Could not list events in namespace %q for probe-failure detection: %v\n", namespace, err)
+		return result
+	}
+
+	for _, ev := range events.Items {
+		if ev.InvolvedObject.Kind != "" && ev.InvolvedObject.Kind != "Pod" {
+			continue
+		}
+		lower := strings.ToLower(ev.Message)
+		if strings.Contains(lower, "probe failed") || strings.Contains(lower, "probe, will be restarted") {
+			result[ev.InvolvedObject.Name] = true
+		}
+	}
+
+	return result
+}
+
 func (w *WasteAuditor) detectStalePods(audit *WasteAudit, filterNamespace string) error {
 	pods, err := w.clientset.CoreV1().Pods(filterNamespace).List(w.ctx, metav1.ListOptions{TimeoutSeconds: int64Ptr(10)})
 	if err != nil {
@@ -354,6 +393,11 @@ func (w *WasteAuditor) detectStalePods(audit *WasteAudit, filterNamespace string
 
 	now := time.Now()
 
+	// Namespace event cache: fetched at most once per namespace encountered,
+	// not once per pod (a 350-pod cluster must not turn into hundreds of
+	// extra API calls).
+	probeFailurePods := make(map[string]map[string]bool)
+
 	for _, pod := range pods.Items {
 		// Skip system namespaces
 		if isInfraPattern(pod.Namespace) {
@@ -361,6 +405,55 @@ func (w *WasteAuditor) detectStalePods(audit *WasteAudit, filterNamespace string
 		}
 
 		ageDays := int(now.Sub(pod.CreationTimestamp.Time).Hours() / 24)
+
+		if _, ok := probeFailurePods[pod.Namespace]; !ok {
+			probeFailurePods[pod.Namespace] = w.probeFailurePodsByNamespace(pod.Namespace)
+		}
+		hasProbeFailureEvent := probeFailurePods[pod.Namespace][pod.Name]
+
+		// ── EVENT-BACKED PROBE FAILURE (checked first) ──────────────
+		// Overrides instantaneous phase: a pod with confirmed probe-failure
+		// events and not-ready containers above the restart threshold is
+		// classified as ProbeFailure regardless of whether THIS scan caught
+		// it Waiting/CrashLoopBackOff or briefly Running.
+		{
+			var totalRestarts int32
+			var notReady int
+			for _, cs := range pod.Status.ContainerStatuses {
+				totalRestarts += cs.RestartCount
+				if !cs.Ready {
+					notReady++
+				}
+			}
+			// No restart threshold here, deliberately. The >10 threshold on the
+			// fallback path below exists because that path INFERS probe failure
+			// from pod phase alone and needs a proxy for "this is persistent, not
+			// a blip". Here we have Kubernetes directly reporting "failed liveness
+			// probe, will be restarted" — that's conclusive, not inferred. Worse,
+			// requiring 10 restarts is self-defeating: exponential backoff stretches
+			// restarts far enough apart that probe events have aged out of the event
+			// log by the time a pod reaches 11, so both conditions can almost never
+			// hold at once. Classify while the evidence exists; ResolveMissing's
+			// debounce keeps the incident active afterward even once events expire.
+			if hasProbeFailureEvent && notReady > 0 {
+				audit.StalePods = append(audit.StalePods, StalePod{
+					Name:         pod.Name,
+					Namespace:    pod.Namespace,
+					Kind:         StalePodZombie,
+					AgeDays:      ageDays,
+					RestartCount: totalRestarts,
+					Status:       "ProbeFailure",
+					Reason: fmt.Sprintf(
+						"%d/%d containers not ready, and recent events confirm a "+
+							"liveness/startup probe is repeatedly killing the container "+
+							"(%d restarts so far) — the process itself is not the problem.",
+						notReady, len(pod.Status.ContainerStatuses), totalRestarts,
+					),
+					Score: float64(ageDays)*0.4 + float64(totalRestarts)*0.3,
+				})
+				goto nextPod
+			}
+		}
 
 		// ── ZOMBIE detection: CrashLoopBackOff / OOMKilled ──────────
 		// Age gate is deliberately skipped — a crashing pod is a problem
@@ -392,6 +485,9 @@ func (w *WasteAuditor) detectStalePods(audit *WasteAudit, filterNamespace string
 			}
 		}
 		{
+			// Fallback ProbeFailure: today's phase-based heuristic, used when
+			// no probe-failure event evidence is available (events expired,
+			// RBAC denied, or the audit above didn't match).
 			var totalRestarts int32
 			var notReady int
 			for _, cs := range pod.Status.ContainerStatuses {
