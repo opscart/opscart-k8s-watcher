@@ -1284,3 +1284,287 @@ func TestOverviewTemplate_ChangeDotCasingMatchesCSS(t *testing.T) {
 		}
 	}
 }
+
+func renderSecurityForTest(t *testing.T, scan *clusterScan) string {
+	t.Helper()
+	srv := newServer([]string{"test-ctx"}, &store.NullStore{}, 90, false)
+	state := srv.getState("test-ctx")
+	state.mu.Lock()
+	state.scan = scan
+	state.mu.Unlock()
+	req := httptest.NewRequest(http.MethodGet, "/security?cluster=test-ctx", nil)
+	rec := httptest.NewRecorder()
+	srv.handleSecurityPage(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("security status = %d; body: %s", rec.Code, rec.Body.String())
+	}
+	return rec.Body.String()
+}
+
+func renderWasteForTest(t *testing.T, audit *analyzer.WasteAudit) string {
+	t.Helper()
+	srv := newServer([]string{"test-ctx"}, &store.NullStore{}, 90, false)
+	state := srv.getState("test-ctx")
+	state.mu.Lock()
+	state.scan = &clusterScan{wasteAudit: audit}
+	state.mu.Unlock()
+	req := httptest.NewRequest(http.MethodGet, "/waste?cluster=test-ctx", nil)
+	rec := httptest.NewRecorder()
+	srv.handleWastePage(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("waste status = %d; body: %s", rec.Code, rec.Body.String())
+	}
+	return rec.Body.String()
+}
+
+func TestSecurityPageScanStatesAndClaims(t *testing.T) {
+	t.Run("unavailable", func(t *testing.T) {
+		body := renderSecurityForTest(t, &clusterScan{})
+		if !strings.Contains(body, "Security scan unavailable/incomplete") {
+			t.Fatal("missing unavailable state")
+		}
+		if strings.Contains(body, "0/100") || strings.Contains(body, "No active risks detected") {
+			t.Fatal("unavailable scan rendered a zero score or clean state")
+		}
+	})
+
+	t.Run("successful clean", func(t *testing.T) {
+		audit := &models.SecurityAudit{}
+		result := analyzer.CalculateCISScore(audit, nil)
+		body := renderSecurityForTest(t, &clusterScan{secAudit: audit, cisResult: &result})
+		if !strings.Contains(body, "No supported workload-security findings") {
+			t.Fatal("successful scan without findings did not render clean state")
+		}
+		if !strings.Contains(body, "Passed checks") || !strings.Contains(body, "<details") {
+			t.Fatal("passed checks are not rendered in a collapsed details element")
+		}
+	})
+
+	t.Run("findings and safe claims", func(t *testing.T) {
+		audit := &models.SecurityAudit{
+			TotalPodsAudited: 4,
+			Risks: models.SecurityRisks{
+				RunningAsRoot:          2,
+				PrivilegedContainers:   1,
+				HostNetwork:            1,
+				HostPID:                1,
+				HostIPC:                1,
+				HostPathVolumes:        1,
+				DefaultServiceAccount:  1,
+				MissingResourceLimits:  1,
+				AddedCapabilities:      1,
+				PrivilegeEscalation:    1,
+				MissingProbes:          99,
+				WritableFilesystem:     99,
+				MissingNetworkPolicies: 99,
+			},
+			PriorityActions: []string{
+				"Review containers without explicitly enforced non-root execution",
+			},
+			Issues: []models.SecurityIssue{
+				{Type: "running_as_root", Severity: "medium", Resource: "container", Namespace: "app", Name: "api/main", Description: "Non-root execution not explicitly enforced in the pod spec"},
+				{Type: "privileged_container", Severity: "medium", Resource: "container", Namespace: "kube-system", Name: "agent/main", Description: "Container running in privileged mode (expected for this infrastructure component)"},
+				{Type: "host_network", Severity: "high", Resource: "pod", Namespace: "app", Name: "api", Description: "Pod uses host network namespace"},
+				{Type: "host_pid", Severity: "critical", Resource: "pod", Namespace: "app", Name: "api", Description: "Pod uses host PID namespace"},
+				{Type: "host_ipc", Severity: "high", Resource: "pod", Namespace: "app", Name: "api", Description: "Pod uses host IPC namespace"},
+				{Type: "host_path_volume", Severity: "high", Resource: "pod", Namespace: "app", Name: "api", Description: "Pod mounts host path: /data"},
+				{Type: "default_service_account", Severity: "medium", Resource: "pod", Namespace: "app", Name: "api", Description: "Pod uses default service account"},
+				{Type: "missing_resource_limits", Severity: "medium", Resource: "container", Namespace: "app", Name: "api/main", Description: "Container missing a CPU limit in the pod spec"},
+				{Type: "added_capabilities", Severity: "medium", Resource: "container", Namespace: "app", Name: "api/main", Description: "Container adds capabilities: NET_ADMIN"},
+				{Type: "privilege_escalation", Severity: "medium", Resource: "container", Namespace: "app", Name: "api/main", Description: "Container allows privilege escalation"},
+			},
+		}
+		result := analyzer.CalculateCISScore(audit, nil)
+		body := renderSecurityForTest(t, &clusterScan{
+			secAudit: audit, cisResult: &result,
+			netAudit: &analyzer.NetworkPolicyAudit{
+				ProtectedNamespaces: []analyzer.NamespaceNetworkStatus{{Name: "protected"}},
+				UnprotectedNamespaces: []analyzer.NamespaceNetworkStatus{{
+					Name: "app", PodCount: 2, RiskLevel: "HIGH", RiskReason: "critical infrastructure exposed; isolation recommended; unprotected",
+				}},
+			},
+		})
+		for _, want := range []string{
+			"Workload Security Posture",
+			"CIS-aligned workload checks and OpsCart operational checks",
+			"Not a formal compliance assessment",
+			"Situation Briefing",
+			"10 security finding categories require review across 4 audited pods",
+			"The network audit found 1 namespace without a NetworkPolicy",
+			"1 observation was recognized as expected infrastructure behavior",
+			"Finding Categories",
+			"1 / 2",
+			"Namespaces Without Policy",
+			"Prioritized Findings",
+			"Non-root enforcement",
+			"OpsCart · Workload Security Posture",
+			"Privileged containers",
+			"Host network",
+			"Host PID",
+			"Host IPC",
+			"HostPath mounts",
+			"Default ServiceAccount",
+			"Resource limits",
+			"Added capabilities",
+			"Privilege escalation",
+			"Expected infrastructure",
+			"Namespace Isolation",
+			"Methodology",
+			"kubectl get pod api -n app -o yaml",
+			"kubectl get networkpolicy -n app",
+			"No NetworkPolicy detected in namespace app.",
+		} {
+			if !strings.Contains(body, want) {
+				t.Errorf("missing %q", want)
+			}
+		}
+		for _, forbidden := range []string{"CIS Kubernetes Benchmark v1.8", "w: 10.0", "Running as Root", "FinOps Engine", "Risk Breakdown", "Priority Actions", "Workload Security Checks", "critical infrastructure exposed", "isolation recommended", "unprotected"} {
+			if strings.Contains(body, forbidden) {
+				t.Errorf("rendered unsupported/internal text %q", forbidden)
+			}
+		}
+	})
+}
+
+func TestWastePageStatesCategoriesAndReconciliation(t *testing.T) {
+	t.Run("complete clean", func(t *testing.T) {
+		body := renderWasteForTest(t, &analyzer.WasteAudit{})
+		if !strings.Contains(body, "No resource review candidates were observed") || strings.Contains(body, "Scan incomplete") {
+			t.Fatalf("unexpected clean state: %s", body)
+		}
+	})
+
+	t.Run("partial", func(t *testing.T) {
+		body := renderWasteForTest(t, &analyzer.WasteAudit{
+			DetectorWarnings: []analyzer.WasteDetectorWarning{{Category: "Broken ingresses", Error: "forbidden"}},
+		})
+		for _, want := range []string{"Scan incomplete", "Unavailable Checks", "Broken ingresses"} {
+			if !strings.Contains(body, want) {
+				t.Errorf("missing %q", want)
+			}
+		}
+		if strings.Contains(body, "No waste detected") {
+			t.Fatal("partial scan rendered misleading clean state")
+		}
+	})
+
+	t.Run("every counted category", func(t *testing.T) {
+		audit := &analyzer.WasteAudit{
+			AbandonedNamespaces:  []analyzer.AbandonedNamespace{{Name: "abandoned"}},
+			StalePods:            []analyzer.StalePod{{Name: "zombie", Kind: analyzer.StalePodZombie}, {Name: "idle", Kind: analyzer.StalePodIdle}},
+			OrphanedPVCs:         []analyzer.OrphanedPVC{{Name: "pvc"}},
+			StaleJobs:            []analyzer.StaleJob{{Name: "job"}},
+			ZeroReplicaWorkloads: []analyzer.ZeroReplicaWorkload{{Name: "zero"}},
+			OrphanedServices:     []analyzer.OrphanedService{{Name: "service"}},
+			BrokenIngresses:      []analyzer.BrokenIngress{{Name: "ingress"}},
+			MisconfiguredHPAs:    []analyzer.MisconfiguredHPA{{Name: "hpa"}},
+			OldReplicaSets:       []analyzer.OldReplicaSet{{Name: "rs"}},
+			TotalWasteItems:      9,
+		}
+		body := renderWasteForTest(t, audit)
+		for _, want := range []string{
+			"active failed-pod incident", "Idle / unmanaged pod",
+			"Unattached PVC candidate", "Stale job history", "Zero-replica workload",
+			"Abandoned namespace", "Orphaned Service candidate", "Broken ingress",
+			"Misconfigured HPA", "Housekeeping — excluded from resource-review total", ">8<",
+			"Unattached Storage Requested", "Active Incidents", "Scan Coverage",
+			"not presented as financial waste", "View active incidents",
+			"Ranked Resource Review", "Drift", "kubectl get pvc pvc",
+		} {
+			if !strings.Contains(body, want) {
+				t.Errorf("missing category or total %q", want)
+			}
+		}
+		for _, forbidden := range []string{"automatically safe", "safe to delete", "Est. Monthly", "$0", "Not calculated"} {
+			if strings.Contains(body, forbidden) {
+				t.Errorf("rendered misleading claim %q", forbidden)
+			}
+		}
+		visibleCount := len(audit.AbandonedNamespaces) + len(audit.StalePods) + len(audit.OrphanedPVCs) +
+			len(audit.StaleJobs) + len(audit.ZeroReplicaWorkloads) + len(audit.OrphanedServices) +
+			len(audit.BrokenIngresses) + len(audit.MisconfiguredHPAs)
+		if visibleCount != audit.TotalWasteItems {
+			t.Fatalf("visible count = %d, total = %d", visibleCount, audit.TotalWasteItems)
+		}
+		if strings.Contains(body, "ns: ") && strings.Contains(body, "zombie") {
+			t.Fatal("active failed pod was duplicated as a large resource card")
+		}
+	})
+}
+
+func TestDashboardWasteMinAgeDefault(t *testing.T) {
+	if dashboardWasteMinAgeDays != 7 {
+		t.Fatalf("dashboardWasteMinAgeDays = %d, want 7", dashboardWasteMinAgeDays)
+	}
+}
+
+func TestSecurityAndWasteTemplatesUseSemanticResponsiveTablesWithoutEmoji(t *testing.T) {
+	for _, name := range []string{"templates/security.html", "templates/waste.html"} {
+		raw, err := templateFS.ReadFile(name)
+		if err != nil {
+			t.Fatalf("ReadFile(%s): %v", name, err)
+		}
+		text := string(raw)
+		for _, forbidden := range []string{"✅", "❌", "⚠️", "🔴", "🟡", "📊", "📋", "🔍", "💀", "💾", "⏸️", "📁", "⏰"} {
+			if strings.Contains(text, forbidden) {
+				t.Errorf("%s contains emoji status/section icon %q", name, forbidden)
+			}
+		}
+		for _, want := range []string{"<table", "<thead>", "<tbody>", "@media(max-width:", `stroke="currentColor"`} {
+			if !strings.Contains(text, want) {
+				t.Errorf("%s missing semantic/responsive structure %q", name, want)
+			}
+		}
+		for i, svg := range strings.Split(text, "<svg")[1:] {
+			openTag := strings.SplitN(svg, ">", 2)[0]
+			for _, attribute := range []string{`width="`, `height="`, `viewBox="0 0 24 24"`} {
+				if !strings.Contains(openTag, attribute) {
+					t.Errorf("%s svg %d missing explicit %s", name, i+1, attribute)
+				}
+			}
+		}
+	}
+}
+
+func TestSecurityBriefingIconIsExplicitlyConstrained(t *testing.T) {
+	raw, err := templateFS.ReadFile("templates/security.html")
+	if err != nil {
+		t.Fatalf("ReadFile: %v", err)
+	}
+	text := string(raw)
+	for _, want := range []string{
+		`.security-briefing-icon{width:20px;height:20px;flex:0 0 20px;display:inline-flex`,
+		`.security-briefing-icon svg{display:block;width:20px;height:20px}`,
+		`<span class="security-briefing-icon"><svg width="20" height="20" viewBox="0 0 24 24"`,
+	} {
+		if !strings.Contains(text, want) {
+			t.Errorf("security briefing icon constraint missing %q", want)
+		}
+	}
+	for _, forbidden := range []string{
+		".security-briefing-icon{width:100%",
+		".security-briefing-icon svg{width:100%",
+		"height:auto",
+		"flex-grow",
+	} {
+		if strings.Contains(text, forbidden) {
+			t.Errorf("security briefing icon contains stretching rule %q", forbidden)
+		}
+	}
+}
+
+func TestRedesignedPagesPreserveClusterQueryLinks(t *testing.T) {
+	waste := renderWasteForTest(t, &analyzer.WasteAudit{
+		StalePods:       []analyzer.StalePod{{Name: "failed", Kind: analyzer.StalePodZombie}},
+		TotalWasteItems: 1,
+	})
+	for _, want := range []string{
+		`href="/incidents?cluster=test-ctx&amp;status=active"`,
+		`href="/security?cluster=test-ctx"`,
+		`href="/waste?cluster=test-ctx"`,
+	} {
+		if !strings.Contains(waste, want) {
+			t.Errorf("waste page missing cluster-preserving link %q", want)
+		}
+	}
+}
