@@ -1,321 +1,63 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width,initial-scale=1.0">
-<title>{{.ClusterName}} — Cloud FinOps Report</title>
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Cost Intelligence — {{.ClusterName}}</title>
 {{template "base" .}}
 <style>
-.oc-kpi-row{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:1rem;margin-bottom:1.5rem}
-.kpi{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:1.25rem;transition:border-color 0.2s;animation:fadeIn 0.4s ease both}
-.kpi:hover{border-color:var(--primary)}
-.kpi-top{display:flex;justify-content:space-between;align-items:center;margin-bottom:0.75rem}
-.kpi-icon{width:36px;height:36px;border-radius:var(--radius-xs);display:flex;align-items:center;justify-content:center;font-size:1rem}
-.kpi-icon.blue{background:var(--primary-bg)}
-.kpi-icon.green{background:rgba(16,185,129,0.1)}
-.kpi-icon.red{background:rgba(239,68,68,0.1)}
-.kpi-icon.yellow{background:rgba(245,158,11,0.1)}
-.kpi-icon.cyan{background:rgba(6,182,212,0.1)}
-.kpi-trend{font-size:0.75rem;padding:2px 8px;border-radius:20px;font-weight:600}
-.kpi-trend.down{background:rgba(16,185,129,0.1);color:var(--success)}
-.kpi h3{font-size:1.6rem;font-weight:800;margin-bottom:0.2rem}
-.kpi p{font-size:0.8rem;color:var(--text-muted)}
-.money.red{color:var(--danger)}
-.money.green{color:var(--success)}
-.table-wrap{overflow-x:auto;border-radius:var(--radius-sm);border:1px solid var(--border)}
-table{width:100%;border-collapse:collapse}
-th{background:rgba(0,0,0,0.3);padding:0.75rem 1rem;text-align:left;font-size:0.72rem;text-transform:uppercase;letter-spacing:0.8px;color:var(--text-muted);font-weight:600;border-bottom:1px solid var(--border);white-space:nowrap}
-td{padding:0.7rem 1rem;border-bottom:1px solid var(--border);font-size:0.85rem;white-space:nowrap}
-tr:last-child td{border-bottom:none}
-tr:hover td{background:rgba(99,102,241,0.03)}
-tbody tr{transition:background 0.1s}
-.util-cell{min-width:120px}
-.util-row{display:flex;align-items:center;gap:8px}
-.util-track{flex:1;height:6px;background:rgba(255,255,255,0.06);border-radius:3px;overflow:hidden}
-.util-fill{height:100%;border-radius:3px;transition:width 0.5s ease}
-.util-fill.green{background:var(--success)}
-.util-fill.yellow{background:var(--warning)}
-.util-fill.red{background:var(--danger)}
-.util-pct{font-size:0.8rem;color:var(--text-secondary);min-width:35px;text-align:right}
-.tag{display:inline-flex;align-items:center;padding:3px 10px;border-radius:20px;font-size:0.72rem;font-weight:600;letter-spacing:0.3px}
-.tag-spot{background:#422006;color:#fbbf24;border:1px solid rgba(251,191,36,0.2)}
-.tag-regular{background:#172554;color:#60a5fa;border:1px solid rgba(96,165,250,0.2)}
-.tag-deploy{background:#064e3b;color:#6ee7b7;border:1px solid rgba(110,231,183,0.2)}
-.tag-sts{background:#4c1d95;color:#c4b5fd;border:1px solid rgba(196,181,253,0.2)}
-.tag-ds{background:#78350f;color:#fcd34d;border:1px solid rgba(252,211,77,0.2)}
-.ns-group{border-bottom:1px solid var(--border)}
-.ns-group:last-child{border-bottom:none}
-.ns-header{cursor:pointer;transition:background 0.15s}
-.ns-header:hover td{background:rgba(99,102,241,0.05)}
-.ns-header td:first-child{font-weight:600}
-.ns-toggle{display:inline-block;width:18px;height:18px;text-align:center;line-height:18px;border-radius:4px;background:rgba(255,255,255,0.05);margin-right:8px;font-size:0.7rem;transition:transform 0.2s}
-.ns-header.open .ns-toggle{transform:rotate(90deg)}
-.dep-rows{display:none}
-.dep-rows.show{display:table-row-group}
-.dep-row td{padding-left:2.5rem;background:rgba(0,0,0,0.15);font-size:0.82rem;color:var(--text-secondary)}
-.dep-row td:first-child{color:var(--text-muted)}grep -rn "v0\.9\.3\|v1\.0\.0\|v1\.1\.0" cmd/opscart-dashboard/ --include="*.go" --include="*.html"
-
-.section-actions{display:flex;gap:0.5rem}
-.btn-sm{padding:0.4rem 0.8rem;border-radius:var(--radius-xs);font-size:0.75rem;border:1px solid var(--border);background:transparent;color:var(--text-secondary);cursor:pointer;transition:all 0.15s}
-.btn-sm:hover{background:var(--surface-hover);color:var(--text)}
-.btn-sm.active{background:var(--primary-bg);border-color:var(--primary);color:var(--primary-light)}
-.confidence-card{display:flex;gap:1.5rem;align-items:center}
-.conf-ring{position:relative;width:80px;height:80px}
-.conf-ring svg{transform:rotate(-90deg)}
-.conf-ring-bg{fill:none;stroke:rgba(255,255,255,0.05);stroke-width:8}
-.conf-ring-fill{fill:none;stroke-width:8;stroke-linecap:round;transition:stroke-dashoffset 0.5s}
-.conf-pct{position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);font-size:1.1rem;font-weight:800}
-.conf-details h4{font-size:0.95rem;margin-bottom:0.3rem}
-.conf-details p{font-size:0.82rem;color:var(--text-muted);max-width:500px}
-.conf-method{margin-top:1rem;display:grid;grid-template-columns:repeat(auto-fit,minmax(250px,1fr));gap:0.75rem}
-.conf-method-item{display:flex;align-items:flex-start;gap:0.5rem;font-size:0.8rem;color:var(--text-secondary)}
-.conf-method-item::before{content:'✓';color:var(--success);font-weight:bold;margin-top:1px}
-.scenarios-grid{display:grid;gap:1rem}
-.scenario-card{background:rgba(0,0,0,0.2);border:1px solid var(--border);border-radius:var(--radius-sm);padding:1.25rem;transition:border-color 0.2s}
-.scenario-card:hover{border-color:var(--success)}
-.scenario-top{display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:0.75rem}
-.scenario-name{font-weight:700;font-size:0.95rem}
-.scenario-save{background:rgba(16,185,129,0.1);color:var(--success);padding:4px 12px;border-radius:20px;font-size:0.8rem;font-weight:700}
-.scenario-desc{font-size:0.85rem;color:var(--text-secondary);margin-bottom:0.75rem}
-.scenario-pills{display:flex;gap:0.5rem;flex-wrap:wrap}
-.pill{padding:3px 10px;border-radius:20px;font-size:0.72rem;font-weight:500;border:1px solid var(--border);color:var(--text-muted)}
-.disclaimer-bar{background:rgba(245,158,11,0.08);border:1px solid rgba(245,158,11,0.2);border-radius:var(--radius);padding:1.25rem;margin-top:1.5rem}
-.disclaimer-bar h4{color:var(--warning);font-size:0.85rem;margin-bottom:0.5rem}
-.disclaimer-bar ul{list-style:none;display:grid;gap:0.3rem}
-.disclaimer-bar li{font-size:0.8rem;color:var(--text-muted);padding-left:1.2rem;position:relative}
-.disclaimer-bar li::before{content:'•';position:absolute;left:0;color:var(--warning)}
-.wr-mini-card{border:1px solid var(--border);border-radius:8px;padding:0.75rem;margin-bottom:0.75rem}
-.wr-mini-card.c{border-color:rgba(239,68,68,0.35);background:rgba(239,68,68,0.04)}
-.wr-mini-card.w{border-color:rgba(245,158,11,0.35);background:rgba(245,158,11,0.04)}
-.wr-mini-top{display:flex;align-items:center;gap:0.5rem;margin-bottom:0.4rem;flex-wrap:wrap}
-.wr-mini-badge{padding:2px 8px;border-radius:20px;font-size:0.68rem;font-weight:700}
-.wr-mini-badge.c{background:rgba(239,68,68,0.15);color:#ef4444}
-.wr-mini-badge.w{background:rgba(245,158,11,0.15);color:#f59e0b}
-.wr-mini-type{font-size:0.7rem;color:var(--text-muted)}
-.wr-mini-age{margin-left:auto;font-size:0.7rem;color:var(--text-muted);background:rgba(255,255,255,0.05);padding:1px 7px;border-radius:4px}
-.wr-mini-name{font-size:0.82rem;font-weight:600;color:#f1f5f9;margin-bottom:0.2rem;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.wr-mini-ns{font-size:0.72rem;color:#64748b;margin-bottom:0.35rem}
-.wr-mini-msg{font-size:0.75rem;color:#94a3b8}
-#oc-refresh-badge{position:fixed;bottom:1.25rem;right:1.25rem;background:#1e293b;border:1px solid #334155;border-radius:10px;padding:0.5rem 1rem;font-family:'Inter',system-ui,sans-serif;font-size:0.75rem;color:#94a3b8;z-index:9999;display:flex;align-items:center;gap:0.5rem;box-shadow:0 4px 12px rgba(0,0,0,0.4);transition:border-color 0.3s}
-#oc-refresh-badge.refreshing{border-color:#6366f1}
-#oc-dot{width:8px;height:8px;border-radius:50%;background:#10b981;flex-shrink:0;transition:background 0.3s}
-#oc-refresh-badge.refreshing #oc-dot{background:#6366f1;animation:oc-pulse 1s infinite}
-@keyframes oc-pulse{0%,100%{opacity:1}50%{opacity:0.3}}
-@media(max-width:768px){.oc-kpi-row{grid-template-columns:repeat(2,1fr)}.main{padding:1.5rem}}
+.cost-grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:1rem;margin-bottom:1.5rem}
+.cost-card,.brief-item,.method-item{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:1.2rem}
+.cost-card .label,.method-item dt,.brief-item dt{color:var(--text-muted);font-size:.72rem;text-transform:uppercase;letter-spacing:.06em}
+.cost-card .value{font-size:1.5rem;font-weight:800;margin-top:.35rem}
+.brief-grid,.method-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:.8rem}
+.brief-item,.method-item{background:rgba(0,0,0,.12);padding:1rem}
+.brief-item dd,.method-item dd{margin-top:.3rem;font-weight:600}
+.warning{margin-top:.75rem;padding:.75rem 1rem;border-left:3px solid var(--warning);background:rgba(245,158,11,.08);color:#fbbf24;font-size:.82rem}
+.table-wrap{overflow:auto;border:1px solid var(--border);border-radius:var(--radius-sm)}
+table{width:100%;border-collapse:collapse}th,td{padding:.75rem 1rem;border-bottom:1px solid var(--border);text-align:left;white-space:nowrap;font-size:.82rem}
+th{color:var(--text-muted);font-size:.7rem;text-transform:uppercase;letter-spacing:.06em;background:rgba(0,0,0,.18)}
+.tag{display:inline-flex;padding:2px 9px;border-radius:20px;font-size:.7rem;font-weight:600}.tag-spot{color:#fbbf24;background:#422006}.tag-regular{color:#60a5fa;background:#172554}
+.util-track{width:90px;height:6px;background:rgba(255,255,255,.07);border-radius:3px;display:inline-block;overflow:hidden}.util-fill{height:100%}.green{background:var(--success)}.yellow{background:var(--warning)}.red{background:var(--danger)}
+.scope{color:var(--text-secondary);font-size:.85rem}.scope li{margin:.35rem 0}
+.section-note{color:var(--text-muted);font-size:.82rem;margin:-.75rem 0 1rem}
+.unavailable{color:var(--text-muted);font-weight:500}
+@media(max-width:1100px){.cost-grid{grid-template-columns:repeat(2,1fr)}}@media(max-width:650px){.cost-grid{grid-template-columns:1fr}}
 </style>
 </head>
-<body>
-<div class="layout">
+<body><div class="layout">
 <aside class="sidebar">
-<div class="logo">
-<div class="logo-icon"><span class="nav-icon"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg></span></div>
-<div><div class="logo-text">OpsCart</div><div class="logo-sub">K8s Operational Intelligence</div></div>
-</div>
-
-<div class="nav-section">
-<div class="nav-label">Overview</div>
-<a class="nav-item{{if eq .ActivePage "dashboard"}} active{{end}}" href="{{.DashURL}}"><span class="nav-icon"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/></svg></span> Overview</a>
-<a class="nav-item{{if eq .ActivePage "warroom"}} active{{end}}" href="{{.WrURL}}"><span class="nav-icon"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><polygon points="7.86 2 16.14 2 22 7.86 22 16.14 16.14 22 7.86 22 2 16.14 2 7.86 7.86 2"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg></span> War Room{{if .CriticalCount}} <span class="nav-badge nav-badge-critical">{{.CriticalCount}}</span>{{end}}</a>
-</div>
-
-<div class="nav-section">
-<div class="nav-label">Investigate</div>
-<a class="nav-item{{if eq .ActivePage "incidents"}} active{{end}}" href="{{.IncidentsURL}}"><span class="nav-icon"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/></svg></span> Incidents</a>
-<a class="nav-item{{if eq .ActivePage "infrastructure"}} active{{end}}" href="{{.InfraURL}}"><span class="nav-icon"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="3" width="20" height="14" rx="2"/><path d="M8 21h8M12 17v4"/></svg></span> Infrastructure</a>
-</div>
-
-<div class="nav-section">
-<div class="nav-label">Analyze</div>
-<a class="nav-item active" href="{{.CostsURL}}"><span class="nav-icon"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="2" x2="12" y2="22"/><path d="M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"/></svg></span> Cost Intelligence</a>
-<a class="nav-item{{if eq .ActivePage "security"}} active{{end}}" href="{{.SecurityURL}}"><span class="nav-icon"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg></span> Security Posture</a>
-<a class="nav-item{{if eq .ActivePage "waste"}} active{{end}}" href="{{.WasteURL}}"><span class="nav-icon"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14H6L5 6"/><path d="M10 11v6M14 11v6"/><path d="M9 6V4h6v2"/></svg></span> Waste &amp; Drift</a>
-</div>
-
-<div class="nav-footer">
-<div class="nav-divider"></div>
-<div class="cluster-selector">
-<div class="cluster-selector-label">Current Cluster</div>
-<div class="cluster-selector-value">{{.ClusterName}}</div>
-{{if gt (len .ClusterList) 1}}
-<div class="cluster-list">
-{{range .ClusterList}}<a class="cluster-list-item{{if .IsActive}} active{{end}}" href="{{.Href}}">{{.Label}}</a>
-{{end}}
-</div>
-{{end}}
-</div>
-<div class="nav-divider"></div>
-<a class="nav-item{{if eq .ActivePage "settings"}} active{{end}}" href="/settings"><span class="nav-icon"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.07 4.93a10 10 0 0 1 0 14.14M4.93 4.93a10 10 0 0 0 0 14.14"/></svg></span> Settings</a>
-</div>
+<div class="logo"><div class="logo-icon"><img src="/static/logo.png" alt="OpsCart logo" width="55" height="55"></div><div><div class="logo-text">OpsCart</div><div class="logo-sub">K8s Operational Intelligence</div></div></div>
+<div class="nav-section"><div class="nav-label">Overview</div><a class="nav-item" href="{{.DashURL}}"><span class="nav-icon"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/></svg></span> Overview</a><a class="nav-item" href="{{.WrURL}}"><span class="nav-icon"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75"><polygon points="7.86 2 16.14 2 22 7.86 22 16.14 16.14 22 7.86 22 2 16.14 2 7.86 7.86 2"/><line x1="12" y1="8" x2="12" y2="12"/></svg></span> War Room</a></div>
+<div class="nav-section"><div class="nav-label">Investigate</div><a class="nav-item" href="{{.IncidentsURL}}">Incidents</a><a class="nav-item" href="{{.InfraURL}}">Infrastructure</a></div>
+<div class="nav-section"><div class="nav-label">Analyze</div><a class="nav-item active" href="{{.CostsURL}}"><span class="nav-icon"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75"><line x1="12" y1="2" x2="12" y2="22"/><path d="M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"/></svg></span> Cost Intelligence</a><a class="nav-item" href="{{.SecurityURL}}">Security Posture</a><a class="nav-item" href="{{.WasteURL}}">Waste &amp; Drift</a></div>
+<div class="nav-footer"><div class="nav-divider"></div><div class="cluster-selector"><div class="cluster-selector-label">Current Cluster</div><div class="cluster-selector-value">{{.ClusterName}}</div>{{range .ClusterList}}<a class="cluster-list-item{{if .IsActive}} active{{end}}" href="{{.Href}}">{{.Label}}</a>{{end}}</div></div>
 </aside>
 <main class="main">
-<div class="oc-kpi-row">
-<div class="kpi"><div class="kpi-top"><div class="kpi-icon {{if .CriticalCount}}red{{else}}green{{end}}"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><polygon points="7.86 2 16.14 2 22 7.86 22 16.14 16.14 22 7.86 22 2 16.14 2 7.86 7.86 2"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg></div></div><h3 class="{{if .CriticalCount}}red{{else}}green{{end}}">{{.CriticalCount}}</h3><p>{{if .CriticalCount}}Critical Issues{{else}}All Clear{{end}}</p></div>
-<div class="kpi"><div class="kpi-top"><div class="kpi-icon green"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M8 12l2 2 4-4"/></svg></div><span class="kpi-trend down">↓ Save</span></div><h3 class="money green">${{money .SavingsPotential}}</h3><p>Potential Savings</p></div>
-<div class="kpi"><div class="kpi-top"><div class="kpi-icon {{.SecurityColor}}"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg></div></div><h3>{{.SecurityDisplay}}</h3><p>Security Score</p></div>
-<div class="kpi"><div class="kpi-top"><div class="kpi-icon {{.WasteColor}}"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14H6L5 6"/><path d="M10 11v6M14 11v6"/><path d="M9 6V4h6v2"/></svg></div></div><h3>{{.WasteDisplay}}</h3><p>Waste Resources</p></div>
-<div class="kpi"><div class="kpi-top"><div class="kpi-icon red"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="2" x2="12" y2="22"/><path d="M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"/></svg></div></div><h3 class="money red">${{money .MonthlyCost}}</h3><p>Monthly Cost</p></div>
-<div class="kpi"><div class="kpi-top"><div class="kpi-icon cyan"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><circle cx="12" cy="12" r="3"/><line x1="12" y1="2" x2="12" y2="5"/><line x1="12" y1="19" x2="12" y2="22"/><line x1="2" y1="12" x2="5" y2="12"/><line x1="19" y1="12" x2="22" y2="12"/></svg></div></div><h3>{{.ClusterCount}}</h3><p>Clusters</p></div>
+<header class="page-hdr"><div><h1>Cost Intelligence</h1><p>{{.Provider}} · {{.Region}} · worker-node compute estimates</p></div><div class="page-meta">Last scanned<br><strong>{{.Timestamp.Format "2006-01-02 15:04 MST"}}</strong></div></header>
+
+<section class="section"><div class="section-hdr"><div class="section-title">Cost Situation Briefing</div></div>
+{{if eq .ProviderDetectionMode "manual"}}<div class="warning"><strong>Manual provider override:</strong> {{if .ProviderWarning}}{{.ProviderWarning}}{{else}}{{.Provider}} pricing is enabled manually. Detected provider: {{.DetectedProvider}}.{{end}}</div>{{end}}
+<dl class="brief-grid"><div class="brief-item"><dt>Detected provider</dt><dd>{{.DetectedProvider}}</dd></div><div class="brief-item"><dt>Effective pricing provider</dt><dd>{{.Provider}}</dd></div><div class="brief-item"><dt>Estimated monthly worker-node compute</dt><dd>{{if gt .MatchedNodes 0}}${{money .MonthlyCost}} {{.Currency}}{{else}}<span class="unavailable">Pricing unavailable</span>{{end}}</dd></div><div class="brief-item"><dt>Matched nodes or pools</dt><dd>{{.MatchedNodes}} of {{.TotalNodes}} nodes</dd></div><div class="brief-item"><dt>Allocation method</dt><dd>CPU/memory request weighted</dd></div></dl>
+{{range .PricingWarnings}}<div class="warning">{{.}}</div>{{end}}</section>
+
+<div class="cost-grid">
+<div class="cost-card"><div class="label">Monthly Compute Estimate</div><div class="value">{{if gt .MatchedNodes 0}}${{money .MonthlyCost}}{{else}}<span class="unavailable">Not calculated</span>{{end}}</div></div>
+<div class="cost-card"><div class="label">Node Pools</div><div class="value">{{len .PoolRows}}</div></div>
+<div class="cost-card"><div class="label">Pricing Coverage</div><div class="value">{{.AccuracyPct}}%</div><div class="muted">{{.PricingCoverage}}</div></div>
+<div class="cost-card"><div class="label">Provider / Region</div><div class="value">{{.Provider}}</div><div class="muted">{{.Region}}</div></div>
+{{if .ShowSavings}}<div class="cost-card"><div class="label">Potential Savings</div><div class="value">${{money .SavingsPotential}}</div></div>{{end}}
 </div>
-<div style="display:grid;grid-template-columns:1fr 340px;gap:1.5rem;align-items:start">
-<div>
-<div style="margin-bottom:2rem">
-<h1 style="font-size:1.5rem;font-weight:800;margin-bottom:0.3rem">Cloud Cost Analysis</h1>
-<p style="color:var(--text-muted);font-size:0.9rem">Kubernetes infrastructure cost breakdown &bull; {{.Timestamp.Format "Monday, January 2, 2006"}}</p>
-</div>
-<div class="section">
-<div class="section-hdr"><div class="section-title">Pricing Confidence</div></div>
-<div class="confidence-card">
-<div class="conf-ring">
-<svg width="80" height="80" viewBox="0 0 80 80">
-<circle cx="40" cy="40" r="36" class="conf-ring-bg"/>
-<circle cx="40" cy="40" r="36" class="conf-ring-fill" style="{{.ConfRingStyle}}"/>
-</svg>
-<div class="conf-pct" style="{{.ConfPctStyle}}">{{.AccuracyPct}}%</div>
-</div>
-<div class="conf-details">
-<h4>Confidence Level: {{.ConfidenceLabel}}</h4>
-<p>{{.KnownVMs}} of {{.TotalVMs}} node pool VM SKUs matched to Azure retail pricing catalog. {{if gt .UnknownVMs 0}}{{.UnknownVMs}} pool(s) estimated from CPU/memory capacity &mdash; actual cost may vary &plusmn;15%.{{else}}All VM sizes resolved to exact Pay-As-You-Go pricing.{{end}}</p>
-</div>
-</div>
-<div class="conf-method">
-<div class="conf-method-item">VM SKU from node label <code>node.kubernetes.io/instance-type</code></div>
-<div class="conf-method-item">Azure Pay-As-You-Go retail pricing (730 hrs/mo)</div>
-<div class="conf-method-item">Spot detected via <code>kubernetes.azure.com/scalesetpriority</code></div>
-<div class="conf-method-item">Namespace cost = weighted CPU+Memory share &times; node cost</div>
-</div>
-</div>
-<div class="section">
-<div class="section-hdr"><div class="section-title">Node Pool Infrastructure</div></div>
-<div class="table-wrap"><table>
-<thead><tr><th>Pool Name</th><th>VM Size</th><th>Nodes</th><th>Type</th><th>CPU Utilization</th><th>Memory Utilization</th><th>$/Node/Mo</th><th>Pool Total</th><th>RI Savings</th></tr></thead>
-<tbody>
-{{range .PoolRows}}
-<tr>
-<td><strong>{{.Name}}</strong></td>
-<td><code style="background:rgba(255,255,255,0.05);padding:2px 8px;border-radius:4px;font-size:0.8rem">{{.VMSize}}</code></td>
-<td>{{.NodeCount}}</td>
-<td><span class="tag {{.TagClass}}">{{.TagLabel}}</span></td>
-<td class="util-cell"><div class="util-row"><div class="util-track"><div class="util-fill {{.CPUColor}}" style="{{.CPUWidthStyle}}"></div></div><span class="util-pct">{{printf "%.0f" .CPUUtilPct}}%</span></div></td>
-<td class="util-cell"><div class="util-row"><div class="util-track"><div class="util-fill {{.MemColor}}" style="{{.MemWidthStyle}}"></div></div><span class="util-pct">{{printf "%.0f" .MemUtilPct}}%</span></div></td>
-<td class="money red">${{.PricePerNode}}</td>
-<td class="money red">${{.PoolTotal}}</td>
-<td class="money green">{{.RISavingsFmt}}</td>
-</tr>
-{{end}}
-{{if gt .TotalRISavings 0.0}}
-<tr style="background:rgba(16,185,129,0.05)">
-<td colspan="7" style="text-align:right;font-weight:600;color:var(--text-secondary)">Total RI Savings Potential (1-year):</td>
-<td></td>
-<td class="money green" style="font-size:1rem">${{money .TotalRISavings}}/mo</td>
-</tr>
-{{end}}
-</tbody>
-</table></div>
-</div>
-<div class="section">
-<div class="section-hdr">
-<div class="section-title">📦 Namespace &amp; Deployment Costs</div>
-<div class="section-actions"><button class="btn-sm active" onclick="toggleAll(true)">Expand All</button><button class="btn-sm" onclick="toggleAll(false)">Collapse All</button></div>
-</div>
-<div class="table-wrap"><table>
-<thead><tr><th>Namespace / Workload</th><th>Kind</th><th>CPU</th><th>Memory</th><th>Replicas</th><th>Share</th><th>Est. Cost/Mo</th></tr></thead>
-{{range .NSRows}}
-<tbody class="ns-group">
-<tr class="ns-header" onclick="toggleNs('{{.GroupID}}',this)">
-<td><span class="ns-toggle">&#x25BA;</span><strong>{{.Name}}</strong></td>
-<td><span class="tag tag-regular">{{.PodCount}} pods</span></td>
-<td>{{printf "%.1f" .CPUCores}} cores</td>
-<td>{{printf "%.1f" .MemoryGB}} GB</td>
-<td>—</td>
-<td>{{printf "%.1f" .NSShare}}%</td>
-<td class="money red">{{.CostFmt}}</td>
-</tr>
-</tbody>
-{{if .Deps}}
-<tbody class="dep-rows" id="{{.GroupID}}">
-{{range .Deps}}
-<tr class="dep-row">
-<td>{{.Name}}</td>
-<td><span class="tag {{.KindTag}}">{{.Kind}}</span></td>
-<td>{{printf "%.2f" .CPUCores}}</td>
-<td>{{printf "%.1f" .MemoryGB}} GB</td>
-<td>{{.Replicas}}</td>
-<td style="color:var(--text-muted)">{{printf "%.1f" .NSSharePct}}%</td>
-<td class="money" style="color:var(--text-secondary)">{{.CostFmt}}</td>
-</tr>
-{{end}}
-</tbody>
-{{end}}
-{{end}}
-</table></div>
-</div>
-{{if .Scenarios}}
-<div class="section">
-<div class="section-hdr"><div class="section-title">Optimization Opportunities</div></div>
-<div class="scenarios-grid">
-{{range .Scenarios}}
-<div class="scenario-card">
-<div class="scenario-top">
-<div class="scenario-name">{{.Name}}</div>
-<div class="scenario-save">&#x2193; ${{money .Savings.Low}} &ndash; ${{money .Savings.High}}/mo</div>
-</div>
-<div class="scenario-desc">{{.Description}}</div>
-<div class="scenario-pills">
-<span class="pill">&#x23F1; {{.Timeline}}</span>
-<span class="pill">&#x1F4AA; {{.Effort}} effort</span>
-<span class="pill">&#x26A0; {{.Risk}} risk</span>
-</div>
-</div>
-{{end}}
-</div>
-</div>
-{{end}}
-<div class="disclaimer-bar"><h4>&#x26A0;&#xFE0F; Important Disclaimers</h4><ul>{{range .Disclaimers}}<li>{{.}}</li>{{end}}</ul></div>
-<div class="footer">Generated by <strong>OpsCart FinOps Engine</strong> {{.Version}} &bull; {{.Timestamp.Format "2006-01-02 15:04:05 MST"}} &bull; Pricing source: {{.PricingSource}}</div>
-</div>
-<div style="position:sticky;top:2rem">
-<div class="section" style="border-color:rgba(239,68,68,0.4)">
-<div class="section-hdr">
-<div class="section-title">War Room</div>
-{{if .WRIssues}}<span style="background:rgba(239,68,68,0.12);color:#ef4444;padding:3px 10px;border-radius:20px;font-size:0.72rem;font-weight:700">{{len .WRIssues}} issues</span>
-{{else}}<span style="background:rgba(16,185,129,0.12);color:#10b981;padding:3px 10px;border-radius:20px;font-size:0.72rem;font-weight:700">All clear</span>
-{{end}}
-</div>
-{{if .WRIssues}}
-{{range .WRIssues}}
-<div class="wr-mini-card {{.CardClass}}">
-<div class="wr-mini-top"><span class="wr-mini-badge {{.CardClass}}">{{.BadgeLabel}}</span><span class="wr-mini-type">{{.Icon}} {{.TypeLabel}}</span>{{if .AgeLbl}}<span class="wr-mini-age">{{.AgeLbl}}</span>{{end}}</div>
-<div class="wr-mini-name">{{.ShortName}}</div>
-<div class="wr-mini-ns">ns: {{.Namespace}}</div>
-<div class="wr-mini-msg">{{.ShortMsg}}</div>
-</div>
-{{end}}
-{{else}}
-<div style="text-align:center;padding:2rem 1rem;color:#64748b">
-<div style="font-size:2rem;margin-bottom:0.5rem">&#x2705;</div>
-<div style="font-size:0.85rem">No critical issues detected</div>
-</div>
-{{end}}
-</div>
-</div>
-</div>
-</main>
-</div>
-<script>
-function toggleNs(id,header){var rows=document.getElementById(id);if(!rows)return;rows.classList.toggle('show');header.classList.toggle('open');}
-function toggleAll(expand){document.querySelectorAll('.dep-rows').forEach(function(el){if(expand)el.classList.add('show');else el.classList.remove('show');});document.querySelectorAll('.ns-header').forEach(function(el){if(expand)el.classList.add('open');else el.classList.remove('open');});}
-</script>
-<div id="oc-refresh-badge"><span id="oc-dot"></span><span>Last updated: <strong id="oc-age">just now</strong></span></div>
-<script>
-(function(){
-var SCAN_TS={{.ScannedAtMS}},REFRESH_URL="{{.RefreshURL}}",REFRESH_INTERVAL=60000;
-var badge=document.getElementById('oc-refresh-badge');
-var ageEl=document.getElementById('oc-age');
-function updateAge(){var s=Math.floor((Date.now()-SCAN_TS)/1000);if(s<5)ageEl.textContent='just now';else if(s<60)ageEl.textContent=s+'s ago';else ageEl.textContent=Math.floor(s/60)+'m ago';}
-setInterval(updateAge,1000);updateAge();
-function doRefresh(){badge.classList.add('refreshing');ageEl.textContent='refreshing…';fetch(REFRESH_URL,{method:'POST'}).then(function(){location.reload();}).catch(function(){badge.classList.remove('refreshing');updateAge();setTimeout(doRefresh,10000);});}
-setTimeout(doRefresh,REFRESH_INTERVAL);
-})();
-</script>
-</body>
-</html>
+
+<section class="section"><div class="section-hdr"><div class="section-title">Pricing Methodology</div></div><dl class="method-grid">
+<div class="method-item"><dt>Provider</dt><dd>{{.Provider}}</dd></div><div class="method-item"><dt>Pricing source</dt><dd>{{.PricingSource}}</dd></div><div class="method-item"><dt>Matched / total nodes</dt><dd>{{.MatchedNodes}} / {{.TotalNodes}}</dd></div><div class="method-item"><dt>Currency</dt><dd>{{.Currency}}</dd></div>{{if .LastPriceRefresh.IsZero}}<div class="method-item"><dt>Catalog freshness</dt><dd>Bundled with this OpsCart release</dd></div>{{else}}<div class="method-item"><dt>Last price refresh</dt><dd>{{.LastPriceRefresh.Format "2006-01-02 15:04 MST"}}</dd></div>{{end}}<div class="method-item"><dt>Supported capacity types</dt><dd>{{.CapacityTypes}}</dd></div>
+</dl></section>
+
+<section class="section"><div class="section-hdr"><div class="section-title">Node Pool Infrastructure</div></div><div class="table-wrap"><table><thead><tr><th>Provider</th><th>Pool / node group</th><th>Instance type</th><th>Region</th><th>Nodes</th><th>Capacity</th><th>CPU util.</th><th>Memory util.</th><th>Per node / month</th><th>Pool total</th>{{if .ShowRI}}<th>Azure RI savings</th>{{end}}</tr></thead><tbody>
+{{range .PoolRows}}<tr><td>{{.Provider}}</td><td><strong>{{.Name}}</strong></td><td><code>{{.VMSize}}</code></td><td>{{.Region}}</td><td>{{.NodeCount}}</td><td><span class="tag {{.TagClass}}">{{.TagLabel}}</span></td><td><span class="util-track"><span class="util-fill {{.CPUColor}}" style="{{.CPUWidthStyle}}"></span></span> {{printf "%.0f" .CPUUtilPct}}%</td><td><span class="util-track"><span class="util-fill {{.MemColor}}" style="{{.MemWidthStyle}}"></span></span> {{printf "%.0f" .MemUtilPct}}%</td><td>{{if .PriceAvailable}}${{.PricePerNode}}{{else}}<span class="unavailable">Not calculated</span>{{end}}</td><td>{{if .PriceAvailable}}${{.PoolTotal}}{{else}}<span class="unavailable">Not calculated</span>{{end}}</td>{{if $.ShowRI}}<td>{{if .ShowRI}}{{.RISavingsFmt}}{{else}}<span class="unavailable">Not calculated</span>{{end}}</td>{{end}}</tr>{{end}}
+</tbody></table></div></section>
+
+<section class="section"><div class="section-hdr"><div class="section-title">Namespace &amp; Workload Allocation</div></div><p class="section-note">Allocated estimates use each namespace or workload’s weighted share of CPU and memory requests. They are not invoice values.</p><div class="table-wrap"><table><thead><tr><th>Namespace</th><th>Pods</th><th>CPU</th><th>Memory</th><th>Weighted share</th><th>Allocated estimate / month</th></tr></thead><tbody>{{range .NSRows}}<tr><td><strong>{{.Name}}</strong></td><td>{{.PodCount}}</td><td>{{printf "%.1f" .CPUCores}} cores</td><td>{{printf "%.1f" .MemoryGB}} GB</td><td>{{printf "%.1f" .NSShare}}%</td><td>{{if gt $.MatchedNodes 0}}{{.CostFmt}}{{else}}<span class="unavailable">Not calculated</span>{{end}}</td></tr>{{end}}</tbody></table></div></section>
+
+<section class="section"><div class="section-hdr"><div class="section-title">Scope &amp; Exclusions</div></div><ul class="scope">{{range .ScopeExclusions}}<li>{{.}}</li>{{else}}<li>Worker-node compute pricing could not be resolved; no unsupported provider estimate was substituted.</li>{{end}}</ul></section>
+<div class="footer">OpsCart {{.Version}} · public/list pricing estimates only · pricing source: {{.PricingSource}}</div>
+</main></div></body></html>

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"embed"
 	"encoding/json"
 	"fmt"
@@ -14,6 +15,8 @@ import (
 	"sync"
 	"time"
 
+	awsconfig "github.com/aws/aws-sdk-go-v2/config"
+	awspricing "github.com/aws/aws-sdk-go-v2/service/pricing"
 	"github.com/opscart/opscart-k8s-watcher/pkg/analyzer"
 	"github.com/opscart/opscart-k8s-watcher/pkg/models"
 	"github.com/opscart/opscart-k8s-watcher/pkg/store"
@@ -27,6 +30,15 @@ var templateFS embed.FS
 
 //go:embed static
 var staticFS embed.FS
+
+var getAWSPricingProvider = sync.OnceValue(func() analyzer.PricingProvider {
+	awsCfg, err := awsconfig.LoadDefaultConfig(context.Background(), awsconfig.WithRegion("us-east-1"))
+	if err != nil {
+		log.Printf("AWS pricing configuration unavailable: %v", err)
+		return nil
+	}
+	return analyzer.NewAWSPricingProvider(awspricing.NewFromConfig(awsCfg), 24*time.Hour)
+})
 
 func displayName(ctx string) string {
 	if ctx == "" {
@@ -1761,6 +1773,11 @@ func runFullScan(ctx string) (*clusterScan, error) {
 
 	// ── 1. Cost analysis (required) ───────────────────────────────────
 	npCostAnalyzer := analyzer.NewNodePoolCostAnalyzer(clientset, region)
+	providerOverride, _ := analyzer.ParseCloudProviderOverride(cloudProvider)
+	npCostAnalyzer.SetCloudProviderOverride(providerOverride)
+	if pricingSource == "aws-api" {
+		npCostAnalyzer.SetPricingProvider(getAWSPricingProvider())
+	}
 	poolCosts, _, err := npCostAnalyzer.AnalyzeNodePoolCosts()
 	if err != nil {
 		return nil, fmt.Errorf("node pool analysis: %w", err)
@@ -1793,14 +1810,49 @@ func runFullScan(ctx string) (*clusterScan, error) {
 
 	detectedRegion := region
 	if detectedRegion == "" {
-		detectedRegion = "auto-detected"
+		detectedRegion = npCostAnalyzer.Region()
 	}
+	if region == "" && npCostAnalyzer.Provider() == analyzer.CloudProviderMixed {
+		detectedRegion = "Multiple regions"
+	}
+	if detectedRegion == "" {
+		detectedRegion = "Not detected"
+	}
+	provider := string(npCostAnalyzer.Provider())
+	matchedNodes, totalNodes := 0, 0
+	for _, pool := range poolCosts {
+		totalNodes += pool.NodeCount
+		if pool.PricingAvailable {
+			matchedNodes += pool.NodeCount
+		}
+	}
+	coverage := fmt.Sprintf("%d of %d nodes priced", matchedNodes, totalNodes)
+	source := "Pricing unavailable"
+	switch npCostAnalyzer.Provider() {
+	case analyzer.CloudProviderAzure:
+		source = analyzer.NewAzurePricingProvider().SourceDescription()
+	case analyzer.CloudProviderAWS:
+		if pricingSource == "aws-api" {
+			source = "AWS Price List Query API public EC2 On-Demand pricing"
+		}
+	case analyzer.CloudProviderMixed:
+		source = "Provider-specific sources; unsupported nodes remain unavailable"
+	}
+	if npCostAnalyzer.Provider() != analyzer.CloudProviderAzure {
+		costEstimate.OptimizationScenarios = nil
+		costEstimate.TotalSavingsPotential = models.CostRange{}
+	}
+	exclusions := providerScopeExclusions(npCostAnalyzer.Provider())
 
 	scan.report = &models.CloudCostReport{
 		Timestamp:             time.Now(),
 		ClusterName:           displayName(ctx),
 		Region:                detectedRegion,
-		Provider:              "azure",
+		Provider:              provider,
+		DetectedProvider:      string(npCostAnalyzer.DetectedProvider()),
+		EffectiveProvider:     provider,
+		ProviderDetectionMode: npCostAnalyzer.ProviderDetectionMode(),
+		ProviderWarning:       npCostAnalyzer.ProviderWarning(),
 		NodePoolCosts:         poolCosts,
 		TotalNodeCost:         totalNodeCost,
 		NamespaceCosts:        nsCosts,
@@ -1809,19 +1861,14 @@ func runFullScan(ctx string) (*clusterScan, error) {
 		CostBreakdown:         models.CostBreakdown{Compute: totalNodeCost},
 		OptimizationScenarios: costEstimate.OptimizationScenarios,
 		TotalSavingsPotential: costEstimate.TotalSavingsPotential,
-		PricingSource:         "embedded-catalog",
-		Assumptions: []string{
-			"VM pricing from embedded Azure retail price catalog (East US 2 baseline)",
-			"Cost allocation: weighted average of CPU + Memory resource requests",
-			"Node pool costs = Pay-As-You-Go unless spot label detected",
-			"Does NOT include: disk I/O, network egress, Log Analytics, Defender for Cloud",
-		},
-		Disclaimers: []string{
-			"Prices are approximate — based on Azure public pricing as of 2026",
-			"Actual costs depend on Enterprise Agreement, MACC commitments, and negotiated rates",
-			"Use Azure Cost Management + Billing for exact billing data",
-			"Reserved Instance savings shown are potential — requires commitment purchase",
-		},
+		PricingSource:         source,
+		PricingCoverage:       coverage,
+		PricingWarnings:       pricingCoverageWarnings(npCostAnalyzer.PricingWarnings(), matchedNodes, totalNodes),
+		Currency:              "USD",
+		ScopeExclusions:       exclusions,
+		LastPriceRefresh:      npCostAnalyzer.LastPriceRefresh(),
+		Assumptions:           []string{"Cost allocation uses a weighted average of CPU and memory requests."},
+		Disclaimers:           []string{"Public/list pricing estimates are not invoice values."},
 	}
 
 	// ── 2. Security audit (best effort) ──────────────────────────────
@@ -1856,6 +1903,34 @@ func runFullScan(ctx string) (*clusterScan, error) {
 	}
 
 	return scan, nil
+}
+
+func providerScopeExclusions(provider analyzer.CloudProvider) []string {
+	switch provider {
+	case analyzer.CloudProviderAWS:
+		return []string{
+			"Includes only matched EC2 Linux worker-node On-Demand compute at public USD list prices.",
+			"Excludes EKS control-plane charges, EBS volumes and snapshots, load balancers, NAT gateways, data transfer, support charges, and taxes.",
+			"Excludes account-specific discounts, Savings Plans, and Reserved Instance commitments. Spot nodes are detected but excluded until Spot pricing is integrated.",
+		}
+	case analyzer.CloudProviderAzure:
+		return []string{
+			"Includes worker-node VM compute from the embedded Azure public pricing catalog.",
+			"Excludes storage, network egress, monitoring, security services, taxes, and negotiated account pricing.",
+		}
+	case analyzer.CloudProviderMixed:
+		return []string{"Each node is priced only by its detected provider; unsupported or disabled provider pricing is excluded from totals."}
+	default:
+		return []string{"No supported provider evidence was detected, so worker-node pricing is unavailable and no Azure fallback was applied."}
+	}
+}
+
+func pricingCoverageWarnings(warnings []string, matched, total int) []string {
+	result := append([]string(nil), warnings...)
+	if matched < total {
+		result = append(result, fmt.Sprintf("Estimate includes only %d of %d nodes with resolved pricing.", matched, total))
+	}
+	return result
 }
 
 func kubeClient(ctx string) (*kubernetes.Clientset, error) {

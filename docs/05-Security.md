@@ -16,7 +16,9 @@ mutate cluster state.
 - Runs as non-root, UID 65534
 - Statically compiled (`CGO_ENABLED=0`), no dynamic linking
 - 0 known CVEs at time of each tagged release (Trivy-scanned)
-- No outbound network calls — no telemetry, no phone-home, no license server
+- Core scanning and embedded pricing make no outbound calls. Explicitly enabled
+  AWS pricing calls the AWS Pricing API; there is no telemetry, phone-home, or
+  license server.
 
 ## What's stored
 
