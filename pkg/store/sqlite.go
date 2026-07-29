@@ -863,26 +863,36 @@ func inClause(ids []int64) (string, []any) {
 func orderByClause(sortBy string, desc bool) string {
 	col := "last_seen"
 	switch sortBy {
+	case "priority", "":
+		return `CASE status WHEN 'active' THEN 0 ELSE 1 END ASC,
+			CASE severity
+				WHEN 'critical' THEN 0
+				WHEN 'high' THEN 1
+				WHEN 'medium' THEN 2
+				WHEN 'low' THEN 3
+				ELSE 4
+			END ASC,
+			first_seen DESC, fingerprint ASC`
 	case "severity":
-		col = `CASE severity
+		return `CASE severity
 			WHEN 'critical' THEN 0
 			WHEN 'high' THEN 1
 			WHEN 'medium' THEN 2
 			WHEN 'low' THEN 3
 			ELSE 4
-		END`
+		END ASC, first_seen DESC, fingerprint ASC`
 	case "first_seen":
 		col = "first_seen"
 	case "restarts":
 		col = "current_restart_count"
-	case "last_seen", "":
+	case "last_seen":
 		col = "last_seen"
 	}
 	dir := "ASC"
 	if desc {
 		dir = "DESC"
 	}
-	return col + " " + dir + ", id " + dir
+	return col + " " + dir + ", fingerprint ASC"
 }
 
 // trendEvent is one DETECTED/RestartMilestone event, used by deriveTrend.
@@ -959,17 +969,30 @@ func (s *SQLiteStore) batchTrendEvents(ids []int64) (map[int64][]trendEvent, err
 	return out, rows.Err()
 }
 
-// deriveTrend classifies an active incident's restart trajectory as
+// restartTrendApplies identifies findings backed by a pod restart series.
+// Namespace posture, security/configuration, and unattached-resource findings
+// have no meaningful restart trajectory and must not be labeled "stable".
+func RestartTrendApplies(issueType string) bool {
+	switch issueType {
+	case "crash_loop", "oomkilled", "oom_killed", "probe_failure":
+		return true
+	default:
+		return false
+	}
+}
+
+// deriveTrend classifies an active, restart-applicable incident's trajectory as
 // "accelerating" or "stable" from its two most recent milestone-relevant
 // events (DETECTED and RestartMilestone) — the cheapest points in the
 // journal that carry both a restart count and a timestamp.
 //
-// Heuristic: lifetimeRate is total restarts/day since first_seen. recentRate
-// is restarts/day between the two most recent events. If recentRate exceeds
-// lifetimeRate by more than 25%, the incident is "accelerating" (restarting
-// faster than its own history predicts). Otherwise — including incidents
-// with fewer than two such events, or whose most recent event is more than
-// 24h old (no recent movement to compare) — it is "stable".
+// Heuristic: lifetimeRate is current restart count divided by active age in
+// days (with a one-day minimum). recentRate is the restart delta per day
+// between the two newest DETECTED/RestartMilestone journal points (with a
+// one-hour minimum interval). A recent rate greater than 125% of lifetime rate
+// is "accelerating". Otherwise it is "stable"; fewer than two points or a
+// latest point older than 24 hours are also "stable" because no acceleration
+// can be established from the available restart series.
 //
 // This intentionally approximates a 48h window with whatever two events
 // happen to exist rather than sampling restart_count on a fixed schedule,
@@ -1133,7 +1156,7 @@ func (s *SQLiteStore) QueryIncidents(f IncidentFilter) ([]IncidentSummary, int, 
 			LastSeen:     time.Unix(r.lastSeen, 0),
 			RestartCount: r.restartCount,
 		}
-		if r.status == "active" {
+		if r.status == "active" && RestartTrendApplies(r.issueType) {
 			summary.Trend = deriveTrend(trendInputs[r.id], r.restartCount, r.firstSeen)
 		}
 		items = append(items, summary)
@@ -1147,7 +1170,8 @@ func (s *SQLiteStore) QueryIncidents(f IncidentFilter) ([]IncidentSummary, int, 
 func (s *SQLiteStore) countAccelerating(cluster string) (int, error) {
 	rows, err := s.db.Query(
 		`SELECT id, current_restart_count, first_seen FROM incidents
-		 WHERE cluster = ? AND status = 'active'`,
+		 WHERE cluster = ? AND status = 'active'
+		   AND issue_type IN ('crash_loop','oomkilled','oom_killed','probe_failure')`,
 		cluster,
 	)
 	if err != nil {

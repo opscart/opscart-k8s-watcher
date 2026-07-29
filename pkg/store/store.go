@@ -103,7 +103,7 @@ type IncidentFilter struct {
 	Severity   string // exact, empty = all
 	Status     string // "active" | "resolved" | "reopened" | "" (all)
 	SinceFirst time.Time
-	SortBy     string // "severity" | "first_seen" | "last_seen" | "restarts"
+	SortBy     string // "priority" | "severity" | "first_seen" | "last_seen" | "restarts"
 	SortDesc   bool
 	Page       int // 1-based
 	PerPage    int // default 50, cap 200
@@ -121,7 +121,7 @@ type IncidentSummary struct {
 	FirstSeen    time.Time
 	LastSeen     time.Time
 	RestartCount int
-	Trend        string // "accelerating" | "stable" | "recovering" | ""
+	Trend        string // restart-series trend: "accelerating" | "stable" | ""
 }
 
 // MemoryScoreboard summarizes a cluster's operational memory: how much

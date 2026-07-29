@@ -139,7 +139,7 @@ func investigationHints(issueType string, stateReason string, restarts int32, po
 	case "unprotected_namespace":
 		hints = append(hints, investigationHint{
 			Confidence: "high",
-			Title:      "Apply a default-deny NetworkPolicy",
+			Title:      "Evaluate a default-deny NetworkPolicy",
 			Reason:     "No NetworkPolicy was detected; review the namespace's intended ingress and egress controls before applying a default-deny policy.",
 			Command:    fmt.Sprintf("kubectl get networkpolicies -n %s", namespace),
 		})
