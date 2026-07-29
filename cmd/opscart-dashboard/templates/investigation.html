@@ -49,6 +49,15 @@
 .inv-summary{background:var(--surface);border-left:3px solid var(--primary-light);border-radius:var(--radius-sm);padding:1rem 1.25rem;margin-bottom:1.5rem}
 .inv-summary-label{font-size:0.7rem;text-transform:uppercase;letter-spacing:1px;color:var(--primary-light);font-weight:700;margin-bottom:0.5rem}
 .inv-summary-text{font-size:0.88rem;color:var(--text);line-height:1.7}
+.inv-briefing{background:rgba(245,158,11,.055);border:1px solid rgba(245,158,11,.48);border-radius:var(--radius-sm);padding:1rem 1.25rem;margin-bottom:1rem}
+.inv-briefing .inv-summary-label{color:#fbbf24}
+.inv-scope-grid{display:grid;grid-template-columns:minmax(260px,.8fr) minmax(360px,1.2fr);gap:1rem;margin-bottom:1.5rem}
+.inv-scope-card{background:linear-gradient(135deg,var(--surface),rgba(30,41,59,.7));border:1px solid var(--border);border-radius:var(--radius-sm);padding:1rem 1.25rem}
+.inv-scope-title{font-size:.7rem;text-transform:uppercase;letter-spacing:.6px;color:var(--primary-light);font-weight:700;margin-bottom:.75rem}
+.inv-scope-row{display:grid;grid-template-columns:130px 1fr;gap:1rem;padding:.48rem 0;border-bottom:1px solid rgba(51,65,85,.45);font-size:.8rem}
+.inv-scope-row:last-child{border-bottom:none}.inv-scope-key{color:var(--text-muted)}.inv-scope-value{color:var(--text);font-weight:500;min-width:0;overflow-wrap:anywhere}
+.inv-current-status{color:#f87171}.inv-current-status:before{content:"";display:inline-block;width:8px;height:8px;border-radius:50%;background:#f87171;margin-right:.4rem}
+.inv-describe{margin-top:.75rem}
 .inv-evidence{display:flex;gap:1rem;flex-wrap:wrap;margin-bottom:1.5rem}
 .inv-evidence-chip{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius-sm);padding:0.6rem 1rem;min-width:120px}
 .inv-evidence-label{font-size:0.65rem;text-transform:uppercase;letter-spacing:0.5px;color:var(--text-muted);margin-bottom:0.25rem}
@@ -65,7 +74,7 @@
 .inv-conf-high{background:rgba(239,68,68,0.15);color:#f87171}
 .inv-conf-medium{background:rgba(245,158,11,0.15);color:#fbbf24}
 .inv-conf-low{background:rgba(100,116,139,0.15);color:#94a3b8}
-@media(max-width:768px){.inv-resources{grid-template-columns:1fr}.inv-bar{flex-direction:column}.inv-evidence{flex-direction:column}}
+@media(max-width:900px){.inv-scope-grid{grid-template-columns:1fr}}@media(max-width:768px){.inv-resources{grid-template-columns:1fr}.inv-bar{flex-direction:column}.inv-evidence{flex-direction:column}.inv-scope-row{grid-template-columns:110px 1fr}}
 </style>
 </head>
 <body>
@@ -74,8 +83,8 @@
 <main class="main">
   <div class="page-hdr">
     <div>
-      <h1>Investigation</h1>
-      <p>{{.Namespace}} / {{.PodName}}</p>
+      <h1>{{if .NamespaceScoped}}Namespace Investigation{{else}}Workload Investigation{{end}}</h1>
+      <p>{{.Namespace}} / {{.WorkloadLabel}}</p>
     </div>
     <div class="page-meta">
       <div>Last scanned: <strong id="inv-age">just now</strong></div>
@@ -134,47 +143,104 @@
 
   {{else}}
 
-  <div class="inv-bar">
-    <div class="inv-chip danger">
-      <div>
-        <div class="inv-badge">CRITICAL</div>
-        {{if .StateReason}}<div class="inv-state-reason">{{.StateReason}}{{if eq .IssueType "probe_failure"}} (ProbeFailure){{end}}</div>{{end}}
+  {{if .OperationalSummary}}
+  <div class="inv-briefing">
+    <div class="inv-summary-label">⚠ Situation Briefing</div>
+    <div class="inv-summary-text">{{.OperationalSummary}}</div>
+  </div>
+  {{end}}
+
+  {{if .NamespaceScoped}}
+  <div class="inv-section">
+    <div class="inv-section-hdr">
+      <h2>Namespace Finding</h2>
+    </div>
+    <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:0.75rem;margin-bottom:1.5rem">
+      <div class="inv-evidence-chip">
+        <div class="inv-evidence-label">Namespace</div>
+        <div class="inv-evidence-value" style="font-size:0.88rem">{{.Namespace}}</div>
+      </div>
+      <div class="inv-evidence-chip">
+        <div class="inv-evidence-label">Pods affected</div>
+        <div class="inv-evidence-value">{{.NamespacePodCount}}</div>
       </div>
     </div>
-    <div class="inv-chip">
-      <div>
-        <div class="inv-chip-label">Restarts</div>
-        <div class="inv-chip-value">{{.Restarts}}</div>
-      </div>
-    </div>
-    <div class="inv-chip">
-      <div>
-        <div class="inv-chip-label">Age</div>
-        <div class="inv-chip-value">{{.AgeDays}}d</div>
-      </div>
-    </div>
-    {{if .FirstDetected}}
-    <div class="inv-chip">
-      <div>
-        <div class="inv-chip-label">First detected</div>
-        <div class="inv-chip-value">{{.FirstDetected}}</div>
-      </div>
+    {{if .NamespaceFinding}}
+    <div class="inv-summary">
+      <div class="inv-summary-label">Finding</div>
+      <div class="inv-summary-text">{{.NamespaceFinding}}</div>
     </div>
     {{end}}
-    {{if .OwnerKind}}
-    <div class="inv-chip">
-      <div>
-        <div class="inv-chip-label">Owner</div>
-        <div class="inv-chip-value">{{.OwnerKind}}/{{.OwnerName}}</div>
+    {{if eq .IssueType "unprotected_namespace"}}
+    <div>
+      <div class="inv-evidence-label" style="margin-bottom:0.6rem">Sample default-deny NetworkPolicy</div>
+      <div class="inv-cmd" style="align-items:flex-start">
+        <pre id="np-yaml" style="white-space:pre;overflow-x:auto;margin:0;font-family:'Consolas','Monaco',monospace;font-size:0.78rem;color:var(--primary-light);flex:1">apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-all
+  namespace: {{.Namespace}}
+spec:
+  podSelector: {}
+  policyTypes:
+    - Ingress
+    - Egress</pre>
+        <button class="wr-copy-btn" onclick="navigator.clipboard.writeText(document.getElementById('np-yaml').textContent)">Copy</button>
       </div>
     </div>
     {{end}}
   </div>
+  {{end}}
 
-  {{if .OperationalSummary}}
-  <div class="inv-summary">
-    <div class="inv-summary-label">OpsCart Assessment</div>
-    <div class="inv-summary-text">{{.OperationalSummary}}</div>
+  {{if not .NamespaceScoped}}<div class="inv-scope-grid">
+    <section class="inv-scope-card">
+      <div class="inv-scope-title">▧ Operational Identity</div>
+      <div class="inv-scope-row"><span class="inv-scope-key">Classification</span><span class="inv-scope-value">{{issueTypeLabel .IssueType}}</span></div>
+      <div class="inv-scope-row"><span class="inv-scope-key">Severity</span><span class="inv-scope-value" style="text-transform:capitalize">{{.Severity}}</span></div>
+      <div class="inv-scope-row"><span class="inv-scope-key">Tracking</span><span class="inv-scope-value">{{.TrackingLabel}}</span></div>
+      {{if .FirstDetected}}<div class="inv-scope-row"><span class="inv-scope-key">Open Since</span><span class="inv-scope-value">{{.FirstDetected}}</span></div>{{end}}
+    </section>
+    <section class="inv-scope-card">
+      <div class="inv-scope-title">◉ Current Observation</div>
+      <div class="inv-scope-row"><span class="inv-scope-key">Namespace</span><span class="inv-scope-value">{{.Namespace}}</span></div>
+      <div class="inv-scope-row"><span class="inv-scope-key">Workload</span><span class="inv-scope-value">{{.WorkloadLabel}}</span></div>
+      <div class="inv-scope-row"><span class="inv-scope-key">Focus Pod</span><span class="inv-scope-value">{{.PodName}}</span></div>
+      <div class="inv-scope-row"><span class="inv-scope-key">Pod Age</span><span class="inv-scope-value">{{.PodAge}}</span></div>
+      <div class="inv-scope-row"><span class="inv-scope-key">Restart Count</span><span class="inv-scope-value">{{.Restarts}}</span></div>
+      {{if .ContainerName}}<div class="inv-scope-row"><span class="inv-scope-key">Container</span><span class="inv-scope-value">{{.ContainerName}}</span></div>{{end}}
+      {{if .StateReason}}
+      <div class="inv-scope-row"><span class="inv-scope-key">Pod Phase</span><span class="inv-scope-value">{{.Phase}}</span></div>
+      <div class="inv-scope-row"><span class="inv-scope-key">Container State</span><span class="inv-scope-value inv-current-status">{{.StateReason}}</span></div>
+      {{else}}
+      <div class="inv-scope-row"><span class="inv-scope-key">Current Status</span><span class="inv-scope-value inv-current-status">{{.Phase}}</span></div>
+      {{end}}
+      {{if .DescribeCommand}}<div class="inv-cmd inv-describe"><code>{{.DescribeCommand}}</code><button class="wr-copy-btn" data-command="{{.DescribeCommand}}" onclick="navigator.clipboard.writeText(this.dataset.command)">Copy</button></div>{{end}}
+    </section>
+  </div>{{end}}
+
+  {{if .Hints}}
+  <div class="inv-section">
+    <div class="inv-section-hdr">
+      <h2>Recommended Investigation</h2>
+    </div>
+    <div class="inv-hints">
+      {{range .Hints}}
+      <div class="inv-hint inv-hint-{{.Confidence}}">
+        <div class="inv-hint-header">
+          {{if .Step}}<span style="font-size:0.72rem;font-weight:700;color:var(--text-muted);min-width:52px">STEP {{.Step}}</span>{{end}}
+          <span class="inv-conf-badge inv-conf-{{.Confidence}}">{{if eq .Confidence "high"}}High{{else if eq .Confidence "medium"}}Medium{{else}}Low{{end}}</span>
+          <span class="inv-hint-title">{{.Title}}</span>
+        </div>
+        <div class="inv-hint-reason">{{.Reason}}</div>
+        {{if .Command}}
+        <div class="inv-hint-cmd">
+          <code>{{.Command}}</code>
+          <button class="wr-copy-btn" onclick="navigator.clipboard.writeText('{{.Command}}')">Copy</button>
+        </div>
+        {{end}}
+      </div>
+      {{end}}
+    </div>
   </div>
   {{end}}
 
@@ -182,7 +248,6 @@
 <div class="inv-section">
   <div class="inv-section-hdr">
     <h2>Incident Timeline</h2>
-    <span style="font-size:0.8rem;color:var(--text-muted);margin-left:auto">{{len .Timeline}} events</span>
   </div>
   <div style="position:relative;padding-left:1.5rem">
     {{/* vertical line */}}
@@ -209,84 +274,22 @@
   </div>
 </div>
 {{end}}
+
+  {{if .NamespaceScoped}}
+  {{$commands := unrepresentedCommands .Commands .Hints}}
+  {{if $commands}}
   <div class="inv-section">
     <div class="inv-section-hdr">
-      <h2>Evidence</h2>
+      <h2>Investigation Commands</h2>
     </div>
-<div class="inv-evidence">
-      {{if .Severity}}
-      <div class="inv-evidence-chip" style="border-color:rgba(239,68,68,0.4);background:rgba(239,68,68,0.04)">
-        <div class="inv-evidence-label">Severity</div>
-        <div class="inv-evidence-value" style="color:#f87171;text-transform:capitalize">{{.Severity}}</div>
-      </div>
+    <div class="inv-cmds">
+      {{range $commands}}
+      <div class="inv-cmd"><code>{{.}}</code><button class="wr-copy-btn" onclick="navigator.clipboard.writeText('{{.}}')">Copy</button></div>
       {{end}}
-      {{if .FirstDetected}}
-      <div class="inv-evidence-chip">
-        <div class="inv-evidence-label">First detected</div>
-        <div class="inv-evidence-value">{{.FirstDetected}}</div>
-      </div>
-      {{end}}
-      {{if not .NamespaceScoped}}
-      <div class="inv-evidence-chip">
-        <div class="inv-evidence-label">Restarts</div>
-        <div class="inv-evidence-value">{{.Restarts}}</div>
-      </div>
-      <div class="inv-evidence-chip">
-        <div class="inv-evidence-label">State</div>
-        <div class="inv-evidence-value">{{if .StateReason}}{{.StateReason}}{{if eq .IssueType "probe_failure"}} (ProbeFailure){{end}}{{else}}Unknown{{end}}</div>
-      </div>
-      <div class="inv-evidence-chip">
-        <div class="inv-evidence-label">Age</div>
-        <div class="inv-evidence-value">{{.AgeDays}}d</div>
-      </div>
-      <div class="inv-evidence-chip">
-        <div class="inv-evidence-label">Owner</div>
-        <div class="inv-evidence-value">{{if .OwnerKind}}{{.OwnerKind}}/{{.OwnerName}}{{else}}None{{end}}</div>
-      </div>
-      {{end}}
-    </div>
-  </div>
-{{if .NamespaceScoped}}
-<div class="inv-section">
-  <div class="inv-section-hdr">
-    <h2>Namespace Finding</h2>
-  </div>
-  <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:0.75rem;margin-bottom:1.5rem">
-    <div class="inv-evidence-chip">
-      <div class="inv-evidence-label">Namespace</div>
-      <div class="inv-evidence-value" style="font-size:0.88rem">{{.Namespace}}</div>
-    </div>
-    <div class="inv-evidence-chip">
-      <div class="inv-evidence-label">Pods affected</div>
-      <div class="inv-evidence-value">{{.NamespacePodCount}}</div>
-    </div>
-  </div>
-  {{if .NamespaceFinding}}
-  <div class="inv-summary">
-    <div class="inv-summary-label">Finding</div>
-    <div class="inv-summary-text">{{.NamespaceFinding}}</div>
-  </div>
-  {{end}}
-  {{if eq .IssueType "unprotected_namespace"}}
-  <div>
-    <div class="inv-evidence-label" style="margin-bottom:0.6rem">Sample default-deny NetworkPolicy</div>
-    <div class="inv-cmd" style="align-items:flex-start">
-      <pre id="np-yaml" style="white-space:pre;overflow-x:auto;margin:0;font-family:'Consolas','Monaco',monospace;font-size:0.78rem;color:var(--primary-light);flex:1">apiVersion: networking.k8s.io/v1
-kind: NetworkPolicy
-metadata:
-  name: default-deny-all
-  namespace: {{.Namespace}}
-spec:
-  podSelector: {}
-  policyTypes:
-    - Ingress
-    - Egress</pre>
-      <button class="wr-copy-btn" onclick="navigator.clipboard.writeText(document.getElementById('np-yaml').textContent)">Copy</button>
     </div>
   </div>
   {{end}}
-</div>
-{{end}}
+  {{end}}
 
 {{if not .NamespaceScoped}}
 {{if or .BlastSiblings .BlastServices .BlastIngresses .BlastNamespacePods}}
@@ -307,7 +310,7 @@ spec:
     </div>
     {{if .BlastTotal}}
     <div class="inv-evidence-chip" style="{{if eq .BlastHealthy 0}}border-color:rgba(239,68,68,0.4);background:rgba(239,68,68,0.04){{end}}">
-      <div class="inv-evidence-label">Replicas down</div>
+      <div class="inv-evidence-label">Replica Health</div>
       <div class="inv-evidence-value" style="font-size:0.88rem;{{if eq .BlastHealthy 0}}color:#f87171{{end}}">
         {{.BlastHealthy}}/{{.BlastTotal}} healthy
         {{if eq .BlastHealthy 0}}<span style="font-size:0.7rem;margin-left:0.4rem;opacity:0.8">(100% failure)</span>{{end}}
@@ -442,45 +445,6 @@ spec:
 {{end}}
 {{end}}
 
-  {{if .Hints}}
-  <div class="inv-section">
-    <div class="inv-section-hdr">
-      <h2>Recommended Investigation</h2>
-    </div>
-    <div class="inv-hints">
-      {{range .Hints}}
-      <div class="inv-hint inv-hint-{{.Confidence}}">
-        <div class="inv-hint-header">
-          {{if .Step}}<span style="font-size:0.72rem;font-weight:700;color:var(--text-muted);min-width:52px">STEP {{.Step}}</span>{{end}}
-          <span class="inv-conf-badge inv-conf-{{.Confidence}}">{{if eq .Confidence "high"}}High{{else if eq .Confidence "medium"}}Medium{{else}}Low{{end}}</span>
-          <span class="inv-hint-title">{{.Title}}</span>
-        </div>
-        <div class="inv-hint-reason">{{.Reason}}</div>
-        {{if .Command}}
-        <div class="inv-hint-cmd">
-          <code>{{.Command}}</code>
-          <button class="wr-copy-btn" onclick="navigator.clipboard.writeText('{{.Command}}')">Copy</button>
-        </div>
-        {{end}}
-      </div>
-      {{end}}
-    </div>
-  </div>
-  {{end}}
-
-  {{if .Commands}}
-  <div class="inv-section">
-    <div class="inv-section-hdr">
-      <h2>Investigation Commands</h2>
-    </div>
-    <div class="inv-cmds">
-      {{range .Commands}}
-      <div class="inv-cmd"><code>{{.}}</code><button class="wr-copy-btn" onclick="navigator.clipboard.writeText('{{.}}')">Copy</button></div>
-      {{end}}
-    </div>
-  </div>
-  {{end}}
-
   <div class="inv-section">
     <div class="inv-section-hdr">
       <h2>Recent Events</h2>
@@ -511,10 +475,11 @@ spec:
       </table>
     </div>
     {{else}}
-    <div class="inv-empty">No recent events recorded for this pod</div>
+    <div class="inv-empty">No recent events recorded for this {{if .NamespaceScoped}}namespace{{else}}pod{{end}}</div>
     {{end}}
   </div>
 
+  {{if not .NamespaceScoped}}
   <div class="inv-section">
     <div class="inv-section-hdr">
       <h2>Related Resources</h2>
@@ -540,6 +505,7 @@ spec:
       </div>
     </div>
   </div>
+  {{end}}
 
   {{end}}
 

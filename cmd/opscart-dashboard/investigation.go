@@ -44,13 +44,17 @@ type investigationPageData struct {
 	Clusters      []sidebarCluster
 
 	// Pod identity
-	PodName       string
-	Namespace     string
-	IssueType     string // crash_loop, image_pull_backoff, oomkilled, privileged_container, probe_failure...
-	Severity      string
-	OwnerKind     string // Deployment / StatefulSet / Job / (none)
-	OwnerName     string
-	ContainerName string // set when the finding is container-scoped (e.g. privileged_container); empty otherwis
+	PodName         string
+	Namespace       string
+	IssueType       string // crash_loop, image_pull_backoff, oomkilled, privileged_container, probe_failure...
+	Severity        string
+	OwnerKind       string // Deployment / StatefulSet / Job / (none)
+	OwnerName       string
+	ContainerName   string // set when the finding is container-scoped (e.g. privileged_container); empty otherwis
+	WorkloadLabel   string
+	TrackingLabel   string
+	PodAge          string
+	DescribeCommand string
 
 	// Status
 	Phase         string
@@ -136,12 +140,12 @@ func investigationHints(issueType string, stateReason string, restarts int32, po
 		hints = append(hints, investigationHint{
 			Confidence: "high",
 			Title:      "Apply a default-deny NetworkPolicy",
-			Reason:     "No NetworkPolicy means every pod in this namespace can be reached by every other pod in the cluster.",
+			Reason:     "No NetworkPolicy was detected; review the namespace's intended ingress and egress controls before applying a default-deny policy.",
 			Command:    fmt.Sprintf("kubectl get networkpolicies -n %s", namespace),
 		})
 		hints = append(hints, investigationHint{
 			Confidence: "medium",
-			Title:      "Review which pods are actually exposed",
+			Title:      "Review pods and intended network access",
 			Reason:     "Confirm the pod count and whether any of them handle sensitive data or traffic.",
 			Command:    fmt.Sprintf("kubectl get pods -n %s", namespace),
 		})
@@ -165,7 +169,10 @@ func investigationHints(issueType string, stateReason string, restarts int32, po
 			hints = append(hints, investigationHint{
 				Confidence: "high",
 				Title:      "Deterministic failure — not transient",
-				Reason:     fmt.Sprintf("Restart count of %d indicates the failure reproduces consistently on every start.", restarts),
+				Reason: fmt.Sprintf(
+					"The pod has restarted %d times. Review previous container logs and restart timing to identify the recurring condition.",
+					restarts,
+				),
 			})
 		}
 		hints = append(hints, investigationHint{
@@ -668,7 +675,8 @@ func populateNamespaceFinding(data *investigationPageData, scan *clusterScan, is
 		for _, ns := range scan.netAudit.UnprotectedNamespaces {
 			if ns.Name == namespace {
 				data.NamespacePodCount = ns.PodCount
-				data.NamespaceFinding = ns.RiskReason
+				data.NamespaceFinding = "No default-deny NetworkPolicy detected in a system namespace"
+				data.Severity = strings.ToLower(ns.RiskLevel)
 				return
 			}
 		}
@@ -692,7 +700,11 @@ func (srv *server) handleInvestigationPage(w http.ResponseWriter, r *http.Reques
 	namespace := r.URL.Query().Get("ns")
 	issueType := r.URL.Query().Get("type")
 
-	if podName == "" || namespace == "" {
+	namespaceScopedTypes := map[string]bool{
+		"unprotected_namespace": true,
+		"idle_namespace":        true,
+	}
+	if namespace == "" || issueType == "" || (podName == "" && !namespaceScopedTypes[issueType]) {
 		http.Error(w, "missing pod or ns query parameter", http.StatusBadRequest)
 		return
 	}
@@ -727,16 +739,16 @@ func (srv *server) handleInvestigationPage(w http.ResponseWriter, r *http.Reques
 		PodName:       podName,
 		Namespace:     namespace,
 		IssueType:     issueType,
+		WorkloadLabel: "Workload/" + store.OwnerNameFromPod(podName),
+		TrackingLabel: "Workload scoped",
 		BackURL:       backURL,
 		ScannedAtMs:   time.Now().UnixMilli(),
 	}
 
-	var namespaceScopedTypes = map[string]bool{
-		"unprotected_namespace": true,
-		"idle_namespace":        true,
-	}
 	if namespaceScopedTypes[issueType] {
 		data.NamespaceScoped = true
+		data.WorkloadLabel = "Namespace/" + namespace
+		data.TrackingLabel = "Namespace scoped"
 		populateNamespaceFinding(&data, scan, issueType, namespace)
 		data.Hints = investigationHints(issueType, "", 0, nil, namespace)
 		for _, h := range data.Hints {
@@ -807,16 +819,32 @@ func (srv *server) handleInvestigationPage(w http.ResponseWriter, r *http.Reques
 	// Status
 	data.Phase = string(pod.Status.Phase)
 	data.AgeDays = int(time.Since(pod.CreationTimestamp.Time).Hours() / 24)
+	data.PodAge = humanAge(time.Since(pod.CreationTimestamp.Time))
 	data.Severity = "critical"
 	for _, cs := range pod.Status.ContainerStatuses {
 		data.Restarts += cs.RestartCount
-		if cs.State.Waiting != nil && data.StateReason == "" {
-			data.StateReason = cs.State.Waiting.Reason
+		if state := effectiveContainerState(cs); state != "" && data.StateReason == "" {
+			data.StateReason = state
+			if data.ContainerName == "" {
+				data.ContainerName = cs.Name
+			}
 		}
 	}
 
 	// Owner, events, related resources, hints
 	data.OwnerKind, data.OwnerName = resolveOwner(clientset, pod)
+	if data.OwnerKind != "" {
+		data.WorkloadLabel = data.OwnerKind + "/" + data.OwnerName
+		if data.OwnerKind == "StatefulSet" {
+			data.TrackingLabel = "StatefulSet instance scoped"
+		} else {
+			data.TrackingLabel = data.OwnerKind + " scoped"
+		}
+	} else {
+		data.WorkloadLabel = "Pod/" + podName
+		data.TrackingLabel = "Pod scoped"
+	}
+	data.DescribeCommand = fmt.Sprintf("kubectl describe pod %s -n %s", podName, namespace)
 	data.Events = podEvents(clientset, namespace, podName, 10)
 	data.ConfigMaps, data.Secrets, data.PVCs = referencedResources(pod)
 	data.Hints = investigationHints(issueType, data.StateReason, data.Restarts, pod, namespace)
@@ -867,11 +895,26 @@ func (srv *server) handleInvestigationPage(w http.ResponseWriter, r *http.Reques
 	renderInvestigation(w, data)
 }
 
+func effectiveContainerState(status corev1.ContainerStatus) string {
+	if status.State.Waiting != nil {
+		return status.State.Waiting.Reason
+	}
+	if status.State.Terminated != nil {
+		if status.State.Terminated.Reason != "" {
+			return status.State.Terminated.Reason
+		}
+		return fmt.Sprintf("Terminated (exit code %d)", status.State.Terminated.ExitCode)
+	}
+	return ""
+}
+
 var getInvestigationTmpl = sync.OnceValue(func() *template.Template {
 	return template.Must(
 		template.New("investigation.html").
 			Funcs(template.FuncMap{
-				"mul": func(a, b int) int { return a * b },
+				"mul":                   func(a, b int) int { return a * b },
+				"issueTypeLabel":        issueTypeLabel,
+				"unrepresentedCommands": unrepresentedCommands,
 				"div": func(a, b int) int {
 					if b == 0 {
 						return 0
@@ -923,85 +966,121 @@ func buildOperationalSummary(data *investigationPageData) string {
 		return "This pod no longer exists — it may have been deleted or recreated with a new name since the last scan."
 	}
 
-	var parts []string
-
 	if data.NamespaceScoped {
-		parts = append(parts, fmt.Sprintf("Namespace %s: %s", data.Namespace, data.NamespaceFinding))
-	} else {
-		// Restart pattern
-		if data.Restarts > 0 {
-			rate := "stable"
-			if data.AgeDays > 0 && int(data.Restarts)/data.AgeDays > 200 {
-				rate = "accelerating"
-			}
-			failureType := "deterministic configuration or application"
-			if rate == "accelerating" {
-				failureType = "worsening or resource-related"
-			}
-			parts = append(parts, fmt.Sprintf(
-				"This workload has restarted %d times over %d day(s). The restart rate appears %s, suggesting a %s failure.",
-				data.Restarts, max(data.AgeDays, 1), rate, failureType))
+		var summary string
+		switch data.IssueType {
+		case "unprotected_namespace":
+			summary = fmt.Sprintf("No NetworkPolicy was detected in the %s namespace.", data.Namespace)
+		case "idle_namespace":
+			summary = fmt.Sprintf("An idle namespace finding is active for the %s namespace.", data.Namespace)
+		default:
+			summary = fmt.Sprintf("A %s finding is active for the %s namespace.", strings.ToLower(issueTypeLabel(data.IssueType)), data.Namespace)
 		}
+		summary += fmt.Sprintf(" The namespace currently contains %d pods.", data.NamespacePodCount)
+		if data.Severity != "" {
+			summary += fmt.Sprintf(" This finding is classified as %s.", strings.ToLower(data.Severity))
+		}
+		return summary
+	}
 
-		// Config references
-		if len(data.Secrets) == 0 && len(data.ConfigMaps) == 0 {
-			parts = append(parts,
-				"No referenced ConfigMaps or Secrets were detected in the pod spec — missing configuration is unlikely to be the root cause.")
+	subject := data.WorkloadLabel
+	if subject == "" {
+		subject = "This workload"
+	}
+	summary := fmt.Sprintf("A %s incident is active for %s.",
+		strings.ToLower(issueTypeLabel(data.IssueType)), subject)
+	if data.FirstDetected != "" {
+		summary += fmt.Sprintf(" Operational memory first detected this incident %s.", relativePart(data.FirstDetected))
+	}
+
+	status := data.StateReason
+	if status == "" {
+		status = data.Phase
+	}
+	focus := fmt.Sprintf(" The Focus Pod %s", data.PodName)
+	if status != "" {
+		focus += fmt.Sprintf(" is currently in %s", status)
+	}
+	if data.PodAge != "" {
+		if status != "" {
+			focus += fmt.Sprintf(", is %s old", data.PodAge)
 		} else {
-			parts = append(parts, fmt.Sprintf(
-				"The pod references %d ConfigMap(s) and %d Secret(s) — verify these exist and contain the expected keys.",
-				len(data.ConfigMaps), len(data.Secrets)))
+			focus += fmt.Sprintf(" is %s old", data.PodAge)
 		}
 	}
-
-	// Issue-specific recommendation
-	switch data.IssueType {
-	case "crash_loop":
-		parts = append(parts,
-			"Investigation should begin with previous container logs. Estimated time: 5–10 minutes.")
-	case "image_pull_backoff":
-		parts = append(parts,
-			"Investigation should begin with registry credentials and image tag verification. Estimated time: 2–5 minutes.")
-	case "oomkilled":
-		parts = append(parts,
-			"Investigation should begin with memory limit configuration. Estimated time: 5 minutes.")
-	case "privileged_container":
-		parts = append(parts,
-			"Review whether privileged mode is genuinely required — most workloads can use specific capabilities instead.")
-	case "probe_failure":
-		parts = append(parts,
-			"Investigation should begin with the probe configuration — this container is starting successfully but being killed for failing its startup or liveness check. Estimated time: 5–10 minutes.")
-	case "unprotected_namespace":
-		parts = append(parts,
-			"This is a configuration gap, not a runtime failure — no pod-level investigation applies here.")
-	case "idle_namespace":
-		parts = append(parts,
-			"This is a configuration/waste finding, not a runtime failure — no pod-level investigation applies here.")
-	}
-
-	return strings.Join(parts, " ")
+	focus += fmt.Sprintf(", and has restarted %d times.", data.Restarts)
+	return summary + focus
 }
 
-func max(a, b int) int {
-	if a > b {
-		return a
+func issueTypeLabel(issueType string) string {
+	switch issueType {
+	case "probe_failure":
+		return "Probe Failure"
+	case "crash_loop":
+		return "CrashLoopBackOff"
+	case "image_pull_backoff":
+		return "ImagePullBackOff"
+	case "oomkilled":
+		return "OOMKilled"
+	case "privileged_container":
+		return "Privileged Container"
+	case "unprotected_namespace":
+		return "Unprotected Namespace"
+	case "idle_namespace":
+		return "Idle Namespace"
 	}
-	return b
+	words := strings.Fields(strings.ReplaceAll(issueType, "_", " "))
+	for i := range words {
+		words[i] = strings.ToUpper(words[i][:1]) + words[i][1:]
+	}
+	return strings.Join(words, " ")
+}
+
+func relativePart(label string) string {
+	if _, relative, ok := strings.Cut(label, " · "); ok {
+		return relative
+	}
+	return label
+}
+
+func unrepresentedCommands(commands []string, hints []investigationHint) []string {
+	represented := make(map[string]bool, len(hints))
+	for _, hint := range hints {
+		if hint.Command != "" {
+			represented[hint.Command] = true
+		}
+	}
+	var result []string
+	for _, command := range commands {
+		if command != "" && !represented[command] {
+			result = append(result, command)
+		}
+	}
+	return result
 }
 
 // firstDetectedLabel converts a first_seen timestamp to a human label.
-// Returns "today", "1 day ago", "N days ago", or "" for zero time.
+// It combines an absolute date with a relative calendar-day duration.
 func firstDetectedLabel(t time.Time) string {
+	return firstDetectedLabelAt(t, time.Now())
+}
+
+func firstDetectedLabelAt(t, now time.Time) string {
 	if t.IsZero() {
 		return ""
 	}
-	days := int(time.Since(t).Hours() / 24)
+	t = t.In(now.Location())
+	startOfToday := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location())
+	startOfFirstSeen := time.Date(t.Year(), t.Month(), t.Day(), 0, 0, 0, 0, now.Location())
+	days := int(startOfToday.Sub(startOfFirstSeen).Hours() / 24)
+	var relative string
 	switch days {
 	case 0:
-		return "today"
+		relative = "today"
 	case 1:
-		return "1 day ago"
+		relative = "1 day"
 	default:
-		return fmt.Sprintf("%d days ago", days)
+		relative = fmt.Sprintf("%d days", days)
 	}
+	return t.Format("Jan 2") + " · " + relative
 }

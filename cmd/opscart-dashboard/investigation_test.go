@@ -5,9 +5,12 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/opscart/opscart-k8s-watcher/pkg/analyzer"
 	"github.com/opscart/opscart-k8s-watcher/pkg/store"
+	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
 // bogusClusterCtx is a kubeconfig context name that will never exist on the
@@ -31,7 +34,7 @@ func TestHandleInvestigationPage_NamespaceScopedSkipsPodLookup(t *testing.T) {
 			scan: &clusterScan{
 				netAudit: &analyzer.NetworkPolicyAudit{
 					UnprotectedNamespaces: []analyzer.NamespaceNetworkStatus{
-						{Name: "test-ns", PodCount: 8, RiskLevel: "HIGH", RiskReason: "Production namespace with no network isolation"},
+						{Name: "test-ns", PodCount: 8, RiskLevel: "HIGH", RiskReason: "critical infrastructure exposed"},
 					},
 				},
 			},
@@ -68,7 +71,36 @@ func TestHandleInvestigationPage_NamespaceScopedSkipsPodLookup(t *testing.T) {
 			if strings.Contains(body, "Blast Radius") {
 				t.Errorf("namespace-scoped page should not render the Blast Radius section")
 			}
+			if strings.Contains(body, "critical infrastructure exposed") {
+				t.Errorf("namespace-scoped page rendered unsupported source text")
+			}
 		})
+	}
+}
+
+func TestHandleInvestigationPage_NamespaceScopedWithoutPodParameter(t *testing.T) {
+	srv := newTestServer()
+	state := srv.getState(bogusClusterCtx)
+	state.scan = &clusterScan{
+		netAudit: &analyzer.NetworkPolicyAudit{
+			UnprotectedNamespaces: []analyzer.NamespaceNetworkStatus{{
+				Name: "test-ns", PodCount: 8, RiskLevel: "HIGH", RiskReason: "critical infrastructure exposed",
+			}},
+		},
+	}
+
+	req := httptest.NewRequest(http.MethodGet,
+		"/investigate?ns=test-ns&type=unprotected_namespace&cluster="+bogusClusterCtx, nil)
+	rec := httptest.NewRecorder()
+	srv.handleInvestigationPage(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("namespace-scoped URL without pod should render, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if strings.Contains(rec.Body.String(), "critical infrastructure exposed") {
+		t.Errorf("complete rendered namespace page contained unsupported finding text")
+	}
+	if !strings.Contains(rec.Body.String(), "No default-deny NetworkPolicy detected in a system namespace") {
+		t.Errorf("rendered namespace page missing mapped finding")
 	}
 }
 
@@ -113,6 +145,9 @@ func TestPopulateNamespaceFinding(t *testing.T) {
 		if data.NamespacePodCount != 8 || data.NamespaceFinding == "" {
 			t.Errorf("expected pod count 8 and non-empty finding, got %d / %q", data.NamespacePodCount, data.NamespaceFinding)
 		}
+		if data.NamespaceFinding != "No default-deny NetworkPolicy detected in a system namespace" {
+			t.Errorf("unexpected mapped finding: %q", data.NamespaceFinding)
+		}
 	})
 
 	t.Run("idle_namespace match", func(t *testing.T) {
@@ -155,21 +190,24 @@ func TestInvestigationHintsNamespaceScopedNilPod(t *testing.T) {
 
 func TestBuildOperationalSummaryNamespaceScoped(t *testing.T) {
 	data := &investigationPageData{
-		NamespaceScoped:  true,
-		Namespace:        "test-ns",
-		NamespaceFinding: "No NetworkPolicy present",
-		IssueType:        "unprotected_namespace",
+		NamespaceScoped:   true,
+		Namespace:         "test-ns",
+		NamespaceFinding:  "No NetworkPolicy present",
+		IssueType:         "unprotected_namespace",
+		NamespacePodCount: 8,
+		Severity:          "critical",
 	}
 	summary := buildOperationalSummary(data)
 
-	if !strings.Contains(summary, "test-ns") || !strings.Contains(summary, "No NetworkPolicy present") {
-		t.Errorf("expected summary to include namespace and finding, got %q", summary)
+	for _, want := range []string{"No NetworkPolicy was detected", "test-ns", "8 pods", "classified as critical"} {
+		if !strings.Contains(summary, want) {
+			t.Errorf("expected summary to include %q, got %q", want, summary)
+		}
 	}
-	if strings.Contains(summary, "restarted") {
-		t.Errorf("namespace-scoped summary should not include pod restart language, got %q", summary)
-	}
-	if !strings.Contains(summary, "not a runtime failure") {
-		t.Errorf("expected closing sentence about configuration gap, got %q", summary)
+	for _, unsupported := range []string{"restarted", "critical infrastructure exposed", "every pod"} {
+		if strings.Contains(summary, unsupported) {
+			t.Errorf("namespace-scoped summary contains unsupported language %q: %q", unsupported, summary)
+		}
 	}
 }
 
@@ -193,5 +231,238 @@ func TestRenderInvestigationTemplate_NamespaceScoped(t *testing.T) {
 	}
 	if !strings.Contains(rec.Body.String(), "Namespace Finding") {
 		t.Errorf("expected rendered page to contain the Namespace Finding section")
+	}
+	if !strings.Contains(rec.Body.String(), "apiVersion: networking.k8s.io/v1") {
+		t.Errorf("expected rendered page to preserve the NetworkPolicy YAML")
+	}
+}
+
+func TestRenderInvestigationTemplateUsesFocusPodLabel(t *testing.T) {
+	data := investigationPageData{
+		Namespace:     "default",
+		PodName:       "fraud-detection-7cddf79d98-jxmtx",
+		IssueType:     "crash_loop",
+		Severity:      "critical",
+		WorkloadLabel: "Deployment/fraud-detection",
+		PodAge:        "5m",
+	}
+
+	rec := httptest.NewRecorder()
+	renderInvestigation(rec, data)
+	body := rec.Body.String()
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK, got %d: %s", rec.Code, body)
+	}
+	if !strings.Contains(body, "Focus Pod") {
+		t.Errorf("expected Focus Pod label, got %q", body)
+	}
+	if strings.Contains(body, "Current Pod") {
+		t.Errorf("rendered page retained Current Pod label")
+	}
+}
+
+func TestInvestigationClassificationIndependentFromCurrentStatus(t *testing.T) {
+	data := investigationPageData{
+		Namespace:     "default",
+		PodName:       "fraud-detection-7cddf79d98-jxmtx",
+		IssueType:     "probe_failure",
+		Severity:      "critical",
+		WorkloadLabel: "Deployment/fraud-detection",
+		TrackingLabel: "Deployment scoped",
+		Phase:         "Running",
+		StateReason:   "CrashLoopBackOff",
+		PodAge:        "3 hours",
+		Restarts:      47,
+		FirstDetected: "Jul 29 · today",
+		OperationalSummary: buildOperationalSummary(&investigationPageData{
+			PodName: "fraud-detection-7cddf79d98-jxmtx", IssueType: "probe_failure",
+			WorkloadLabel: "Deployment/fraud-detection", StateReason: "CrashLoopBackOff",
+			PodAge: "3 hours", Restarts: 47, FirstDetected: "Jul 29 · today",
+		}),
+	}
+
+	body := renderInvestigationBody(t, data)
+	assertInOrder(t, body,
+		"Classification", "Probe Failure",
+		"Pod Phase", "Running",
+		"Container State", "CrashLoopBackOff",
+	)
+	for _, want := range []string{
+		"A probe failure incident is active for Deployment/fraud-detection.",
+		"The Focus Pod fraud-detection-7cddf79d98-jxmtx is currently in CrashLoopBackOff",
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("workload page missing %q", want)
+		}
+	}
+	if strings.Contains(body, "currently in Running") {
+		t.Errorf("briefing contradicted the effective container state: %s", body)
+	}
+}
+
+func TestInvestigationHintsUseObservationalRestartLanguage(t *testing.T) {
+	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "pod-a", Namespace: "default"}}
+	hints := investigationHints("crash_loop", "CrashLoopBackOff", 101, pod, "default")
+	var reasons string
+	for _, hint := range hints {
+		reasons += hint.Reason
+	}
+	want := "The pod has restarted 101 times. Review previous container logs and restart timing to identify the recurring condition."
+	if !strings.Contains(reasons, want) {
+		t.Errorf("restart guidance missing observational wording: %q", reasons)
+	}
+	if strings.Contains(reasons, "failure reproduces consistently on every start") {
+		t.Errorf("restart guidance retained unsupported deterministic claim")
+	}
+}
+
+func TestEffectiveContainerState(t *testing.T) {
+	tests := []struct {
+		name   string
+		status corev1.ContainerStatus
+		want   string
+	}{
+		{
+			name: "waiting",
+			status: corev1.ContainerStatus{State: corev1.ContainerState{
+				Waiting: &corev1.ContainerStateWaiting{Reason: "CrashLoopBackOff"},
+			}},
+			want: "CrashLoopBackOff",
+		},
+		{
+			name: "terminated error",
+			status: corev1.ContainerStatus{State: corev1.ContainerState{
+				Terminated: &corev1.ContainerStateTerminated{Reason: "Error", ExitCode: 1},
+			}},
+			want: "Error",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := effectiveContainerState(tc.status); got != tc.want {
+				t.Errorf("effectiveContainerState() = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestInvestigationWorkloadSectionsAndLabels(t *testing.T) {
+	data := investigationPageData{
+		Namespace:          "default",
+		PodName:            "fraud-detection-7cddf79d98-jxmtx",
+		IssueType:          "crash_loop",
+		Severity:           "critical",
+		WorkloadLabel:      "Deployment/fraud-detection",
+		TrackingLabel:      "Deployment scoped",
+		StateReason:        "CrashLoopBackOff",
+		PodAge:             "3 hours",
+		Restarts:           47,
+		FirstDetected:      "Jul 10 · 19 days",
+		OperationalSummary: "A CrashLoopBackOff incident is active. The Focus Pod is observed from live data.",
+		Hints:              []investigationHint{{Confidence: "high", Title: "Check logs"}},
+		Timeline: []store.IncidentEvent{{
+			OccurredAt: time.Now(), EventType: "DETECTED", Message: "crash_loop first detected",
+		}},
+		BlastSiblings: []blastRadiusPod{{Name: "fraud-detection-a", Phase: "Running", Healthy: true}},
+		BlastHealthy:  1,
+		BlastTotal:    2,
+	}
+
+	body := renderInvestigationBody(t, data)
+	if strings.Contains(body, "<h2>Evidence</h2>") || strings.Contains(body, "<div class=\"inv-evidence-label\">State</div>") {
+		t.Errorf("workload page rendered legacy Evidence content")
+	}
+	for _, want := range []string{"Replica Health", "Jul 10 · 19 days"} {
+		if !strings.Contains(body, want) {
+			t.Errorf("workload page missing %q", want)
+		}
+	}
+	assertInOrder(t, body,
+		"Situation Briefing",
+		"Operational Identity",
+		"Current Observation",
+		"Recommended Investigation",
+		"Incident Timeline",
+		"Blast Radius",
+		"Recent Events",
+		"Related Resources",
+	)
+}
+
+func TestInvestigationNamespaceSectionsAndEvidence(t *testing.T) {
+	command := "kubectl get networkpolicies -n monitoring"
+	data := investigationPageData{
+		Namespace:          "monitoring",
+		PodName:            "namespace",
+		IssueType:          "unprotected_namespace",
+		Severity:           "critical",
+		NamespaceScoped:    true,
+		NamespacePodCount:  8,
+		NamespaceFinding:   "No NetworkPolicy present",
+		OperationalSummary: "No NetworkPolicy was detected in the monitoring namespace. The namespace currently contains 8 pods.",
+		Hints:              []investigationHint{{Confidence: "high", Title: "Apply a policy", Command: command}},
+		Commands:           []string{command},
+		Timeline: []store.IncidentEvent{{
+			OccurredAt: time.Now(), EventType: "DETECTED", Message: "unprotected_namespace first detected",
+		}},
+	}
+
+	body := renderInvestigationBody(t, data)
+	for _, want := range []string{
+		"Namespace Finding", "Namespace", "Pods affected", "Finding",
+		"apiVersion: networking.k8s.io/v1", "kind: NetworkPolicy",
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("namespace page missing %q", want)
+		}
+	}
+	if strings.Contains(body, "<h2>Investigation Commands</h2>") {
+		t.Errorf("namespace page duplicated a command already represented by Recommended Investigation")
+	}
+	assertInOrder(t, body,
+		"Situation Briefing",
+		"Namespace Finding",
+		"Recommended Investigation",
+		"Incident Timeline",
+		"Recent Events",
+	)
+}
+
+func TestFirstDetectedLabelIncludesAbsoluteAndRelativeDate(t *testing.T) {
+	location := time.FixedZone("test", -4*60*60)
+	now := time.Date(2026, time.July, 29, 12, 0, 0, 0, location)
+	tests := []struct {
+		firstSeen time.Time
+		want      string
+	}{
+		{time.Date(2026, time.July, 29, 1, 0, 0, 0, location), "Jul 29 · today"},
+		{time.Date(2026, time.July, 10, 23, 0, 0, 0, location), "Jul 10 · 19 days"},
+	}
+	for _, tc := range tests {
+		if got := firstDetectedLabelAt(tc.firstSeen, now); got != tc.want {
+			t.Errorf("firstDetectedLabelAt(%v) = %q, want %q", tc.firstSeen, got, tc.want)
+		}
+	}
+}
+
+func renderInvestigationBody(t *testing.T, data investigationPageData) string {
+	t.Helper()
+	rec := httptest.NewRecorder()
+	renderInvestigation(rec, data)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK, got %d: %s", rec.Code, rec.Body.String())
+	}
+	return rec.Body.String()
+}
+
+func assertInOrder(t *testing.T, body string, labels ...string) {
+	t.Helper()
+	position := -1
+	for _, label := range labels {
+		next := strings.Index(body[position+1:], label)
+		if next < 0 {
+			t.Fatalf("rendered page missing %q", label)
+		}
+		position += next + 1
 	}
 }

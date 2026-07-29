@@ -130,7 +130,7 @@
     </div>
     {{else}}
     <div class="wr-grid">
-      {{range .Critical}}{{renderCard .}}{{end}}
+      {{range .Critical}}{{renderCard . $.ActiveCtx}}{{end}}
     </div>
     {{end}}
   </div>
@@ -147,7 +147,7 @@
     </div>
     {{else}}
     <div class="wr-grid">
-      {{range .Warnings}}{{renderCard .}}{{end}}
+      {{range .Warnings}}{{renderCard . $.ActiveCtx}}{{end}}
     </div>
     {{end}}
   </div>

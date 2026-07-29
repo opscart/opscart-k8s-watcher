@@ -8,10 +8,22 @@ func Fingerprint(namespace, ownerKind, ownerName, issueType string) string {
 	return namespace + "/" + ownerKind + "/" + ownerName + "/" + issueType
 }
 
-// OwnerNameFromPod strips ReplicaSet/pod hash suffixes:
-// "fraud-detection-5fc85b778-8j6s5" -> "fraud-detection"
 func OwnerNameFromPod(podName string) string {
 	segments := strings.Split(podName, "-")
+
+	// Deployment pods end in:
+	// <replicaset-hash>-<five-character-pod-suffix>
+	//
+	// The final pod suffix may contain only letters, such as jxmtx.
+	if len(segments) >= 3 {
+		podSuffix := segments[len(segments)-1]
+		replicaSetHash := segments[len(segments)-2]
+
+		if looksLikePodSuffix(podSuffix) && looksLikeHash(replicaSetHash) {
+			return strings.Join(segments[:len(segments)-2], "-")
+		}
+	}
+
 	stripped := 0
 	for stripped < 2 && len(segments) > 1 {
 		last := segments[len(segments)-1]
@@ -21,10 +33,25 @@ func OwnerNameFromPod(podName string) string {
 		segments = segments[:len(segments)-1]
 		stripped++
 	}
+
 	if stripped == 0 {
 		return podName
 	}
 	return strings.Join(segments, "-")
+}
+
+func looksLikePodSuffix(s string) bool {
+	if len(s) != 5 {
+		return false
+	}
+
+	for _, r := range s {
+		if !((r >= '0' && r <= '9') || (r >= 'a' && r <= 'z')) {
+			return false
+		}
+	}
+
+	return true
 }
 
 // looksLikeHash reports whether s looks like a ReplicaSet/pod hash
