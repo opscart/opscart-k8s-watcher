@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"os"
+	"strings"
 
 	"github.com/opscart/opscart-k8s-watcher/pkg/config"
 	"github.com/opscart/opscart-k8s-watcher/pkg/scanner"
@@ -35,9 +36,11 @@ var (
 	wasteFormat string // waste command: output format (cli, html)
 
 	// NEW v0.7 flags (cloud costs)
-	region     string // cloud-costs: Azure region for pricing lookup
-	autoPrice  bool   // cloud-costs: auto-detect pricing from node labels
-	costFormat string // cloud-costs: output format (table|json|html)
+	region        string // cloud-costs: Azure region for pricing lookup
+	autoPrice     bool   // cloud-costs: auto-detect pricing from node labels
+	costFormat    string // cloud-costs: output format (table|json|html)
+	pricingSource string
+	cloudProvider string
 )
 
 func main() {
@@ -704,7 +707,9 @@ Examples:
 	}
 	cloudCostsCmd.Flags().StringVarP(&cluster, "cluster", "c", "", "Cluster context name")
 	cloudCostsCmd.Flags().StringVarP(&namespace, "namespace", "n", "", "Namespace to analyze (default: all)")
-	cloudCostsCmd.Flags().StringVar(&region, "region", "", "Azure region for pricing (auto-detected from node labels if empty)")
+	cloudCostsCmd.Flags().StringVar(&region, "region", "", "Region override for pricing by the effective cloud provider (auto-detected from node labels if empty)")
+	cloudCostsCmd.Flags().StringVar(&pricingSource, "pricing-source", scanPricingSourceDefault(), "Pricing source: auto, embedded, or aws-api")
+	cloudCostsCmd.Flags().StringVar(&cloudProvider, "cloud-provider", scanCloudProviderDefault(), "Cloud provider: auto, azure, or aws")
 	cloudCostsCmd.Flags().StringVar(&breakdown, "breakdown", "", "Drill-down: deployment")
 	cloudCostsCmd.Flags().StringVarP(&costFormat, "format", "f", "table", "Output format (table|json|html)")
 	cloudCostsCmd.Flags().BoolVar(&allClustersFlag, "all-clusters", false, "Scan all configured clusters")
@@ -730,4 +735,18 @@ Examples:
 		fmt.Println(err)
 		os.Exit(1)
 	}
+}
+
+func scanPricingSourceDefault() string {
+	if value := strings.TrimSpace(os.Getenv("OPSCART_PRICING_SOURCE")); value != "" {
+		return value
+	}
+	return "auto"
+}
+
+func scanCloudProviderDefault() string {
+	if value := strings.TrimSpace(os.Getenv("OPSCART_CLOUD_PROVIDER")); value != "" {
+		return value
+	}
+	return "auto"
 }
