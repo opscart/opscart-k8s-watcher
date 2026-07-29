@@ -11,6 +11,7 @@ import (
 	autoscalingv2 "k8s.io/api/autoscaling/v2"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/client-go/kubernetes"
 )
 
@@ -37,10 +38,16 @@ type WasteAudit struct {
 	OrphanedServices     []OrphanedService
 	BrokenIngresses      []BrokenIngress
 	MisconfiguredHPAs    []MisconfiguredHPA
+	DetectorWarnings     []WasteDetectorWarning
 
 	TotalWasteItems       int
 	OrphanedPVCStorageGB  int     // total GB across all orphaned PVCs
 	EstimatedMonthlyWaste float64 // 0 if monthly cost not provided
+}
+
+type WasteDetectorWarning struct {
+	Category string
+	Error    string
 }
 
 // ----------------------------------------------------------------
@@ -213,38 +220,47 @@ func (w *WasteAuditor) AuditWaste(filterNamespace string) (*WasteAudit, error) {
 	// Run all detectors
 	if err := w.detectAbandonedNamespaces(audit, filterNamespace); err != nil {
 		fmt.Printf("⚠️  Namespace scan skipped: %v\n", err)
+		audit.addDetectorWarning("Abandoned namespaces", err)
 	}
 
 	if err := w.detectStalePods(audit, filterNamespace); err != nil {
 		fmt.Printf("⚠️  Pod scan skipped: %v\n", err)
+		audit.addDetectorWarning("Zombie and idle/unmanaged pods", err)
 	}
 
 	if err := w.detectOrphanedPVCs(audit, filterNamespace); err != nil {
 		fmt.Printf("⚠️  PVC scan skipped: %v\n", err)
+		audit.addDetectorWarning("Unattached PVC candidates", err)
 	}
 
 	if err := w.detectStaleJobs(audit, filterNamespace); err != nil {
 		fmt.Printf("⚠️  Job scan skipped: %v\n", err)
+		audit.addDetectorWarning("Stale jobs", err)
 	}
 
 	if err := w.detectZeroReplicaWorkloads(audit, filterNamespace); err != nil {
 		fmt.Printf("⚠️  Deployment scan skipped: %v\n", err)
+		audit.addDetectorWarning("Zero-replica workloads", err)
 	}
 
 	if err := w.detectOldReplicaSets(audit, filterNamespace); err != nil {
 		fmt.Printf("⚠️  ReplicaSet scan skipped: %v\n", err)
+		audit.addDetectorWarning("Old ReplicaSets (housekeeping)", err)
 	}
 
 	if err := w.detectOrphanedServices(audit, filterNamespace); err != nil {
 		fmt.Printf("⚠️  Service scan skipped: %v\n", err)
+		audit.addDetectorWarning("Orphaned services", err)
 	}
 
 	if err := w.detectBrokenIngresses(audit, filterNamespace); err != nil {
 		fmt.Printf("⚠️  Ingress scan skipped: %v\n", err)
+		audit.addDetectorWarning("Broken ingresses", err)
 	}
 
 	if err := w.detectMisconfiguredHPAs(audit, filterNamespace); err != nil {
 		fmt.Printf("⚠️  HPA scan skipped: %v\n", err)
+		audit.addDetectorWarning("Misconfigured HPAs", err)
 	}
 
 	// Count totals (excluding OldReplicaSets - they're low-severity housekeeping items)
@@ -258,6 +274,13 @@ func (w *WasteAuditor) AuditWaste(filterNamespace string) (*WasteAudit, error) {
 		len(audit.MisconfiguredHPAs)
 
 	return audit, nil
+}
+
+func (a *WasteAudit) addDetectorWarning(category string, err error) {
+	a.DetectorWarnings = append(a.DetectorWarnings, WasteDetectorWarning{
+		Category: category,
+		Error:    err.Error(),
+	})
 }
 
 // ================================================================
@@ -297,7 +320,7 @@ func (w *WasteAuditor) detectAbandonedNamespaces(audit *WasteAudit, filterNamesp
 		// Count running pods
 		pods, err := w.clientset.CoreV1().Pods(nsName).List(w.ctx, metav1.ListOptions{TimeoutSeconds: int64Ptr(10)})
 		if err != nil {
-			continue
+			return fmt.Errorf("list pods in namespace %q: %w", nsName, err)
 		}
 
 		podCount := len(pods.Items)
@@ -356,11 +379,9 @@ func (w *WasteAuditor) detectAbandonedNamespaces(audit *WasteAudit, filterNamesp
 // tell these apart, since a probe-killed pod alternates between Waiting and
 // Running from one scan to the next.
 //
-// Best-effort: any error here (RBAC, timeout, API unavailable) is logged and
-// swallowed, returning an empty map so classification simply falls back to
-// today's phase-based behavior. A failed event lookup must never break the
-// waste audit.
-func (w *WasteAuditor) probeFailurePodsByNamespace(namespace string) map[string]bool {
+// An event-list failure returns an empty map for classification and an error
+// so the audit can preserve that the pod detector was incomplete.
+func (w *WasteAuditor) probeFailurePodsByNamespace(namespace string) (map[string]bool, error) {
 	result := make(map[string]bool)
 
 	events, err := w.clientset.CoreV1().Events(namespace).List(w.ctx, metav1.ListOptions{
@@ -369,7 +390,7 @@ func (w *WasteAuditor) probeFailurePodsByNamespace(namespace string) map[string]
 	})
 	if err != nil {
 		fmt.Printf("⚠️  Could not list events in namespace %q for probe-failure detection: %v\n", namespace, err)
-		return result
+		return result, err
 	}
 
 	for _, ev := range events.Items {
@@ -382,7 +403,7 @@ func (w *WasteAuditor) probeFailurePodsByNamespace(namespace string) map[string]
 		}
 	}
 
-	return result
+	return result, nil
 }
 
 func (w *WasteAuditor) detectStalePods(audit *WasteAudit, filterNamespace string) error {
@@ -397,6 +418,7 @@ func (w *WasteAuditor) detectStalePods(audit *WasteAudit, filterNamespace string
 	// not once per pod (a 350-pod cluster must not turn into hundreds of
 	// extra API calls).
 	probeFailurePods := make(map[string]map[string]bool)
+	var eventScanErr error
 
 	for _, pod := range pods.Items {
 		// Skip system namespaces
@@ -407,7 +429,11 @@ func (w *WasteAuditor) detectStalePods(audit *WasteAudit, filterNamespace string
 		ageDays := int(now.Sub(pod.CreationTimestamp.Time).Hours() / 24)
 
 		if _, ok := probeFailurePods[pod.Namespace]; !ok {
-			probeFailurePods[pod.Namespace] = w.probeFailurePodsByNamespace(pod.Namespace)
+			var err error
+			probeFailurePods[pod.Namespace], err = w.probeFailurePodsByNamespace(pod.Namespace)
+			if err != nil && eventScanErr == nil {
+				eventScanErr = fmt.Errorf("list pod events in namespace %q: %w", pod.Namespace, err)
+			}
 		}
 		hasProbeFailureEvent := probeFailurePods[pod.Namespace][pod.Name]
 
@@ -444,9 +470,9 @@ func (w *WasteAuditor) detectStalePods(audit *WasteAudit, filterNamespace string
 					RestartCount: totalRestarts,
 					Status:       "ProbeFailure",
 					Reason: fmt.Sprintf(
-						"%d/%d containers not ready, and recent events confirm a "+
-							"liveness/startup probe is repeatedly killing the container "+
-							"(%d restarts so far) — the process itself is not the problem.",
+						"%d/%d containers are not ready. Kubernetes events reported a "+
+							"startup or liveness probe failure and container restart "+
+							"(%d restarts observed).",
 						notReady, len(pod.Status.ContainerStatuses), totalRestarts,
 					),
 					Score: float64(ageDays)*0.4 + float64(totalRestarts)*0.3,
@@ -588,7 +614,7 @@ func (w *WasteAuditor) detectStalePods(audit *WasteAudit, filterNamespace string
 		return audit.StalePods[i].Score > audit.StalePods[j].Score
 	})
 
-	return nil
+	return eventScanErr
 }
 
 // ================================================================
@@ -604,8 +630,7 @@ func (w *WasteAuditor) detectOrphanedPVCs(audit *WasteAudit, filterNamespace str
 	// Build set of PVCs actively used by pods
 	pods, err := w.clientset.CoreV1().Pods(filterNamespace).List(w.ctx, metav1.ListOptions{TimeoutSeconds: int64Ptr(10)})
 	if err != nil {
-		fmt.Printf("⚠️  Could not list pods for PVC orphan detection: %v. Continuing with incomplete data.\n", err)
-		pods = &corev1.PodList{} // Continue with empty list
+		return fmt.Errorf("list pods for PVC reference detection: %w", err)
 	}
 
 	usedPVCs := map[string]bool{}
@@ -662,7 +687,7 @@ func (w *WasteAuditor) detectOrphanedPVCs(audit *WasteAudit, filterNamespace str
 			status = PVCReleased
 			reason = fmt.Sprintf(
 				"PVC is in 'Lost' state for %d days - the underlying PV no longer exists. "+
-					"Data may already be gone. Safe to delete the PVC object.",
+					"Review the PVC and storage-system state before making changes.",
 				ageDays,
 			)
 			score = float64(ageDays) * 0.7
@@ -672,10 +697,10 @@ func (w *WasteAuditor) detectOrphanedPVCs(audit *WasteAudit, filterNamespace str
 			if !usedPVCs[pvcKey] {
 				status = PVCBoundNoPod
 				reason = fmt.Sprintf(
-					"PVC is Bound to a PV but no running pod is mounting it (checked %d pods in namespace). "+
-						"%dGB of storage is allocated but idle for %d days. "+
-						"Common cause: StatefulSet scaled down or pod deleted without removing PVC.",
-					len(pods.Items), sizeGB, ageDays,
+					"PVC is Bound to a PV, and no currently listed pod in namespace %q references it. "+
+						"The PVC requests %dGB of storage and is %d days old. "+
+						"Retained data, a scaled-down StatefulSet, or an intentionally stopped workload may explain this state.",
+					pvc.Namespace, sizeGB, ageDays,
 				)
 				score = float64(ageDays)*0.5 + float64(sizeGB)*0.3
 			} else {
@@ -981,6 +1006,10 @@ func (w *WasteAuditor) detectOrphanedServices(audit *WasteAudit, filterNamespace
 	if err != nil {
 		return err
 	}
+	pods, err := w.clientset.CoreV1().Pods(filterNamespace).List(w.ctx, metav1.ListOptions{TimeoutSeconds: int64Ptr(10)})
+	if err != nil {
+		return fmt.Errorf("list pods for Service selector matching: %w", err)
+	}
 
 	now := time.Now()
 
@@ -1012,26 +1041,28 @@ func (w *WasteAuditor) detectOrphanedServices(audit *WasteAudit, filterNamespace
 			continue
 		}
 
-		// Check endpoints
-		hasEndpoints, _ := kube.ServiceHasReadyEndpoints(w.ctx, w.clientset, svc.Namespace, svc.Name)
+		selector := labels.SelectorFromSet(svc.Spec.Selector)
+		matchedPods := 0
+		for _, pod := range pods.Items {
+			if pod.Namespace == svc.Namespace && selector.Matches(labels.Set(pod.Labels)) {
+				matchedPods++
+			}
+		}
 
-		if !hasEndpoints {
+		if matchedPods == 0 {
 			isLB := svc.Spec.Type == corev1.ServiceTypeLoadBalancer
 
 			var reason string
 			if isLB {
 				reason = fmt.Sprintf(
-					"LoadBalancer service has no active endpoints for %d days. "+
-						"Cloud load balancers incur hourly cost even with zero traffic. "+
-						"Selector '%v' does not match any running pod.",
-					ageDays, svc.Spec.Selector,
+					"LoadBalancer Service is %d days old, and selector %v matches zero currently listed pods in namespace %q. "+
+						"Review workload ownership and cloud billing before making changes.",
+					ageDays, svc.Spec.Selector, svc.Namespace,
 				)
 			} else {
 				reason = fmt.Sprintf(
-					"Service (type: %s) has no active endpoints for %d days. "+
-						"Selector '%v' does not match any running pod. "+
-						"This service cannot route traffic to anything.",
-					svc.Spec.Type, ageDays, svc.Spec.Selector,
+					"Service (type: %s) is %d days old, and selector %v matches zero currently listed pods in namespace %q.",
+					svc.Spec.Type, ageDays, svc.Spec.Selector, svc.Namespace,
 				)
 			}
 
@@ -1155,8 +1186,7 @@ func (w *WasteAuditor) detectMisconfiguredHPAs(audit *WasteAudit, filterNamespac
 	if err != nil {
 		hpasV1, errV1 := w.clientset.AutoscalingV1().HorizontalPodAutoscalers(filterNamespace).List(w.ctx, metav1.ListOptions{TimeoutSeconds: int64Ptr(10)})
 		if errV1 != nil {
-			// Both v2 and v1 failed - skip HPA detection
-			return nil
+			return fmt.Errorf("list HPAs using autoscaling/v2 (%v) and autoscaling/v1: %w", err, errV1)
 		}
 
 		// Convert v1 to v2 format for unified processing
@@ -1516,7 +1546,7 @@ func printStaleJobs(audit *WasteAudit) {
 		fmt.Printf("     Age:     %d days\n", job.AgeDays)
 		fmt.Printf("     Finding: %s\n", job.Reason)
 		if job.JobStatus == "Completed" {
-			fmt.Printf("     Suggest: Safe to delete: kubectl delete job %s -n %s\n", job.Name, job.Namespace)
+			fmt.Println("     Suggest: Review job history and retention requirements with the workload owner")
 		} else {
 			fmt.Printf("     Suggest: kubectl describe job %s -n %s\n", job.Name, job.Namespace)
 		}

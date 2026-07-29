@@ -65,13 +65,12 @@ func (sa *SecurityAuditor) auditPod(pod corev1.Pod) []models.SecurityIssue {
 	// Skip system namespaces for some checks
 	isSystemNamespace := pod.Namespace == "kube-system" || pod.Namespace == "istio-system"
 
-	// Check for hostPath volumes (CRITICAL)
+	// Check for hostPath volumes. Whether host access is required depends on
+	// workload purpose, so observed mounts require review rather than an
+	// unconditional critical classification.
 	for _, volume := range pod.Spec.Volumes {
 		if volume.HostPath != nil {
 			severity := "high"
-			if !isSystemNamespace {
-				severity = "critical"
-			}
 			issues = append(issues, models.SecurityIssue{
 				Type:        "host_path_volume",
 				Severity:    severity,
@@ -79,7 +78,7 @@ func (sa *SecurityAuditor) auditPod(pod corev1.Pod) []models.SecurityIssue {
 				Namespace:   pod.Namespace,
 				Name:        pod.Name,
 				Description: fmt.Sprintf("Pod mounts host path: %s", volume.HostPath.Path),
-				Remediation: "Remove hostPath volume - use PersistentVolumeClaims or emptyDir instead",
+				Remediation: "Review the hostPath mount and verify whether this workload requires host access",
 			})
 		}
 	}
@@ -159,23 +158,24 @@ func (sa *SecurityAuditor) auditPod(pod corev1.Pod) []models.SecurityIssue {
 func (sa *SecurityAuditor) auditContainer(pod corev1.Pod, container corev1.Container, isSystemNamespace bool) []models.SecurityIssue {
 	var issues []models.SecurityIssue
 
-	// Check if running as root
-	runAsRoot := true
+	// Pod specs can explicitly enforce non-root execution, but absence of that
+	// setting does not establish the container's runtime user.
+	nonRootNotEnforced := true
 	if container.SecurityContext != nil && container.SecurityContext.RunAsNonRoot != nil {
-		runAsRoot = !*container.SecurityContext.RunAsNonRoot
+		nonRootNotEnforced = !*container.SecurityContext.RunAsNonRoot
 	} else if pod.Spec.SecurityContext != nil && pod.Spec.SecurityContext.RunAsNonRoot != nil {
-		runAsRoot = !*pod.Spec.SecurityContext.RunAsNonRoot
+		nonRootNotEnforced = !*pod.Spec.SecurityContext.RunAsNonRoot
 	}
 
-	if runAsRoot && !isSystemNamespace {
+	if nonRootNotEnforced && !isSystemNamespace {
 		issues = append(issues, models.SecurityIssue{
 			Type:        "running_as_root",
 			Severity:    "medium",
 			Resource:    "container",
 			Namespace:   pod.Namespace,
 			Name:        fmt.Sprintf("%s/%s", pod.Name, container.Name),
-			Description: "Container running as root user",
-			Remediation: "Add securityContext.runAsNonRoot: true and runAsUser: <non-zero>",
+			Description: "Non-root execution not explicitly enforced in the pod spec",
+			Remediation: "Review the image and workload requirements, then set securityContext.runAsNonRoot: true when appropriate",
 		})
 	}
 
@@ -233,16 +233,26 @@ func (sa *SecurityAuditor) auditContainer(pod corev1.Pod, container corev1.Conta
 	}
 
 	// Check resource limits
-	if container.Resources.Limits == nil ||
-		(container.Resources.Limits.Cpu().IsZero() && container.Resources.Limits.Memory().IsZero()) {
+	missingCPU := container.Resources.Limits.Cpu().IsZero()
+	missingMemory := container.Resources.Limits.Memory().IsZero()
+	if missingCPU || missingMemory {
+		description := "Container missing CPU and memory limits in the pod spec"
+		remediation := "Add resources.limits.cpu and resources.limits.memory"
+		if missingCPU && !missingMemory {
+			description = "Container missing a CPU limit in the pod spec"
+			remediation = "Add resources.limits.cpu"
+		} else if !missingCPU && missingMemory {
+			description = "Container missing a memory limit in the pod spec"
+			remediation = "Add resources.limits.memory"
+		}
 		issues = append(issues, models.SecurityIssue{
 			Type:        "missing_resource_limits",
 			Severity:    "medium",
 			Resource:    "container",
 			Namespace:   pod.Namespace,
 			Name:        fmt.Sprintf("%s/%s", pod.Name, container.Name),
-			Description: "Container missing CPU/memory limits",
-			Remediation: "Add resources.limits.cpu and resources.limits.memory",
+			Description: description,
+			Remediation: remediation,
 		})
 	}
 
@@ -297,13 +307,13 @@ func (sa *SecurityAuditor) generatePriorityActions(audit *models.SecurityAudit) 
 
 	// Critical actions first
 	if audit.Risks.HostPathVolumes > 0 {
-		actions = append(actions, "Remove hostPath volumes (critical filesystem access)")
+		actions = append(actions, "Review hostPath mounts and verify which workloads require host access")
 	}
 	if audit.Risks.PrivilegedContainers > 0 {
-		actions = append(actions, "Fix privileged containers (highest risk)")
+		actions = append(actions, "Review privileged containers and verify which workloads require that access")
 	}
 	if audit.Risks.HostPID > 0 {
-		actions = append(actions, "Remove hostPID usage (critical security risk)")
+		actions = append(actions, "Review hostPID usage and verify workload requirements")
 	}
 
 	// High priority
@@ -311,21 +321,21 @@ func (sa *SecurityAuditor) generatePriorityActions(audit *models.SecurityAudit) 
 		actions = append(actions, "Review and minimize hostNetwork usage")
 	}
 	if audit.Risks.HostIPC > 0 {
-		actions = append(actions, "Remove hostIPC usage where not required")
+		actions = append(actions, "Review hostIPC usage and verify workload requirements")
 	}
 	if audit.Risks.RunningAsRoot > 0 {
-		actions = append(actions, "Configure pods to run as non-root user")
+		actions = append(actions, "Review containers without explicitly enforced non-root execution")
 	}
 
 	// Medium priority
 	if audit.Risks.DefaultServiceAccount > 0 {
-		actions = append(actions, "Create dedicated ServiceAccounts with minimal permissions")
+		actions = append(actions, "Review pods using the default ServiceAccount and their required permissions")
 	}
 	if audit.Risks.MissingResourceLimits > 0 {
-		actions = append(actions, "Add resource limits to all pods")
+		actions = append(actions, "Review containers missing CPU or memory limits")
 	}
 	if audit.Risks.PrivilegeEscalation > 0 {
-		actions = append(actions, "Set allowPrivilegeEscalation: false")
+		actions = append(actions, "Review containers without allowPrivilegeEscalation: false")
 	}
 
 	return actions

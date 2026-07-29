@@ -2,6 +2,7 @@ package analyzer
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
@@ -9,6 +10,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/kubernetes/fake"
+	ktesting "k8s.io/client-go/testing"
 )
 
 // newTestAuditor creates a WasteAuditor backed by a fake Kubernetes client.
@@ -21,6 +23,154 @@ func newTestAuditor(minAgeDays int, objs ...interface{}) *WasteAuditor {
 		clientset:  fake.NewSimpleClientset(runtimeObjs...),
 		minAgeDays: minAgeDays,
 		ctx:        context.Background(),
+	}
+}
+
+func TestAuditWastePreservesDetectorWarnings(t *testing.T) {
+	wa := newTestAuditor(7)
+	wa.clientset.(*fake.Clientset).PrependReactor("list", "persistentvolumeclaims", func(ktesting.Action) (bool, runtime.Object, error) {
+		return true, nil, context.DeadlineExceeded
+	})
+
+	audit, err := wa.AuditWaste("")
+	if err != nil {
+		t.Fatalf("AuditWaste: %v", err)
+	}
+	for _, warning := range audit.DetectorWarnings {
+		if warning.Category == "Unattached PVC candidates" {
+			return
+		}
+	}
+	t.Fatalf("PVC detector warning not preserved: %+v", audit.DetectorWarnings)
+}
+
+func oldService(name, namespace string, selector map[string]string, serviceType corev1.ServiceType) *corev1.Service {
+	return &corev1.Service{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:              name,
+			Namespace:         namespace,
+			CreationTimestamp: metav1.Time{Time: time.Now().Add(-30 * 24 * time.Hour)},
+		},
+		Spec: corev1.ServiceSpec{Selector: selector, Type: serviceType},
+	}
+}
+
+func servicePod(name, namespace string, podLabels map[string]string, phase corev1.PodPhase, ready bool) *corev1.Pod {
+	return &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace, Labels: podLabels},
+		Status: corev1.PodStatus{
+			Phase: phase,
+			ContainerStatuses: []corev1.ContainerStatus{{
+				Name: "app", Ready: ready,
+			}},
+		},
+	}
+}
+
+func TestOrphanedServiceUsesNamespaceLocalSelectorMatches(t *testing.T) {
+	tests := []struct {
+		name      string
+		service   *corev1.Service
+		pods      []*corev1.Pod
+		wantCount int
+	}{
+		{
+			name:      "selector matches no pods",
+			service:   oldService("api", "app", map[string]string{"app": "api"}, corev1.ServiceTypeClusterIP),
+			wantCount: 1,
+		},
+		{
+			name:    "selector matches healthy pod",
+			service: oldService("api", "app", map[string]string{"app": "api"}, corev1.ServiceTypeClusterIP),
+			pods: []*corev1.Pod{
+				servicePod("api-1", "app", map[string]string{"app": "api"}, corev1.PodRunning, true),
+			},
+		},
+		{
+			name:    "selector matches unhealthy pod",
+			service: oldService("api", "app", map[string]string{"app": "api"}, corev1.ServiceTypeClusterIP),
+			pods: []*corev1.Pod{
+				servicePod("api-1", "app", map[string]string{"app": "api"}, corev1.PodFailed, false),
+			},
+		},
+		{
+			name:    "selectorless Service",
+			service: oldService("manual", "app", nil, corev1.ServiceTypeClusterIP),
+		},
+		{
+			name:    "ExternalName Service",
+			service: oldService("external", "app", map[string]string{"app": "api"}, corev1.ServiceTypeExternalName),
+		},
+		{
+			name:      "matching pod in another namespace does not count",
+			service:   oldService("api", "app", map[string]string{"app": "api"}, corev1.ServiceTypeClusterIP),
+			pods:      []*corev1.Pod{servicePod("api-1", "other", map[string]string{"app": "api"}, corev1.PodRunning, true)},
+			wantCount: 1,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			objs := []interface{}{tt.service}
+			for _, pod := range tt.pods {
+				objs = append(objs, pod)
+			}
+			wa := newTestAuditor(7, objs...)
+			audit := &WasteAudit{}
+			if err := wa.detectOrphanedServices(audit, ""); err != nil {
+				t.Fatalf("detectOrphanedServices: %v", err)
+			}
+			if got := len(audit.OrphanedServices); got != tt.wantCount {
+				t.Fatalf("orphan candidates = %d, want %d: %+v", got, tt.wantCount, audit.OrphanedServices)
+			}
+		})
+	}
+}
+
+func TestPVCReferenceEvidenceIsNamespaceScopedAndPhaseAgnostic(t *testing.T) {
+	pvc := &corev1.PersistentVolumeClaim{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:              "data",
+			Namespace:         "app",
+			CreationTimestamp: metav1.Time{Time: time.Now().Add(-30 * 24 * time.Hour)},
+		},
+		Status: corev1.PersistentVolumeClaimStatus{Phase: corev1.ClaimBound},
+	}
+	otherNamespacePod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: "other", Namespace: "other"},
+		Spec: corev1.PodSpec{Volumes: []corev1.Volume{{
+			VolumeSource: corev1.VolumeSource{PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: "data"}},
+		}}},
+	}
+	wa := newTestAuditor(7, pvc, otherNamespacePod)
+	audit := &WasteAudit{}
+	if err := wa.detectOrphanedPVCs(audit, ""); err != nil {
+		t.Fatalf("detectOrphanedPVCs: %v", err)
+	}
+	if len(audit.OrphanedPVCs) != 1 {
+		t.Fatalf("candidates = %+v, want namespace-isolated PVC candidate", audit.OrphanedPVCs)
+	}
+	reason := audit.OrphanedPVCs[0].Reason
+	if !strings.Contains(reason, `no currently listed pod in namespace "app" references it`) {
+		t.Fatalf("reason lacks namespace-local evidence: %q", reason)
+	}
+	for _, forbidden := range []string{"running pod", "checked 1 pods in namespace"} {
+		if strings.Contains(strings.ToLower(reason), forbidden) {
+			t.Fatalf("reason contains unsupported evidence %q: %q", forbidden, reason)
+		}
+	}
+
+	referencingFailedPod := otherNamespacePod.DeepCopy()
+	referencingFailedPod.Name = "stopped"
+	referencingFailedPod.Namespace = "app"
+	referencingFailedPod.Status.Phase = corev1.PodFailed
+	wa = newTestAuditor(7, pvc, referencingFailedPod)
+	audit = &WasteAudit{}
+	if err := wa.detectOrphanedPVCs(audit, "app"); err != nil {
+		t.Fatalf("detectOrphanedPVCs: %v", err)
+	}
+	if len(audit.OrphanedPVCs) != 0 {
+		t.Fatalf("non-running referencing pod must count as a reference: %+v", audit.OrphanedPVCs)
 	}
 }
 
@@ -223,6 +373,12 @@ func TestProbeFailureEventOverridesCrashLoopClassification(t *testing.T) {
 	}
 	if sp.Status != "ProbeFailure" {
 		t.Errorf("Status = %q, want %q (event evidence must override instantaneous CrashLoopBackOff state)", sp.Status, "ProbeFailure")
+	}
+	if strings.Contains(sp.Reason, "process itself is not the problem") {
+		t.Fatalf("probe evidence made an unsupported causal claim: %q", sp.Reason)
+	}
+	if !strings.Contains(sp.Reason, "Kubernetes events reported a startup or liveness probe failure and container restart") {
+		t.Fatalf("probe evidence wording missing observed event semantics: %q", sp.Reason)
 	}
 }
 
