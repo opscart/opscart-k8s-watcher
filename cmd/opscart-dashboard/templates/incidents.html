@@ -53,8 +53,9 @@
 .inc-sev-medium{background:rgba(100,116,139,.18);color:#94a3b8}
 .inc-sev-low{background:rgba(100,116,139,.12);color:#64748b}
 
-/* incident name cell */
-.inc-name{font-weight:600;color:var(--text);max-width:220px;overflow:hidden;text-overflow:ellipsis}
+/* workload identity cell */
+.inc-workload{font-weight:600;color:var(--text);max-width:260px;overflow:hidden;text-overflow:ellipsis}
+.inc-pod{font-family:'Consolas','Monaco',monospace;font-size:.68rem;color:var(--text-muted);margin-top:3px;max-width:260px;overflow:hidden;text-overflow:ellipsis}
 .inc-type{font-family:'Consolas','Monaco',monospace;font-size:.7rem;color:var(--text-muted);margin-top:1px}
 
 /* namespace */
@@ -128,7 +129,7 @@
 
   <!-- Filter form -->
   <form method="GET" action="/incidents" id="inc-form">
-    <input type="hidden" name="cluster" value="{{.ClusterName}}">
+    <input type="hidden" name="cluster" value="{{.ClusterParam}}">
     <div class="inc-filters">
       <div class="inc-search">
         <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
@@ -166,7 +167,7 @@
       </select>
       <button type="submit" class="inc-btn">Search</button>
       {{if or .Filter.Text .Filter.Namespace .Filter.IssueType .Filter.Severity}}
-      <a href="/incidents?cluster={{.ClusterName}}" class="inc-btn-clear">Clear</a>
+      <a href="/incidents?cluster={{.ClusterParam}}" class="inc-btn-clear">Clear</a>
       {{end}}
     </div>
   </form>
@@ -186,21 +187,21 @@
       <thead>
         <tr>
           <th>Severity</th>
-          <th>Incident</th>
+          <th>Workload</th>
           <th>Namespace</th>
           <th>Status</th>
           <th class="sortable{{if eq .Filter.SortBy "first_seen"}} sort-active{{end}}">
-            <a href="?cluster={{.ClusterName}}&q={{.Filter.Text}}&ns={{.Filter.Namespace}}&type={{.Filter.IssueType}}&severity={{.Filter.Severity}}&status={{.Filter.Status}}&sort=first_seen" style="color:inherit;text-decoration:none">
+            <a href="?cluster={{.ClusterParam}}&q={{.Filter.Text}}&ns={{.Filter.Namespace}}&type={{.Filter.IssueType}}&severity={{.Filter.Severity}}&status={{.Filter.Status}}&sort=first_seen" style="color:inherit;text-decoration:none">
               First detected <span class="sort-icon">▲▼</span>
             </a>
           </th>
           <th class="sortable{{if eq .Filter.SortBy "last_seen"}} sort-active{{end}}">
-            <a href="?cluster={{.ClusterName}}&q={{.Filter.Text}}&ns={{.Filter.Namespace}}&type={{.Filter.IssueType}}&severity={{.Filter.Severity}}&status={{.Filter.Status}}&sort=last_seen" style="color:inherit;text-decoration:none">
+            <a href="?cluster={{.ClusterParam}}&q={{.Filter.Text}}&ns={{.Filter.Namespace}}&type={{.Filter.IssueType}}&severity={{.Filter.Severity}}&status={{.Filter.Status}}&sort=last_seen" style="color:inherit;text-decoration:none">
               Last seen <span class="sort-icon">▲▼</span>
             </a>
           </th>
           <th class="sortable{{if eq .Filter.SortBy "restarts"}} sort-active{{end}}" style="text-align:right">
-            <a href="?cluster={{.ClusterName}}&q={{.Filter.Text}}&ns={{.Filter.Namespace}}&type={{.Filter.IssueType}}&severity={{.Filter.Severity}}&status={{.Filter.Status}}&sort=restarts" style="color:inherit;text-decoration:none">
+            <a href="?cluster={{.ClusterParam}}&q={{.Filter.Text}}&ns={{.Filter.Namespace}}&type={{.Filter.IssueType}}&severity={{.Filter.Severity}}&status={{.Filter.Status}}&sort=restarts" style="color:inherit;text-decoration:none">
               Restarts <span class="sort-icon">▲▼</span>
             </a>
           </th>
@@ -211,22 +212,30 @@
       <tbody>
         {{range .Incidents}}
         <tr class="{{if eq .Status "resolved"}}inc-row-resolved{{end}}"
-            onclick="window.location='/investigate?pod={{.Resource}}&ns={{.Namespace}}&type={{.IssueType}}&cluster={{$.ClusterName}}&from=incidents'">
+            {{if isNamespaceScoped .IssueType}}
+            onclick="window.location='/investigate?ns={{.Namespace}}&type={{.IssueType}}&cluster={{$.ClusterParam}}&from=incidents'"
+            {{else}}
+            onclick="window.location='/investigate?pod={{.Resource}}&ns={{.Namespace}}&type={{.IssueType}}&cluster={{$.ClusterParam}}&from=incidents'"
+            {{end}}>
           <td>
             <span class="inc-sev inc-sev-{{.Severity}}">{{.Severity}}</span>
           </td>
           <td>
-            <div class="inc-name">
-              {{if eq .IssueType "unprotected_namespace"}}{{.Namespace}}{{else}}{{.Resource}}{{end}}
-            </div>
-            <div class="inc-type">{{.IssueType}}</div>
+            {{if isNamespaceScoped .IssueType}}
+              <div class="inc-workload">Namespace/{{.Namespace}}</div>
+              <div class="inc-pod">{{.IssueType}}</div>
+            {{else}}
+              <div class="inc-workload">Workload/{{ownerName .Resource}}</div>
+              <div class="inc-pod">↳ currently: {{.Resource}}</div>
+              <div class="inc-type">{{.IssueType}}</div>
+            {{end}}
           </td>
           <td class="inc-ns">{{.Namespace}}</td>
           <td>
             {{if eq .Status "resolved"}}
               <span class="inc-status inc-status-resolved"><span class="inc-dot"></span>Resolved</span>
             {{else if gt .ReopenCount 0}}
-              <span class="inc-status inc-status-reopened"><span class="inc-dot"></span>Reopened<span class="inc-reopen-n">×{{.ReopenCount}}</span></span>
+              <span class="inc-status inc-status-reopened"><span class="inc-dot"></span>Reopened</span>
             {{else}}
               <span class="inc-status inc-status-active"><span class="inc-dot"></span>Active</span>
             {{end}}
@@ -266,7 +275,7 @@
       </span>
       <div class="inc-pager-btns">
         {{if gt .Page 1}}
-        <a href="?cluster={{.ClusterName}}&q={{.Filter.Text}}&ns={{.Filter.Namespace}}&type={{.Filter.IssueType}}&severity={{.Filter.Severity}}&status={{.Filter.Status}}&sort={{.Filter.SortBy}}&page={{prevPage .Page}}">
+        <a href="?cluster={{.ClusterParam}}&q={{.Filter.Text}}&ns={{.Filter.Namespace}}&type={{.Filter.IssueType}}&severity={{.Filter.Severity}}&status={{.Filter.Status}}&sort={{.Filter.SortBy}}&page={{prevPage .Page}}">
           <button class="inc-pg">‹ Prev</button>
         </a>
         {{end}}
@@ -276,7 +285,7 @@
         </a>
         {{end}}
         {{if lt .Page .TotalPages}}
-        <a href="?cluster={{.ClusterName}}&q={{.Filter.Text}}&ns={{.Filter.Namespace}}&type={{.Filter.IssueType}}&severity={{.Filter.Severity}}&status={{.Filter.Status}}&sort={{.Filter.SortBy}}&page={{nextPage .Page .TotalPages}}">
+        <a href="?cluster={{.ClusterParam}}&q={{.Filter.Text}}&ns={{.Filter.Namespace}}&type={{.Filter.IssueType}}&severity={{.Filter.Severity}}&status={{.Filter.Status}}&sort={{.Filter.SortBy}}&page={{nextPage .Page .TotalPages}}">
           <button class="inc-pg">Next ›</button>
         </a>
         {{end}}
@@ -290,7 +299,7 @@
       <div class="inc-empty-msg">No incidents match your filters</div>
       <div class="inc-empty-sub">
         {{if or .Filter.Text .Filter.Namespace .Filter.IssueType .Filter.Severity}}
-          Try clearing some filters — <a href="/incidents?cluster={{.ClusterName}}" style="color:var(--primary-light)">show all active</a>
+          Try clearing some filters — <a href="/incidents?cluster={{.ClusterParam}}" style="color:var(--primary-light)">show all active</a>
         {{else}}
           No active incidents detected. This cluster looks healthy.
         {{end}}

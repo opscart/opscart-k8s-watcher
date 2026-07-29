@@ -1011,6 +1011,16 @@ func TestInvestigateURL(t *testing.T) {
 			want: "/investigate?pod=payments-api%2Fabc123&ns=payments+prod&type=crash_loop&cluster=my+cluster&from=warroom",
 		},
 		{
+			name:      "namespace finding omits synthetic pod parameter",
+			namespace: "monitoring", resource: "namespace", issueType: "unprotected_namespace", ctx: "my cluster",
+			want: "/investigate?ns=monitoring&type=unprotected_namespace&cluster=my+cluster&from=warroom",
+		},
+		{
+			name:      "idle namespace omits synthetic pod parameter",
+			namespace: "batch", resource: "namespace", issueType: "idle_namespace", ctx: "my cluster",
+			want: "/investigate?ns=batch&type=idle_namespace&cluster=my+cluster&from=warroom",
+		},
+		{
 			name:      "empty namespace falls back to /warroom",
 			namespace: "", resource: "payments-api", issueType: "crash_loop", ctx: "test-cluster",
 			want: "/warroom",
@@ -1037,6 +1047,70 @@ func TestInvestigateURL(t *testing.T) {
 				t.Errorf("investigateURL(%q, %q, %q, %q) = %q, want %q", tt.namespace, tt.resource, tt.issueType, tt.ctx, got, tt.want)
 			}
 		})
+	}
+}
+
+func TestRenderWarRoomCardInvestigationLinks(t *testing.T) {
+	namespaceCard := renderWarRoomCard(warRoomIssue{
+		Resource: "namespace", Namespace: "monitoring", Type: "unprotected_namespace",
+	}, "prod-cluster")
+	if strings.Contains(namespaceCard, "pod=namespace") {
+		t.Errorf("namespace card included synthetic pod parameter: %s", namespaceCard)
+	}
+	if !strings.Contains(namespaceCard, "/investigate?ns=monitoring&type=unprotected_namespace&cluster=prod-cluster&from=warroom") {
+		t.Errorf("namespace card missing ns/type investigation link: %s", namespaceCard)
+	}
+
+	workloadCard := renderWarRoomCard(warRoomIssue{
+		Resource: "fraud-detection-abc", Namespace: "payments", Type: "crash_loop",
+	}, "prod-cluster")
+	if !strings.Contains(workloadCard, "/investigate?pod=fraud-detection-abc&ns=payments&type=crash_loop&cluster=prod-cluster&from=warroom") {
+		t.Errorf("workload card omitted Focus Pod: %s", workloadCard)
+	}
+
+	emptyContextCard := renderWarRoomCard(warRoomIssue{
+		Resource: "fraud-detection-abc", Namespace: "payments", Type: "crash_loop",
+	}, "")
+	if strings.Contains(emptyContextCard, "cluster=current-context") {
+		t.Errorf("empty active context emitted synthetic cluster context: %s", emptyContextCard)
+	}
+	if !strings.Contains(emptyContextCard, "&from=warroom") {
+		t.Errorf("empty active context omitted source parameter: %s", emptyContextCard)
+	}
+
+	emptyResourceNamespaceCard := renderWarRoomCard(warRoomIssue{
+		Namespace: "monitoring", Type: "unprotected_namespace",
+	}, "prod-cluster")
+	if !strings.Contains(emptyResourceNamespaceCard, "Investigate →") {
+		t.Errorf("namespace card with empty Resource omitted Investigate action: %s", emptyResourceNamespaceCard)
+	}
+	if strings.Contains(emptyResourceNamespaceCard, "pod=") {
+		t.Errorf("namespace card with empty Resource emitted pod parameter: %s", emptyResourceNamespaceCard)
+	}
+}
+
+func TestRenderWarRoomPagePassesActiveContextToCards(t *testing.T) {
+	scan := &clusterScan{
+		wasteAudit: &analyzer.WasteAudit{
+			StalePods: []analyzer.StalePod{{
+				Name: "fraud-detection-abc", Namespace: "payments",
+				Kind: analyzer.StalePodZombie, Status: "CrashLoopBackOff",
+			}},
+		},
+		netAudit: &analyzer.NetworkPolicyAudit{
+			UnprotectedNamespaces: []analyzer.NamespaceNetworkStatus{{
+				Name: "monitoring", RiskLevel: "HIGH",
+			}},
+		},
+	}
+	body := renderWarRoomPage(scan, "prod-cluster", []string{"prod-cluster"})
+	for _, want := range []string{
+		"/investigate?pod=fraud-detection-abc&ns=payments&type=crash_loop&cluster=prod-cluster&from=warroom",
+		"/investigate?ns=monitoring&type=unprotected_namespace&cluster=prod-cluster&from=warroom",
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("rendered War Room page missing context-aware link %q", want)
+		}
 	}
 }
 

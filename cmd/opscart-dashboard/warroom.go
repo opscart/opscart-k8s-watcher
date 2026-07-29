@@ -53,6 +53,7 @@ type warRoomIssue struct {
 
 type warRoomPageData struct {
 	ClusterName   string
+	ActiveCtx     string
 	StatusDesc    string
 	DashURL       string
 	CritChipClass string
@@ -197,6 +198,7 @@ func renderWarRoomPage(scan *clusterScan, activeCtx string, clusterList []string
 
 	data := warRoomPageData{
 		ClusterName:   clusterName,
+		ActiveCtx:     activeCtx,
 		StatusDesc:    fmt.Sprintf("%d issue(s) detected", len(critical)+len(warnings)),
 		DashURL:       "/" + q,
 		CritChipClass: critChipClass,
@@ -224,8 +226,8 @@ func getWarRoomTmpl() *template.Template {
 	warRoomTmplOnce.Do(func() {
 		warRoomTmpl = template.Must(
 			template.New("warroom.html").Funcs(template.FuncMap{
-				"renderCard": func(issue warRoomIssue) template.HTML {
-					return template.HTML(renderWarRoomCard(issue))
+				"renderCard": func(issue warRoomIssue, activeCtx string) template.HTML {
+					return template.HTML(renderWarRoomCard(issue, activeCtx))
 				},
 			}).ParseFS(templateFS, "templates/base.html", "templates/warroom.html"),
 		)
@@ -233,7 +235,7 @@ func getWarRoomTmpl() *template.Template {
 	return warRoomTmpl
 }
 
-func renderWarRoomCard(issue warRoomIssue) string {
+func renderWarRoomCard(issue warRoomIssue, activeCtx string) string {
 	sc := "c"
 	bl := "CRITICAL"
 	if issue.Severity == "warning" {
@@ -270,14 +272,10 @@ func renderWarRoomCard(issue warRoomIssue) string {
 	sb.WriteString(`<button class="copy-btn" onclick="var b=this,c=this.previousElementSibling.textContent;navigator.clipboard.writeText(c).then(function(){b.textContent='✓';setTimeout(function(){b.textContent='Copy'},1500)})">Copy</button>`)
 	sb.WriteString(`</div>`)
 	// Investigate button — links to investigation page
-	if issue.Resource != "" && issue.Namespace != "" {
-		investigateURL := fmt.Sprintf("/investigate?pod=%s&ns=%s&type=%s",
-			url.QueryEscape(issue.Resource),
-			url.QueryEscape(issue.Namespace),
-			url.QueryEscape(issue.Type))
+	if investigationHref := investigateURL(issue.Namespace, issue.Resource, issue.Type, activeCtx); investigationHref != "/warroom" {
 		sb.WriteString(fmt.Sprintf(
 			`<a class="investigate-btn" href="%s">Investigate →</a>`,
-			investigateURL))
+			investigationHref))
 	}
 	sb.WriteString(`</div>`)
 	return sb.String()
