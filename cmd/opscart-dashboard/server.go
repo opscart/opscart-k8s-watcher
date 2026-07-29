@@ -1264,12 +1264,23 @@ func buildWorkloadHealthGrid(scan *clusterScan) []workloadHealthCell {
 // buildTopIssues (orphaned PVCs, security score, zero-replica workloads)
 // have no single corresponding incident to deep-link to.
 func investigateURL(namespace, resource, issueType, activeCtx string) string {
-	if namespace == "" || resource == "" || issueType == "" {
+	if namespace == "" || issueType == "" {
 		return "/warroom"
 	}
-	return fmt.Sprintf("/investigate?pod=%s&ns=%s&type=%s&cluster=%s&from=warroom",
+	clusterParam := ""
+	if activeCtx != "" {
+		clusterParam = "&cluster=" + url.QueryEscape(activeCtx)
+	}
+	if issueType == "unprotected_namespace" || issueType == "idle_namespace" {
+		return fmt.Sprintf("/investigate?ns=%s&type=%s%s&from=warroom",
+			url.QueryEscape(namespace), url.QueryEscape(issueType), clusterParam)
+	}
+	if resource == "" {
+		return "/warroom"
+	}
+	return fmt.Sprintf("/investigate?pod=%s&ns=%s&type=%s%s&from=warroom",
 		url.QueryEscape(resource), url.QueryEscape(namespace),
-		url.QueryEscape(issueType), url.QueryEscape(activeCtx))
+		url.QueryEscape(issueType), clusterParam)
 }
 
 func buildTopIssues(scan *clusterScan, wrIssues []warRoomIssue, activeCtx string) []topIssue {
