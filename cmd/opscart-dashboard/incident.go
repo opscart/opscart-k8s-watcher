@@ -42,9 +42,12 @@ type incidentsPageData struct {
 	Namespaces []string // distinct namespaces for filter dropdown
 
 	// Summary counts (across all matching, not just this page)
-	ActiveCount   int
-	ReopenedCount int
-	ResolvedCount int
+	ActiveCritical int
+	ActiveHigh     int
+	ActiveMedium   int
+	ActiveLow      int
+	ReopenedCount  int
+	ResolvedCount  int
 }
 
 func (srv *server) handleIncidentsPage(w http.ResponseWriter, r *http.Request) {
@@ -64,7 +67,7 @@ func (srv *server) handleIncidentsPage(w http.ResponseWriter, r *http.Request) {
 
 	sortBy := q.Get("sort")
 	if sortBy == "" {
-		sortBy = "severity"
+		sortBy = "priority"
 	}
 
 	f := store.IncidentFilter{
@@ -111,27 +114,33 @@ func (srv *server) handleIncidentsPage(w http.ResponseWriter, r *http.Request) {
 		data.TotalPages = int(math.Ceil(float64(total) / 50))
 	}
 
-	// Summary counts — query with status overrides for the strip
-	if ac, _, e := srv.db.QueryIncidents(store.IncidentFilter{Cluster: ctx, Status: "active", PerPage: 1}); e == nil {
-		_ = ac
-	}
-	// Simpler: get counts from a summary query
-	if all, allTotal, e := srv.db.QueryIncidents(store.IncidentFilter{
+	// Summary counts use the current non-status filters across active and
+	// resolved results, rather than labeling every active row critical.
+	if all, e := queryAllIncidentSummaries(srv.db, store.IncidentFilter{
 		Cluster: ctx, Text: f.Text, Namespace: f.Namespace,
 		IssueType: f.IssueType, Severity: f.Severity,
-		Status: "", PerPage: 200,
+		Status: "",
 	}); e == nil {
 		for _, inc := range all {
 			switch {
 			case inc.Status == "resolved":
 				data.ResolvedCount++
-			case inc.ReopenCount > 0:
-				data.ReopenedCount++
 			default:
-				data.ActiveCount++
+				switch inc.Severity {
+				case "critical":
+					data.ActiveCritical++
+				case "high":
+					data.ActiveHigh++
+				case "medium":
+					data.ActiveMedium++
+				case "low":
+					data.ActiveLow++
+				}
+				if inc.ReopenCount > 0 {
+					data.ReopenedCount++
+				}
 			}
 		}
-		_ = allTotal
 	}
 
 	// Distinct namespaces for dropdown
@@ -234,6 +243,7 @@ var getIncidentsTmpl = sync.OnceValue(func() *template.Template {
 				"isNamespaceScoped": func(issueType string) bool {
 					return issueType == "unprotected_namespace" || issueType == "idle_namespace"
 				},
+				"trendApplies": store.RestartTrendApplies,
 			}).
 			ParseFS(templateFS,
 				"templates/base.html",
@@ -252,4 +262,21 @@ func renderIncidents(w http.ResponseWriter, data incidentsPageData) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-cache, no-store, must-revalidate")
 	w.Write(buf.Bytes())
+}
+
+func queryAllIncidentSummaries(db store.Store, filter store.IncidentFilter) ([]store.IncidentSummary, error) {
+	filter.PerPage = 200
+	filter.Page = 1
+	var all []store.IncidentSummary
+	for {
+		items, total, err := db.QueryIncidents(filter)
+		if err != nil {
+			return nil, err
+		}
+		all = append(all, items...)
+		if len(all) >= total || len(items) == 0 {
+			return all, nil
+		}
+		filter.Page++
+	}
 }

@@ -82,6 +82,7 @@
 .inc-trend-accelerating{color:#f87171}
 .inc-trend-stable{color:var(--text-muted)}
 .inc-trend-recovering{color:#4ade80}
+.sr-only{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0}
 
 /* arrow */
 .inc-arrow{color:var(--text-muted);font-size:.85rem;text-align:center}
@@ -123,7 +124,7 @@
 
   <!-- War Room callout -->
   <div class="inc-wr-banner">
-    <span>Need immediate triage? <a class="inc-wr-link" href="{{.WrHref}}">War Room shows the top incidents ranked by impact →</a></span>
+    <span>Need immediate triage? <a class="inc-wr-link" href="{{.WrHref}}">War Room shows the top incidents ranked by severity and restart count →</a></span>
     {{if .CriticalCount}}<span style="color:#f87171;font-weight:600">{{.CriticalCount}} critical active</span>{{end}}
   </div>
 
@@ -160,6 +161,7 @@
         <option value="reopened"{{if eq .Filter.Status "reopened"}} selected{{end}}>Reopened</option>
       </select>
       <select name="sort" class="inc-select" onchange="this.form.submit()">
+        <option value="priority"{{if eq .Filter.SortBy "priority"}} selected{{end}}>Sort: Priority</option>
         <option value="severity"{{if eq .Filter.SortBy "severity"}} selected{{end}}>Sort: Severity</option>
         <option value="first_seen"{{if eq .Filter.SortBy "first_seen"}} selected{{end}}>Sort: First detected</option>
         <option value="last_seen"{{if eq .Filter.SortBy "last_seen"}} selected{{end}}>Sort: Last seen</option>
@@ -174,7 +176,10 @@
 
   <!-- Summary strip -->
   <div class="inc-summary">
-    {{if .ActiveCount}}<span class="inc-sum-crit"><b>{{.ActiveCount}}</b> active critical</span>{{end}}
+    {{if .ActiveCritical}}<span class="inc-sum-crit"><b>{{.ActiveCritical}}</b> active critical</span>{{end}}
+    {{if .ActiveHigh}}<span class="inc-sum-reo"><b>{{.ActiveHigh}}</b> active high</span>{{end}}
+    {{if .ActiveMedium}}<span><b>{{.ActiveMedium}}</b> active medium</span>{{end}}
+    {{if .ActiveLow}}<span><b>{{.ActiveLow}}</b> active low</span>{{end}}
     {{if .ReopenedCount}}<span class="inc-sum-reo"><b>{{.ReopenedCount}}</b> reopened</span>{{end}}
     {{if .ResolvedCount}}<span class="inc-sum-res"><b>{{.ResolvedCount}}</b> resolved</span>{{end}}
     <span class="inc-total"><b style="color:var(--text)">{{.Total}}</b> incidents in memory{{if or .Filter.Text .Filter.Namespace .Filter.IssueType .Filter.Severity .Filter.Status}} matching filters{{end}}</span>
@@ -246,7 +251,9 @@
             {{if gt .RestartCount 0}}{{.RestartCount}}{{else}}<span class="inc-dash">—</span>{{end}}
           </td>
           <td>
-            {{if .Trend}}
+            {{if not (trendApplies .IssueType)}}
+              <span class="inc-dash" aria-hidden="true">—</span><span class="sr-only">Restart trend does not apply to this finding.</span>
+            {{else if .Trend}}
               <span class="inc-trend inc-trend-{{.Trend}}">
                 {{if eq .Trend "accelerating"}}↑ accelerating
                 {{else if eq .Trend "stable"}}→ stable
@@ -271,7 +278,10 @@
         Showing <b style="color:var(--text)">{{pageStart .Page .PerPage}}–{{pageEnd .Page .PerPage .Total}}</b>
         of <b style="color:var(--text)">{{.Total}}</b>
         {{if gt .Total 1}}incidents{{else}}incident{{end}}
-        · sorted by {{.Filter.SortBy}}, newest first
+        {{if eq .Filter.SortBy "priority"}}· active first, then severity, newest first
+        {{else if eq .Filter.SortBy "severity"}}· sorted critical to low, newest first
+        {{else if eq .Filter.SortBy "restarts"}}· sorted by restarts, highest first
+        {{else}}· sorted by {{.Filter.SortBy}}, newest first{{end}}
       </span>
       <div class="inc-pager-btns">
         {{if gt .Page 1}}

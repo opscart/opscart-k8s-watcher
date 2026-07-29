@@ -384,7 +384,6 @@ func TestInvestigationWorkloadSectionsAndLabels(t *testing.T) {
 		"Recommended Investigation",
 		"Incident Timeline",
 		"Blast Radius",
-		"Recent Events",
 		"Related Resources",
 	)
 }
@@ -424,8 +423,21 @@ func TestInvestigationNamespaceSectionsAndEvidence(t *testing.T) {
 		"Namespace Finding",
 		"Recommended Investigation",
 		"Incident Timeline",
-		"Recent Events",
 	)
+}
+
+func TestInvestigationRecentEventsHiddenWhenEmpty(t *testing.T) {
+	empty := renderInvestigationBody(t, investigationPageData{Namespace: "default", PodName: "pod"})
+	if strings.Contains(empty, "<h2>Recent Events</h2>") {
+		t.Fatal("Recent Events section rendered without events")
+	}
+	withEvent := renderInvestigationBody(t, investigationPageData{
+		Namespace: "default", PodName: "pod",
+		Events: []investigationEvent{{Type: "Warning", Reason: "BackOff", Age: "1m", Count: 1, Message: "retrying"}},
+	})
+	if !strings.Contains(withEvent, "<h2>Recent Events</h2>") {
+		t.Fatal("Recent Events section missing when events exist")
+	}
 }
 
 func TestFirstDetectedLabelIncludesAbsoluteAndRelativeDate(t *testing.T) {
