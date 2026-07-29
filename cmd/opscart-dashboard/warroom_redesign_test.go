@@ -1,0 +1,198 @@
+package main
+
+import (
+	"fmt"
+	"net/url"
+	"strings"
+	"testing"
+
+	"github.com/opscart/opscart-k8s-watcher/pkg/analyzer"
+	"github.com/opscart/opscart-k8s-watcher/pkg/models"
+)
+
+func TestWarRoomWorkloadIdentity(t *testing.T) {
+	scan := &clusterScan{AllWorkloads: []models.WorkloadRef{
+		{Name: "stream-processor", Kind: "Deployment", Namespace: "apps"},
+		{Name: "node-agent", Kind: "DaemonSet", Namespace: "ops"},
+		{Name: "prometheus", Kind: "StatefulSet", Namespace: "monitoring"},
+	}}
+	tests := []struct {
+		name, pod, namespace, wantIdentity string
+	}{
+		{"deployment", "stream-processor-66c474d5fd-9zpwq", "apps", "Deployment/stream-processor"},
+		{"daemonset", "node-agent-8j6s5", "ops", "DaemonSet/node-agent"},
+		{"statefulset ordinal", "prometheus-0", "monitoring", "StatefulSet/prometheus-0"},
+		{"bare pod", "storage-provisioner", "kube-system", "Pod/storage-provisioner"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			issue := warRoomIssue{Severity: "critical", Type: "crash_loop", Resource: tt.pod, Namespace: tt.namespace}
+			enrichWarRoomIdentity(&issue, scan)
+			card := renderWarRoomCard(issue, "prod")
+			if !strings.Contains(card, tt.wantIdentity) {
+				t.Fatalf("card missing identity %q: %s", tt.wantIdentity, card)
+			}
+			if !strings.Contains(card, "Focus Pod: "+tt.pod) {
+				t.Fatalf("card missing Focus Pod subtitle: %s", card)
+			}
+		})
+	}
+}
+
+func TestNamespacePostureEvidenceAndIdentity(t *testing.T) {
+	scan := &clusterScan{
+		netAudit:   &analyzer.NetworkPolicyAudit{UnprotectedNamespaces: []analyzer.NamespaceNetworkStatus{{Name: "monitoring", RiskLevel: "HIGH", PodCount: 8}}},
+		wasteAudit: &analyzer.WasteAudit{AbandonedNamespaces: []analyzer.AbandonedNamespace{{Name: "batch", AgeDays: 30, PodCount: 0, Reason: "No pods found. Namespace is 30 days old with zero workloads"}}},
+	}
+	issues := collectWarRoomIssues(scan, 0)
+	body := renderWarRoomPage(scan, "prod", []string{"prod"})
+	for _, want := range []string{
+		"Namespace/monitoring", "Missing default-deny NetworkPolicy", "8 pods in namespace",
+		"kubectl get networkpolicies -n monitoring", "Namespace/batch",
+		"No pods found. Namespace is 30 days old with zero workloads",
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("page missing %q", want)
+		}
+	}
+	for _, forbidden := range []string{"pods exposed", "pod=namespace", "every pod can reach", "critical infrastructure exposed"} {
+		if strings.Contains(strings.ToLower(body), forbidden) {
+			t.Errorf("page contains unsupported wording %q", forbidden)
+		}
+	}
+	if len(issues) != 2 {
+		t.Fatalf("got %d posture issues, want 2", len(issues))
+	}
+}
+
+func TestWarRoomSearchAndFilters(t *testing.T) {
+	issues := []warRoomIssue{
+		{Severity: "critical", Type: "crash_loop", Namespace: "payments", Resource: "checkout-7cddf79d98-jxmtx", WorkloadKind: "Deployment", WorkloadName: "checkout", Classification: "CrashLoopBackOff", Container: "api"},
+		{Severity: "high", Type: "unprotected_namespace", Namespace: "monitoring", Resource: "namespace", WorkloadKind: "Namespace", WorkloadName: "monitoring", Classification: "Missing default-deny NetworkPolicy"},
+	}
+	tests := []struct{ name, q, severity, issueType string }{
+		{"workload", "checkout", "", ""},
+		{"focus pod", "7cddf79d98-jxmtx", "", ""},
+		{"namespace", "payments", "", ""},
+		{"classification", "crashloopbackoff", "", ""},
+		{"container", "api", "", ""},
+		{"severity", "", "critical", ""},
+		{"classification filter", "", "", "crash_loop"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := filterWarRoomIssues(issues, tt.q, tt.severity, tt.issueType)
+			if len(got) != 1 || got[0].Type != "crash_loop" {
+				t.Fatalf("unexpected filtered results: %+v", got)
+			}
+		})
+	}
+}
+
+func TestWarRoomFilteringOccursBeforeLimit(t *testing.T) {
+	var pods []analyzer.StalePod
+	for i := 0; i < 13; i++ {
+		pods = append(pods, analyzer.StalePod{Name: fmt.Sprintf("worker-%02d-7cddf79d98-jxmtx", i), Namespace: "apps", Kind: analyzer.StalePodZombie, Status: "CrashLoopBackOff", RestartCount: int32(100 - i)})
+	}
+	scan := &clusterScan{wasteAudit: &analyzer.WasteAudit{StalePods: pods}}
+	body := renderWarRoomPageWithFilters(scan, "prod", []string{"prod"}, url.Values{"q": {"worker-12"}, "limit": {"12"}})
+	if !strings.Contains(body, "worker-12") || !strings.Contains(body, "Showing 1 prioritized incident") {
+		t.Fatalf("search was applied after the first 12 results")
+	}
+}
+
+func TestWarRoomLimitsAndInvalidDefault(t *testing.T) {
+	for raw, want := range map[string]int{"12": 12, "25": 25, "50": 50, "": 12, "999": 12, "bad": 12} {
+		if got := parseWarRoomLimit(raw); got != want {
+			t.Errorf("parseWarRoomLimit(%q) = %d, want %d", raw, got, want)
+		}
+	}
+}
+
+func TestWarRoomRankingAndOrdinals(t *testing.T) {
+	scan := &clusterScan{
+		wasteAudit: &analyzer.WasteAudit{StalePods: []analyzer.StalePod{
+			{Name: "low-restarts", Namespace: "apps", Kind: analyzer.StalePodZombie, Status: "CrashLoopBackOff", RestartCount: 2},
+			{Name: "high-restarts", Namespace: "apps", Kind: analyzer.StalePodZombie, Status: "CrashLoopBackOff", RestartCount: 50},
+		}},
+		netAudit: &analyzer.NetworkPolicyAudit{UnprotectedNamespaces: []analyzer.NamespaceNetworkStatus{{Name: "posture", RiskLevel: "HIGH"}}},
+	}
+	issues := collectWarRoomIssues(scan, 0)
+	if issues[0].Resource != "high-restarts" || issues[1].Resource != "low-restarts" || issues[2].Severity != "high" {
+		t.Fatalf("ranking changed from severity then restart count: %+v", issues)
+	}
+	body := renderWarRoomPage(scan, "prod", []string{"prod"})
+	if strings.Index(body, "#1") > strings.Index(body, "#2") || !strings.Contains(body, "Ranked by severity · restart count") ||
+		!strings.Contains(body, "wr-card c wr-type-crash-loop featured") {
+		t.Fatalf("ordinal badges or ranking label are incorrect")
+	}
+}
+
+func TestWarRoomBriefingDeduplicatesWorkloadsAndOmitsUnavailable(t *testing.T) {
+	issues := []warRoomIssue{
+		{Severity: "critical", Type: "crash_loop", Namespace: "apps", WorkloadKind: "Deployment", WorkloadName: "api"},
+		{Severity: "critical", Type: "privileged_container", Namespace: "apps", WorkloadKind: "Deployment", WorkloadName: "api"},
+		{Severity: "high", Type: "unprotected_namespace", Namespace: "apps", WorkloadKind: "Namespace", WorkloadName: "apps"},
+	}
+	stats := warRoomStatsFor(issues)
+	if stats.affectedWorkloads != 1 || stats.namespaceFindings != 1 {
+		t.Fatalf("unexpected deduplicated stats: %+v", stats)
+	}
+	briefing := buildWarRoomBriefing(stats)
+	if strings.Contains(briefing, "oldest") || strings.Contains(briefing, "restart count") {
+		t.Fatalf("briefing did not omit unavailable facts: %q", briefing)
+	}
+}
+
+func TestWarRoomBackToOverviewAndResponsiveLayout(t *testing.T) {
+	body := renderWarRoomPage(&clusterScan{}, "real/context", []string{"real/context"})
+	for _, want := range []string{
+		"Back to Overview", `href="/?cluster=real%2Fcontext"`,
+		"@media(min-width:1500px){.wr-grid{grid-template-columns:repeat(4,minmax(0,1fr))}}",
+		"@media(max-width:1099px)", "grid-template-columns:repeat(2,minmax(0,1fr))",
+		"@media(max-width:719px)", ".wr-grid{grid-template-columns:1fr}",
+		".wr-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr))",
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("page missing %q", want)
+		}
+	}
+	if strings.Contains(body, ".wr-card.featured{grid-column") {
+		t.Fatal("featured card still spans grid columns")
+	}
+	if strings.Contains(body, "cluster=current-context") {
+		t.Fatal("page leaked synthetic current-context")
+	}
+	empty := renderWarRoomPage(&clusterScan{}, "", []string{""})
+	if strings.Contains(empty, "cluster=current-context") || strings.Contains(empty, `name="cluster" value="current-context"`) {
+		t.Fatal("empty context emitted synthetic cluster query")
+	}
+}
+
+func TestWarRoomDenseEqualCardsAndResetVisibility(t *testing.T) {
+	scan := &clusterScan{wasteAudit: &analyzer.WasteAudit{StalePods: []analyzer.StalePod{
+		{Name: "api-7cddf79d98-jxmtx", Namespace: "apps", Kind: analyzer.StalePodZombie, Status: "CrashLoopBackOff", RestartCount: 8, AgeDays: 2},
+		{Name: "worker-7cddf79d98-kbfzw", Namespace: "apps", Kind: analyzer.StalePodZombie, Status: "CrashLoopBackOff", RestartCount: 4, AgeDays: 1},
+	}}}
+	body := renderWarRoomPage(scan, "prod", []string{"prod"})
+	for _, want := range []string{
+		`class="wr-card c wr-type-crash-loop featured"`,
+		`class="wr-card c wr-type-crash-loop"`,
+		`class="wr-evidence"`, "Classification", "Active For", "Restarts",
+		`<footer class="wr-actions">`, `title="Focus Pod: api-7cddf79d98-jxmtx"`,
+		`min-height:260px`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("dense card rendering missing %q", want)
+		}
+	}
+	if strings.Contains(body, `<a class="toolbar-reset"`) || strings.Contains(body, `class="toolbar has-reset"`) {
+		t.Fatal("unfiltered toolbar rendered or reserved space for Reset")
+	}
+
+	filtered := renderWarRoomPageWithFilters(scan, "prod", []string{"prod"}, url.Values{"q": {"api"}})
+	if !strings.Contains(filtered, `class="toolbar has-reset"`) ||
+		!strings.Contains(filtered, `<a class="toolbar-reset"`) {
+		t.Fatal("active filter did not render full-height Reset control")
+	}
+}

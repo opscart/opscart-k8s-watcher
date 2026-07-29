@@ -445,11 +445,11 @@ spec:
 {{end}}
 {{end}}
 
+  {{if .Events}}
   <div class="inv-section">
     <div class="inv-section-hdr">
       <h2>Recent Events</h2>
     </div>
-    {{if .Events}}
     <div class="inv-events-wrap">
       <table class="inv-events-tbl">
         <thead>
@@ -474,10 +474,8 @@ spec:
         </tbody>
       </table>
     </div>
-    {{else}}
-    <div class="inv-empty">No recent events recorded for this {{if .NamespaceScoped}}namespace{{else}}pod{{end}}</div>
-    {{end}}
   </div>
+  {{end}}
 
   {{if not .NamespaceScoped}}
   <div class="inv-section">
