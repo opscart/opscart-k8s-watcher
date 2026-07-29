@@ -740,17 +740,151 @@ type securityPageData struct {
 	CriticalCount int
 	Clusters      []sidebarCluster
 
-	CISScore        int
-	CISScoreColor   string
-	TotalChecks     int
-	PassedChecks    int
-	FailedChecks    int
-	Controls        []analyzer.CISControl
-	Risks           models.SecurityRisks
-	HasRisks        bool
-	TotalPods       int
-	PriorityActions []string
-	ScannedAtMs     int64
+	CISScore              int
+	CISScoreColor         string
+	TotalChecks           int
+	PassedChecks          int
+	FailedChecks          int
+	Controls              []analyzer.CISControl
+	Risks                 models.SecurityRisks
+	HasRisks              bool
+	TotalPods             int
+	PriorityActions       []string
+	ScannedAtMs           int64
+	ScanAvailable         bool
+	ExpectedInfra         int
+	RequiresReview        int
+	Findings              []securityFindingGroup
+	PassedControls        []analyzer.CISControl
+	TopFindingSummaries   []string
+	UnprotectedNS         []analyzer.NamespaceNetworkStatus
+	ProtectedNSCount      int
+	NetworkNamespaceTotal int
+	NetworkAvailable      bool
+	ScanCoverage          string
+}
+
+type securityFindingResource struct {
+	Namespace string
+	Resource  string
+	Container string
+	Evidence  string
+	Expected  bool
+	Command   string
+}
+
+type securityFindingGroup struct {
+	Type          string
+	Severity      string
+	SeverityClass string
+	Name          string
+	Count         int
+	Unit          string
+	ScopeCount    int
+	Evidence      string
+	Action        string
+	ExpectedCount int
+	Resources     []securityFindingResource
+}
+
+type securityFindingMeta struct {
+	Name, Unit, Evidence, Action string
+}
+
+var securityFindingMetadata = map[string]securityFindingMeta{
+	"host_path_volume":        {"HostPath mounts", "mounts", "Pod specs include hostPath volume mounts.", "Review each mount and verify whether the workload requires host access."},
+	"privileged_container":    {"Privileged containers", "containers", "Container security contexts set privileged: true.", "Review which containers require privileged access."},
+	"host_network":            {"Host network", "pods", "Pod specs set hostNetwork: true.", "Review host-network requirements and reduce usage where appropriate."},
+	"host_pid":                {"Host PID", "pods", "Pod specs set hostPID: true.", "Review host-PID requirements."},
+	"host_ipc":                {"Host IPC", "pods", "Pod specs set hostIPC: true.", "Review host-IPC requirements."},
+	"default_service_account": {"Default ServiceAccount", "pods", "Pod specs use the default ServiceAccount.", "Review required permissions and whether a dedicated ServiceAccount is appropriate."},
+	"running_as_root":         {"Non-root enforcement", "containers", "Pod specs do not explicitly enforce non-root execution.", "Review image requirements and enforce non-root execution where appropriate."},
+	"missing_resource_limits": {"Resource limits", "containers", "Container specs omit a CPU limit, memory limit, or both.", "Review containers missing CPU or memory limits."},
+	"added_capabilities":      {"Added capabilities", "containers", "Container security contexts add Linux capabilities.", "Review each added capability against workload requirements."},
+	"privilege_escalation":    {"Privilege escalation", "containers", "Container specs permit or do not explicitly disable privilege escalation.", "Review requirements and disable privilege escalation where appropriate."},
+}
+
+func buildSecurityFindingGroups(issues []models.SecurityIssue) []securityFindingGroup {
+	byType := make(map[string]*securityFindingGroup)
+	scopes := make(map[string]map[string]struct{})
+	for _, issue := range issues {
+		meta, ok := securityFindingMetadata[issue.Type]
+		if !ok {
+			continue
+		}
+		group := byType[issue.Type]
+		if group == nil {
+			group = &securityFindingGroup{
+				Type: issue.Type, Severity: issue.Severity, SeverityClass: securitySeverityClass(issue.Severity),
+				Name: meta.Name, Unit: meta.Unit, Evidence: meta.Evidence, Action: meta.Action,
+			}
+			byType[issue.Type] = group
+			scopes[issue.Type] = make(map[string]struct{})
+		}
+		if securitySeverityRank(issue.Severity) > securitySeverityRank(group.Severity) {
+			group.Severity = issue.Severity
+			group.SeverityClass = securitySeverityClass(issue.Severity)
+		}
+		resource, container := issue.Name, ""
+		if issue.Resource == "container" {
+			if parts := strings.SplitN(issue.Name, "/", 2); len(parts) == 2 {
+				resource, container = parts[0], parts[1]
+			}
+		}
+		expected := strings.Contains(issue.Description, "(expected for this infrastructure component)")
+		if expected {
+			group.ExpectedCount++
+		}
+		command := ""
+		if issue.Namespace != "" && resource != "" {
+			command = fmt.Sprintf("kubectl get pod %s -n %s -o yaml", resource, issue.Namespace)
+		}
+		group.Resources = append(group.Resources, securityFindingResource{
+			Namespace: issue.Namespace, Resource: resource, Container: container,
+			Evidence: issue.Description, Expected: expected, Command: command,
+		})
+		group.Count++
+		scopes[issue.Type][issue.Namespace+"/"+resource] = struct{}{}
+	}
+	groups := make([]securityFindingGroup, 0, len(byType))
+	for issueType, group := range byType {
+		group.ScopeCount = len(scopes[issueType])
+		groups = append(groups, *group)
+	}
+	sort.SliceStable(groups, func(i, j int) bool {
+		ri, rj := securitySeverityRank(groups[i].Severity), securitySeverityRank(groups[j].Severity)
+		if ri == rj {
+			return groups[i].Count > groups[j].Count
+		}
+		return ri > rj
+	})
+	return groups
+}
+
+func securitySeverityRank(severity string) int {
+	switch severity {
+	case "critical":
+		return 4
+	case "high":
+		return 3
+	case "medium":
+		return 2
+	default:
+		return 1
+	}
+}
+
+func securitySeverityClass(severity string) string {
+	switch severity {
+	case "critical":
+		return "critical"
+	case "high":
+		return "high"
+	case "medium":
+		return "medium"
+	default:
+		return "info"
+	}
 }
 
 var getSecurityTmpl = sync.OnceValue(func() *template.Template {
@@ -815,7 +949,8 @@ func (srv *server) handleSecurityPage(w http.ResponseWriter, r *http.Request) {
 		ScannedAtMs:   time.Now().UnixMilli(),
 	}
 
-	if scan.cisResult != nil {
+	data.ScanAvailable = scan.secAudit != nil && scan.cisResult != nil
+	if data.ScanAvailable {
 		data.CISScore = scan.cisResult.Score
 		data.TotalChecks = scan.cisResult.TotalChecks
 		data.PassedChecks = scan.cisResult.PassedChecks
@@ -825,18 +960,52 @@ func (srv *server) handleSecurityPage(w http.ResponseWriter, r *http.Request) {
 		sort.SliceStable(data.Controls, func(i, j int) bool {
 			return !data.Controls[i].Passed && data.Controls[j].Passed
 		})
+		for _, control := range data.Controls {
+			if control.Passed {
+				data.PassedControls = append(data.PassedControls, control)
+			}
+		}
 	}
-	if scan.secAudit != nil {
+	if data.ScanAvailable {
 		data.Risks = scan.secAudit.Risks
 		data.TotalPods = scan.secAudit.TotalPodsAudited
 		data.PriorityActions = scan.secAudit.PriorityActions
+		data.Findings = buildSecurityFindingGroups(scan.secAudit.Issues)
+		for i := 0; i < len(data.Findings) && i < 3; i++ {
+			finding := data.Findings[i]
+			data.TopFindingSummaries = append(data.TopFindingSummaries,
+				fmt.Sprintf("%s on %d %s", finding.Name, finding.Count, finding.Unit))
+		}
+		for _, issue := range scan.secAudit.Issues {
+			if strings.Contains(issue.Description, "(expected for this infrastructure component)") {
+				data.ExpectedInfra++
+			} else {
+				data.RequiresReview++
+			}
+		}
 		r := scan.secAudit.Risks
 		data.HasRisks = r.RunningAsRoot > 0 || r.PrivilegedContainers > 0 ||
 			r.HostNetwork > 0 || r.HostPID > 0 || r.HostIPC > 0 ||
 			r.HostPathVolumes > 0 || r.DefaultServiceAccount > 0 ||
-			r.MissingResourceLimits > 0 || r.MissingProbes > 0 ||
-			r.AddedCapabilities > 0 || r.PrivilegeEscalation > 0 ||
-			r.WritableFilesystem > 0 || r.MissingNetworkPolicies > 0
+			r.MissingResourceLimits > 0 ||
+			r.AddedCapabilities > 0 || r.PrivilegeEscalation > 0
+	}
+	if scan.netAudit != nil {
+		data.NetworkAvailable = true
+		data.UnprotectedNS = scan.netAudit.UnprotectedNamespaces
+		data.ProtectedNSCount = len(scan.netAudit.ProtectedNamespaces)
+		data.NetworkNamespaceTotal = scan.netAudit.TotalNamespaces
+		if data.NetworkNamespaceTotal == 0 {
+			data.NetworkNamespaceTotal = data.ProtectedNSCount + len(data.UnprotectedNS)
+		}
+	}
+	switch {
+	case !data.ScanAvailable:
+		data.ScanCoverage = "Unavailable"
+	case !data.NetworkAvailable:
+		data.ScanCoverage = "Partial"
+	default:
+		data.ScanCoverage = "Complete"
 	}
 
 	switch {
@@ -875,16 +1044,88 @@ type wastePageData struct {
 	Clusters      []sidebarCluster
 
 	TotalWasteItems      int
+	ResourceCandidates   int
 	OrphanedPVCStorageGB int
-	EstimatedMonthly     float64
 	ZombieCount          int
-	StalePods            []analyzer.StalePod
+	ProbeFailureCount    int
+	CrashLoopCount       int
+	OtherIncidentCount   int
+	IncidentHref         string
+	ScanCoverage         string
+	ZombiePods           []analyzer.StalePod
+	IdlePods             []analyzer.StalePod
 	OrphanedPVCs         []analyzer.OrphanedPVC
 	ZeroReplicaWorkloads []analyzer.ZeroReplicaWorkload
 	AbandonedNamespaces  []analyzer.AbandonedNamespace
 	StaleJobs            []analyzer.StaleJob
+	OrphanedServices     []analyzer.OrphanedService
+	BrokenIngresses      []analyzer.BrokenIngress
+	MisconfiguredHPAs    []analyzer.MisconfiguredHPA
+	OldReplicaSets       []analyzer.OldReplicaSet
+	DetectorWarnings     []analyzer.WasteDetectorWarning
+	ScanAvailable        bool
+	ScanComplete         bool
 	ScannedAtMs          int64
+	ResourceRows         []wasteReviewRow
+	DriftRows            []wasteReviewRow
+	HousekeepingRows     []wasteReviewRow
+	TopWasteCategories   []string
 }
+
+type wasteReviewRow struct {
+	Category, Resource, Namespace, Evidence, Age, Storage, ReviewStatus, Command string
+	Score                                                                        float64
+}
+
+func wasteCommand(kind, name, namespace string) string {
+	if kind == "" || name == "" {
+		return ""
+	}
+	if namespace == "" {
+		return fmt.Sprintf("kubectl get %s %s -o yaml", kind, name)
+	}
+	return fmt.Sprintf("kubectl get %s %s -n %s -o yaml", kind, name, namespace)
+}
+
+func buildWasteReviewRows(a *analyzer.WasteAudit, idle []analyzer.StalePod) (resource, drift, housekeeping []wasteReviewRow) {
+	for _, item := range a.AbandonedNamespaces {
+		resource = append(resource, wasteReviewRow{"Abandoned namespace", item.Name, "cluster-scoped", item.Reason, fmt.Sprintf("%dd", item.AgeDays), "—", "Review candidate", wasteCommand("namespace", item.Name, ""), item.Score})
+	}
+	for _, item := range idle {
+		resource = append(resource, wasteReviewRow{"Idle / unmanaged pod", item.Name, item.Namespace, item.Reason, fmt.Sprintf("%dd", item.AgeDays), "—", "Review candidate", wasteCommand("pod", item.Name, item.Namespace), item.Score})
+	}
+	for _, item := range a.OrphanedPVCs {
+		resource = append(resource, wasteReviewRow{"Unattached PVC candidate", item.Name, item.Namespace, item.Reason, fmt.Sprintf("%dd", item.AgeDays), fmt.Sprintf("%d GB", item.SizeGB), "Ownership review", wasteCommand("pvc", item.Name, item.Namespace), item.Score})
+	}
+	for _, item := range a.OrphanedServices {
+		resource = append(resource, wasteReviewRow{"Orphaned Service candidate", item.Name, item.Namespace, item.Reason, fmt.Sprintf("%dd", item.AgeDays), "—", "Selector evidence", wasteCommand("service", item.Name, item.Namespace), item.Score})
+	}
+	for _, item := range a.StaleJobs {
+		kind := "job"
+		if item.IsCronJob {
+			kind = "cronjob"
+		}
+		drift = append(drift, wasteReviewRow{"Stale job history", item.Name, item.Namespace, item.Reason, fmt.Sprintf("%dd", item.AgeDays), "—", "Retention review", wasteCommand(kind, item.Name, item.Namespace), item.Score})
+	}
+	for _, item := range a.ZeroReplicaWorkloads {
+		drift = append(drift, wasteReviewRow{"Zero-replica workload", item.Name, item.Namespace, item.Reason, fmt.Sprintf("%dd", item.AgeDays), "—", "Intent review", wasteCommand(strings.ToLower(item.Kind), item.Name, item.Namespace), item.Score})
+	}
+	for _, item := range a.BrokenIngresses {
+		drift = append(drift, wasteReviewRow{"Broken ingress", item.Name, item.Namespace, item.Reason, fmt.Sprintf("%dd", item.AgeDays), "—", "Configuration review", wasteCommand("ingress", item.Name, item.Namespace), item.Score})
+	}
+	for _, item := range a.MisconfiguredHPAs {
+		drift = append(drift, wasteReviewRow{"Misconfigured HPA", item.Name, item.Namespace, item.Reason, fmt.Sprintf("%dd", item.AgeDays), "—", "Configuration review", wasteCommand("hpa", item.Name, item.Namespace), item.Score})
+	}
+	for _, item := range a.OldReplicaSets {
+		housekeeping = append(housekeeping, wasteReviewRow{"Old ReplicaSet", item.Name, item.Namespace, item.Reason, fmt.Sprintf("%dd", item.AgeDays), "—", "Housekeeping; excluded from total", wasteCommand("replicaset", item.Name, item.Namespace), item.Score})
+	}
+	sort.SliceStable(resource, func(i, j int) bool { return resource[i].Score > resource[j].Score })
+	sort.SliceStable(drift, func(i, j int) bool { return drift[i].Score > drift[j].Score })
+	sort.SliceStable(housekeeping, func(i, j int) bool { return housekeeping[i].Score > housekeeping[j].Score })
+	return
+}
+
+const dashboardWasteMinAgeDays = 7
 
 var getWasteTmpl = sync.OnceValue(func() *template.Template {
 	return template.Must(
@@ -943,24 +1184,71 @@ func (srv *server) handleWastePage(w http.ResponseWriter, r *http.Request) {
 		CriticalCount: countCriticalIssues(scan),
 		Clusters:      clusters,
 		ScannedAtMs:   time.Now().UnixMilli(),
+		IncidentHref:  "/incidents" + q + "&status=active",
 	}
 
 	if scan.wasteAudit != nil {
 		wa := scan.wasteAudit
+		data.ScanAvailable = true
+		data.ScanComplete = len(wa.DetectorWarnings) == 0
+		if data.ScanComplete {
+			data.ScanCoverage = "Complete"
+		} else {
+			data.ScanCoverage = "Incomplete"
+		}
 		data.TotalWasteItems = wa.TotalWasteItems
 		data.OrphanedPVCStorageGB = wa.OrphanedPVCStorageGB
-		data.EstimatedMonthly = wa.EstimatedMonthlyWaste
 		data.OrphanedPVCs = wa.OrphanedPVCs
 		data.ZeroReplicaWorkloads = wa.ZeroReplicaWorkloads
 		data.AbandonedNamespaces = wa.AbandonedNamespaces
 		data.StaleJobs = wa.StaleJobs
+		data.OrphanedServices = wa.OrphanedServices
+		data.BrokenIngresses = wa.BrokenIngresses
+		data.MisconfiguredHPAs = wa.MisconfiguredHPAs
+		data.OldReplicaSets = wa.OldReplicaSets
+		data.DetectorWarnings = wa.DetectorWarnings
 
 		for _, p := range wa.StalePods {
 			if p.Kind == analyzer.StalePodZombie {
-				data.StalePods = append(data.StalePods, p)
+				data.ZombiePods = append(data.ZombiePods, p)
 				data.ZombieCount++
+				switch p.Status {
+				case "ProbeFailure":
+					data.ProbeFailureCount++
+				case "CrashLoopBackOff":
+					data.CrashLoopCount++
+				default:
+					data.OtherIncidentCount++
+				}
+			} else {
+				data.IdlePods = append(data.IdlePods, p)
 			}
 		}
+		data.ResourceRows, data.DriftRows, data.HousekeepingRows = buildWasteReviewRows(wa, data.IdlePods)
+		categoryCounts := []struct {
+			name  string
+			count int
+		}{
+			{"Unattached PVC candidates", len(wa.OrphanedPVCs)},
+			{"Idle / unmanaged pods", len(data.IdlePods)},
+			{"Abandoned namespaces", len(wa.AbandonedNamespaces)},
+			{"Orphaned Service candidates", len(wa.OrphanedServices)},
+			{"Drift findings", len(data.DriftRows)},
+		}
+		sort.SliceStable(categoryCounts, func(i, j int) bool { return categoryCounts[i].count > categoryCounts[j].count })
+		for _, category := range categoryCounts {
+			if category.count > 0 && len(data.TopWasteCategories) < 3 {
+				data.TopWasteCategories = append(data.TopWasteCategories, fmt.Sprintf("%s (%d)", category.name, category.count))
+			}
+		}
+		data.ResourceCandidates = len(data.AbandonedNamespaces) +
+			len(data.IdlePods) +
+			len(data.OrphanedPVCs) +
+			len(data.StaleJobs) +
+			len(data.ZeroReplicaWorkloads) +
+			len(data.OrphanedServices) +
+			len(data.BrokenIngresses) +
+			len(data.MisconfiguredHPAs)
 	}
 
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")

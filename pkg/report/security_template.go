@@ -156,7 +156,7 @@ const securityHTMLTemplate = `<!DOCTYPE html>
 <body>
     <div class="container">
         <div class="header">
-            <h1>🛡️ Security Audit Report</h1>
+            <h1>Security Audit Report</h1>
             <div class="header-meta">
                 <strong>Cluster:</strong> {{.ClusterName}} &nbsp;|&nbsp;
                 <strong>Generated:</strong> {{.GeneratedAt.Format "January 2, 2006 3:04 PM"}}
@@ -164,15 +164,15 @@ const securityHTMLTemplate = `<!DOCTYPE html>
         </div>
         
         <div class="content">
-            <!-- CIS Compliance Score -->
+            <!-- Heuristic posture score -->
             <div class="section">
                 <div class="score-card">
-                    <div style="font-size: 18px; opacity: 0.9;">CIS Compliance Score</div>
+                    <div style="font-size: 18px; opacity: 0.9;">Heuristic posture score</div>
                     <div class="score-number">{{.CISScore}}<span style="font-size: 36px;">/100</span></div>
                     <div style="font-size: 18px;">
-                        {{if ge .CISScore 80}}✅ Excellent
-                        {{else if ge .CISScore 60}}🟡 Needs Attention
-                        {{else}}🔴 Action Required{{end}}
+                        {{if ge .CISScore 80}}Strong posture
+                        {{else if ge .CISScore 60}}Needs review
+                        {{else}}Review required{{end}}
                     </div>
                     <div class="progress-bar">
                         <div class="progress-fill" style="width: {{.CISScore}}%;"></div>
@@ -182,7 +182,7 @@ const securityHTMLTemplate = `<!DOCTYPE html>
             
             <!-- Summary Metrics -->
             <div class="section">
-                <div class="section-title">📊 Summary</div>
+                <div class="section-title">Summary</div>
                 <div class="metrics-grid">
                     {{if .PodCount}}
                     <div class="metric-card">
@@ -210,7 +210,7 @@ const securityHTMLTemplate = `<!DOCTYPE html>
             <!-- Critical Findings -->
             {{if .CriticalIssues}}
             <div class="section">
-                <div class="section-title">🔴 Critical Findings</div>
+                <div class="section-title">Critical Findings</div>
                 {{range .CriticalIssues}}
                 <div class="finding-box finding-critical">
                     <div class="finding-title">{{.Title}}</div>
@@ -229,7 +229,7 @@ const securityHTMLTemplate = `<!DOCTYPE html>
             <!-- Warnings -->
             {{if .WarningIssues}}
             <div class="section">
-                <div class="section-title">🟡 Warnings</div>
+                <div class="section-title">Warnings</div>
                 {{range .WarningIssues}}
                 <div class="finding-box finding-warning">
                     <div class="finding-title">{{.Title}}</div>
@@ -248,11 +248,11 @@ const securityHTMLTemplate = `<!DOCTYPE html>
             <!-- Security Findings Details -->
             {{if .SecurityFindings}}
             <div class="section">
-                <div class="section-title">🔍 Detailed Findings</div>
+                <div class="section-title">Detailed Findings</div>
                 {{range .SecurityFindings}}
                 <div class="finding-box {{if eq .Status "passed"}}finding-pass{{else if eq .Severity "critical"}}finding-critical{{else}}finding-warning{{end}}">
                     <div class="finding-title">
-                        {{if eq .Status "passed"}}✅{{else}}❌{{end}} {{.Control}}
+                        {{.Control}}
                         <span class="badge {{if eq .Status "passed"}}badge-pass{{else if eq .Severity "critical"}}badge-critical{{else}}badge-warning{{end}}">
                             {{.Status}}
                         </span>
@@ -276,28 +276,28 @@ const securityHTMLTemplate = `<!DOCTYPE html>
             
             <!-- Recommended Actions -->
             <div class="section">
-                <div class="section-title">📋 Recommended Actions (Priority Order)</div>
+                <div class="section-title">Recommended Reviews (Priority Order)</div>
                 <div style="background: #f7fafc; padding: 20px; border-radius: 8px; border-left: 4px solid #667eea;">
                     <ol style="margin-left: 20px; line-height: 2;">
-                        <li>Remove hostPath volumes (critical filesystem access)</li>
-                        <li>Fix privileged containers (highest risk)</li>
+                        <li>Review hostPath mounts and verify which workloads require host access</li>
+                        <li>Review privileged containers and verify which workloads require that access</li>
                         <li>Review and minimize hostNetwork usage</li>
-                        <li>Configure pods to run as non-root user</li>
-                        <li>Create dedicated ServiceAccounts with minimal permissions</li>
-                        <li>Add resource limits to all pods</li>
-                        <li>Set allowPrivilegeEscalation: false</li>
+                        <li>Review containers without explicit non-root enforcement</li>
+                        <li>Review pods using default ServiceAccounts and their required permissions</li>
+                        <li>Review containers missing CPU or memory limits</li>
+                        <li>Review containers without allowPrivilegeEscalation: false</li>
                     </ol>
                 </div>
             </div>
             
             <!-- Validation Steps -->
             <div class="section">
-                <div class="section-title">✅ Validation Steps</div>
+                <div class="section-title">Validation Steps</div>
                 <div style="background: #f7fafc; padding: 20px; border-radius: 8px; border-left: 4px solid #48bb78;">
                     <ol style="margin-left: 20px; line-height: 2;">
                         <li>Test fixes in staging environment first</li>
                         <li>Verify application functionality after changes</li>
-                        <li>Run kube-bench for complete CIS assessment</li>
+                        <li>Use formally mapped and verified tooling when a compliance assessment is required</li>
                         <li>Re-scan cluster after remediation</li>
                     </ol>
                 </div>
@@ -306,7 +306,7 @@ const securityHTMLTemplate = `<!DOCTYPE html>
             <!-- Issue Count Breakdown -->
             {{if .NamespaceCount}}
             <div class="section">
-                <div class="section-title">📊 Issue Count Breakdown</div>
+                <div class="section-title">Issue Count Breakdown</div>
                 <table style="width: 100%; border-collapse: collapse;">
                     <thead>
                         <tr style="background: #f7fafc; border-bottom: 2px solid #e2e8f0;">
@@ -338,8 +338,8 @@ const securityHTMLTemplate = `<!DOCTYPE html>
             
             <!-- Actions -->
             <div class="actions">
-                <button class="button" onclick="window.print()">📥 Download PDF</button>
-                <a href="https://opscart.com" target="_blank" class="button button-secondary">🌐 Visit OpsCart.com</a>
+                <button class="button" onclick="window.print()">Download PDF</button>
+                <a href="https://opscart.com" target="_blank" class="button button-secondary">Visit OpsCart.com</a>
             </div>
         </div>
     </div>
