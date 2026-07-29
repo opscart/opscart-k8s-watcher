@@ -1,9 +1,12 @@
 package analyzer
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/opscart/opscart-k8s-watcher/pkg/models"
+	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
 )
 
 func TestDetectEnvironment(t *testing.T) {
@@ -54,6 +57,113 @@ func TestDetectEnvironment(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestAuditContainerUsesPodSpecEvidenceWording(t *testing.T) {
+	sa := &SecurityAuditor{}
+	pod := corev1.Pod{}
+	pod.Name = "api"
+	pod.Namespace = "app"
+	container := corev1.Container{Name: "main"}
+
+	issues := sa.auditContainer(pod, container, false)
+	var nonRoot models.SecurityIssue
+	for _, issue := range issues {
+		if issue.Type == "running_as_root" {
+			nonRoot = issue
+		}
+	}
+	if nonRoot.Description != "Non-root execution not explicitly enforced in the pod spec" {
+		t.Fatalf("description = %q", nonRoot.Description)
+	}
+	if strings.Contains(strings.ToLower(nonRoot.Description), "running as root") {
+		t.Fatalf("description makes an unsupported runtime claim: %q", nonRoot.Description)
+	}
+}
+
+func TestAuditContainerDistinguishesMissingResourceLimits(t *testing.T) {
+	tests := []struct {
+		name   string
+		limits corev1.ResourceList
+		want   string
+	}{
+		{name: "both", want: "missing CPU and memory limits"},
+		{name: "cpu", limits: corev1.ResourceList{corev1.ResourceMemory: resource.MustParse("1Gi")}, want: "missing a CPU limit"},
+		{name: "memory", limits: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("1")}, want: "missing a memory limit"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			sa := &SecurityAuditor{}
+			pod := corev1.Pod{}
+			pod.Name = "api"
+			pod.Namespace = "app"
+			container := corev1.Container{
+				Name:      "main",
+				Resources: corev1.ResourceRequirements{Limits: tt.limits},
+			}
+			issues := sa.auditContainer(pod, container, false)
+			for _, issue := range issues {
+				if issue.Type == "missing_resource_limits" {
+					if !strings.Contains(issue.Description, tt.want) {
+						t.Fatalf("description = %q, want substring %q", issue.Description, tt.want)
+					}
+					return
+				}
+			}
+			t.Fatal("missing_resource_limits issue not found")
+		})
+	}
+}
+
+func TestPriorityActionsUseReviewLanguage(t *testing.T) {
+	sa := &SecurityAuditor{}
+	audit := &models.SecurityAudit{Risks: models.SecurityRisks{
+		HostPathVolumes:       1,
+		MissingResourceLimits: 1,
+	}}
+	actions := strings.Join(sa.generatePriorityActions(audit), "\n")
+	for _, want := range []string{
+		"Review hostPath mounts and verify which workloads require host access",
+		"Review containers missing CPU or memory limits",
+	} {
+		if !strings.Contains(actions, want) {
+			t.Errorf("missing softened action %q in %q", want, actions)
+		}
+	}
+	for _, forbidden := range []string{"Remove hostPath volumes", "Add resource limits to all pods"} {
+		if strings.Contains(actions, forbidden) {
+			t.Errorf("contains unconditional action %q", forbidden)
+		}
+	}
+}
+
+func TestHostPathFindingPreservesEvidenceWithoutCriticalClaim(t *testing.T) {
+	sa := &SecurityAuditor{}
+	pod := corev1.Pod{}
+	pod.Name = "api"
+	pod.Namespace = "app"
+	pod.Spec.Volumes = []corev1.Volume{{
+		Name: "host",
+		VolumeSource: corev1.VolumeSource{
+			HostPath: &corev1.HostPathVolumeSource{Path: "/var/lib/app"},
+		},
+	}}
+	issues := sa.auditPod(pod)
+	for _, issue := range issues {
+		if issue.Type == "host_path_volume" {
+			if issue.Severity == "critical" {
+				t.Fatalf("hostPath occurrence was unconditionally critical: %+v", issue)
+			}
+			if !strings.Contains(issue.Description, "/var/lib/app") {
+				t.Fatalf("hostPath evidence missing: %+v", issue)
+			}
+			if !strings.Contains(issue.Remediation, "Review") {
+				t.Fatalf("hostPath recommendation is not review-oriented: %+v", issue)
+			}
+			return
+		}
+	}
+	t.Fatal("hostPath finding not produced")
 }
 
 func TestIsExpectedPrivileged(t *testing.T) {

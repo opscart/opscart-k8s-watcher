@@ -3,43 +3,20 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1.0">
-<title>Security Posture — {{.ClusterName}}</title>
+<title>Workload Security Posture — {{.ClusterName}}</title>
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
 {{template "base" .}}
 <style>
-.summary-bar{display:flex;gap:1rem;margin-bottom:2rem;flex-wrap:wrap}
-.summary-chip{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius-sm);padding:0.75rem 1.25rem;display:flex;align-items:center;gap:0.75rem;min-width:160px}
-.summary-chip.green{border-color:rgba(16,185,129,0.35)}
-.summary-chip.orange{border-color:rgba(245,158,11,0.35)}
-.summary-chip.red{border-color:rgba(239,68,68,0.35)}
-.summary-num{font-size:1.6rem;font-weight:800;line-height:1}
-.green .summary-num{color:var(--success)}
-.orange .summary-num{color:var(--warning)}
-.red .summary-num{color:var(--danger)}
-.summary-lbl{font-size:0.72rem;color:var(--text-muted);text-transform:uppercase;letter-spacing:0.5px;line-height:1.3}
-.sec-section{margin-bottom:2.5rem}
-.sec-section-hdr{display:flex;align-items:center;gap:0.75rem;margin-bottom:1rem;padding-bottom:0.75rem;border-bottom:1px solid var(--border)}
-.sec-section-hdr h2{font-size:1rem;font-weight:700}
-.control-list{display:flex;flex-direction:column;gap:0.5rem}
-.control-row{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius-sm);padding:0.85rem 1rem;display:grid;grid-template-columns:auto auto 1fr auto;align-items:start;gap:0.75rem}
-.control-row.failed{border-color:rgba(239,68,68,0.3);background:rgba(239,68,68,0.025)}
-.control-row.passed{opacity:0.75}
-.control-icon{font-size:1rem;line-height:1}
-.control-id{font-size:0.72rem;font-weight:700;color:var(--primary-light);white-space:nowrap;padding-top:1px}
-.control-desc{font-size:0.85rem;color:var(--text)}
-.control-finding{font-size:0.75rem;color:var(--danger);margin-top:0.2rem;line-height:1.4}
-.risk-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:0.75rem}
-.risk-card{background:var(--surface);border:1px solid rgba(239,68,68,0.3);border-radius:var(--radius-sm);padding:0.85rem 1rem;background:rgba(239,68,68,0.025)}
-.risk-count{font-size:1.4rem;font-weight:800;color:var(--danger);line-height:1}
-.risk-name{font-size:0.8rem;font-weight:600;color:var(--text);margin-top:0.15rem}
-.risk-hint{font-size:0.7rem;color:var(--text-muted);margin-top:0.35rem;line-height:1.4}
-.actions-list{display:flex;flex-direction:column;gap:0.5rem;counter-reset:actions}
-.action-item{display:flex;align-items:flex-start;gap:0.85rem;background:var(--surface);border:1px solid var(--border);border-radius:var(--radius-sm);padding:0.85rem 1rem}
-.action-num{background:var(--primary-bg);color:var(--primary-light);border-radius:50%;width:24px;height:24px;min-width:24px;display:flex;align-items:center;justify-content:center;font-size:0.7rem;font-weight:700;margin-top:1px}
-.action-text{font-size:0.85rem;color:var(--text);line-height:1.5}
-.no-risks{background:var(--surface);border:1px solid rgba(16,185,129,0.25);border-radius:var(--radius);padding:2rem;text-align:center;color:var(--text-muted)}
-.footer{text-align:center;padding:1.5rem 0;color:var(--text-muted);font-size:0.75rem;border-top:1px solid var(--border);margin-top:1rem}
-@media(max-width:640px){.risk-grid{grid-template-columns:1fr}.summary-bar{flex-direction:column}.control-row{grid-template-columns:auto 1fr}}
+.page-title{display:flex;align-items:center;gap:.65rem}.page-title svg,.section-title svg{width:20px;height:20px;color:var(--primary-light);flex:none}
+.security-briefing{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:1rem 1.15rem;margin-bottom:1rem}.security-briefing-title{display:flex;align-items:center;gap:.5rem;margin-bottom:.45rem}.security-briefing-title h2{font-size:.94rem;font-weight:700}.security-briefing-icon{width:20px;height:20px;flex:0 0 20px;display:inline-flex;color:var(--primary-light)}.security-briefing-icon svg{display:block;width:20px;height:20px}.security-briefing-summary{font-size:.82rem;color:var(--text-secondary);line-height:1.6}.security-briefing-meta{display:flex;gap:.65rem;flex-wrap:wrap;margin-top:.55rem;font-size:.7rem;color:var(--text-muted)}
+.summary-grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:.7rem;margin-bottom:1.2rem}.metric{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius-sm);padding:.8rem 1rem}.metric-value{font-size:1.45rem;font-weight:800}.metric-label{font-size:.68rem;color:var(--text-muted);text-transform:uppercase;letter-spacing:.05em;margin-top:.2rem}
+.section{margin:1.2rem 0}.section-head{display:flex;justify-content:space-between;align-items:center;margin-bottom:.55rem}.section-sub{font-size:.72rem;color:var(--text-muted)}
+.data-table{width:100%;border-collapse:separate;border-spacing:0;background:var(--surface);border:1px solid var(--border);border-radius:var(--radius-sm);overflow:hidden;font-size:.82rem}.data-table th{background:rgba(100,116,139,.07);color:var(--text-muted);font-size:.67rem;text-transform:uppercase;letter-spacing:.045em;text-align:left;padding:.58rem .7rem}.data-table td{padding:.67rem .7rem;border-top:1px solid var(--border);vertical-align:top}.data-table tr:first-child td{border-top:0}.finding-name{font-weight:650}.muted{font-size:.72rem;color:var(--text-muted);line-height:1.45}.badge{display:inline-flex;border-radius:999px;padding:.16rem .48rem;font-size:.64rem;font-weight:700;text-transform:uppercase}.badge-critical{background:rgba(239,68,68,.12);color:#f87171}.badge-high{background:rgba(245,158,11,.13);color:#fbbf24}.badge-medium{background:rgba(234,179,8,.12);color:#facc15}.badge-info,.badge-expected{background:rgba(59,130,246,.12);color:#60a5fa}.badge-pass{background:rgba(16,185,129,.12);color:#34d399}
+details.resources{margin-top:.4rem}details.resources summary,details.panel summary{cursor:pointer;color:var(--primary-light);font-size:.72rem}.resource-table{width:100%;border-collapse:collapse;margin-top:.45rem;font-size:.73rem}.resource-table td,.resource-table th{padding:.38rem .45rem;border-top:1px solid var(--border);text-align:left}.resource-table code,.cmd{font-size:.68rem;color:var(--text-secondary);white-space:normal;word-break:break-all}
+.coverage{display:grid;grid-template-columns:1fr 1fr;gap:.8rem}.panel{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius-sm);padding:.9rem 1rem}.panel p,.panel li{font-size:.76rem;color:var(--text-muted);line-height:1.55}.panel ul{margin:.4rem 0 0 1rem}
+.empty{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:1.5rem;text-align:center;color:var(--text-muted);font-size:.82rem}
+@media(max-width:900px){.coverage{grid-template-columns:1fr}.summary-grid{grid-template-columns:repeat(2,1fr)}.data-table{display:block;overflow-x:auto}}
+@media(max-width:560px){.summary-grid{grid-template-columns:1fr}.main{padding:1rem}.data-table th,.data-table td{padding:.55rem}}
 </style>
 </head>
 <body>
@@ -48,201 +25,70 @@
 <main class="main">
   <div class="page-hdr">
     <div>
-      <h1>Security Posture</h1>
-      <p>{{.ClusterName}} &mdash; CIS Kubernetes Benchmark v1.8</p>
+      <h1 class="page-title"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>Workload Security Posture</h1>
+      <p>{{.ClusterName}} — CIS-aligned workload checks and OpsCart operational checks</p>
     </div>
-    <div class="page-meta">
-      <div>Last scanned: <strong id="sec-age">just now</strong></div>
-      <a class="back-link" href="{{.DashHref}}">← Back to Dashboard</a>
-    </div>
+    <div class="page-meta"><div>Last scanned: <strong id="sec-age">just now</strong></div><a class="back-link" href="{{.DashHref}}">Back to Dashboard</a></div>
   </div>
 
-  <div class="summary-bar">
-    <div class="summary-chip {{.CISScoreColor}}">
-      <div class="summary-num">{{.CISScore}}<span style="font-size:0.9rem;font-weight:500">/100</span></div>
-      <div class="summary-lbl">CIS<br>Score</div>
+  {{if .ScanAvailable}}
+  <section class="security-briefing" aria-labelledby="security-briefing-heading">
+    <div class="security-briefing-title">
+      <span class="security-briefing-icon"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/></svg></span>
+      <h2 id="security-briefing-heading">Situation Briefing</h2>
     </div>
-    <div class="summary-chip{{if gt .PassedChecks 0}} green{{end}}">
-      <div class="summary-num">{{.PassedChecks}}<span style="font-size:0.9rem;font-weight:500">/{{.TotalChecks}}</span></div>
-      <div class="summary-lbl">Controls<br>Passed</div>
-    </div>
-    <div class="summary-chip">
-      <div class="summary-num">{{.TotalPods}}</div>
-      <div class="summary-lbl">Pods<br>Audited</div>
-    </div>
+    <p class="security-briefing-summary">{{len .Findings}} security finding categor{{if eq (len .Findings) 1}}y{{else}}ies{{end}} require review across {{.TotalPods}} audited pod{{if ne .TotalPods 1}}s{{end}}.{{if .TopFindingSummaries}} Highest-impact observations include {{range $i,$n := .TopFindingSummaries}}{{if $i}}, {{end}}{{$n}}{{end}}.{{end}} {{if .NetworkAvailable}}The network audit found {{len .UnprotectedNS}} namespace{{if ne (len .UnprotectedNS) 1}}s{{end}} without a NetworkPolicy.{{else}}Network-policy coverage is unavailable.{{end}} {{.ExpectedInfra}} observation{{if ne .ExpectedInfra 1}}s were{{else}} was{{end}} recognized as expected infrastructure behavior. Scan coverage is {{.ScanCoverage}}.</p>
+    <div class="security-briefing-meta"><span>CIS-aligned subset plus OpsCart checks</span><span>Not a formal compliance assessment</span></div>
+  </section>
+
+  <div class="summary-grid" aria-label="Security summary">
+    <div class="metric"><div class="metric-value">{{len .Findings}}</div><div class="metric-label">Finding Categories</div></div>
+    <div class="metric"><div class="metric-value">{{.TotalPods}}</div><div class="metric-label">Pods Audited</div></div>
+    <div class="metric"><div class="metric-value">{{if .NetworkAvailable}}{{len .UnprotectedNS}} / {{.NetworkNamespaceTotal}}{{else}}Unavailable{{end}}</div><div class="metric-label">Namespaces Without Policy</div></div>
+    <div class="metric"><div class="metric-value">{{.ScanCoverage}}</div><div class="metric-label">Scan Coverage</div></div>
   </div>
 
-  {{if .Controls}}
-  <div class="sec-section">
-    <div class="sec-section-hdr">
-      <h2>🛡️ CIS Controls</h2>
-      <span style="font-size:0.75rem;color:var(--text-muted)">{{.FailedChecks}} failed &middot; {{.PassedChecks}} passed</span>
+  <section class="section" aria-labelledby="prioritized-findings">
+    <div class="section-head"><h2 class="section-title" id="prioritized-findings"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75"><path d="M4 6h16M4 12h16M4 18h10"/></svg>Prioritized Findings</h2><span class="section-sub">Observed configuration evidence and review guidance</span></div>
+    {{if .Findings}}
+    <table class="data-table">
+      <thead><tr><th>Severity</th><th>Check</th><th>Affected</th><th>Observed evidence</th><th>Review action</th></tr></thead>
+      <tbody>{{range .Findings}}
+      <tr>
+        <td><span class="badge badge-{{.SeverityClass}}">{{.Severity}}</span>{{if .ExpectedCount}}<div class="muted"><span class="badge badge-expected">{{.ExpectedCount}} expected infrastructure</span></div>{{end}}</td>
+        <td><div class="finding-name">{{.Name}}</div><div class="muted">{{.ScopeCount}} workload/pod scope{{if ne .ScopeCount 1}}s{{end}}</div></td>
+        <td><strong>{{.Count}}</strong> {{.Unit}}</td>
+        <td><div>{{.Evidence}}</div><details class="resources"><summary>View {{len .Resources}} affected resource{{if ne (len .Resources) 1}}s{{end}}</summary>
+          <table class="resource-table"><thead><tr><th>Namespace</th><th>Pod/resource</th><th>Container</th><th>Evidence</th><th>Read-only inspection</th></tr></thead><tbody>{{range .Resources}}
+          <tr><td>{{.Namespace}}</td><td>{{.Resource}}</td><td>{{if .Container}}{{.Container}}{{else}}—{{end}}</td><td>{{.Evidence}}{{if .Expected}} <span class="badge badge-expected">Expected infrastructure</span>{{end}}</td><td>{{if .Command}}<code>{{.Command}}</code>{{else}}—{{end}}</td></tr>
+          {{end}}</tbody></table>
+        </details></td>
+        <td>{{.Action}}</td>
+      </tr>{{end}}</tbody>
+    </table>
+    {{else}}<div class="empty">No supported workload-security findings were observed in the completed checks.</div>{{end}}
+  </section>
+
+  <section class="section" aria-labelledby="namespace-isolation">
+    <div class="section-head"><h2 class="section-title" id="namespace-isolation"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M3 9h18M9 21V9"/></svg>Namespace Isolation</h2><span class="section-sub">{{.ProtectedNSCount}} protected · {{len .UnprotectedNS}} without NetworkPolicy</span></div>
+    {{if .NetworkAvailable}}
+      {{if .UnprotectedNS}}<table class="data-table"><thead><tr><th>Namespace</th><th>Pods</th><th>Risk classification</th><th>Observed evidence</th><th>Read-only inspection</th></tr></thead><tbody>{{range .UnprotectedNS}}
+      <tr><td>{{.Name}}</td><td>{{.PodCount}} pods</td><td><span class="badge badge-{{if eq .RiskLevel "HIGH"}}high{{else}}medium{{end}}">{{.RiskLevel}}</span></td><td>No NetworkPolicy detected in namespace {{.Name}}.</td><td><code class="cmd">kubectl get networkpolicy -n {{.Name}}</code></td></tr>
+      {{end}}</tbody></table>{{else}}<div class="empty"><span class="badge badge-pass">Passed</span> Every namespace evaluated by the network audit has at least one NetworkPolicy.</div>{{end}}
+    {{else}}<div class="empty">Network-policy coverage was unavailable; namespace isolation was not evaluated.</div>{{end}}
+  </section>
+
+  <section class="coverage" aria-label="Scan coverage and methodology">
+    <div class="panel"><h2 class="section-title">Scan Coverage</h2><p>Workload security: available. Network-policy detector: {{if .NetworkAvailable}}available{{else}}unavailable{{end}}. Overall coverage: {{.ScanCoverage}}.</p>
+      {{if .PassedControls}}<details class="panel"><summary>Passed checks ({{len .PassedControls}})</summary><ul>{{range .PassedControls}}<li><span class="badge badge-pass">Passed</span> {{.Description}}</li>{{end}}</ul></details>{{end}}
     </div>
-    <div class="control-list">
-      {{range .Controls}}
-      {{if .Passed}}
-      <div class="control-row passed">
-        <div class="control-icon">✅</div>
-        <div class="control-id">{{.ID}}</div>
-        <div>
-          <div class="control-desc">{{.Description}}</div>
-        </div>
-        <div style="font-size:0.7rem;color:var(--text-muted);white-space:nowrap">w: {{printf "%.1f" .Weight}}</div>
-      </div>
-      {{else}}
-      <div class="control-row failed">
-        <div class="control-icon">❌</div>
-        <div class="control-id">{{.ID}}</div>
-        <div>
-          <div class="control-desc">{{.Description}}</div>
-          {{if .Finding}}
-          <div class="control-finding">{{.Finding}}</div>
-          {{end}}
-        </div>
-        <div style="font-size:0.7rem;color:var(--text-muted);white-space:nowrap">w: {{printf "%.1f" .Weight}}</div>
-      </div>
-      {{end}}
-      {{end}}
-    </div>
-  </div>
+    <div class="panel"><h2 class="section-title">Methodology</h2><p>CIS-aligned workload checks are combined with OpsCart operational checks. This is a subset, not a formal compliance assessment. The optional heuristic posture score is {{.CISScore}}/100 and uses custom internal weighting; it is not a compliance score.</p></div>
+  </section>
+  {{else}}
+  <section class="security-briefing"><div class="security-briefing-title"><span class="security-briefing-icon"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75"><path d="M12 9v4M12 17h.01"/><circle cx="12" cy="12" r="10"/></svg></span><h2>Situation Briefing</h2></div><p class="security-briefing-summary">Security scan unavailable/incomplete. Findings, namespace isolation, and heuristic posture score cannot be established from the current scan.</p><div class="security-briefing-meta"><span>Scan coverage unavailable</span><span>Not a formal compliance assessment</span></div></section>
   {{end}}
 
-  <div class="sec-section">
-    <div class="sec-section-hdr">
-      <h2>Risk Breakdown</h2>
-    </div>
-    {{$r := .Risks}}
-    {{if .HasRisks}}
-    <div class="risk-grid">
-      {{if gt $r.RunningAsRoot 0}}
-      <div class="risk-card">
-        <div class="risk-count">{{$r.RunningAsRoot}}</div>
-        <div class="risk-name">Running as Root</div>
-        <div class="risk-hint">Set securityContext.runAsNonRoot: true</div>
-      </div>
-      {{end}}
-      {{if gt $r.PrivilegedContainers 0}}
-      <div class="risk-card">
-        <div class="risk-count">{{$r.PrivilegedContainers}}</div>
-        <div class="risk-name">Privileged Containers</div>
-        <div class="risk-hint">Remove privileged: true from securityContext</div>
-      </div>
-      {{end}}
-      {{if gt $r.HostNetwork 0}}
-      <div class="risk-card">
-        <div class="risk-count">{{$r.HostNetwork}}</div>
-        <div class="risk-name">Host Network</div>
-        <div class="risk-hint">Avoid hostNetwork: true unless required</div>
-      </div>
-      {{end}}
-      {{if gt $r.HostPID 0}}
-      <div class="risk-card">
-        <div class="risk-count">{{$r.HostPID}}</div>
-        <div class="risk-name">Host PID</div>
-        <div class="risk-hint">Avoid hostPID: true — exposes host process tree</div>
-      </div>
-      {{end}}
-      {{if gt $r.HostIPC 0}}
-      <div class="risk-card">
-        <div class="risk-count">{{$r.HostIPC}}</div>
-        <div class="risk-name">Host IPC</div>
-        <div class="risk-hint">Avoid hostIPC: true — exposes host IPC namespace</div>
-      </div>
-      {{end}}
-      {{if gt $r.HostPathVolumes 0}}
-      <div class="risk-card">
-        <div class="risk-count">{{$r.HostPathVolumes}}</div>
-        <div class="risk-name">Host Path Volumes</div>
-        <div class="risk-hint">Replace hostPath mounts with PVCs where possible</div>
-      </div>
-      {{end}}
-      {{if gt $r.DefaultServiceAccount 0}}
-      <div class="risk-card">
-        <div class="risk-count">{{$r.DefaultServiceAccount}}</div>
-        <div class="risk-name">Default Service Account</div>
-        <div class="risk-hint">Create dedicated service accounts per workload</div>
-      </div>
-      {{end}}
-      {{if gt $r.MissingResourceLimits 0}}
-      <div class="risk-card">
-        <div class="risk-count">{{$r.MissingResourceLimits}}</div>
-        <div class="risk-name">Missing Resource Limits</div>
-        <div class="risk-hint">Set resources.limits.cpu and memory on all containers</div>
-      </div>
-      {{end}}
-      {{if gt $r.MissingProbes 0}}
-      <div class="risk-card">
-        <div class="risk-count">{{$r.MissingProbes}}</div>
-        <div class="risk-name">Missing Probes</div>
-        <div class="risk-hint">Add livenessProbe and readinessProbe to containers</div>
-      </div>
-      {{end}}
-      {{if gt $r.AddedCapabilities 0}}
-      <div class="risk-card">
-        <div class="risk-count">{{$r.AddedCapabilities}}</div>
-        <div class="risk-name">Added Capabilities</div>
-        <div class="risk-hint">Drop all capabilities and add only what's required</div>
-      </div>
-      {{end}}
-      {{if gt $r.PrivilegeEscalation 0}}
-      <div class="risk-card">
-        <div class="risk-count">{{$r.PrivilegeEscalation}}</div>
-        <div class="risk-name">Privilege Escalation</div>
-        <div class="risk-hint">Set allowPrivilegeEscalation: false in securityContext</div>
-      </div>
-      {{end}}
-      {{if gt $r.WritableFilesystem 0}}
-      <div class="risk-card">
-        <div class="risk-count">{{$r.WritableFilesystem}}</div>
-        <div class="risk-name">Writable Filesystem</div>
-        <div class="risk-hint">Set readOnlyRootFilesystem: true in securityContext</div>
-      </div>
-      {{end}}
-      {{if gt $r.MissingNetworkPolicies 0}}
-      <div class="risk-card">
-        <div class="risk-count">{{$r.MissingNetworkPolicies}}</div>
-        <div class="risk-name">Missing Network Policies</div>
-        <div class="risk-hint">Apply default-deny NetworkPolicy to each namespace</div>
-      </div>
-      {{end}}
-    </div>
-    {{else}}
-    <div class="no-risks">
-      <div style="font-size:2rem;margin-bottom:0.5rem">✅</div>
-      <div>No active risks detected</div>
-    </div>
-    {{end}}
-  </div>
-
-  {{if .PriorityActions}}
-  <div class="sec-section">
-    <div class="sec-section-hdr">
-      <h2>Priority Actions</h2>
-    </div>
-    <div class="actions-list">
-      {{range $i, $a := .PriorityActions}}
-      <div class="action-item">
-        <div class="action-num">{{add $i 1}}</div>
-        <div class="action-text">{{$a}}</div>
-      </div>
-      {{end}}
-    </div>
-  </div>
-  {{end}}
-
-  <div class="footer">OpsCart FinOps Engine &middot; Security Posture &middot; CIS Kubernetes Benchmark v1.8</div>
-</main>
-</div>
-<script>
-(function(){
-  var TS={{.ScannedAtMs}},el=document.getElementById('sec-age');
-  function upd(){
-    var s=Math.floor((Date.now()-TS)/1000);
-    var t=s<5?'just now':s<60?s+'s ago':Math.floor(s/60)+'m ago';
-    if(el)el.textContent=t;
-  }
-  setInterval(upd,1000);upd();
-})();
-</script>
-</body>
-</html>
+  <div class="footer">OpsCart · Workload Security Posture · Not a formal compliance assessment</div>
+</main></div>
+<script>(function(){var TS={{.ScannedAtMs}},el=document.getElementById('sec-age');function upd(){var s=Math.floor((Date.now()-TS)/1000);if(el)el.textContent=s<5?'just now':s<60?s+'s ago':Math.floor(s/60)+'m ago'}setInterval(upd,1000);upd()})();</script>
+</body></html>

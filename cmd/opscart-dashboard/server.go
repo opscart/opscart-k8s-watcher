@@ -1833,7 +1833,7 @@ func runFullScan(ctx string) (*clusterScan, error) {
 	}
 
 	// ── 3. Waste audit (best effort) ──────────────────────────────────
-	wasteAuditor, cancel := analyzer.NewWasteAuditor(clientset, 0)
+	wasteAuditor, cancel := analyzer.NewWasteAuditor(clientset, dashboardWasteMinAgeDays)
 	defer cancel()
 	if wasteAudit, err := wasteAuditor.AuditWaste(""); err == nil {
 		scan.wasteAudit = wasteAudit

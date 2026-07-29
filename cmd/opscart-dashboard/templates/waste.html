@@ -1,241 +1,49 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width,initial-scale=1.0">
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0">
 <title>Waste &amp; Drift — {{.ClusterName}}</title>
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
 {{template "base" .}}
 <style>
-.summary-chip{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius-sm);padding:0.75rem 1.25rem;display:flex;align-items:center;gap:0.75rem;min-width:160px}
-.summary-chip.red{border-color:rgba(239,68,68,0.35)}
-.summary-chip.orange{border-color:rgba(245,158,11,0.35)}
-.summary-chip.green{border-color:rgba(16,185,129,0.35)}
-.summary-num{font-size:1.6rem;font-weight:800;line-height:1}
-.red .summary-num{color:var(--danger)}
-.orange .summary-num{color:var(--warning)}
-.green .summary-num{color:var(--success)}
-.summary-lbl{font-size:0.72rem;color:var(--text-muted);text-transform:uppercase;letter-spacing:0.5px;line-height:1.3}
-.waste-section{margin-bottom:2.5rem}
-.waste-section-hdr{display:flex;align-items:center;gap:0.75rem;margin-bottom:1rem;padding-bottom:0.75rem;border-bottom:1px solid var(--border)}
-.waste-section-hdr h2{font-size:1rem;font-weight:700}
-.cnt-chip{padding:3px 10px;border-radius:20px;font-size:0.7rem;font-weight:700}
-.cnt-chip.red{background:rgba(239,68,68,0.15);color:#f87171}
-.cnt-chip.orange{background:rgba(245,158,11,0.15);color:#fbbf24}
-.cnt-chip.gray{background:rgba(100,116,139,0.15);color:#94a3b8}
-.cnt-chip.yellow{background:rgba(234,179,8,0.15);color:#facc15}
-.waste-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(320px,1fr));gap:1rem}
-.waste-card{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:1.25rem;display:flex;flex-direction:column;gap:0.55rem;animation:fadeIn 0.3s ease both}
-.waste-card:hover{border-color:var(--primary)}
-.waste-card.red{border-color:rgba(239,68,68,0.3);background:rgba(239,68,68,0.025)}
-.waste-card.orange{border-color:rgba(245,158,11,0.25);background:rgba(245,158,11,0.02)}
-.waste-card.yellow{border-color:rgba(234,179,8,0.2);background:rgba(234,179,8,0.015)}
-.waste-card.gray{border-color:rgba(100,116,139,0.25);background:rgba(100,116,139,0.015)}
-.waste-top{display:flex;align-items:center;gap:0.5rem;flex-wrap:wrap}
-.waste-badge{padding:2px 8px;border-radius:20px;font-size:0.64rem;font-weight:700;letter-spacing:0.5px}
-.waste-badge.red{background:rgba(239,68,68,0.15);color:#f87171}
-.waste-badge.orange{background:rgba(245,158,11,0.15);color:#fbbf24}
-.waste-badge.yellow{background:rgba(234,179,8,0.12);color:#facc15}
-.waste-badge.gray{background:rgba(100,116,139,0.15);color:#94a3b8}
-.waste-name{font-size:0.93rem;font-weight:700;color:var(--text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.waste-ns{font-size:0.73rem;color:var(--text-muted)}
-.waste-meta{display:flex;gap:1.25rem;flex-wrap:wrap;margin-top:0.1rem}
-.waste-meta-item{font-size:0.78rem;color:var(--text-secondary)}
-.waste-meta-item span{color:var(--text-muted);font-size:0.7rem}
-.waste-reason{font-size:0.76rem;color:var(--text-muted);line-height:1.5;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;margin-top:0.15rem}
-.empty-state-box{background:var(--surface);border:1px solid rgba(16,185,129,0.25);border-radius:var(--radius);padding:2.5rem;text-align:center;color:var(--text-muted)}
-.empty-state-box .icon{font-size:2.5rem;margin-bottom:0.5rem}
-.all-clean{background:var(--surface);border:1px solid rgba(16,185,129,0.3);border-radius:var(--radius);padding:3.5rem 2rem;text-align:center}
-.all-clean .big-icon{font-size:3.5rem;margin-bottom:1rem}
-.all-clean h2{font-size:1.25rem;font-weight:700;color:var(--success);margin-bottom:0.5rem}
-.all-clean p{font-size:0.85rem;color:var(--text-muted)}
-@media(max-width:640px){.waste-grid{grid-template-columns:1fr}.summary-bar{flex-direction:column}}
+.page-title,.section-title{display:flex;align-items:center;gap:.55rem}.page-title svg,.section-title svg{width:20px;height:20px;color:var(--primary-light);flex:none}
+.brief{display:grid;grid-template-columns:1.4fr 1fr;gap:1rem;background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:1rem 1.15rem;margin-bottom:1rem}.brief h2{font-size:.94rem}.brief p{font-size:.8rem;color:var(--text-secondary);line-height:1.55}.brief strong{color:var(--text)}
+.summary-grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:.7rem;margin-bottom:1rem}.metric{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius-sm);padding:.8rem 1rem}.metric-value{font-size:1.4rem;font-weight:800}.metric-label{font-size:.68rem;color:var(--text-muted);text-transform:uppercase;letter-spacing:.05em;margin-top:.2rem}
+.incident-banner{display:flex;justify-content:space-between;align-items:center;gap:1rem;border:1px solid rgba(245,158,11,.32);background:rgba(245,158,11,.035);border-radius:var(--radius-sm);padding:.75rem 1rem;margin-bottom:1rem}.incident-banner h2{font-size:.86rem}.incident-banner p{font-size:.72rem;color:var(--text-muted)}.incident-banner a{font-size:.76rem;font-weight:700;color:var(--primary-light);white-space:nowrap;text-decoration:none}
+.section{margin:1rem 0}.section-head{display:flex;justify-content:space-between;align-items:center;margin-bottom:.5rem}.section-title{font-size:.92rem}.section-sub{font-size:.7rem;color:var(--text-muted)}
+.data-table{width:100%;border-collapse:separate;border-spacing:0;background:var(--surface);border:1px solid var(--border);border-radius:var(--radius-sm);overflow:hidden;font-size:.81rem}.data-table th{background:rgba(100,116,139,.07);color:var(--text-muted);font-size:.65rem;text-transform:uppercase;letter-spacing:.045em;text-align:left;padding:.55rem .65rem}.data-table td{padding:.62rem .65rem;border-top:1px solid var(--border);vertical-align:top}.resource{font-weight:650}.muted{font-size:.7rem;color:var(--text-muted);line-height:1.4}.evidence{max-width:430px;line-height:1.42}.badge{display:inline-flex;border-radius:999px;padding:.16rem .46rem;font-size:.63rem;font-weight:700;background:rgba(59,130,246,.12);color:#60a5fa}.cmd{font-size:.67rem;color:var(--text-secondary);word-break:break-all}.empty{border:1px solid var(--border);background:var(--surface);border-radius:var(--radius-sm);padding:1rem;color:var(--text-muted);font-size:.8rem}.warning-list{font-size:.74rem;color:var(--text-muted);margin:.4rem 0 0 1rem}
+details.housekeeping summary{cursor:pointer;color:var(--primary-light);font-size:.76rem;margin-bottom:.5rem}
+@media(max-width:900px){.brief{grid-template-columns:1fr}.summary-grid{grid-template-columns:repeat(2,1fr)}.data-table{display:block;overflow-x:auto}}
+@media(max-width:560px){.summary-grid{grid-template-columns:1fr}.incident-banner{align-items:flex-start;flex-direction:column}.main{padding:1rem}}
 </style>
 </head>
-<body>
-<div class="layout">
-{{template "sidebar.html" .}}
-<main class="main">
-  <div class="page-hdr">
-    <div>
-      <h1>Waste &amp; Drift</h1>
-      <p>Unused and forgotten resources</p>
-    </div>
-    <div class="page-meta">
-      <div>Last scanned: <strong id="waste-age">just now</strong></div>
-      <a class="back-link" href="{{.DashHref}}">← Back to Dashboard</a>
-    </div>
-  </div>
+<body><div class="layout">{{template "sidebar.html" .}}<main class="main">
+<div class="page-hdr"><div><h1 class="page-title"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14H6L5 6"/><path d="M10 11v6M14 11v6"/><path d="M9 6V4h6v2"/></svg>Waste &amp; Drift</h1><p>{{.ClusterName}} — evidence-backed resource review and operational drift</p></div><div class="page-meta"><div>Last scanned: <strong id="waste-age">just now</strong></div><a class="back-link" href="{{.DashHref}}">Back to Dashboard</a></div></div>
 
-  <div class="summary-bar">
-    <div class="summary-chip{{if gt .TotalWasteItems 0}} orange{{end}}">
-      <div class="summary-num">{{.TotalWasteItems}}</div>
-      <div class="summary-lbl">Total Waste<br>Items</div>
-    </div>
-    <div class="summary-chip{{if gt .OrphanedPVCStorageGB 0}} orange{{end}}">
-      <div class="summary-num">{{.OrphanedPVCStorageGB}}<span style="font-size:0.9rem;font-weight:500"> GB</span></div>
-      <div class="summary-lbl">Orphaned<br>Storage</div>
-    </div>
-    <div class="summary-chip{{if gt .EstimatedMonthly 0.0}} red{{end}}">
-      <div class="summary-num">{{if gt .EstimatedMonthly 0.0}}${{printf "%.0f" .EstimatedMonthly}}{{else}}—{{end}}</div>
-      <div class="summary-lbl">Est. Monthly<br>Waste</div>
-    </div>
-    <div class="summary-chip{{if gt .ZombieCount 0}} red{{end}}">
-      <div class="summary-num">{{.ZombieCount}}</div>
-      <div class="summary-lbl">Zombie<br>Pods</div>
-    </div>
-  </div>
+{{if .ScanAvailable}}
+<section class="brief" aria-labelledby="waste-briefing"><div><h2 id="waste-briefing">Situation Briefing</h2><p>{{.ResourceCandidates}} resource review candidate{{if ne .ResourceCandidates 1}}s{{end}} were observed. {{.ZombieCount}} active failed-pod incident{{if ne .ZombieCount 1}}s{{end}} are tracked separately and are not presented as financial waste.</p>{{if .TopWasteCategories}}<p>Largest observed groups: {{range $i,$n := .TopWasteCategories}}{{if $i}}, {{end}}{{$n}}{{end}}.</p>{{end}}</div><div><p>Unattached storage requested: <strong>{{.OrphanedPVCStorageGB}} GB</strong>. Scan coverage: <strong>{{.ScanCoverage}}</strong>.</p><p>Findings are review candidates; workload intent, retention needs, and realized cost are not inferred.</p></div></section>
 
-  {{if eq .TotalWasteItems 0}}
-  <div class="all-clean">
-    <div class="big-icon">✅</div>
-    <h2>No waste detected</h2>
-    <p>Your cluster looks clean — no abandoned, stale, or orphaned resources found.</p>
-  </div>
-  {{else}}
-
-  {{if .StalePods}}
-  <div class="waste-section">
-    <div class="waste-section-hdr">
-      <h2>💀 Zombie Pods</h2>
-      <span class="cnt-chip red">{{len .StalePods}}</span>
-    </div>
-    <div class="waste-grid">
-      {{range .StalePods}}
-      <div class="waste-card red">
-        <div class="waste-top">
-          <span class="waste-badge red">ZOMBIE</span>
-        </div>
-        <div class="waste-name">{{.Name}}</div>
-        <div class="waste-ns">ns: {{.Namespace}}</div>
-        <div class="waste-meta">
-          <div class="waste-meta-item"><span>Status</span> {{.Status}}</div>
-          <div class="waste-meta-item"><span>Restarts</span> {{.RestartCount}}</div>
-          <div class="waste-meta-item"><span>Age</span> {{.AgeDays}}d</div>
-        </div>
-        {{if .Reason}}<div class="waste-reason">{{.Reason}}</div>{{end}}
-      </div>
-      {{end}}
-    </div>
-  </div>
-  {{end}}
-
-  {{if .OrphanedPVCs}}
-  <div class="waste-section">
-    <div class="waste-section-hdr">
-      <h2>💾 Orphaned PVCs</h2>
-      <span class="cnt-chip orange">{{len .OrphanedPVCs}}</span>
-    </div>
-    <div class="waste-grid">
-      {{range .OrphanedPVCs}}
-      <div class="waste-card orange">
-        <div class="waste-top">
-          <span class="waste-badge orange">PVC</span>
-        </div>
-        <div class="waste-name">{{.Name}}</div>
-        <div class="waste-ns">ns: {{.Namespace}}</div>
-        <div class="waste-meta">
-          <div class="waste-meta-item"><span>Size</span> {{.SizeGB}} GB</div>
-          <div class="waste-meta-item"><span>Status</span> {{.Status}}</div>
-          <div class="waste-meta-item"><span>Age</span> {{.AgeDays}}d</div>
-        </div>
-        {{if .Reason}}<div class="waste-reason">{{.Reason}}</div>{{end}}
-      </div>
-      {{end}}
-    </div>
-  </div>
-  {{end}}
-
-  {{if .ZeroReplicaWorkloads}}
-  <div class="waste-section">
-    <div class="waste-section-hdr">
-      <h2>⏸️ Zero-Replica Workloads</h2>
-      <span class="cnt-chip yellow">{{len .ZeroReplicaWorkloads}}</span>
-    </div>
-    <div class="waste-grid">
-      {{range .ZeroReplicaWorkloads}}
-      <div class="waste-card yellow">
-        <div class="waste-top">
-          <span class="waste-badge yellow">SCALED TO ZERO</span>
-        </div>
-        <div class="waste-name">{{.Name}}</div>
-        <div class="waste-ns">ns: {{.Namespace}}</div>
-        <div class="waste-meta">
-          <div class="waste-meta-item"><span>Kind</span> {{.Kind}}</div>
-          <div class="waste-meta-item"><span>Age</span> {{.AgeDays}}d</div>
-        </div>
-        {{if .Reason}}<div class="waste-reason">{{.Reason}}</div>{{end}}
-      </div>
-      {{end}}
-    </div>
-  </div>
-  {{end}}
-
-  {{if .AbandonedNamespaces}}
-  <div class="waste-section">
-    <div class="waste-section-hdr">
-      <h2>📁 Abandoned Namespaces</h2>
-      <span class="cnt-chip gray">{{len .AbandonedNamespaces}}</span>
-    </div>
-    <div class="waste-grid">
-      {{range .AbandonedNamespaces}}
-      <div class="waste-card gray">
-        <div class="waste-top">
-          <span class="waste-badge gray">ABANDONED</span>
-        </div>
-        <div class="waste-name">{{.Name}}</div>
-        <div class="waste-meta">
-          <div class="waste-meta-item"><span>Age</span> {{.AgeDays}}d</div>
-          <div class="waste-meta-item"><span>Pods</span> {{.PodCount}}</div>
-        </div>
-        {{if .Reason}}<div class="waste-reason">{{.Reason}}</div>{{end}}
-      </div>
-      {{end}}
-    </div>
-  </div>
-  {{end}}
-
-  {{if .StaleJobs}}
-  <div class="waste-section">
-    <div class="waste-section-hdr">
-      <h2>⏰ Stale Jobs</h2>
-      <span class="cnt-chip gray">{{len .StaleJobs}}</span>
-    </div>
-    <div class="waste-grid">
-      {{range .StaleJobs}}
-      <div class="waste-card gray">
-        <div class="waste-top">
-          <span class="waste-badge gray">STALE JOB</span>
-          {{if .IsCronJob}}<span class="waste-badge gray">CRONJOB</span>{{end}}
-        </div>
-        <div class="waste-name">{{.Name}}</div>
-        <div class="waste-ns">ns: {{.Namespace}}</div>
-        <div class="waste-meta">
-          <div class="waste-meta-item"><span>Status</span> {{.JobStatus}}</div>
-          <div class="waste-meta-item"><span>Age</span> {{.AgeDays}}d</div>
-        </div>
-        {{if .Reason}}<div class="waste-reason">{{.Reason}}</div>{{end}}
-      </div>
-      {{end}}
-    </div>
-  </div>
-  {{end}}
-
-  {{end}}
-
-  <div class="footer">OpsCart FinOps Engine &middot; Waste &amp; Drift &middot; Suggestions only — verify with owners before removing resources</div>
-</main>
+<div class="summary-grid" aria-label="Waste and drift summary">
+  <div class="metric"><div class="metric-value">{{.ResourceCandidates}}</div><div class="metric-label">Resource Review Candidates</div></div>
+  <div class="metric"><div class="metric-value">{{.OrphanedPVCStorageGB}} GB</div><div class="metric-label">Unattached Storage Requested</div></div>
+  <div class="metric"><div class="metric-value">{{.ZombieCount}}</div><div class="metric-label">Active Incidents</div></div>
+  <div class="metric"><div class="metric-value">{{.ScanCoverage}}</div><div class="metric-label">Scan Coverage</div></div>
 </div>
-<script>
-(function(){
-  var TS={{.ScannedAtMs}},el=document.getElementById('waste-age');
-  function upd(){
-    var s=Math.floor((Date.now()-TS)/1000);
-    var t=s<5?'just now':s<60?s+'s ago':Math.floor(s/60)+'m ago';
-    if(el)el.textContent=t;
-  }
-  setInterval(upd,1000);upd();
-})();
-</script>
-</body>
-</html>
+
+{{if gt .ZombieCount 0}}<div class="incident-banner"><div><h2>{{.ZombieCount}} active failed-pod incident{{if ne .ZombieCount 1}}s{{end}}</h2><p>Operational drift: {{.ProbeFailureCount}} probe failure, {{.CrashLoopCount}} crash loop, {{.OtherIncidentCount}} other. No financial-waste conclusion is made.</p></div><a href="{{.IncidentHref}}">View active incidents</a></div>{{end}}
+
+{{if .DetectorWarnings}}<section class="section"><div class="section-head"><h2 class="section-title">Unavailable Checks</h2></div><div class="empty">Scan incomplete.<ul class="warning-list">{{range .DetectorWarnings}}<li>{{.Category}}: {{.Error}}</li>{{end}}</ul></div></section>{{end}}
+
+<section class="section" aria-labelledby="resource-review"><div class="section-head"><h2 class="section-title" id="resource-review"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/></svg>Ranked Resource Review</h2><span class="section-sub">{{len .ResourceRows}} resources</span></div>
+{{if .ResourceRows}}<table class="data-table"><thead><tr><th>Category</th><th>Resource</th><th>Namespace</th><th>Evidence</th><th>Age</th><th>Requested storage</th><th>Review status</th><th>Read-only inspection</th></tr></thead><tbody>{{range .ResourceRows}}<tr><td>{{.Category}}</td><td class="resource">{{.Resource}}</td><td>{{.Namespace}}</td><td class="evidence">{{.Evidence}}</td><td>{{.Age}}</td><td>{{.Storage}}</td><td><span class="badge">{{.ReviewStatus}}</span></td><td>{{if .Command}}<code class="cmd">{{.Command}}</code>{{else}}—{{end}}</td></tr>{{end}}</tbody></table>{{else}}<div class="empty">No resource review candidates were observed in completed checks.</div>{{end}}</section>
+
+<section class="section" aria-labelledby="drift-review"><div class="section-head"><h2 class="section-title" id="drift-review"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75"><path d="M3 12h4l3-9 4 18 3-9h4"/></svg>Drift</h2><span class="section-sub">{{len .DriftRows}} configuration or lifecycle findings</span></div>
+{{if .DriftRows}}<table class="data-table"><thead><tr><th>Category</th><th>Resource</th><th>Namespace</th><th>Evidence</th><th>Age</th><th>Review status</th><th>Read-only inspection</th></tr></thead><tbody>{{range .DriftRows}}<tr><td>{{.Category}}</td><td class="resource">{{.Resource}}</td><td>{{.Namespace}}</td><td class="evidence">{{.Evidence}}</td><td>{{.Age}}</td><td><span class="badge">{{.ReviewStatus}}</span></td><td><code class="cmd">{{.Command}}</code></td></tr>{{end}}</tbody></table>{{else}}<div class="empty">No drift findings were observed in completed checks.</div>{{end}}</section>
+
+{{if .HousekeepingRows}}<section class="section"><details class="housekeeping"><summary>Housekeeping — excluded from resource-review total ({{len .HousekeepingRows}})</summary><table class="data-table"><thead><tr><th>Category</th><th>Resource</th><th>Namespace</th><th>Evidence</th><th>Age</th><th>Read-only inspection</th></tr></thead><tbody>{{range .HousekeepingRows}}<tr><td>{{.Category}}</td><td>{{.Resource}}</td><td>{{.Namespace}}</td><td>{{.Evidence}}</td><td>{{.Age}}</td><td><code class="cmd">{{.Command}}</code></td></tr>{{end}}</tbody></table></details></section>{{end}}
+{{else}}<section class="brief"><div><h2>Situation Briefing</h2><p>Waste scan unavailable/incomplete. Resource candidates, incidents, storage quantities, and scan coverage cannot be established.</p></div></section>{{end}}
+
+<div class="footer">OpsCart · Waste &amp; Drift · Read-only evidence and review guidance</div>
+</main></div>
+<script>(function(){var TS={{.ScannedAtMs}},el=document.getElementById('waste-age');function upd(){var s=Math.floor((Date.now()-TS)/1000);if(el)el.textContent=s<5?'just now':s<60?s+'s ago':Math.floor(s/60)+'m ago'}setInterval(upd,1000);upd()})();</script>
+</body></html>

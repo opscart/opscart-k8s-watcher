@@ -81,10 +81,10 @@ func CalculateCISScore(audit *models.SecurityAudit, netAudit *NetworkPolicyAudit
 		},
 		{
 			ID:          "5.2.6",
-			Description: "Minimize containers running as root",
+			Description: "Explicitly enforce non-root container execution",
 			Weight:      6.0,
 			Passed:      audit.Risks.RunningAsRoot == 0,
-			Finding:     fmt.Sprintf("%d containers as root", audit.Risks.RunningAsRoot),
+			Finding:     fmt.Sprintf("%d containers without explicit non-root enforcement", audit.Risks.RunningAsRoot),
 		},
 		{
 			ID:          "5.7.3",
