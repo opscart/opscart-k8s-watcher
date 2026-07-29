@@ -26,6 +26,7 @@ type incidentsPageData struct {
 	IncidentsHref string
 	ActivePage    string
 	ClusterName   string
+	ClusterParam  string
 	CriticalCount int
 	Clusters      []sidebarCluster
 
@@ -95,6 +96,7 @@ func (srv *server) handleIncidentsPage(w http.ResponseWriter, r *http.Request) {
 		IncidentsHref: "/incidents" + clusterQ,
 		ActivePage:    "incidents",
 		ClusterName:   displayName(ctx),
+		ClusterParam:  ctx,
 		CriticalCount: countCriticalIssues(scan),
 		Filter:        f,
 		Page:          page,
@@ -228,6 +230,10 @@ var getIncidentsTmpl = sync.OnceValue(func() *template.Template {
 				"prevPage":      prevPage,
 				"nextPage":      nextPage,
 				"pageRange":     pageRange,
+				"ownerName":     store.OwnerNameFromPod,
+				"isNamespaceScoped": func(issueType string) bool {
+					return issueType == "unprotected_namespace" || issueType == "idle_namespace"
+				},
 			}).
 			ParseFS(templateFS,
 				"templates/base.html",
