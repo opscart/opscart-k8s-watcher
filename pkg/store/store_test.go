@@ -226,6 +226,134 @@ func TestUpsertIncident(t *testing.T) {
 	}
 }
 
+func TestUpsertIncidentsGroupsByFingerprintDeterministically(t *testing.T) {
+	fp := "default/Deployment/fraud-detection/crash_loop"
+	low := IncidentData{
+		Fingerprint: fp, Namespace: "default",
+		Resource: "fraud-detection-bbbbbbbbb-zzzzz", IssueType: "crash_loop",
+		Severity: "warning", DetailsJSON: `{"pod":"low"}`, RestartCount: 7,
+	}
+	highLexical := IncidentData{
+		Fingerprint: fp, Namespace: "default",
+		Resource: "fraud-detection-ccccccccc-yyyyy", IssueType: "crash_loop",
+		Severity: "high", DetailsJSON: `{"pod":"high-lexical"}`, RestartCount: 12,
+	}
+	focus := IncidentData{
+		Fingerprint: fp, Namespace: "default",
+		Resource: "fraud-detection-aaaaaaaaa-xxxxx", IssueType: "crash_loop",
+		Severity: "critical", DetailsJSON: `{"pod":"focus"}`, RestartCount: 12,
+	}
+
+	for _, tc := range []struct {
+		name   string
+		inputs []IncidentData
+	}{
+		{name: "forward", inputs: []IncidentData{low, highLexical, focus}},
+		{name: "reverse", inputs: []IncidentData{focus, highLexical, low}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := openTestStore(t)
+			if err := s.UpsertIncidents("test-cluster", "scan-1", tc.inputs); err != nil {
+				t.Fatalf("UpsertIncidents: %v", err)
+			}
+
+			var count, restarts int
+			var resource, severity, details string
+			if err := s.db.QueryRow(
+				`SELECT COUNT(*), resource, current_restart_count, severity, details_json
+				 FROM incidents WHERE cluster=? AND fingerprint=?`,
+				"test-cluster", fp,
+			).Scan(&count, &resource, &restarts, &severity, &details); err != nil {
+				t.Fatalf("query focused incident: %v", err)
+			}
+			if count != 1 {
+				t.Fatalf("incident count = %d, want 1", count)
+			}
+			if resource != focus.Resource || restarts != focus.RestartCount ||
+				severity != focus.Severity || details != focus.DetailsJSON {
+				t.Fatalf("stored observation mixed focus pods: resource=%q restarts=%d severity=%q details=%q",
+					resource, restarts, severity, details)
+			}
+
+			events, err := s.GetIncidentTimeline("test-cluster", fp)
+			if err != nil {
+				t.Fatalf("GetIncidentTimeline: %v", err)
+			}
+			if len(events) != 1 || events[0].EventType != "DETECTED" {
+				t.Fatalf("events = %+v, want exactly one DETECTED", events)
+			}
+		})
+	}
+}
+
+func TestUpsertIncidentsFocusPodChangeSkipsCrossPodRestartMilestone(t *testing.T) {
+	s := openTestStore(t)
+	fp := "default/Deployment/fraud-detection/crash_loop"
+	original := IncidentData{
+		Fingerprint: fp, Namespace: "default",
+		Resource: "fraud-detection-aaaaaaaaa-aaaaa", IssueType: "crash_loop",
+		Severity: "critical", DetailsJSON: `{"pod":"original"}`, RestartCount: 1,
+	}
+	if err := s.UpsertIncidents("test-cluster", "scan-1", []IncidentData{original}); err != nil {
+		t.Fatalf("UpsertIncidents(original): %v", err)
+	}
+
+	replacement := original
+	replacement.Resource = "fraud-detection-bbbbbbbbb-bbbbb"
+	replacement.RestartCount = 110
+	replacement.DetailsJSON = `{"pod":"replacement"}`
+	if err := s.UpsertIncidents("test-cluster", "scan-2", []IncidentData{replacement}); err != nil {
+		t.Fatalf("UpsertIncidents(replacement): %v", err)
+	}
+
+	var resource, details string
+	var restarts int
+	if err := s.db.QueryRow(
+		`SELECT resource, current_restart_count, details_json FROM incidents
+		 WHERE cluster=? AND fingerprint=?`,
+		"test-cluster", fp,
+	).Scan(&resource, &restarts, &details); err != nil {
+		t.Fatalf("query focused incident: %v", err)
+	}
+	if resource != replacement.Resource || restarts != replacement.RestartCount || details != replacement.DetailsJSON {
+		t.Fatalf("focus pod was not updated coherently: resource=%q restarts=%d details=%q",
+			resource, restarts, details)
+	}
+
+	events, err := s.GetIncidentTimeline("test-cluster", fp)
+	if err != nil {
+		t.Fatalf("GetIncidentTimeline: %v", err)
+	}
+	if len(events) != 1 || events[0].EventReason != "Detected" {
+		t.Fatalf("focus pod change emitted an event (including PodReplaced or RestartMilestone): %+v", events)
+	}
+}
+
+func TestUpsertIncidentsUnchangedFocusPodEmitsRestartMilestone(t *testing.T) {
+	s := openTestStore(t)
+	inc := IncidentData{
+		Fingerprint: "default/Deployment/fraud-detection/crash_loop",
+		Namespace:   "default", Resource: "fraud-detection-aaaaaaaaa-aaaaa",
+		IssueType: "crash_loop", Severity: "critical", RestartCount: 90,
+	}
+	if err := s.UpsertIncidents("test-cluster", "scan-1", []IncidentData{inc}); err != nil {
+		t.Fatalf("UpsertIncidents(initial): %v", err)
+	}
+	inc.RestartCount = 110
+	if err := s.UpsertIncidents("test-cluster", "scan-2", []IncidentData{inc}); err != nil {
+		t.Fatalf("UpsertIncidents(updated): %v", err)
+	}
+
+	events, err := s.GetIncidentTimeline("test-cluster", inc.Fingerprint)
+	if err != nil {
+		t.Fatalf("GetIncidentTimeline: %v", err)
+	}
+	if len(events) != 2 || events[1].EventReason != "RestartMilestone" ||
+		events[1].Message != "Restart count exceeded 100" {
+		t.Fatalf("events = %+v, want DETECTED then valid RestartMilestone", events)
+	}
+}
+
 func TestResolveMissing(t *testing.T) {
 	s := openTestStore(t)
 
@@ -296,6 +424,10 @@ func TestOwnerNameFromPod(t *testing.T) {
 		{"stream-processor-66c474d5fd-9zpwq", "stream-processor"},
 		{"namespace", "namespace"},
 		{"nginx", "nginx"},
+		{"fraud-detection-7cddf79d98-jxmtx", "fraud-detection"},
+		{"fraud-detection-7cddf79d98-kbfzw", "fraud-detection"},
+		{"prometheus-0", "prometheus-0"},
+		{"storage-provisioner", "storage-provisioner"},
 	}
 
 	for _, c := range cases {
