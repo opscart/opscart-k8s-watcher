@@ -7,7 +7,7 @@
 [![Docker](https://img.shields.io/badge/docker-ghcr.io%2Fopscart-blue)](https://ghcr.io/opscart/opscart-dashboard)
 [![Trivy](https://img.shields.io/badge/trivy-0%20CVEs-success)](https://trivy.dev)
 
-**Read-only** &nbsp;·&nbsp; **No agents** &nbsp;·&nbsp; **No cloud credentials** &nbsp;·&nbsp; **Deploy in 30 seconds**
+**Read-only** &nbsp;·&nbsp; **No agents** &nbsp;·&nbsp; **Credential-free core** &nbsp;·&nbsp; **Deploy in 30 seconds**
 
 ---
 
@@ -31,12 +31,13 @@ OpsCart    →  shows what deserves attention first
 
 A healthy dashboard does not always mean a healthy cluster.
 
-Metrics tell you whether your services are meeting SLOs. OpsCart tells you which operational problems have quietly accumulated over weeks — crash-looping pods, image pull failures, privileged containers, missing NetworkPolicies, orphaned PVCs, and cost waste — none of which trigger a metrics alert.
+Metrics show whether services are meeting their SLOs. OpsCart surfaces operational conditions that can remain hidden or fragmented across dashboards—crash-looping workloads, image pull failures, privileged containers, missing NetworkPolicies, unattached storage, and resource waste.
 
-This isn't alert aggregation. OpsCart remembers what happened between scans — when a problem was first detected, whether it's been resolved and come back, whether it's getting worse. A pod that's been crash-looping for 11 days and a pod that started crashing 5 minutes ago look identical to a metrics dashboard; they're a completely different problem to OpsCart, because it has a memory and metrics tools don't.
+This is not another alert aggregator. OpsCart preserves operational memory across scans: when an incident was first detected, whether it resolved and later reoccurred, how restart behavior changed, and which workload is currently affected. A replacement pod may be only five minutes old while the workload incident has existed for weeks. OpsCart keeps that workload-level history without presenting the new pod as the identity of the incident.
 
-Instead of dozens of dashboards, you get a prioritized list of what deserves attention first — with the history to know why.
-Designed for platform engineers managing Kubernetes clusters who want fast operational triage without deploying agents or modifying workloads.
+Instead of requiring operators to correlate several dashboards during triage, OpsCart presents a prioritized view of what deserves attention, the observed evidence behind it, and read-only investigation commands for the next step.
+
+OpsCart is designed for platform engineers managing Kubernetes clusters who want faster operational triage without deploying node agents or modifying application workloads.
 
 ---
 
@@ -153,7 +154,7 @@ Namespace-level findings (unprotected namespaces, idle namespaces) get their own
 
 **Waste & Drift** — Zombie pods, orphaned PVCs with storage size and age, zero-replica workloads, abandoned namespaces.
 
-**Cost Intelligence** — Node pool cost breakdown, namespace allocation, reserved instance savings. No cloud credentials needed — Azure pricing is embedded at build time.
+**Cost Intelligence** — Provider-aware worker-node estimates with namespace allocation, embedded Azure pricing, and optional AWS public pricing. See [Cost Intelligence](docs/07-Cost-Intelligence.md).
 
 ### Platform
 
@@ -163,7 +164,7 @@ Namespace-level findings (unprotected namespaces, idle namespaces) get their own
 
 **Helm Chart** — Full Helm chart with configurable values, PVC-backed persistence, read-only RBAC, and non-root security context. See the [chart README](helm/opscart-watcher/README.md) for persistence options, minikube notes, and all values.
 
-**Agentless** — Runs as a single container. No sidecars, no DaemonSets, no node access, no cloud credentials.
+**Agentless** — Runs as a single container. No sidecars, no DaemonSets, and no node access. Core scanning needs no cloud credentials; optional AWS API pricing uses workload identity.
 
 ---
 
@@ -220,7 +221,7 @@ go build -o opscart-scan ./cmd/opscart-scan
 ./opscart-scan emergency --cluster prod      # War Room from terminal
 ./opscart-scan security --cluster prod       # CIS scoring
 ./opscart-scan waste --cluster prod          # Waste detection
-./opscart-scan cloud-costs --cluster prod    # Azure cost analysis
+./opscart-scan cloud-costs --cluster prod    # Provider-aware cost analysis
 ./opscart-scan network --cluster prod        # Network policy gaps
 ./opscart-scan report --cluster prod         # HTML report
 ```
@@ -237,7 +238,7 @@ go build -o opscart-scan ./cmd/opscart-scan
 
 ## Disclaimer
 
-Awareness tool — not for formal compliance auditing. Use [kube-bench](https://github.com/aquasecurity/kube-bench) for official CIS compliance. Azure cost estimates are based on public retail pricing and vary with EA/MACC agreements.
+Awareness tool — not for formal compliance auditing. Use [kube-bench](https://github.com/aquasecurity/kube-bench) for official CIS compliance. Cost figures are public-pricing estimates, not invoices; see [Cost Intelligence](docs/07-Cost-Intelligence.md).
 
 ---
 

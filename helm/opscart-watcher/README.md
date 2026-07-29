@@ -127,7 +127,9 @@ helm upgrade ... --set image.tag=dev --set image.pullPolicy=Never
 
 - Runs as non-root (UID 65534)
 - Read-only ClusterRole (get/list only)
-- No cloud credentials required
+- Core scanning and embedded pricing require no cloud credentials. Optional AWS
+  public pricing uses workload identity; see
+  [Cost Intelligence](../../docs/07-Cost-Intelligence.md).
 - No agents, no mutations
 - Image built FROM scratch
 - The optional `volumePermissions` init container runs as root by
