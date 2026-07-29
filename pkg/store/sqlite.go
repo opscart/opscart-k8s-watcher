@@ -3,6 +3,7 @@ package store
 import (
 	"database/sql"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
@@ -323,6 +324,8 @@ func (s *SQLiteStore) WriteSnapshot(cluster string, scanID string, d SnapshotDat
 }
 
 func (s *SQLiteStore) UpsertIncidents(cluster string, scanID string, incidents []IncidentData) error {
+	incidents = focusIncidentsByFingerprint(incidents)
+
 	tx, err := s.db.Begin()
 	if err != nil {
 		return err
@@ -330,7 +333,7 @@ func (s *SQLiteStore) UpsertIncidents(cluster string, scanID string, incidents [
 	defer tx.Rollback()
 
 	lookupStmt, err := tx.Prepare(
-		`SELECT id, current_restart_count, severity, status FROM incidents WHERE cluster=? AND fingerprint=?`,
+		`SELECT id, resource, current_restart_count, severity, status FROM incidents WHERE cluster=? AND fingerprint=?`,
 	)
 	if err != nil {
 		return err
@@ -346,6 +349,7 @@ func (s *SQLiteStore) UpsertIncidents(cluster string, scanID string, incidents [
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, 0)
 		ON CONFLICT(cluster, fingerprint) DO UPDATE SET
 			last_seen = excluded.last_seen,
+			resource = excluded.resource,
 			details_json = excluded.details_json,
 			severity = excluded.severity,
 			status = 'active',
@@ -362,8 +366,8 @@ func (s *SQLiteStore) UpsertIncidents(cluster string, scanID string, incidents [
 	for _, inc := range incidents {
 		var existingID int64
 		var prevRestart int
-		var prevSeverity, prevStatus string
-		lookupErr := lookupStmt.QueryRow(cluster, inc.Fingerprint).Scan(&existingID, &prevRestart, &prevSeverity, &prevStatus)
+		var prevResource, prevSeverity, prevStatus string
+		lookupErr := lookupStmt.QueryRow(cluster, inc.Fingerprint).Scan(&existingID, &prevResource, &prevRestart, &prevSeverity, &prevStatus)
 		if lookupErr != nil && lookupErr != sql.ErrNoRows {
 			return lookupErr
 		}
@@ -400,16 +404,43 @@ func (s *SQLiteStore) UpsertIncidents(cluster string, scanID string, incidents [
 				err = insertIncidentEvent(tx, incidentID, scanID, now, "REOPENED", "Reopened",
 					inc.RestartCount, inc.Severity, "active", "Incident reoccurred")
 			} else {
-				err = emitDriftEvents(tx, incidentID, scanID, now, prevSeverity, prevRestart, inc)
+				err = emitDriftEvents(tx, incidentID, scanID, now, prevSeverity, prevRestart, prevResource == inc.Resource, inc)
 			}
 		default:
-			err = emitDriftEvents(tx, incidentID, scanID, now, prevSeverity, prevRestart, inc)
+			err = emitDriftEvents(tx, incidentID, scanID, now, prevSeverity, prevRestart, prevResource == inc.Resource, inc)
 		}
 		if err != nil {
 			return err
 		}
 	}
 	return tx.Commit()
+}
+
+// focusIncidentsByFingerprint selects exactly one coherent observation for
+// each workload-scoped fingerprint. The highest restart count wins; resource
+// provides a stable tie-breaker so selection does not depend on scan order.
+func focusIncidentsByFingerprint(incidents []IncidentData) []IncidentData {
+	focused := make(map[string]IncidentData, len(incidents))
+	for _, inc := range incidents {
+		current, exists := focused[inc.Fingerprint]
+		if !exists ||
+			inc.RestartCount > current.RestartCount ||
+			(inc.RestartCount == current.RestartCount && inc.Resource < current.Resource) {
+			focused[inc.Fingerprint] = inc
+		}
+	}
+
+	fingerprints := make([]string, 0, len(focused))
+	for fingerprint := range focused {
+		fingerprints = append(fingerprints, fingerprint)
+	}
+	sort.Strings(fingerprints)
+
+	result := make([]IncidentData, 0, len(fingerprints))
+	for _, fingerprint := range fingerprints {
+		result = append(result, focused[fingerprint])
+	}
+	return result
 }
 
 // absorbRecentResolution checks whether the incident's most recent RESOLVED
@@ -446,7 +477,7 @@ func absorbRecentResolution(tx *sql.Tx, incidentID int64, now int64) (bool, erro
 // emitDriftEvents records SeverityChanged/RestartMilestone events for an
 // incident that is already (or was just flap-absorbed back to) active,
 // comparing against its previously stored severity/restart count.
-func emitDriftEvents(tx *sql.Tx, incidentID int64, scanID string, now int64, prevSeverity string, prevRestart int, inc IncidentData) error {
+func emitDriftEvents(tx *sql.Tx, incidentID int64, scanID string, now int64, prevSeverity string, prevRestart int, sameResource bool, inc IncidentData) error {
 	if prevSeverity != inc.Severity {
 		if err := insertIncidentEvent(tx, incidentID, scanID, now, "UPDATED", "SeverityChanged",
 			inc.RestartCount, inc.Severity, "active",
@@ -454,18 +485,20 @@ func emitDriftEvents(tx *sql.Tx, incidentID int64, scanID string, now int64, pre
 			return err
 		}
 	}
-	if milestone := highestMilestoneCrossed(prevRestart, inc.RestartCount); milestone > 0 {
-		var lastMilestone int
-		_ = tx.QueryRow(
-			`SELECT COALESCE(MAX(restart_count), 0) FROM incident_events
+	if sameResource {
+		if milestone := highestMilestoneCrossed(prevRestart, inc.RestartCount); milestone > 0 {
+			var lastMilestone int
+			_ = tx.QueryRow(
+				`SELECT COALESCE(MAX(restart_count), 0) FROM incident_events
 			 WHERE incident_id=? AND event_reason='RestartMilestone'`,
-			incidentID,
-		).Scan(&lastMilestone)
-		if lastMilestone < milestone {
-			if err := insertIncidentEvent(tx, incidentID, scanID, now, "UPDATED", "RestartMilestone",
-				inc.RestartCount, inc.Severity, "active",
-				fmt.Sprintf("Restart count exceeded %d", milestone)); err != nil {
-				return err
+				incidentID,
+			).Scan(&lastMilestone)
+			if lastMilestone < milestone {
+				if err := insertIncidentEvent(tx, incidentID, scanID, now, "UPDATED", "RestartMilestone",
+					inc.RestartCount, inc.Severity, "active",
+					fmt.Sprintf("Restart count exceeded %d", milestone)); err != nil {
+					return err
+				}
 			}
 		}
 	}
