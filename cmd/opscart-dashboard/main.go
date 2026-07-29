@@ -12,17 +12,20 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/opscart/opscart-k8s-watcher/pkg/analyzer"
 	"github.com/opscart/opscart-k8s-watcher/pkg/store"
 	"github.com/spf13/cobra"
 )
 
 var (
-	port         string
-	cluster      string
-	clustersFlag string
-	region       string
-	breakdown    string
-	namespace    string
+	port          string
+	cluster       string
+	clustersFlag  string
+	region        string
+	breakdown     string
+	namespace     string
+	pricingSource string
+	cloudProvider string
 )
 
 func main() {
@@ -48,7 +51,9 @@ All data routes accept ?cluster=<context> to target a specific cluster.`,
 	rootCmd.Flags().StringVarP(&port, "port", "p", "8080", "Port to listen on")
 	rootCmd.Flags().StringVarP(&cluster, "cluster", "c", "", "Kubernetes context to scan (default: current context)")
 	rootCmd.Flags().StringVar(&clustersFlag, "clusters", "", "Comma-separated Kubernetes contexts for the sidebar selector")
-	rootCmd.Flags().StringVar(&region, "region", "", "Azure region for pricing (auto-detected from node labels if empty)")
+	rootCmd.Flags().StringVar(&region, "region", "", "Region override for pricing by the effective cloud provider (auto-detected from node labels if empty)")
+	rootCmd.Flags().StringVar(&pricingSource, "pricing-source", pricingSourceDefault(), "Pricing source: auto, embedded, or aws-api")
+	rootCmd.Flags().StringVar(&cloudProvider, "cloud-provider", cloudProviderDefault(), "Cloud provider: auto, azure, or aws")
 	rootCmd.Flags().StringVar(&breakdown, "breakdown", "", "Cost breakdown level: '' or 'deployment'")
 	rootCmd.Flags().StringVarP(&namespace, "namespace", "n", "", "Namespace to analyze (default: all)")
 
@@ -85,6 +90,12 @@ func parseClusterList() []string {
 // ── runDashboard ──────────────────────────────────────────────────────────────
 
 func runDashboard(_ *cobra.Command, _ []string) error {
+	if pricingSource != "auto" && pricingSource != "embedded" && pricingSource != "aws-api" {
+		return fmt.Errorf("invalid --pricing-source %q: use auto, embedded, or aws-api", pricingSource)
+	}
+	if _, err := analyzer.ParseCloudProviderOverride(cloudProvider); err != nil {
+		return err
+	}
 	cl := parseClusterList()
 	dbPath := os.Getenv("OPSCART_DB_PATH")
 	if dbPath == "" {
@@ -147,4 +158,18 @@ func runDashboard(_ *cobra.Command, _ []string) error {
 	}
 
 	return nil
+}
+
+func pricingSourceDefault() string {
+	if value := strings.TrimSpace(os.Getenv("OPSCART_PRICING_SOURCE")); value != "" {
+		return value
+	}
+	return "auto"
+}
+
+func cloudProviderDefault() string {
+	if value := strings.TrimSpace(os.Getenv("OPSCART_CLOUD_PROVIDER")); value != "" {
+		return value
+	}
+	return "auto"
 }

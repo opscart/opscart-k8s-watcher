@@ -1278,14 +1278,24 @@ type costPageData struct {
 	ScannedAtMS int64
 	Timestamp   time.Time
 
-	MonthlyCost      float64
-	SavingsPotential float64
-	SecurityColor    string
-	SecurityDisplay  string
-	WasteColor       string
-	WasteDisplay     string
-	PodCount         int
-	ClusterCount     int
+	MonthlyCost           float64
+	SavingsPotential      float64
+	ClusterCount          int
+	Provider              string
+	DetectedProvider      string
+	ProviderDetectionMode string
+	ProviderWarning       string
+	Region                string
+	PricingCoverage       string
+	PricingWarnings       []string
+	Currency              string
+	ScopeExclusions       []string
+	LastPriceRefresh      time.Time
+	MatchedNodes          int
+	TotalNodes            int
+	ShowSavings           bool
+	ShowRI                bool
+	CapacityTypes         string
 
 	AccuracyPct     int
 	KnownVMs        int
@@ -1303,32 +1313,34 @@ type costPageData struct {
 	Disclaimers   []string
 	PricingSource string
 
-	WRIssues      []costWRIssue
-	CriticalCount int
-	CostsURL      string
-	IncidentsURL  string
-	SecurityURL   string
-	WasteURL      string
-	ActivePage    string
-	Version       string
+	CostsURL     string
+	IncidentsURL string
+	SecurityURL  string
+	WasteURL     string
+	ActivePage   string
+	Version      string
 }
 
 type costPoolRow struct {
-	Name          string
-	VMSize        string
-	NodeCount     int
-	TagClass      string
-	TagLabel      string
-	CPUColor      string
-	MemColor      string
-	CPUUtilPct    float64
-	MemUtilPct    float64
-	CPUWidthStyle template.CSS
-	MemWidthStyle template.CSS
-	PricePerNode  string
-	PoolTotal     string
-	RISavingsFmt  string
-	RISavings     float64
+	Name           string
+	VMSize         string
+	NodeCount      int
+	TagClass       string
+	TagLabel       string
+	CPUColor       string
+	MemColor       string
+	CPUUtilPct     float64
+	MemUtilPct     float64
+	CPUWidthStyle  template.CSS
+	MemWidthStyle  template.CSS
+	PricePerNode   string
+	PoolTotal      string
+	RISavingsFmt   string
+	RISavings      float64
+	Provider       string
+	Region         string
+	PriceAvailable bool
+	ShowRI         bool
 }
 
 type costNSRow struct {
@@ -1377,21 +1389,14 @@ func buildCostPageData(scan *clusterScan, activeCtx string, clusterList []string
 		q = "?cluster=" + url.QueryEscape(activeCtx)
 	}
 	data := costPageData{
-		ActiveCtx:     activeCtx,
-		ClusterCount:  len(clusterList),
-		DashURL:       "/" + q,
-		InfraURL:      "/infrastructure" + q,
-		NSsURL:        "/namespaces" + q,
-		OptURL:        "/optimizations" + q,
-		WrURL:         "/warroom" + q,
-		RefreshURL:    "/refresh" + q,
-		CriticalCount: countCriticalIssues(scan),
-		CostsURL:      "/costs" + q,
-		IncidentsURL:  "/incidents" + q,
-		SecurityURL:   "/security" + q,
-		WasteURL:      "/waste" + q,
-		ActivePage:    "costs",
-		Version:       Version,
+		ActiveCtx: activeCtx, ClusterCount: len(clusterList), DashURL: "/" + q,
+		InfraURL: "/infrastructure" + q, NSsURL: "/namespaces" + q,
+		OptURL: "/optimizations" + q, WrURL: "/warroom" + q,
+		RefreshURL: "/refresh" + q, CostsURL: "/costs" + q,
+		IncidentsURL: "/incidents" + q, SecurityURL: "/security" + q,
+		WasteURL: "/waste" + q, ActivePage: "costs", Version: Version,
+		Currency: "USD", Provider: "Unknown", Region: "Not detected",
+		PricingCoverage: "Pricing unavailable", CapacityTypes: "None",
 	}
 
 	if scan != nil && scan.report != nil {
@@ -1402,15 +1407,35 @@ func buildCostPageData(scan *clusterScan, activeCtx string, clusterList []string
 		data.Scenarios = r.OptimizationScenarios
 		data.Disclaimers = r.Disclaimers
 		data.PricingSource = r.PricingSource
+		data.Provider = titleProvider(r.Provider)
+		data.DetectedProvider = titleProvider(r.DetectedProvider)
+		data.ProviderDetectionMode = r.ProviderDetectionMode
+		data.ProviderWarning = r.ProviderWarning
+		data.Region = r.Region
+		data.PricingCoverage = r.PricingCoverage
+		data.PricingWarnings = r.PricingWarnings
+		data.Currency = r.Currency
+		data.ScopeExclusions = r.ScopeExclusions
+		data.LastPriceRefresh = r.LastPriceRefresh
+		data.ShowSavings = r.Provider == "azure" && r.TotalSavingsPotential.Best > 0
+		data.ShowRI = r.Provider == "azure"
+		switch r.Provider {
+		case "azure":
+			data.CapacityTypes = "Regular and Spot"
+		case "aws":
+			data.CapacityTypes = "EC2 On-Demand; Spot detected but not priced"
+		case "mixed":
+			data.CapacityTypes = "Varies by provider"
+		}
 		data.Timestamp = r.Timestamp
 		data.ScannedAtMS = r.Timestamp.UnixMilli()
 
 		known, unknown := 0, 0
 		for _, p := range r.NodePoolCosts {
-			if p.PricePerNodeMonth > 0 {
-				known++
+			if p.PricingAvailable {
+				known += p.NodeCount
 			} else {
-				unknown++
+				unknown += p.NodeCount
 			}
 		}
 		total := known + unknown
@@ -1418,6 +1443,7 @@ func buildCostPageData(scan *clusterScan, activeCtx string, clusterList []string
 			data.AccuracyPct = known * 100 / total
 		}
 		data.KnownVMs, data.UnknownVMs, data.TotalVMs = known, unknown, total
+		data.MatchedNodes, data.TotalNodes = known, total
 		data.ConfidenceLabel = "High"
 		if data.AccuracyPct < 80 {
 			data.ConfidenceLabel = "Medium"
@@ -1434,19 +1460,23 @@ func buildCostPageData(scan *clusterScan, activeCtx string, clusterList []string
 		for _, p := range r.NodePoolCosts {
 			data.TotalRISavings += p.RISavings
 			row := costPoolRow{
-				Name:          p.Name,
-				VMSize:        p.VMSize,
-				NodeCount:     p.NodeCount,
-				CPUUtilPct:    p.CPUUtilizationPct,
-				MemUtilPct:    p.MemoryUtilizationPct,
-				CPUWidthStyle: template.CSS(fmt.Sprintf("width:%.0f%%", p.CPUUtilizationPct)),
-				MemWidthStyle: template.CSS(fmt.Sprintf("width:%.0f%%", p.MemoryUtilizationPct)),
-				PricePerNode:  formatMoney(p.PricePerNodeMonth),
-				PoolTotal:     formatMoney(p.TotalMonthly),
-				RISavings:     p.RISavings,
+				Name:           p.Name,
+				VMSize:         p.VMSize,
+				NodeCount:      p.NodeCount,
+				CPUUtilPct:     p.CPUUtilizationPct,
+				MemUtilPct:     p.MemoryUtilizationPct,
+				CPUWidthStyle:  template.CSS(fmt.Sprintf("width:%.0f%%", p.CPUUtilizationPct)),
+				MemWidthStyle:  template.CSS(fmt.Sprintf("width:%.0f%%", p.MemoryUtilizationPct)),
+				PricePerNode:   formatMoney(p.PricePerNodeMonth),
+				PoolTotal:      formatMoney(p.TotalMonthly),
+				RISavings:      p.RISavings,
+				Provider:       titleProvider(p.Provider),
+				Region:         p.Region,
+				PriceAvailable: p.PricingAvailable,
+				ShowRI:         p.Provider == "azure",
 			}
 			if strings.EqualFold(p.Priority, "spot") {
-				row.TagClass, row.TagLabel = "tag-spot", "⚡ Spot"
+				row.TagClass, row.TagLabel = "tag-spot", "Spot"
 			} else {
 				row.TagClass, row.TagLabel = "tag-regular", "On-Demand"
 			}
@@ -1498,34 +1528,6 @@ func buildCostPageData(scan *clusterScan, activeCtx string, clusterList []string
 		data.ConfPctStyle = template.CSS("color:#64748b")
 	}
 
-	cisScore := scan.securityScore()
-	data.SecurityColor = "green"
-	if cisScore < 0 {
-		data.SecurityDisplay, data.SecurityColor = "N/A", "blue"
-	} else {
-		data.SecurityDisplay = fmt.Sprintf("%d/100", cisScore)
-		if cisScore < 60 {
-			data.SecurityColor = "red"
-		} else if cisScore < 80 {
-			data.SecurityColor = "yellow"
-		}
-	}
-
-	wasteItems := scan.wasteTotal()
-	data.WasteColor = "green"
-	if wasteItems < 0 {
-		data.WasteDisplay, data.WasteColor = "N/A", "blue"
-	} else {
-		data.WasteDisplay = fmt.Sprintf("%d", wasteItems)
-		if wasteItems > 10 {
-			data.WasteColor = "red"
-		} else if wasteItems > 0 {
-			data.WasteColor = "yellow"
-		}
-	}
-
-	data.PodCount = scan.monthlyPodCount()
-
 	for _, ctx := range clusterList {
 		label := displayName(ctx)
 		if len(label) > 22 {
@@ -1539,29 +1541,20 @@ func buildCostPageData(scan *clusterScan, activeCtx string, clusterList []string
 		})
 	}
 
-	for _, issue := range collectWarRoomIssues(scan, 5) {
-		wi := costWRIssue{warRoomIssue: issue}
-		if issue.Severity == "critical" {
-			wi.CardClass, wi.BadgeLabel = "c", "CRITICAL"
-		} else {
-			wi.CardClass, wi.BadgeLabel = "w", strings.ToUpper(issue.Severity)
-		}
-		wi.Icon, wi.TypeLabel = warRoomTypeLabel(issue.Type)
-		if issue.AgeDays > 0 {
-			wi.AgeLbl = fmt.Sprintf("%dd", issue.AgeDays)
-		}
-		wi.ShortName = issue.Resource
-		if len(wi.ShortName) > 28 {
-			wi.ShortName = wi.ShortName[:27] + "…"
-		}
-		wi.ShortMsg = issue.Message
-		if len(wi.ShortMsg) > 80 {
-			wi.ShortMsg = wi.ShortMsg[:79] + "…"
-		}
-		data.WRIssues = append(data.WRIssues, wi)
-	}
-
 	return data
+}
+
+func titleProvider(provider string) string {
+	switch provider {
+	case "azure":
+		return "Azure"
+	case "aws":
+		return "AWS"
+	case "mixed":
+		return "Mixed"
+	default:
+		return "Unknown"
+	}
 }
 
 func renderCostPage(scan *clusterScan, activeCtx string, clusterList []string) string {

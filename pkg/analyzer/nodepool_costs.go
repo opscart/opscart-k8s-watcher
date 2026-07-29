@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/opscart/opscart-k8s-watcher/pkg/models"
 	corev1 "k8s.io/api/core/v1"
@@ -13,9 +14,15 @@ import (
 
 // NodePoolCostAnalyzer detects AKS/K8s node pools and calculates real costs
 type NodePoolCostAnalyzer struct {
-	clientset *kubernetes.Clientset
-	ctx       context.Context
-	region    string
+	clientset         *kubernetes.Clientset
+	ctx               context.Context
+	region            string
+	providers         map[CloudProvider]PricingProvider
+	detectedProvider  CloudProvider
+	effectiveProvider CloudProvider
+	providerOverride  CloudProvider
+	warnings          []string
+	lastPriceRefresh  time.Time
 }
 
 // NewNodePoolCostAnalyzer creates a new node pool cost analyzer
@@ -24,14 +31,53 @@ func NewNodePoolCostAnalyzer(clientset *kubernetes.Clientset, region string) *No
 		clientset: clientset,
 		ctx:       context.Background(),
 		region:    region,
+		providers: map[CloudProvider]PricingProvider{CloudProviderAzure: NewAzurePricingProvider()},
 	}
 }
+
+func (npa *NodePoolCostAnalyzer) SetPricingProvider(provider PricingProvider) {
+	if provider != nil {
+		npa.providers[provider.Provider()] = provider
+	}
+}
+
+func (npa *NodePoolCostAnalyzer) SetCloudProviderOverride(provider CloudProvider) {
+	if provider == CloudProviderAzure || provider == CloudProviderAWS {
+		npa.providerOverride = provider
+	}
+}
+
+func (npa *NodePoolCostAnalyzer) Provider() CloudProvider         { return npa.effectiveProvider }
+func (npa *NodePoolCostAnalyzer) DetectedProvider() CloudProvider { return npa.detectedProvider }
+func (npa *NodePoolCostAnalyzer) ProviderDetectionMode() string {
+	if npa.providerOverride != "" {
+		return "manual"
+	}
+	return "detected"
+}
+func (npa *NodePoolCostAnalyzer) ProviderWarning() string {
+	if npa.providerOverride != "" && npa.providerOverride != npa.detectedProvider {
+		return fmt.Sprintf("%s pricing is enabled by manual provider override; the cluster provider was not detected as %s.",
+			providerDisplayName(npa.providerOverride), providerDisplayName(npa.providerOverride))
+	}
+	return ""
+}
+func (npa *NodePoolCostAnalyzer) Region() string { return npa.region }
+func (npa *NodePoolCostAnalyzer) PricingWarnings() []string {
+	return append([]string(nil), npa.warnings...)
+}
+func (npa *NodePoolCostAnalyzer) LastPriceRefresh() time.Time { return npa.lastPriceRefresh }
 
 // AnalyzeNodePoolCosts discovers node pools and computes costs from VM SKU pricing
 func (npa *NodePoolCostAnalyzer) AnalyzeNodePoolCosts() ([]models.NodePoolCost, []models.NodeInfo, error) {
 	nodeList, err := npa.clientset.CoreV1().Nodes().List(npa.ctx, metav1.ListOptions{})
 	if err != nil {
 		return nil, nil, fmt.Errorf("listing nodes: %w", err)
+	}
+	npa.detectedProvider = DetectClusterProvider(nodeList.Items)
+	npa.effectiveProvider = npa.detectedProvider
+	if npa.providerOverride != "" {
+		npa.effectiveProvider = npa.providerOverride
 	}
 
 	// Get all pods to calculate per-node resource requests
@@ -80,6 +126,9 @@ func (npa *NodePoolCostAnalyzer) AnalyzeNodePoolCosts() ([]models.NodePoolCost, 
 
 	for _, node := range nodeList.Items {
 		info := npa.extractNodeInfo(node)
+		if npa.providerOverride != "" {
+			info.Provider = string(npa.providerOverride)
+		}
 
 		// Add resource requests
 		if req, ok := nodeRequests[node.Name]; ok {
@@ -95,26 +144,42 @@ func (npa *NodePoolCostAnalyzer) AnalyzeNodePoolCosts() ([]models.NodePoolCost, 
 			poolName = "default"
 		}
 
-		if _, exists := poolMap[poolName]; !exists {
-			poolMap[poolName] = &nodePoolBuilder{
+		poolKey := info.Provider + "\x00" + poolName + "\x00" + info.VMSize + "\x00" + info.Priority + "\x00" + info.Region
+		if _, exists := poolMap[poolKey]; !exists {
+			poolMap[poolKey] = &nodePoolBuilder{
 				name:     poolName,
 				vmSize:   info.VMSize,
 				os:       info.OS,
 				priority: info.Priority,
 				region:   info.Region,
+				provider: CloudProvider(info.Provider),
 			}
 		}
-		poolMap[poolName].nodes = append(poolMap[poolName].nodes, info)
+		poolMap[poolKey].nodes = append(poolMap[poolKey].nodes, info)
 	}
 
 	// Build NodePoolCost structs
 	var poolCosts []models.NodePoolCost
 	for _, builder := range poolMap {
-		poolCost := builder.build(npa.region)
+		poolCost := builder.build(npa)
+		if poolCost.PricingWarning != "" {
+			npa.warnings = append(npa.warnings, fmt.Sprintf("%s: %s", poolCost.Name, poolCost.PricingWarning))
+		}
 		poolCosts = append(poolCosts, poolCost)
 	}
 
 	return poolCosts, nodeInfos, nil
+}
+
+func providerDisplayName(provider CloudProvider) string {
+	switch provider {
+	case CloudProviderAzure:
+		return "Azure"
+	case CloudProviderAWS:
+		return "AWS"
+	default:
+		return "Unknown"
+	}
 }
 
 // TotalClusterCost sums all node pool monthly costs
@@ -193,10 +258,11 @@ type nodePoolBuilder struct {
 	os       string
 	priority string
 	region   string
+	provider CloudProvider
 	nodes    []models.NodeInfo
 }
 
-func (b *nodePoolBuilder) build(region string) models.NodePoolCost {
+func (b *nodePoolBuilder) build(npa *NodePoolCostAnalyzer) models.NodePoolCost {
 	nodeCount := len(b.nodes)
 
 	// Determine VM size — use most common across nodes
@@ -211,18 +277,30 @@ func (b *nodePoolBuilder) build(region string) models.NodePoolCost {
 	var spotDiscount float64
 	var riSavings, riSavings3yr float64
 
-	pricing, found := LookupVMPrice(vmSize, region)
-	if found {
+	region := b.region
+	if region == "" {
+		region = npa.region
+	}
+	providerImpl, configured := npa.providers[b.provider]
+	priceResult, priceErr := PriceResult{}, fmt.Errorf("pricing is unavailable for provider %s", b.provider)
+	if configured {
+		priceResult, priceErr = providerImpl.LookupOnDemandPrice(npa.ctx, PriceRequest{
+			InstanceType: vmSize, Region: region, OS: b.os, CapacityType: b.priority,
+		})
+	}
+	pricing, azureCatalogMatch := LookupVMPrice(vmSize, region)
+	if priceErr == nil {
+		pricePerHour = priceResult.HourlyPrice
+		pricePerMonth = pricePerHour * 730
+		if !priceResult.RefreshedAt.IsZero() && priceResult.RefreshedAt.After(npa.lastPriceRefresh) {
+			npa.lastPriceRefresh = priceResult.RefreshedAt
+		}
+	}
+	if b.provider == CloudProviderAzure && azureCatalogMatch {
 		cpuPerNode = float64(pricing.CPUCores)
 		memPerNode = pricing.MemoryGB
-
-		if strings.EqualFold(b.priority, "spot") {
-			pricePerHour = pricing.SpotHour
-			pricePerMonth = pricing.SpotHour * 730
+		if strings.EqualFold(b.priority, "spot") && priceErr == nil {
 			spotDiscount = 1.0 - (pricing.SpotHour / pricing.PayAsYouGoHour)
-		} else {
-			pricePerHour = pricing.PayAsYouGoHour
-			pricePerMonth = pricing.PayAsYouGoMonth
 		}
 		// RI savings potential (if not already spot)
 		if !strings.EqualFold(b.priority, "spot") {
@@ -233,8 +311,9 @@ func (b *nodePoolBuilder) build(region string) models.NodePoolCost {
 				riSavings3yr = (pricing.PayAsYouGoMonth - pricing.ThreeYearRI) * float64(nodeCount)
 			}
 		}
-	} else {
-		// Fallback: estimate from node capacity
+	} else if b.provider == CloudProviderAzure && npa.providerOverride == "" {
+		// Preserve the existing Azure-only capacity fallback. It is never used
+		// for AWS or unknown nodes.
 		if len(b.nodes) > 0 {
 			cpuPerNode = b.nodes[0].CPUCapacity
 			memPerNode = b.nodes[0].MemGBCapacity
@@ -242,8 +321,12 @@ func (b *nodePoolBuilder) build(region string) models.NodePoolCost {
 			if estimated, ok := EstimateVMFromResources(cpuPerNode, memPerNode); ok {
 				pricePerHour = estimated.PayAsYouGoHour
 				pricePerMonth = estimated.PayAsYouGoMonth
+				priceErr = nil
 			}
 		}
+	} else if len(b.nodes) > 0 {
+		cpuPerNode = b.nodes[0].CPUCapacity
+		memPerNode = b.nodes[0].MemGBCapacity
 	}
 
 	// Sum utilization across all nodes in pool
@@ -274,18 +357,21 @@ func (b *nodePoolBuilder) build(region string) models.NodePoolCost {
 	}
 
 	return models.NodePoolCost{
-		Name:              b.name,
-		VMSize:            vmSize,
-		NodeCount:         nodeCount,
-		Priority:          b.priority,
-		OS:                b.os,
-		Mode:              mode,
-		CPUCoresPerNode:   cpuPerNode,
-		MemoryGBPerNode:   memPerNode,
-		PricePerNodeHour:  pricePerHour,
-		PricePerNodeMonth: pricePerMonth,
-		TotalMonthly:      pricePerMonth * float64(nodeCount),
-		SpotDiscount:      spotDiscount,
+		Name:                 b.name,
+		VMSize:               vmSize,
+		NodeCount:            nodeCount,
+		Priority:             b.priority,
+		OS:                   b.os,
+		Mode:                 mode,
+		Provider:             string(b.provider),
+		Region:               region,
+		PricingAvailable:     priceErr == nil && pricePerMonth > 0,
+		CPUCoresPerNode:      cpuPerNode,
+		MemoryGBPerNode:      memPerNode,
+		PricePerNodeHour:     pricePerHour,
+		PricePerNodeMonth:    pricePerMonth,
+		TotalMonthly:         pricePerMonth * float64(nodeCount),
+		SpotDiscount:         spotDiscount,
 		TotalCPUCapacity:     totalCPUCap,
 		TotalMemoryCapacity:  totalMemCap,
 		CPURequested:         totalCPUReq,
@@ -294,6 +380,12 @@ func (b *nodePoolBuilder) build(region string) models.NodePoolCost {
 		MemoryUtilizationPct: memUtil,
 		RISavings:            riSavings,
 		RISavings3yr:         riSavings3yr,
+		PricingWarning: func() string {
+			if priceErr != nil {
+				return priceErr.Error()
+			}
+			return ""
+		}(),
 	}
 }
 
@@ -302,7 +394,8 @@ func (npa *NodePoolCostAnalyzer) extractNodeInfo(node corev1.Node) models.NodeIn
 	labels := node.Labels
 
 	info := models.NodeInfo{
-		Name: node.Name,
+		Name:     node.Name,
+		Provider: string(DetectNodeProvider(node)),
 	}
 
 	// AKS node pool labels
@@ -343,9 +436,11 @@ func (npa *NodePoolCostAnalyzer) extractNodeInfo(node corev1.Node) models.NodeIn
 		info.OS = "linux"
 	}
 
-	// Priority (AKS spot)
+	// Capacity type / priority.
 	if priority, ok := labels["kubernetes.azure.com/scalesetpriority"]; ok {
 		info.Priority = priority // "spot" or "regular"
+	} else if capacity, ok := labels["eks.amazonaws.com/capacityType"]; ok {
+		info.Priority = capacity
 	} else {
 		info.Priority = "Regular"
 	}

@@ -1,10 +1,13 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"sort"
 	"time"
 
+	awsconfig "github.com/aws/aws-sdk-go-v2/config"
+	awspricing "github.com/aws/aws-sdk-go-v2/service/pricing"
 	"github.com/opscart/opscart-k8s-watcher/pkg/analyzer"
 	"github.com/opscart/opscart-k8s-watcher/pkg/models"
 	"github.com/opscart/opscart-k8s-watcher/pkg/report"
@@ -67,6 +70,13 @@ func runCostsScan(clusterContext string) error {
 }
 
 func runCloudCostsScan(clusterContext string) error {
+	if pricingSource != "auto" && pricingSource != "embedded" && pricingSource != "aws-api" {
+		return fmt.Errorf("invalid pricing source %q: use auto, embedded, or aws-api", pricingSource)
+	}
+	providerOverride, err := analyzer.ParseCloudProviderOverride(cloudProvider)
+	if err != nil {
+		return err
+	}
 	fmt.Printf("\n🔍 Cluster: %s\n", clusterContext)
 	clientset, err := getKubernetesClient(clusterContext)
 	if err != nil {
@@ -75,6 +85,13 @@ func runCloudCostsScan(clusterContext string) error {
 
 	// ── Step 1: Analyze node pools and compute real VM costs ──────────────
 	npa := analyzer.NewNodePoolCostAnalyzer(clientset, region)
+	npa.SetCloudProviderOverride(providerOverride)
+	if pricingSource == "aws-api" {
+		cfg, cfgErr := awsconfig.LoadDefaultConfig(context.Background(), awsconfig.WithRegion("us-east-1"))
+		if cfgErr == nil {
+			npa.SetPricingProvider(analyzer.NewAWSPricingProvider(awspricing.NewFromConfig(cfg), 24*time.Hour))
+		}
+	}
 	poolCosts, _, err := npa.AnalyzeNodePoolCosts()
 	if err != nil {
 		return fmt.Errorf("analyzing node pool costs: %w", err)
@@ -110,6 +127,10 @@ func runCloudCostsScan(clusterContext string) error {
 	costEstimate, _ := ca.AnalyzeCosts(totalNodeCost)
 	scenarios := costEstimate.OptimizationScenarios
 	savingsPotential := costEstimate.TotalSavingsPotential
+	if npa.Provider() != analyzer.CloudProviderAzure {
+		scenarios = nil
+		savingsPotential = models.CostRange{}
+	}
 
 	// ── Step 7: Detect region (from node labels if not specified) ─────────
 	detectedRegion := region
@@ -117,36 +138,41 @@ func runCloudCostsScan(clusterContext string) error {
 		// Pull from node pool builder
 		detectedRegion = "auto-detected"
 	}
+	matchedNodes, totalNodes := 0, 0
+	for _, pool := range poolCosts {
+		totalNodes += pool.NodeCount
+		if pool.PricingAvailable {
+			matchedNodes += pool.NodeCount
+		}
+	}
 
 	// ── Step 8: Build CloudCostReport ────────────────────────────────────
 	costReport := &models.CloudCostReport{
-		Timestamp:        time.Now(),
-		ClusterName:      clusterContext,
-		Region:           detectedRegion,
-		Provider:         "azure",
-		NodePoolCosts:    poolCosts,
-		TotalNodeCost:    totalNodeCost,
-		NamespaceCosts:   nsCosts,
-		TotalMonthlyCost: totalNodeCost,
-		TotalAnnualCost:  totalNodeCost * 12,
+		Timestamp:             time.Now(),
+		ClusterName:           clusterContext,
+		Region:                detectedRegion,
+		Provider:              string(npa.Provider()),
+		DetectedProvider:      string(npa.DetectedProvider()),
+		EffectiveProvider:     string(npa.Provider()),
+		ProviderDetectionMode: npa.ProviderDetectionMode(),
+		ProviderWarning:       npa.ProviderWarning(),
+		NodePoolCosts:         poolCosts,
+		TotalNodeCost:         totalNodeCost,
+		NamespaceCosts:        nsCosts,
+		TotalMonthlyCost:      totalNodeCost,
+		TotalAnnualCost:       totalNodeCost * 12,
 		CostBreakdown: models.CostBreakdown{
 			Compute: totalNodeCost,
 		},
 		OptimizationScenarios: scenarios,
 		TotalSavingsPotential: savingsPotential,
-		PricingSource:         "embedded-catalog",
-		Assumptions: []string{
-			"VM pricing from embedded Azure retail price catalog (East US 2 baseline)",
-			"Cost allocation: weighted average of CPU + Memory resource requests",
-			"Node pool costs = Pay-As-You-Go unless spot label detected",
-			"Does NOT include: disk I/O, network egress, Log Analytics, Defender for Cloud",
-		},
-		Disclaimers: []string{
-			"⚠️  Prices are approximate — based on Azure public pricing as of 2026",
-			"⚠️  Actual costs depend on Enterprise Agreement, MACC commitments, and negotiated rates",
-			"⚠️  Use Azure Cost Management + Billing for exact billing data",
-			"⚠️  Reserved Instance savings shown are potential — requires commitment purchase",
-		},
+		PricingSource:         pricingSource,
+		PricingCoverage:       fmt.Sprintf("%d of %d nodes priced", matchedNodes, totalNodes),
+		PricingWarnings:       npa.PricingWarnings(),
+		Currency:              "USD",
+		LastPriceRefresh:      npa.LastPriceRefresh(),
+		Assumptions:           []string{"Cost allocation uses a weighted average of CPU and memory requests."},
+		Disclaimers:           []string{"Public/list pricing estimates are not invoice values."},
 	}
 
 	// ── Step 9: Render output ────────────────────────────────────────────
