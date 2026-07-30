@@ -7,6 +7,10 @@
     kubectl port-forward -n {{ .Release.Namespace }} deploy/{{ include "opscart-watcher.fullname" . }} 8080:8080
     open http://localhost:8080
 
+  Retrieve the dashboard credentials:
+    kubectl get secret -n {{ .Release.Namespace }} {{ include "opscart-watcher.authSecretName" . }} -o jsonpath='{.data.username}' | base64 --decode; echo
+    kubectl get secret -n {{ .Release.Namespace }} {{ include "opscart-watcher.authSecretName" . }} -o jsonpath='{.data.password}' | base64 --decode; echo
+
 {{- if .Values.persistence.enabled }}
   Operational memory (incident history, timelines) is persisted on PVC
   "{{ .Values.persistence.existingClaim | default (include "opscart-watcher.fullname" .) }}".

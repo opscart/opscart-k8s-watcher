@@ -55,6 +55,7 @@ open http://localhost:8080
 ```
 
 Incident history persists on a PVC by default — see the [chart README](helm/opscart-watcher/README.md) for storage options and minikube-specific notes. The raw manifest below is a quickstart; the Helm chart is canonical.
+Official container images support both `linux/amd64` and `linux/arm64`.
 
 ### kubectl
 
@@ -77,30 +78,21 @@ go build -o opscart-dashboard ./cmd/opscart-dashboard
 
 ## First Login
 
-OpsCart requires authentication by default — there is no configuration that disables it. On first run with nothing configured, it generates a random password and prints it once to the pod logs:
+OpsCart requires authentication by default. When `auth.existingSecret` is
+empty, Helm creates a release-managed Secret and preserves its generated
+credentials across pod restarts and chart upgrades.
 
 ```bash
-kubectl logs deploy/opscart-watcher -n opscart-system | grep "auth:"
-```
-Get the user name and password
-
-```bash
-kubectl get secret opscart-auth -n opscart-system -o jsonpath='{.data.username}' | base64 -d
+kubectl get secret -n opscart-system opscart-watcher-auth \
+  -o jsonpath='{.data.username}' | base64 --decode
 echo
-admin
-kubectl get secret opscart-auth -n opscart-system -o jsonpath='{.data.password}' | base64 -d
+kubectl get secret -n opscart-system opscart-watcher-auth \
+  -o jsonpath='{.data.password}' | base64 --decode
 echo
-mypassxxx
 ```
 
-You'll see something like:
-
-```
-auth: WARNING — using auto-generated password (see above). Configure OPSCART_AUTH_USER/PASS or OPSCART_AUTH_SECRET_NAME for a stable credential.
-auth: username=admin password=x7K9-mQ2p-Rt4w
-```
-
-This password regenerates on every pod restart unless you configure a stable one. For a persistent credential, create a Secret and reference it in `values.yaml`:
+To supply credentials yourself, create a Secret with `username` and `password`
+keys and set `auth.existingSecret`:
 
 ```bash
 kubectl create secret generic opscart-auth \
@@ -113,6 +105,9 @@ kubectl create secret generic opscart-auth \
 auth:
   existingSecret: "opscart-auth"
 ```
+
+Standalone execution without configured credentials still generates and logs a
+random password at startup; that password changes when the process restarts.
 
 For team deployments, authenticate at the ingress layer instead with [oauth2-proxy](helm/opscart-watcher/values-oauth2-proxy-example.yaml) — supports Azure AD, Google, GitHub, and generic OIDC. See [Security](docs/05-Security.md) for the full pattern and threat model.
 

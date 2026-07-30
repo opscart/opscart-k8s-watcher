@@ -59,3 +59,15 @@ PVC claim name — the templated PVC's name, or the user-supplied existingClaim.
 {{- include "opscart-watcher.fullname" . }}
 {{- end }}
 {{- end }}
+
+{{/*
+Auth Secret name — preserve an explicitly supplied Secret; otherwise use a
+release-managed Secret whose data is retained with lookup on upgrades.
+*/}}
+{{- define "opscart-watcher.authSecretName" -}}
+{{- if .Values.auth.existingSecret }}
+{{- .Values.auth.existingSecret }}
+{{- else }}
+{{- printf "%s-auth" (include "opscart-watcher.fullname" .) }}
+{{- end }}
+{{- end }}

@@ -29,66 +29,45 @@ bodies. Treat the database file with the same sensitivity as `kubectl get`
 output — it reveals cluster topology and workload names, not application
 data.
 
-Find the current Authentication section and replace with:
-markdown## Authentication
+## Authentication
 
 OpsCart ships with a safety-net authentication layer on by default — the
 dashboard is never silently open, even if you skip configuration entirely.
 
-### Default behavior: auto-generated credentials
+### Helm-managed credentials
 
-If no credentials are configured, OpsCart generates a random password on
-startup and prints it once to the pod logs:
-2026-07-16 09:12:03  auth: no credentials configured — generated one-time password
-2026-07-16 09:12:03  auth: username=admin password=x7K9-mQ2p-Rt4w
-2026-07-16 09:12:03  auth: set OPSCART_AUTH_USER / OPSCART_AUTH_PASS (or authSecretName
-in values.yaml) to use a stable password across restarts
+When `auth.existingSecret` is empty, the Helm chart creates a
+release-managed Secret. Helm uses the existing Secret data during upgrades,
+so the generated username and password remain stable across pod restarts and
+chart upgrades.
 
-Retrieve it with:
 ```bash
-kubectl logs deploy/opscart-watcher -n opscart-system | grep "auth:"
+kubectl get secret -n opscart-system opscart-watcher-auth \
+  -o jsonpath='{.data.username}' | base64 --decode
+echo
+kubectl get secret -n opscart-system opscart-watcher-auth \
+  -o jsonpath='{.data.password}' | base64 --decode
+echo
 ```
 
-This password is regenerated on every pod restart unless you configure a
-stable one — by design, so there is no default credential to discover or
-leave unrotated.
+You can instead manage the Secret yourself. It must contain non-empty
+`username` and `password` keys:
 
-### Stable credentials (two ways)
-
-**Environment variables** (simplest):
-```yaml
-auth:
-  username: "admin"
-  passwordEnv: "OPSCART_AUTH_PASS"   # set via a Secret-backed env var
-```
-
-**Kubernetes Secret reference** (if you prefer managing credentials as a
-Secret directly):
 ```yaml
 auth:
   existingSecret: "opscart-auth"
-  secretUsernameKey: "username"
-  secretPasswordKey: "password"
 ```
 
-Either path is optional — if neither is set, the auto-generated flow above
-applies. There is no configuration value that disables authentication
-entirely; this is deliberate. If you are fronting OpsCart with oauth2-proxy
-(see below) and want to avoid a double login prompt, terminate basic auth
-at the ingress layer instead of removing it from OpsCart.
+`auth.existingSecret` remains supported for existing installations and for
+credentials managed by an external secret controller.
 
-### Startup validation
+### Standalone execution
 
-On every start, OpsCart logs one explicit line about its auth state:
-2026-07-16 09:12:03  auth: WARNING — using auto-generated password (see above).
-Configure OPSCART_AUTH_USER/PASS for a stable credential.
-
-or, when configured:
-2026-07-16 09:12:03  auth: basic auth configured (source: env)
-
-This is intentionally a log line, not a UI element — it is aimed at the
-person deploying the chart, checked once at rollout, not at end users of
-the dashboard.
+Outside Helm, OpsCart accepts `OPSCART_AUTH_USER` and `OPSCART_AUTH_PASS`, or
+`OPSCART_AUTH_SECRET_NAME` with mounted `username` and `password` files. If no
+credentials are configured, it generates and logs a random password at
+startup. That standalone password is process-local and changes after every
+restart.
 
 ### Recommended pattern: authenticate at the ingress
 
@@ -115,30 +94,10 @@ pod.
 See `helm/opscart-watcher/values-oauth2-proxy-example.yaml` for a working
 example.
 
-### Until authentication is configured
-
-The dashboard has no protection beyond network placement. Recommended
-deployment postures, in order of preference:
-
-1. **Behind an authenticated ingress** (see above) — safe for shared/team use
-2. **`kubectl port-forward`** — safe for individual use; traffic is
-   encrypted via the existing API server tunnel and never leaves your
-   machine's authenticated kubectl session
-3. **ClusterIP only, no ingress** — safe only if every user with cluster
-   network access is already trusted at the level OpsCart's data warrants
-
 **Do not** expose the OpsCart Service via a public LoadBalancer or
-unauthenticated Ingress. There is nothing between an anonymous HTTP request
-and full read access to your cluster's operational state.
-
-### What's next (v1.10)
-
-Native OIDC support with namespace-scoped authorization — where dashboard
-visibility maps to the viewer's own Kubernetes RBAC — is planned for v1.10.
-That's a genuinely different problem (OpsCart needs to know *who* is asking
-to filter *what* they see) and can't be solved by a reverse proxy alone.
-The interim pattern above remains valid until then; v1.10 adds
-authorization on top of it, not a replacement for it.
+an unauthenticated Ingress. Basic authentication protects the dashboard, but
+TLS and an identity-aware ingress remain the recommended posture for shared
+or internet-reachable deployments.
 
 ## Reporting a vulnerability
 
