@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -8,6 +9,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -68,6 +70,83 @@ func TestHandleHealth(t *testing.T) {
 				t.Errorf("persistence = %q, want %q", body.Persistence, tt.wantPersistence)
 			}
 		})
+	}
+}
+
+func TestOpenDashboardStoreRequiredPersistenceFailure(t *testing.T) {
+	_, persistent, err := openDashboardStore(t.TempDir(), true)
+	if err == nil {
+		t.Fatal("required persistence unexpectedly accepted an unopenable database path")
+	}
+	if persistent {
+		t.Fatal("required persistence failure reported persistent=true")
+	}
+	if !strings.Contains(err.Error(), "required persistence unavailable") ||
+		!strings.Contains(err.Error(), "open SQLite database") {
+		t.Fatalf("error lacks persistence context: %v", err)
+	}
+}
+
+func TestOpenDashboardStoreOptionalPersistenceFallsBack(t *testing.T) {
+	db, persistent, err := openDashboardStore(t.TempDir(), false)
+	if err != nil {
+		t.Fatalf("optional persistence returned an error: %v", err)
+	}
+	defer db.Close()
+	if persistent {
+		t.Fatal("optional persistence fallback reported persistent=true")
+	}
+	if _, ok := db.(*store.NullStore); !ok {
+		t.Fatalf("fallback store = %T, want *store.NullStore", db)
+	}
+}
+
+func TestBackgroundRefreshStopsAfterActiveScanCompletes(t *testing.T) {
+	srv := newServer([]string{"test-ctx"}, &store.NullStore{}, 90, false)
+	state := srv.getState("test-ctx")
+	state.mu.Lock()
+	state.scan = &clusterScan{}
+	state.mu.Unlock()
+
+	started := make(chan struct{})
+	release := make(chan struct{})
+	var calls atomic.Int32
+	srv.refreshState = func(_ *dashboardState, _ []string) error {
+		if calls.Add(1) == 1 {
+			close(started)
+		}
+		<-release
+		return nil
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	srv.startBackgroundRefresh(ctx, time.Millisecond)
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("scheduled scan did not start")
+	}
+
+	cancel()
+	stopped := make(chan struct{})
+	go func() {
+		srv.backgroundWG.Wait()
+		close(stopped)
+	}()
+	select {
+	case <-stopped:
+		t.Fatal("background worker stopped before its active scan completed")
+	case <-time.After(20 * time.Millisecond):
+	}
+
+	close(release)
+	select {
+	case <-stopped:
+	case <-time.After(time.Second):
+		t.Fatal("background worker did not stop after active scan completed")
+	}
+	if got := calls.Load(); got != 1 {
+		t.Fatalf("scheduled scans after cancellation = %d, want 1 total call", got)
 	}
 }
 

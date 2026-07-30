@@ -2,12 +2,14 @@ package store
 
 import (
 	"database/sql"
+	"errors"
 	"fmt"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
-	_ "modernc.org/sqlite"
+	"modernc.org/sqlite"
 )
 
 var _ Store = (*SQLiteStore)(nil)
@@ -107,63 +109,110 @@ CREATE INDEX IF NOT EXISTS idx_incident_events_incident ON incident_events(incid
 
 // SQLiteStore is a Store implementation backed by a local SQLite database.
 type SQLiteStore struct {
-	db *sql.DB
+	db      *sql.DB
+	closeMu sync.Mutex
+	closed  bool
 }
 
 // OpenSQLite opens (and if necessary migrates) the SQLite database at path.
 func OpenSQLite(path string) (*SQLiteStore, error) {
+	const attempts = 3
+	var lastErr error
+	for attempt := 1; attempt <= attempts; attempt++ {
+		store, err := openSQLite(path)
+		if err == nil {
+			return store, nil
+		}
+		lastErr = err
+		if !isRetryableSQLiteOpenError(err) || attempt == attempts {
+			break
+		}
+		time.Sleep(time.Duration(attempt) * 100 * time.Millisecond)
+	}
+	return nil, fmt.Errorf("open SQLite database %q: %w", path, lastErr)
+}
+
+func openSQLite(path string) (*SQLiteStore, error) {
 	db, err := sql.Open("sqlite", path)
 	if err != nil {
+		return nil, fmt.Errorf("create database handle: %w", err)
+	}
+	closeOnError := func(err error) (*SQLiteStore, error) {
+		_ = db.Close()
 		return nil, err
 	}
 	// SQLite allows only a single writer; serialize all access through
 	// one connection to avoid "database is locked" errors.
 	db.SetMaxOpenConns(1)
 
-	if _, err := db.Exec("PRAGMA journal_mode=WAL"); err != nil {
-		db.Close()
-		return nil, err
+	if err := db.Ping(); err != nil {
+		return closeOnError(fmt.Errorf("ping database: %w", err))
 	}
-	// NORMAL syncs the WAL on checkpoint rather than every transaction.
-	// Paired with WAL mode and a clean Close() on SIGTERM, this is safe
-	// against kubelet-initiated pod restarts while avoiding FULL's
-	// per-commit fsync cost.
+
+	var journalMode string
+	if err := db.QueryRow("PRAGMA journal_mode=WAL").Scan(&journalMode); err != nil {
+		return closeOnError(fmt.Errorf("configure PRAGMA journal_mode=WAL: %w", err))
+	}
+	if !strings.EqualFold(journalMode, "wal") {
+		return closeOnError(fmt.Errorf("verify PRAGMA journal_mode=WAL: database reported %q", journalMode))
+	}
 	if _, err := db.Exec("PRAGMA synchronous=NORMAL"); err != nil {
-		db.Close()
-		return nil, err
+		return closeOnError(fmt.Errorf("configure PRAGMA synchronous=NORMAL: %w", err))
+	}
+	var synchronous int
+	if err := db.QueryRow("PRAGMA synchronous").Scan(&synchronous); err != nil {
+		return closeOnError(fmt.Errorf("verify PRAGMA synchronous=NORMAL: %w", err))
+	}
+	if synchronous != 1 {
+		return closeOnError(fmt.Errorf("verify PRAGMA synchronous=NORMAL: database reported %d", synchronous))
 	}
 
 	var version int
 	if err := db.QueryRow("PRAGMA user_version").Scan(&version); err != nil {
-		db.Close()
-		return nil, err
+		return closeOnError(fmt.Errorf("verify database schema version: %w", err))
 	}
 
 	switch {
 	case version == 0:
 		if _, err := db.Exec(schema); err != nil {
-			db.Close()
-			return nil, err
+			return closeOnError(fmt.Errorf("create database schema: %w", err))
 		}
 		if _, err := db.Exec(fmt.Sprintf("PRAGMA user_version = %d", schemaVersion)); err != nil {
-			db.Close()
-			return nil, err
+			return closeOnError(fmt.Errorf("record database schema version %d: %w", schemaVersion, err))
 		}
 	case version < schemaVersion:
 		if err := migrateSchema(db); err != nil {
-			db.Close()
-			return nil, err
+			return closeOnError(fmt.Errorf("migrate database schema from version %d to %d: %w", version, schemaVersion, err))
 		}
 		if _, err := db.Exec(fmt.Sprintf("PRAGMA user_version = %d", schemaVersion)); err != nil {
-			db.Close()
-			return nil, err
+			return closeOnError(fmt.Errorf("record migrated database schema version %d: %w", schemaVersion, err))
 		}
 	case version > schemaVersion:
-		db.Close()
-		return nil, fmt.Errorf("database schema is newer than this version of opscart")
+		return closeOnError(fmt.Errorf("verify database schema version: database version %d is newer than supported version %d", version, schemaVersion))
+	}
+
+	var verifiedVersion int
+	if err := db.QueryRow("PRAGMA user_version").Scan(&verifiedVersion); err != nil {
+		return closeOnError(fmt.Errorf("verify database initialization: read schema version: %w", err))
+	}
+	if verifiedVersion != schemaVersion {
+		return closeOnError(fmt.Errorf("verify database initialization: schema version is %d, want %d", verifiedVersion, schemaVersion))
 	}
 
 	return &SQLiteStore{db: db}, nil
+}
+
+func isRetryableSQLiteOpenError(err error) bool {
+	var sqliteErr *sqlite.Error
+	if !errors.As(err, &sqliteErr) {
+		return false
+	}
+	switch sqliteErr.Code() & 0xff {
+	case 5, 6, 14: // SQLITE_BUSY, SQLITE_LOCKED, SQLITE_CANTOPEN
+		return true
+	default:
+		return false
+	}
 }
 
 // migrateSchema brings a database created by an older version of opscart
@@ -1480,5 +1529,28 @@ func (s *SQLiteStore) PruneOlderThan(cluster string, cutoff time.Time) (int, err
 }
 
 func (s *SQLiteStore) Close() error {
-	return s.db.Close()
+	s.closeMu.Lock()
+	defer s.closeMu.Unlock()
+	if s.closed {
+		return nil
+	}
+	s.closed = true
+
+	// All application workers and HTTP handlers must be stopped before Close.
+	// A truncating checkpoint moves committed WAL frames into the main database
+	// and removes the WAL dependency before the connection is released.
+	var checkpointErr error
+	var busy, logFrames, checkpointedFrames int
+	if err := s.db.QueryRow("PRAGMA wal_checkpoint(TRUNCATE)").Scan(&busy, &logFrames, &checkpointedFrames); err != nil {
+		checkpointErr = fmt.Errorf("checkpoint SQLite WAL: %w", err)
+	} else if busy != 0 {
+		checkpointErr = fmt.Errorf(
+			"checkpoint SQLite WAL: busy=%d log_frames=%d checkpointed_frames=%d",
+			busy, logFrames, checkpointedFrames,
+		)
+	}
+	if err := s.db.Close(); err != nil {
+		return errors.Join(checkpointErr, fmt.Errorf("close SQLite database: %w", err))
+	}
+	return checkpointErr
 }

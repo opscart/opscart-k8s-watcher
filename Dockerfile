@@ -3,13 +3,16 @@ FROM golang:1.25 AS builder
 
 WORKDIR /src
 
+ARG TARGETOS
+ARG TARGETARCH
+
 # Cache module downloads separately from source so rebuilds are fast.
 COPY go.mod go.sum ./
 RUN go mod download
 
 COPY . .
 
-RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
+RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH:-amd64} \
     go build \
       -ldflags="-s -w" \
       -trimpath \

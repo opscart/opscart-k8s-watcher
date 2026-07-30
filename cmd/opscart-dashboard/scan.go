@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
@@ -130,11 +131,26 @@ func (s *dashboardState) refresh(clusterList []string) error {
 }
 
 // startBackgroundRefresh ticks every interval and re-scans every cluster that
-// has been visited at least once. Uses the same refresh() pipeline as POST /refresh.
-func (srv *server) startBackgroundRefresh(interval time.Duration) {
+// has been visited at least once. The worker is owned by ctx and backgroundWG,
+// so shutdown can stop scheduling work and wait for an in-flight scan before
+// the SQLite store is closed.
+func (srv *server) startBackgroundRefresh(ctx context.Context, interval time.Duration) {
+	srv.backgroundWG.Add(1)
+	go srv.runBackgroundRefresh(ctx, interval)
+}
+
+func (srv *server) runBackgroundRefresh(ctx context.Context, interval time.Duration) {
+	defer srv.backgroundWG.Done()
+
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
-	for range ticker.C {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+
 		srv.mu.RLock()
 		states := make([]*dashboardState, 0, len(srv.states))
 		for _, s := range srv.states {
@@ -143,13 +159,16 @@ func (srv *server) startBackgroundRefresh(interval time.Duration) {
 		srv.mu.RUnlock()
 
 		for _, state := range states {
+			if ctx.Err() != nil {
+				return
+			}
 			state.mu.RLock()
 			hasData := state.scan != nil
 			state.mu.RUnlock()
 			if !hasData {
 				continue
 			}
-			if err := state.refresh(srv.clusterList); err != nil {
+			if err := srv.refreshState(state, srv.clusterList); err != nil {
 				log.Printf("[%s] background refresh error: %v", displayName(state.ctx), err)
 			}
 		}

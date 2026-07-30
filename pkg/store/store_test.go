@@ -86,6 +86,52 @@ func TestWALModeActive(t *testing.T) {
 	}
 }
 
+func TestWALDatabaseRepeatedReopenPreservesIncidents(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "reopen.db")
+	incident := IncidentData{
+		Fingerprint: "default/Deployment/api/crash_loop",
+		Namespace:   "default",
+		Resource:    "api",
+		IssueType:   "crash_loop",
+		Severity:    "critical",
+	}
+
+	s, err := OpenSQLite(path)
+	if err != nil {
+		t.Fatalf("initial OpenSQLite: %v", err)
+	}
+	if err := s.UpsertIncidents("test-cluster", "scan-1", []IncidentData{incident}); err != nil {
+		t.Fatalf("UpsertIncidents: %v", err)
+	}
+	if err := s.Close(); err != nil {
+		t.Fatalf("initial Close: %v", err)
+	}
+
+	for i := 0; i < 5; i++ {
+		s, err = OpenSQLite(path)
+		if err != nil {
+			t.Fatalf("reopen %d: %v", i+1, err)
+		}
+		var mode string
+		if err := s.db.QueryRow("PRAGMA journal_mode").Scan(&mode); err != nil {
+			t.Fatalf("reopen %d journal mode: %v", i+1, err)
+		}
+		if mode != "wal" {
+			t.Fatalf("reopen %d journal_mode = %q, want wal", i+1, mode)
+		}
+		record, err := s.GetIncidentHistory("test-cluster", incident.Fingerprint)
+		if err != nil {
+			t.Fatalf("reopen %d GetIncidentHistory: %v", i+1, err)
+		}
+		if record == nil || record.Fingerprint != incident.Fingerprint {
+			t.Fatalf("reopen %d lost incident: %+v", i+1, record)
+		}
+		if err := s.Close(); err != nil {
+			t.Fatalf("reopen %d Close: %v", i+1, err)
+		}
+	}
+}
+
 func TestClose_SubsequentOpsFailCleanly(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "close.db")
 	s, err := OpenSQLite(path)

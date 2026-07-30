@@ -9,6 +9,7 @@ import (
 	"os/signal"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -90,6 +91,9 @@ func parseClusterList() []string {
 // ── runDashboard ──────────────────────────────────────────────────────────────
 
 func runDashboard(_ *cobra.Command, _ []string) error {
+	signalCtx, stopSignals := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stopSignals()
+
 	if pricingSource != "auto" && pricingSource != "embedded" && pricingSource != "aws-api" {
 		return fmt.Errorf("invalid --pricing-source %q: use auto, embedded, or aws-api", pricingSource)
 	}
@@ -101,6 +105,12 @@ func runDashboard(_ *cobra.Command, _ []string) error {
 	if dbPath == "" {
 		dbPath = "./opscart.db"
 	}
+	persistenceRequired, err := strconv.ParseBool(os.Getenv("OPSCART_PERSISTENCE_REQUIRED"))
+	if os.Getenv("OPSCART_PERSISTENCE_REQUIRED") == "" {
+		persistenceRequired = false
+	} else if err != nil {
+		return fmt.Errorf("invalid OPSCART_PERSISTENCE_REQUIRED: %w", err)
+	}
 	retentionDays := 90
 	if v := os.Getenv("OPSCART_RETENTION_DAYS"); v != "" {
 		if parsed, err := strconv.Atoi(v); err != nil {
@@ -109,17 +119,18 @@ func runDashboard(_ *cobra.Command, _ []string) error {
 			retentionDays = parsed
 		}
 	}
-	var db store.Store
-	dbPersistent := false
-	if sqlDB, err := store.OpenSQLite(dbPath); err != nil {
-		log.Printf("store: persistence disabled (%v)", err)
-		db = &store.NullStore{}
-	} else {
-		db = sqlDB
-		dbPersistent = true
+	db, dbPersistent, err := openDashboardStore(dbPath, persistenceRequired)
+	if err != nil {
+		return err
+	}
+	if dbPersistent {
 		log.Printf("store: operational memory at %s", dbPath)
 	}
-	defer db.Close()
+	defer func() {
+		if err := db.Close(); err != nil {
+			log.Printf("store: close operational memory: %v", err)
+		}
+	}()
 	srv := newServer(cl, db, retentionDays, dbPersistent)
 
 	log.Printf("Scanning cluster %q ...", displayName(cl[0]))
@@ -127,13 +138,24 @@ func runDashboard(_ *cobra.Command, _ []string) error {
 		return fmt.Errorf("initial scan: %w", err)
 	}
 
-	go srv.startBackgroundRefresh(60 * time.Second)
+	backgroundCtx, stopBackground := context.WithCancel(context.Background())
+	defer func() {
+		stopBackground()
+		srv.backgroundWG.Wait()
+	}()
+	srv.startBackgroundRefresh(backgroundCtx, 60*time.Second)
 
 	addr := ":" + port
-	httpServer := &http.Server{Addr: addr, Handler: srv.newMux()}
-
-	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
-	defer stop()
+	var httpHandlers sync.WaitGroup
+	handler := srv.newMux()
+	httpServer := &http.Server{
+		Addr: addr,
+		Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			httpHandlers.Add(1)
+			defer httpHandlers.Done()
+			handler.ServeHTTP(w, r)
+		}),
+	}
 
 	serveErr := make(chan error, 1)
 	go func() {
@@ -146,18 +168,37 @@ func runDashboard(_ *cobra.Command, _ []string) error {
 		if err != nil && err != http.ErrServerClosed {
 			return err
 		}
-	case <-ctx.Done():
-		stop()
-		log.Printf("shutting down: flushing operational memory")
+	case <-signalCtx.Done():
+		stopSignals()
+		log.Printf("shutting down: stopping HTTP traffic and scheduled scans")
+		stopBackground()
 
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 		if err := httpServer.Shutdown(shutdownCtx); err != nil {
 			log.Printf("http server shutdown: %v", err)
+			if closeErr := httpServer.Close(); closeErr != nil {
+				log.Printf("http server close: %v", closeErr)
+			}
 		}
+		httpHandlers.Wait()
+		srv.backgroundWG.Wait()
+		log.Printf("shutting down: checkpointing operational memory")
 	}
 
 	return nil
+}
+
+func openDashboardStore(path string, required bool) (store.Store, bool, error) {
+	sqlDB, err := store.OpenSQLite(path)
+	if err == nil {
+		return sqlDB, true, nil
+	}
+	if required {
+		return nil, false, fmt.Errorf("required persistence unavailable: %w", err)
+	}
+	log.Printf("store: persistence disabled (%v)", err)
+	return &store.NullStore{}, false, nil
 }
 
 func pricingSourceDefault() string {
