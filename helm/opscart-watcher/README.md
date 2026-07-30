@@ -25,6 +25,31 @@ Open http://localhost:8080
 > The chart does not create the namespace itself — always pass
 > `--create-namespace` on first install.
 
+## Authentication
+
+When `auth.existingSecret` is empty, Helm creates a release-managed Secret and
+preserves its generated credentials across pod restarts and upgrades. Retrieve
+them with:
+
+```bash
+kubectl get secret -n opscart-system opscart-watcher-auth \
+  -o jsonpath='{.data.username}' | base64 --decode
+echo
+kubectl get secret -n opscart-system opscart-watcher-auth \
+  -o jsonpath='{.data.password}' | base64 --decode
+echo
+```
+
+To manage credentials yourself, create a Secret containing `username` and
+`password`, then set:
+
+```yaml
+auth:
+  existingSecret: "opscart-auth"
+```
+
+The existing-Secret path remains compatible with existing installations.
+
 ## Uninstall
 
 ```bash
@@ -54,10 +79,9 @@ When persistence is enabled the Deployment uses `strategy: Recreate` —
 an RWO volume cannot be mounted by the old and new pod simultaneously,
 so upgrades incur brief downtime. This is expected.
 
-If the store cannot open its database the dashboard **falls back to
-in-memory mode and keeps running** — the symptom is
-`store: persistence disabled` in the pod logs and incident history that
-resets on every restart. If you see that, check the sections below.
+When Helm persistence is enabled, failure to open the database stops startup
+instead of silently using ephemeral storage. Check the pod logs and the
+permissions and node-placement sections below.
 
 ### Volume permissions (hostPath provisioners, minikube default)
 
@@ -93,6 +117,8 @@ helm upgrade ... --set persistence.storageClassName=csi-hostpath-sc
 ```
 
 ## Local development images
+
+Official images support `linux/amd64` and `linux/arm64`.
 
 With `image.pullPolicy=Never`, kubelet requires the image to be loaded
 under the **exact** `repository:tag` the chart renders — there is no
