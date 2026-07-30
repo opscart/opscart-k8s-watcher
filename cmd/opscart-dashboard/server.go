@@ -84,6 +84,8 @@ type server struct {
 	retentionDays int
 	dbPersistent  bool
 	auth          *authConfig
+	refreshState  func(*dashboardState, []string) error
+	backgroundWG  sync.WaitGroup
 }
 
 func newServer(clusterList []string, db store.Store, retentionDays int, dbPersistent bool) *server {
@@ -92,7 +94,17 @@ func newServer(clusterList []string, db store.Store, retentionDays int, dbPersis
 		log.Fatalf("auth: %v", err)
 	}
 	logAuthConfig(auth)
-	return &server{clusterList: clusterList, states: make(map[string]*dashboardState), db: db, retentionDays: retentionDays, dbPersistent: dbPersistent, auth: auth}
+	return &server{
+		clusterList:   clusterList,
+		states:        make(map[string]*dashboardState),
+		db:            db,
+		retentionDays: retentionDays,
+		dbPersistent:  dbPersistent,
+		auth:          auth,
+		refreshState: func(state *dashboardState, clusters []string) error {
+			return state.refresh(clusters)
+		},
+	}
 }
 
 func (srv *server) getState(ctx string) *dashboardState {

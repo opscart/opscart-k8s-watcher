@@ -43,12 +43,14 @@ spec:
           env:
             - name: OPSCART_DB_PATH
               value: /data/opscart.db
+            {{- if .Values.persistence.enabled }}
+            - name: OPSCART_PERSISTENCE_REQUIRED
+              value: "true"
+            {{- end }}
             - name: OPSCART_RETENTION_DAYS
               value: {{ .Values.retentionDays | quote }}
-            {{- if .Values.auth.existingSecret }}
             - name: OPSCART_AUTH_SECRET_NAME
-              value: {{ .Values.auth.existingSecret | quote }}
-            {{- end }}
+              value: {{ include "opscart-watcher.authSecretName" . | quote }}
           ports:
             - name: http
               containerPort: {{ .Values.service.targetPort }}
@@ -58,11 +60,9 @@ spec:
           volumeMounts:
             - name: opscart-data
               mountPath: /data
-            {{- if .Values.auth.existingSecret }}
             - name: auth-secret
               mountPath: /etc/opscart/auth
               readOnly: true
-            {{- end }}
           readinessProbe:
             httpGet:
               path: {{ .Values.probes.readiness.path }}
@@ -89,8 +89,6 @@ spec:
           {{- else }}
           emptyDir: {}
           {{- end }}
-        {{- if .Values.auth.existingSecret }}
         - name: auth-secret
           secret:
-            secretName: {{ .Values.auth.existingSecret }}
-        {{- end }}
+            secretName: {{ include "opscart-watcher.authSecretName" . }}
