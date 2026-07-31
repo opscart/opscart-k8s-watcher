@@ -445,7 +445,7 @@ func fullyPopulatedOverviewData() overviewPageData {
 				CountText: "3 pods", URL: "/warroom",
 				Namespace: "payments", Resource: "payments-api-7d8f9c6b5-abc12", IssueType: "crash_loop",
 				FirstDetectedLabel: "2d ago", ReopenCountVal: 1, TrendVal: "accelerating",
-				MemoryLine: "First detected 2d ago · reopened once · accelerating",
+				MemoryLine: "First detected 2d ago · accelerating",
 			},
 			{
 				Rank: 2, Title: "2 namespaces missing NetworkPolicy", Subtitle: "Including checkout, payments",
@@ -495,7 +495,7 @@ func fullyPopulatedOverviewData() overviewPageData {
 			{Name: "checkout-worker", Severity: ""},
 		},
 
-		NodePoolCount: 3, PodCount: 48, CPUUtilization: 92, MemUtilization: 61,
+		NodePoolCount: 3, PodCount: 48, CPUUtilization: 92, MemUtilization: 61, UtilizationStatus: "Critical",
 
 		IncidentScore: 62, IncidentScoreColor: "orange", IncidentScoreLabel: "Needs attention",
 		SecurityScore: 78, WasteCount: 6, MonthlyCost: 1234.56,
@@ -536,8 +536,8 @@ func TestOverviewTemplate_RendersFullyPopulatedData(t *testing.T) {
 		"&#43;$45 from last scan",
 		"-10 from last scan",
 		"&#43;5 from last scan",
-		"First detected 2d ago · reopened once · accelerating", // MemoryLine
-		"payments", // TopIssueNS in the "Highest Priority" bf-item
+		"First detected 2d ago · accelerating", // MemoryLine
+		"payments",                             // TopIssueNS in the "Highest Priority" bf-item
 	}
 	for _, want := range wantSubstrings {
 		if !strings.Contains(out, want) {
@@ -646,8 +646,8 @@ func TestBuildOverviewVerdict_UnprotectedNamespaceUsesNamespaceNotLiteralResourc
 }
 
 // TestBuildOverviewVerdict_IdleNamespaceUsesNamespaceNotLiteralResource
-// covers the same substitution for idle_namespace, and the ReopenCount
-// branch rather than the default one.
+// covers the same substitution for idle_namespace while ensuring recurrence
+// aggregates do not alter summary prose.
 func TestBuildOverviewVerdict_IdleNamespaceUsesNamespaceNotLiteralResource(t *testing.T) {
 	topIssues := []topIssue{
 		{
@@ -663,10 +663,10 @@ func TestBuildOverviewVerdict_IdleNamespaceUsesNamespaceNotLiteralResource(t *te
 
 	line1, _ := buildOverviewVerdict(topIssues, 0, time.Now())
 
-	if strings.Contains(line1, "namespace reoccurred") {
+	if strings.Contains(line1, "namespace has been") {
 		t.Fatalf("expected verdict to use the real namespace, not the literal placeholder %q: got %q", "namespace", line1)
 	}
-	if !strings.Contains(line1, "batch-jobs reoccurred") {
+	if !strings.Contains(line1, "batch-jobs has been") || strings.Contains(line1, "reopened") || strings.Contains(line1, "reoccurred") {
 		t.Fatalf("expected verdict to mention namespace %q, got: %q", "batch-jobs", line1)
 	}
 }
@@ -824,11 +824,11 @@ func TestBuildMemoryLine(t *testing.T) {
 		},
 		{
 			name: "one reopen", firstDetectedLabel: "3d ago", reopenCount: 1, trend: "stable", issueType: "crash_loop",
-			want: "First detected 3d ago · reopened once",
+			want: "First detected 3d ago",
 		},
 		{
 			name: "multiple reopens use ×N", firstDetectedLabel: "3d ago", reopenCount: 4, trend: "stable", issueType: "crash_loop",
-			want: "First detected 3d ago · reopened ×4",
+			want: "First detected 3d ago",
 		},
 		{
 			name: "accelerating trend included for restart-based issue type", firstDetectedLabel: "3d ago", reopenCount: 0, trend: "accelerating", issueType: "crash_loop",
@@ -852,7 +852,7 @@ func TestBuildMemoryLine(t *testing.T) {
 		},
 		{
 			name: "reopen and trend both present, joined with middle dot", firstDetectedLabel: "7d ago", reopenCount: 1, trend: "accelerating", issueType: "crash_loop",
-			want: "First detected 7d ago · reopened once · accelerating",
+			want: "First detected 7d ago · accelerating",
 		},
 	}
 	for _, tt := range tests {
@@ -953,7 +953,7 @@ func TestEnrichTopIssues(t *testing.T) {
 	if got[0].MemoryLine == "" {
 		t.Fatalf("expected matched row to be enriched, got %+v", got[0])
 	}
-	if !strings.Contains(got[0].MemoryLine, "reopened once") || !strings.Contains(got[0].MemoryLine, "accelerating") {
+	if strings.Contains(got[0].MemoryLine, "reopened") || !strings.Contains(got[0].MemoryLine, "accelerating") {
 		t.Errorf("unexpected MemoryLine: %q", got[0].MemoryLine)
 	}
 	if got[0].ReopenCountVal != 1 || got[0].TrendVal != "accelerating" {

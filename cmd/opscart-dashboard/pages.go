@@ -1196,7 +1196,6 @@ func (srv *server) handleWastePage(w http.ResponseWriter, r *http.Request) {
 		} else {
 			data.ScanCoverage = "Incomplete"
 		}
-		data.TotalWasteItems = wa.TotalWasteItems
 		data.OrphanedPVCStorageGB = wa.OrphanedPVCStorageGB
 		data.OrphanedPVCs = wa.OrphanedPVCs
 		data.ZeroReplicaWorkloads = wa.ZeroReplicaWorkloads
@@ -1249,6 +1248,7 @@ func (srv *server) handleWastePage(w http.ResponseWriter, r *http.Request) {
 			len(data.OrphanedServices) +
 			len(data.BrokenIngresses) +
 			len(data.MisconfiguredHPAs)
+		data.TotalWasteItems = data.ResourceCandidates
 	}
 
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
@@ -1417,7 +1417,10 @@ func buildCostPageData(scan *clusterScan, activeCtx string, clusterList []string
 		data.Currency = r.Currency
 		data.ScopeExclusions = r.ScopeExclusions
 		data.LastPriceRefresh = r.LastPriceRefresh
-		data.ShowSavings = r.Provider == "azure" && r.TotalSavingsPotential.Best > 0
+		// Scenario savings are not reproducible from the visible priced-node
+		// rows. Preserve provider pricing and visible RI savings, but hide the
+		// unsupported aggregate.
+		data.ShowSavings = false
 		data.ShowRI = r.Provider == "azure"
 		switch r.Provider {
 		case "azure":

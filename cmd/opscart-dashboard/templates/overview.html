@@ -231,10 +231,6 @@
         <div class="mem-lbl">Resolved</div>
       </div>
       <div class="mem-cell">
-        <div class="mem-num warn">{{.Scoreboard.Reopened}}</div>
-        <div class="mem-lbl">Reopened</div>
-      </div>
-      <div class="mem-cell">
         <div class="mem-num bad">{{.Scoreboard.Accelerating}}</div>
         <div class="mem-lbl">Accelerating</div>
       </div>
@@ -331,11 +327,7 @@
         <div class="ch-lbl">Memory Utilization</div>
       </div>
     </div>
-    {{if or (gt .CPUUtilization 85) (gt .MemUtilization 85)}}
-    <div class="ch-summary warn"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3"/><path d="M12 9v4"/><path d="M12 17h.01"/></svg> Utilization running high</div>
-    {{else}}
-    <div class="ch-summary ok"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="m9 12 2 2 4-4"/></svg> Utilization nominal</div>
-    {{end}}
+    <div class="ch-summary {{if eq .UtilizationStatus "Nominal"}}ok{{else}}warn{{end}}">Utilization {{.UtilizationStatus}}</div>
     {{if .WorkloadHealthGrid}}
     <div class="wh-strip">
       <div class="wh-strip-lbl">Workload Health ({{len .WorkloadHealthGrid}}) · <span class="wh-legend"><i class="wh-dot critical"></i> critical <i class="wh-dot high"></i> high <i class="wh-dot ok"></i> healthy</span> · hover for names</div>
@@ -375,7 +367,7 @@
     <div class="section-sub">Current cluster security findings</div>
 
     <div class="sec-row">
-      <span class="sec-label">CIS benchmark score</span>
+      <span class="sec-label">OpsCart posture score</span>
       <span class="sec-val{{if lt .SecurityScore 50}} bad{{else if lt .SecurityScore 80}} warn{{end}}">{{.SecurityScore}}/100</span>
     </div>
 
@@ -385,8 +377,8 @@
     </div>
 
     <div class="sec-row">
-      <span class="sec-label">Running as root</span>
-      <span class="sec-val{{if gt .RunningAsRoot 0}} warn{{end}}">{{.RunningAsRoot}}</span>
+      <span class="sec-label">Non-root not explicitly enforced</span>
+      <span class="sec-val{{if gt .NonRootNotExplicitlyEnforced 0}} warn{{end}}">{{.NonRootNotExplicitlyEnforced}}</span>
     </div>
 
     <div class="sec-row">
@@ -394,6 +386,7 @@
       <span class="sec-val{{if gt .UnprotectedNamespaceCount 0}} warn{{end}}">{{.UnprotectedNamespaceCount}}</span>
     </div>
 
+    <div class="section-sub">CIS-aligned checks · Not a formal compliance assessment.</div>
     <a class="view-all-link" href="{{.SecurityHref}}" style="margin-top:0.75rem;display:inline-block">View full security posture →</a>
   </div>
 
@@ -417,7 +410,7 @@
     {{if .CostDeltaText}}<div class="bottom-delta {{if hasPrefix .CostDeltaText "+"}}good{{else}}bad{{end}}">{{.CostDeltaText}} from last scan</div>{{end}}
   </div>
   <div class="bottom-metric bs-item">
-    <div class="bottom-lbl l">Reclaimable Waste</div>
+    <div class="bottom-lbl l">Resource Review Candidates</div>
     <div class="bottom-val n">{{.WasteCount}}</div>
   </div>
   <div class="bottom-actions">
