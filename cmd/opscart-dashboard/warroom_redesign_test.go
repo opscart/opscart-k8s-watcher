@@ -5,10 +5,46 @@ import (
 	"net/url"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/opscart/opscart-k8s-watcher/pkg/analyzer"
 	"github.com/opscart/opscart-k8s-watcher/pkg/models"
+	"github.com/opscart/opscart-k8s-watcher/pkg/store"
 )
+
+func TestWarRoomIncidentAgeUsesOperationalMemory(t *testing.T) {
+	scan := &clusterScan{wasteAudit: &analyzer.WasteAudit{StalePods: []analyzer.StalePod{{
+		Name: "api-abc123", Namespace: "apps", Kind: analyzer.StalePodZombie,
+		Status: "CrashLoopBackOff", RestartCount: 9, AgeDays: 1897,
+	}}}}
+	db := &queryIncidentsStubStore{items: []store.IncidentSummary{{
+		Namespace: "apps", Resource: "api-abc123", IssueType: "crash_loop",
+		FirstSeen: time.Now().Add(-26 * 24 * time.Hour),
+	}}, total: 1}
+	body := renderWarRoomPageWithStore(scan, "prod", []string{"prod"}, nil, db)
+	if !strings.Contains(body, ">26d<") || strings.Contains(body, ">1897d<") {
+		t.Fatalf("War Room did not use incident first_seen")
+	}
+	if !strings.Contains(body, "api-abc123</a>") {
+		t.Fatal("oldest-active summary is not traceable to its finding")
+	}
+	withoutMemory := renderWarRoomPage(scan, "prod", []string{"prod"})
+	if !strings.Contains(withoutMemory, "Active For</span><strong>—</strong>") ||
+		!strings.Contains(withoutMemory, `<div class="summary-num">—</div><div class="summary-label">Oldest Active</div>`) {
+		t.Fatal("unavailable operational memory did not render em dashes")
+	}
+}
+
+func TestUtilizationStatusBoundaries(t *testing.T) {
+	for value, want := range map[int]string{59: "Nominal", 60: "Elevated", 79: "Elevated", 80: "High", 89: "High", 90: "Critical"} {
+		if got := utilizationStatus(value, 0); got != want {
+			t.Errorf("utilizationStatus(%d, 0) = %q, want %q", value, got, want)
+		}
+	}
+	if got := utilizationStatus(20, 82); got != "High" {
+		t.Errorf("highest CPU/memory utilization not used: got %q", got)
+	}
+}
 
 func TestWarRoomWorkloadIdentity(t *testing.T) {
 	scan := &clusterScan{AllWorkloads: []models.WorkloadRef{

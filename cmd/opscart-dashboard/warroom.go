@@ -42,19 +42,20 @@ func (srv *server) handleWarRoom(w http.ResponseWriter, r *http.Request) {
 // ── War Room helpers ──────────────────────────────────────────────────────────
 
 type warRoomIssue struct {
-	Severity       string `json:"severity"`
-	Type           string `json:"type"`
-	Namespace      string `json:"namespace"`
-	Resource       string `json:"resource"`
-	Message        string `json:"message"`
-	AgeDays        int    `json:"age_days,omitempty"`
-	KubectlCmd     string `json:"kubectl_cmd,omitempty"`
-	RestartCount   int    `json:"restart_count,omitempty"`
-	Classification string `json:"classification,omitempty"`
-	Container      string `json:"container,omitempty"`
-	WorkloadKind   string `json:"workload_kind,omitempty"`
-	WorkloadName   string `json:"workload_name,omitempty"`
-	Rank           int    `json:"rank,omitempty"`
+	Severity          string    `json:"severity"`
+	Type              string    `json:"type"`
+	Namespace         string    `json:"namespace"`
+	Resource          string    `json:"resource"`
+	Message           string    `json:"message"`
+	ResourceAgeDays   int       `json:"age_days,omitempty"`
+	IncidentFirstSeen time.Time `json:"-"`
+	KubectlCmd        string    `json:"kubectl_cmd,omitempty"`
+	RestartCount      int       `json:"restart_count,omitempty"`
+	Classification    string    `json:"classification,omitempty"`
+	Container         string    `json:"container,omitempty"`
+	WorkloadKind      string    `json:"workload_kind,omitempty"`
+	WorkloadName      string    `json:"workload_name,omitempty"`
+	Rank              int       `json:"rank,omitempty"`
 }
 
 type warRoomPageData struct {
@@ -81,6 +82,8 @@ type warRoomPageData struct {
 	AffectedWorkloads  int
 	OldestActive       int
 	HasOldestActive    bool
+	OldestActiveLabel  string
+	OldestActiveHref   string
 	HighestRestarts    int
 	HasHighestRestarts bool
 	NamespaceFindings  int
@@ -94,6 +97,7 @@ type warRoomFilterOption struct {
 type warRoomStats struct {
 	activeCritical, affectedWorkloads, oldest, highestRestarts, namespaceFindings int
 	hasOldest, hasHighestRestarts                                                 bool
+	oldestLabel, oldestHref                                                       string
 }
 
 func collectWarRoomIssues(scan *clusterScan, limit int) []warRoomIssue {
@@ -105,15 +109,15 @@ func collectWarRoomIssues(scan *clusterScan, limit int) []warRoomIssue {
 			if pod.Kind == analyzer.StalePodZombie {
 				itype := zombieTypeForStatus(pod.Status)
 				issues = append(issues, warRoomIssue{
-					Severity:       "critical",
-					Type:           itype,
-					Namespace:      pod.Namespace,
-					Resource:       pod.Name,
-					Message:        fmt.Sprintf("%s — %d restarts, %d days old", pod.Status, pod.RestartCount, pod.AgeDays),
-					AgeDays:        pod.AgeDays,
-					KubectlCmd:     kubectlCmdForIssue(itype, pod.Name, pod.Namespace),
-					RestartCount:   int(pod.RestartCount),
-					Classification: classificationForIssue(itype),
+					Severity:        "critical",
+					Type:            itype,
+					Namespace:       pod.Namespace,
+					Resource:        pod.Name,
+					Message:         fmt.Sprintf("%s — %d restarts · Resource Age: %d days", pod.Status, pod.RestartCount, pod.AgeDays),
+					ResourceAgeDays: pod.AgeDays,
+					KubectlCmd:      kubectlCmdForIssue(itype, pod.Name, pod.Namespace),
+					RestartCount:    int(pod.RestartCount),
+					Classification:  classificationForIssue(itype),
 				})
 			}
 		}
@@ -162,7 +166,7 @@ func collectWarRoomIssues(scan *clusterScan, limit int) []warRoomIssue {
 		for _, ns := range scan.wasteAudit.AbandonedNamespaces {
 			issues = append(issues, warRoomIssue{
 				Severity: "high", Type: "idle_namespace", Namespace: ns.Name,
-				Resource: "namespace", Message: ns.Reason, AgeDays: ns.AgeDays,
+				Resource: "namespace", Message: ns.Reason, ResourceAgeDays: ns.AgeDays,
 				KubectlCmd:     fmt.Sprintf("kubectl get pods -n %s", ns.Name),
 				Classification: "Idle namespace",
 			})
@@ -215,18 +219,23 @@ func (srv *server) handleWarRoomPage(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	fmt.Fprint(w, renderWarRoomPageWithFilters(scan, ctx, srv.clusterList, r.URL.Query()))
+	fmt.Fprint(w, renderWarRoomPageWithStore(scan, ctx, srv.clusterList, r.URL.Query(), srv.db))
 }
 
 func renderWarRoomPage(scan *clusterScan, activeCtx string, clusterList []string) string {
-	return renderWarRoomPageWithFilters(scan, activeCtx, clusterList, nil)
+	return renderWarRoomPageWithStore(scan, activeCtx, clusterList, nil, nil)
 }
 
 func renderWarRoomPageWithFilters(scan *clusterScan, activeCtx string, clusterList []string, query url.Values) string {
+	return renderWarRoomPageWithStore(scan, activeCtx, clusterList, query, nil)
+}
+
+func renderWarRoomPageWithStore(scan *clusterScan, activeCtx string, clusterList []string, query url.Values, db store.Store) string {
 	allIssues := collectWarRoomIssues(scan, 0)
 	for i := range allIssues {
 		enrichWarRoomIdentity(&allIssues[i], scan)
 	}
+	enrichWarRoomIncidentFirstSeen(allIssues, db, activeCtx)
 	stats := warRoomStatsFor(allIssues)
 	qText := strings.TrimSpace(query.Get("q"))
 	severity := strings.ToLower(strings.TrimSpace(query.Get("severity")))
@@ -284,6 +293,7 @@ func renderWarRoomPageWithFilters(scan *clusterScan, activeCtx string, clusterLi
 		ShowingStatus: status, Briefing: briefing,
 		ActiveCritical: stats.activeCritical, AffectedWorkloads: stats.affectedWorkloads,
 		OldestActive: stats.oldest, HasOldestActive: stats.hasOldest,
+		OldestActiveLabel: stats.oldestLabel, OldestActiveHref: stats.oldestHref,
 		HighestRestarts: stats.highestRestarts, HasHighestRestarts: stats.hasHighestRestarts,
 		NamespaceFindings: stats.namespaceFindings,
 	}
@@ -294,6 +304,24 @@ func renderWarRoomPageWithFilters(scan *clusterScan, activeCtx string, clusterLi
 		return ""
 	}
 	return buf.String()
+}
+
+func enrichWarRoomIncidentFirstSeen(issues []warRoomIssue, db store.Store, cluster string) {
+	if db == nil {
+		return
+	}
+	incidents, _, err := db.QueryIncidents(store.IncidentFilter{Cluster: cluster, Status: "active", PerPage: 200})
+	if err != nil {
+		return
+	}
+	type key struct{ namespace, resource, issueType string }
+	firstSeen := make(map[key]time.Time, len(incidents))
+	for _, incident := range incidents {
+		firstSeen[key{incident.Namespace, incident.Resource, incident.IssueType}] = incident.FirstSeen
+	}
+	for i := range issues {
+		issues[i].IncidentFirstSeen = firstSeen[key{issues[i].Namespace, issues[i].Resource, issues[i].Type}]
+	}
 }
 
 func canonicalWarRoomQuery(query url.Values) (url.Values, bool) {
@@ -442,8 +470,13 @@ func warRoomStatsFor(issues []warRoomIssue) warRoomStats {
 	stats := warRoomStats{}
 	workloads := map[string]bool{}
 	for _, issue := range issues {
-		if issue.AgeDays > 0 && (!stats.hasOldest || issue.AgeDays > stats.oldest) {
-			stats.oldest, stats.hasOldest = issue.AgeDays, true
+		if !issue.IncidentFirstSeen.IsZero() {
+			incidentAgeDays := int(time.Since(issue.IncidentFirstSeen).Hours() / 24)
+			if !stats.hasOldest || incidentAgeDays > stats.oldest {
+				stats.oldest, stats.hasOldest = incidentAgeDays, true
+				stats.oldestLabel = topIssueResourceLabel(issue.Resource, issue.Namespace, issue.Type)
+				stats.oldestHref = investigateURL(issue.Namespace, issue.Resource, issue.Type, "")
+			}
 		}
 		if isNamespaceFinding(issue) {
 			stats.namespaceFindings++
@@ -580,8 +613,8 @@ func renderWarRoomCard(issue warRoomIssue, activeCtx string) string {
 	}
 	sb.WriteString(fmt.Sprintf(`<div class="wr-ns" title="Namespace: %s">Namespace: %s</div>`, template.HTMLEscapeString(issue.Namespace), template.HTMLEscapeString(issue.Namespace)))
 	activeFor, restarts := "—", "—"
-	if issue.AgeDays > 0 {
-		activeFor = fmt.Sprintf("%dd", issue.AgeDays)
+	if !issue.IncidentFirstSeen.IsZero() {
+		activeFor = fmt.Sprintf("%dd", int(time.Since(issue.IncidentFirstSeen).Hours()/24))
 	}
 	if issue.RestartCount > 0 {
 		restarts = formatCount(issue.RestartCount)
