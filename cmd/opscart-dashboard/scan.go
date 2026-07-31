@@ -78,8 +78,8 @@ func (s *dashboardState) refresh(clusterList []string) error {
 			}
 			owner := store.OwnerNameFromPod(is.Resource)
 			details, _ := json.Marshal(map[string]any{
-				"age_days": is.AgeDays,
-				"message":  is.Message,
+				"resource_age_days": is.ResourceAgeDays,
+				"message":           is.Message,
 			})
 			incidents = append(incidents, store.IncidentData{
 				Fingerprint:  store.Fingerprint(is.Namespace, "Workload", owner, is.Type),

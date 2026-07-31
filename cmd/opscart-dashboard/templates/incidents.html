@@ -180,7 +180,6 @@
     {{if .ActiveHigh}}<span class="inc-sum-reo"><b>{{.ActiveHigh}}</b> active high</span>{{end}}
     {{if .ActiveMedium}}<span><b>{{.ActiveMedium}}</b> active medium</span>{{end}}
     {{if .ActiveLow}}<span><b>{{.ActiveLow}}</b> active low</span>{{end}}
-    {{if .ReopenedCount}}<span class="inc-sum-reo"><b>{{.ReopenedCount}}</b> reopened</span>{{end}}
     {{if .ResolvedCount}}<span class="inc-sum-res"><b>{{.ResolvedCount}}</b> resolved</span>{{end}}
     <span class="inc-total"><b style="color:var(--text)">{{.Total}}</b> incidents in memory{{if or .Filter.Text .Filter.Namespace .Filter.IssueType .Filter.Severity .Filter.Status}} matching filters{{end}}</span>
   </div>
