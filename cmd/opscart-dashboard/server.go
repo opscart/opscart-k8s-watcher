@@ -599,15 +599,15 @@ type overviewPageData struct {
 	Clusters      []sidebarCluster
 
 	// KPI bar
-	CriticalCount             int
-	SavingsPotential          float64
-	SecurityScore             int
-	SecurityColor             string
-	WasteCount                int
-	MonthlyCost               float64
-	PrivilegedContainers      int
-	RunningAsRoot             int
-	UnprotectedNamespaceCount int
+	CriticalCount                int
+	SavingsPotential             float64
+	SecurityScore                int
+	SecurityColor                string
+	WasteCount                   int
+	MonthlyCost                  float64
+	PrivilegedContainers         int
+	NonRootNotExplicitlyEnforced int
+	UnprotectedNamespaceCount    int
 
 	// Incident Score
 	IncidentScore      int
@@ -649,11 +649,12 @@ type overviewPageData struct {
 	HasFeatured    bool
 
 	// Cluster Summary
-	NodePoolCount  int
-	PodCount       int
-	CPUUtilization int
-	MemUtilization int
-	NamespaceCount int
+	NodePoolCount     int
+	PodCount          int
+	CPUUtilization    int
+	MemUtilization    int
+	UtilizationStatus string
+	NamespaceCount    int
 
 	// Version + branding
 	Version string
@@ -685,7 +686,7 @@ type topIssue struct {
 	FirstDetectedLabel string
 	ReopenCountVal     int // named _Val to read distinctly from store.IncidentSummary.ReopenCount
 	TrendVal           string
-	MemoryLine         string // "First detected 7d ago · reopened once · accelerating"
+	MemoryLine         string // "First detected 7d ago · accelerating"
 }
 
 func convertToSidebarClusters(clusterList []string, activeCtx, basePath string) []sidebarCluster {
@@ -848,53 +849,54 @@ func buildOverviewData(scan *clusterScan, activeCtx string, clusterList []string
 	}
 
 	return overviewPageData{
-		ClusterName:               clusterName,
-		ActiveCtx:                 activeCtx,
-		ClusterList:               clusters,
-		DashURL:                   "/" + q,
-		InfraURL:                  "/infrastructure" + q,
-		NSsURL:                    "/namespaces" + q,
-		OptURL:                    "/optimizations" + q,
-		WrURL:                     "/warroom" + q,
-		CostsURL:                  "/costs" + q,
-		ScannedAtMS:               time.Now().UnixMilli(),
-		CriticalCount:             criticalCount,
-		SavingsPotential:          savings,
-		SecurityScore:             securityScore,
-		PrivilegedContainers:      privilegedContainers,
-		RunningAsRoot:             runningAsRoot,
-		UnprotectedNamespaceCount: unprotectedNamespaces,
-		WasteCount:                wasteCount,
-		MonthlyCost:               monthlyCost,
-		TopIssues:                 topIssues,
-		HasTopIssue:               hasTopIssue,
-		TopIssueName:              topIssueName,
-		TopIssueNS:                topIssueNS,
-		TopIssueTrend:             topIssueTrend,
-		TopIssueReopen:            topIssueReopen,
-		FeaturedIssues:            featuredIssues,
-		HasFeatured:               len(featuredIssues) > 0,
-		NodePoolCount:             nodePoolCount,
-		PodCount:                  podCount,
-		CPUUtilization:            cpuUtil,
-		MemUtilization:            memUtil,
-		NamespaceCount:            nsCount,
-		Version:                   Version,
-		DashHref:                  "/" + q,
-		CostsHref:                 "/costs" + q,
-		InfraHref:                 "/infrastructure" + q,
-		NsHref:                    "/namespaces" + q,
-		OptHref:                   "/optimizations" + q,
-		WrHref:                    "/warroom" + q,
-		IncidentsHref:             "/incidents" + q,
-		SecurityHref:              "/security" + q,
-		WasteHref:                 "/waste" + q,
-		ActivePage:                "dashboard",
-		Clusters:                  convertToSidebarClusters(clusterList, activeCtx, "/"),
-		IncidentScore:             incidentScore,
-		IncidentScoreColor:        incidentScoreColor,
-		IncidentScoreLabel:        incidentScoreLabel,
-		Trend:                     trend,
+		ClusterName:                  clusterName,
+		ActiveCtx:                    activeCtx,
+		ClusterList:                  clusters,
+		DashURL:                      "/" + q,
+		InfraURL:                     "/infrastructure" + q,
+		NSsURL:                       "/namespaces" + q,
+		OptURL:                       "/optimizations" + q,
+		WrURL:                        "/warroom" + q,
+		CostsURL:                     "/costs" + q,
+		ScannedAtMS:                  time.Now().UnixMilli(),
+		CriticalCount:                criticalCount,
+		SavingsPotential:             savings,
+		SecurityScore:                securityScore,
+		PrivilegedContainers:         privilegedContainers,
+		NonRootNotExplicitlyEnforced: runningAsRoot,
+		UnprotectedNamespaceCount:    unprotectedNamespaces,
+		WasteCount:                   wasteCount,
+		MonthlyCost:                  monthlyCost,
+		TopIssues:                    topIssues,
+		HasTopIssue:                  hasTopIssue,
+		TopIssueName:                 topIssueName,
+		TopIssueNS:                   topIssueNS,
+		TopIssueTrend:                topIssueTrend,
+		TopIssueReopen:               topIssueReopen,
+		FeaturedIssues:               featuredIssues,
+		HasFeatured:                  len(featuredIssues) > 0,
+		NodePoolCount:                nodePoolCount,
+		PodCount:                     podCount,
+		CPUUtilization:               cpuUtil,
+		MemUtilization:               memUtil,
+		UtilizationStatus:            utilizationStatus(cpuUtil, memUtil),
+		NamespaceCount:               nsCount,
+		Version:                      Version,
+		DashHref:                     "/" + q,
+		CostsHref:                    "/costs" + q,
+		InfraHref:                    "/infrastructure" + q,
+		NsHref:                       "/namespaces" + q,
+		OptHref:                      "/optimizations" + q,
+		WrHref:                       "/warroom" + q,
+		IncidentsHref:                "/incidents" + q,
+		SecurityHref:                 "/security" + q,
+		WasteHref:                    "/waste" + q,
+		ActivePage:                   "dashboard",
+		Clusters:                     convertToSidebarClusters(clusterList, activeCtx, "/"),
+		IncidentScore:                incidentScore,
+		IncidentScoreColor:           incidentScoreColor,
+		IncidentScoreLabel:           incidentScoreLabel,
+		Trend:                        trend,
 
 		CostDeltaText:          costDeltaText,
 		IncidentScoreDeltaText: incidentScoreDeltaText,
@@ -1035,10 +1037,6 @@ func buildOverviewVerdict(topIssues []topIssue, resolvedSinceCursor int, cursorS
 		line1 = fmt.Sprintf(
 			"%d %s. %s has been %s, first detected %s, and its restart rate is accelerating.",
 			total, workloadWord, resourceLabel, issueLabel, firstDetected)
-	case worst.ReopenCountVal > 0:
-		line1 = fmt.Sprintf(
-			"%d %s. %s reoccurred after a recovery — reopened %d time(s).",
-			total, workloadWord, resourceLabel, worst.ReopenCountVal)
 	default:
 		line1 = fmt.Sprintf(
 			"%d %s. %s has been %s, first detected %s.",
@@ -1567,22 +1565,32 @@ func enrichTopIssues(issues []topIssue, db store.Store, cluster string) []topIss
 	return issues
 }
 
-// buildMemoryLine composes the small muted "First detected 7d ago ·
-// reopened once · accelerating" line shown below a Top 5 row's subtitle.
+// buildMemoryLine composes the small muted operational-memory line.
 // The trend clause is omitted for postureOnlyIssueTypes, where a
 // restart-based trend doesn't apply.
-func buildMemoryLine(firstDetectedLabel string, reopenCount int, trend string, issueType string) string {
+func buildMemoryLine(firstDetectedLabel string, _ int, trend, issueType string) string {
 	parts := []string{"First detected " + firstDetectedLabel}
-	switch {
-	case reopenCount == 1:
-		parts = append(parts, "reopened once")
-	case reopenCount > 1:
-		parts = append(parts, fmt.Sprintf("reopened ×%d", reopenCount))
-	}
 	if trend == "accelerating" && !postureOnlyIssueTypes[issueType] {
 		parts = append(parts, "accelerating")
 	}
 	return strings.Join(parts, " · ")
+}
+
+func utilizationStatus(cpuPercent, memoryPercent int) string {
+	highest := cpuPercent
+	if memoryPercent > highest {
+		highest = memoryPercent
+	}
+	switch {
+	case highest >= 90:
+		return "Critical"
+	case highest >= 80:
+		return "High"
+	case highest >= 60:
+		return "Elevated"
+	default:
+		return "Nominal"
+	}
 }
 
 // topIssueResourceLabel mirrors buildOverviewVerdict's resourceLabel
