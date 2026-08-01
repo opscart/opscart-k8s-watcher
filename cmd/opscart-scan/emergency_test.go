@@ -84,14 +84,14 @@ func TestIncidentFingerprint_MatchesStoreScheme(t *testing.T) {
 	}
 
 	got := incidentFingerprint(issue)
-	want := "prod/Workload/checkout/CrashLoopBackOff"
+	want := "prod/Workload/checkout/crash_loop"
 	if got != want {
 		t.Fatalf("incidentFingerprint = %q, want %q", got, want)
 	}
 
 	// Must match store.Fingerprint's own construction exactly, not a
 	// parallel scheme that happens to agree on this one input.
-	if want2 := store.Fingerprint("prod", "Workload", store.OwnerNameFromPod(issue.Name), issue.Reason); got != want2 {
+	if want2 := store.Fingerprint("prod", "Workload", store.OwnerNameFromPod(issue.Name), canonicalIssueType(issue.Reason)); got != want2 {
 		t.Fatalf("incidentFingerprint diverges from store.Fingerprint: got %q, store gives %q", got, want2)
 	}
 }
@@ -124,8 +124,8 @@ func TestMapIssuesToIncidents(t *testing.T) {
 	if inc.Resource != "checkout-7d9f8b6c5-x7z2m9" {
 		t.Errorf("Resource = %q, want checkout-7d9f8b6c5-x7z2m9", inc.Resource)
 	}
-	if inc.IssueType != "CrashLoopBackOff" {
-		t.Errorf("IssueType = %q, want CrashLoopBackOff", inc.IssueType)
+	if inc.IssueType != "crash_loop" {
+		t.Errorf("IssueType = %q, want crash_loop", inc.IssueType)
 	}
 	if inc.Severity != "critical" {
 		t.Errorf("Severity = %q, want critical", inc.Severity)
@@ -155,6 +155,22 @@ type countingStore struct {
 
 	records      map[string]*store.IncidentRecord
 	reopenCounts map[int64]int
+	incidents    []store.IncidentSummary
+}
+
+func (c *countingStore) QueryIncidents(f store.IncidentFilter) ([]store.IncidentSummary, int, error) {
+	start := (f.Page - 1) * f.PerPage
+	if start < 0 {
+		start = 0
+	}
+	if start >= len(c.incidents) {
+		return nil, len(c.incidents), nil
+	}
+	end := start + f.PerPage
+	if end > len(c.incidents) {
+		end = len(c.incidents)
+	}
+	return c.incidents[start:end], len(c.incidents), nil
 }
 
 func (c *countingStore) GetIncidentHistory(cluster, fingerprint string) (*store.IncidentRecord, error) {
@@ -266,8 +282,8 @@ func TestEnrichIssues_PreExistingIncident(t *testing.T) {
 	if !strings.Contains(out, "First detected: 5d ago") {
 		t.Errorf("output missing 'First detected: 5d ago' line, got:\n%s", out)
 	}
-	if !strings.Contains(out, "Reopened: 2x") {
-		t.Errorf("output missing 'Reopened: 2x' line, got:\n%s", out)
+	if strings.Contains(out, "Reopened:") {
+		t.Errorf("Emergency output must not render recurrence aggregates, got:\n%s", out)
 	}
 }
 
@@ -339,8 +355,8 @@ func TestEnrichIssues_NullStore_NoEnrichment(t *testing.T) {
 	if got.String() != want.String() {
 		t.Errorf("stateless output diverges from plain (unenriched) output:\ngot:\n%s\nwant:\n%s", got.String(), want.String())
 	}
-	if strings.Contains(got.String(), "First detected") || strings.Contains(got.String(), "Reopened") {
-		t.Errorf("stateless output should have no enrichment lines, got:\n%s", got.String())
+	if !strings.Contains(got.String(), "First detected: —") || strings.Contains(got.String(), "Reopened") {
+		t.Errorf("stateless output should show unknown incident age and no recurrence aggregate, got:\n%s", got.String())
 	}
 }
 
@@ -349,6 +365,127 @@ func TestPrintEmergencyIssuesEnriched_NoIssues(t *testing.T) {
 	printEmergencyIssuesEnriched(&buf, nil)
 	if buf.String() != "✅ No critical issues found!\n" {
 		t.Errorf("got %q", buf.String())
+	}
+}
+
+func TestEmergencyMcoreProbeFailureUsesCanonicalFirstSeen(t *testing.T) {
+	issue := models.EmergencyIssue{
+		Resource: "pod", Namespace: "demo-apps",
+		Name:   "message-processor-68b7798664-p47cz",
+		Reason: "CrashLoopBackOff (ProbeFailure)", Severity: "critical",
+		Age: 10 * time.Second,
+	}
+	firstSeen := time.Now().Add(-12 * 24 * time.Hour)
+	fp := "demo-apps/Workload/message-processor/probe_failure"
+	cs := &countingStore{records: map[string]*store.IncidentRecord{
+		fp: {ID: 77, Status: "active", FirstSeen: firstSeen},
+	}}
+	enriched := enrichIssues(cs, "prod", []models.EmergencyIssue{issue})
+	var buf bytes.Buffer
+	printEmergencyIssuesEnriched(&buf, enriched)
+	out := buf.String()
+	if !strings.Contains(out, "First detected: 12d ago") {
+		t.Fatalf("canonical incident first_seen was not rendered:\n%s", out)
+	}
+	if strings.Contains(out, "First detected: 0s") {
+		t.Fatalf("pod age leaked into incident age:\n%s", out)
+	}
+}
+
+func TestHistoricalAliasReconciliationDisplaysEarliestOOMKilled(t *testing.T) {
+	now := time.Now()
+	issue := models.EmergencyIssue{Namespace: "data", Name: "stream-processor-66c474d5fd-9zpwq", Reason: "CrashLoopBackOff (OOMKilled)"}
+	fp := incidentFingerprint(issue)
+	cs := &countingStore{
+		records: map[string]*store.IncidentRecord{fp: {ID: 2, Status: "active", FirstSeen: now.Add(-11 * time.Minute)}},
+		incidents: []store.IncidentSummary{
+			{Namespace: "data", Resource: issue.Name, IssueType: "OOMKilled", FirstSeen: now.Add(-10 * 24 * time.Hour)},
+			{Namespace: "data", Resource: issue.Name, IssueType: "oomkilled", FirstSeen: now.Add(-11 * time.Minute), Status: "active"},
+		},
+	}
+	got := enrichIssues(cs, "prod", []models.EmergencyIssue{issue})
+	if got[0].FirstDetected != "10d" {
+		t.Fatalf("FirstDetected = %q, want legacy OOM history of 10d", got[0].FirstDetected)
+	}
+}
+
+func TestHistoricalAliasReconciliationDisplaysEarliestCrashLoop(t *testing.T) {
+	now := time.Now()
+	issue := models.EmergencyIssue{Namespace: "prod", Name: "token-service-786498c5c-phg2g", Reason: "CrashLoopBackOff"}
+	fp := incidentFingerprint(issue)
+	cs := &countingStore{
+		records: map[string]*store.IncidentRecord{fp: {ID: 3, Status: "active", FirstSeen: now.Add(-11 * time.Minute)}},
+		incidents: []store.IncidentSummary{
+			{Namespace: "prod", Resource: issue.Name, IssueType: "CrashLoopBackOff", FirstSeen: now.Add(-9 * 24 * time.Hour)},
+			{Namespace: "prod", Resource: issue.Name, IssueType: "crash_loop", FirstSeen: now.Add(-11 * time.Minute)},
+		},
+	}
+	got := enrichIssues(cs, "prod", []models.EmergencyIssue{issue})
+	if got[0].FirstDetected != "9d" {
+		t.Fatalf("FirstDetected = %q, want legacy crash-loop history of 9d", got[0].FirstDetected)
+	}
+}
+
+func TestHistoricalAliasIdentityIsolation(t *testing.T) {
+	now := time.Now()
+	issues := []models.EmergencyIssue{
+		{Namespace: "risk", Name: "fraud-detection-7cddf79d98-jxmtx", Reason: "CrashLoopBackOff"},
+		{Namespace: "risk", Name: "fraud-detection-7cddf79d98-jxmtx", Reason: "CrashLoopBackOff (ProbeFailure)"},
+		{Namespace: "risk", Name: "fraud-detection-7cddf79d98-jxmtx", Reason: "CrashLoopBackOff (OOMKilled)"},
+		{Namespace: "other", Name: "fraud-detection-7cddf79d98-jxmtx", Reason: "CrashLoopBackOff"},
+	}
+	legacy := []store.IncidentSummary{
+		{Namespace: "risk", Resource: "fraud-detection-7cddf79d98-old12", IssueType: "CrashLoopBackOff", FirstSeen: now.Add(-10 * 24 * time.Hour)},
+		{Namespace: "risk", Resource: "fraud-detection-7cddf79d98-old12", IssueType: "ProbeFailure", FirstSeen: now.Add(-8 * 24 * time.Hour)},
+		{Namespace: "risk", Resource: "fraud-detection-7cddf79d98-old12", IssueType: "OOMKilled", FirstSeen: now.Add(-6 * 24 * time.Hour)},
+		{Namespace: "other", Resource: "fraud-detection-7cddf79d98-old12", IssueType: "CrashLoopBackOff", FirstSeen: now.Add(-2 * 24 * time.Hour)},
+	}
+	got := reconcileHistoricalFirstSeen(issues, legacy)
+	wants := []time.Time{now.Add(-10 * 24 * time.Hour), now.Add(-8 * 24 * time.Hour), now.Add(-6 * 24 * time.Hour), now.Add(-2 * 24 * time.Hour)}
+	for i, issue := range issues {
+		if value := got[findingMemoryIdentity(issue)]; !value.Equal(wants[i]) {
+			t.Fatalf("identity %d reconciled to %s, want %s", i, value, wants[i])
+		}
+	}
+}
+
+func TestHistoricalAliasExactCanonicalRecordWithoutLegacy(t *testing.T) {
+	firstSeen := time.Now().Add(-4 * time.Hour)
+	issue := models.EmergencyIssue{Namespace: "prod", Name: "api-7cddf79d98-jxmtx", Reason: "CrashLoopBackOff"}
+	got := reconcileHistoricalFirstSeen([]models.EmergencyIssue{issue}, []store.IncidentSummary{{
+		Namespace: "prod", Resource: issue.Name, IssueType: "crash_loop", FirstSeen: firstSeen,
+	}})
+	if value := got[findingMemoryIdentity(issue)]; !value.Equal(firstSeen) {
+		t.Fatalf("canonical first_seen = %s, want %s", value, firstSeen)
+	}
+}
+
+func TestGroupedFailedCronJobPodsReconcileHeader(t *testing.T) {
+	failedAt := time.Date(2026, 7, 19, 20, 49, 13, 0, time.UTC)
+	issues := []enrichedIssue{
+		{EmergencyIssue: models.EmergencyIssue{Resource: "pod", Namespace: "batch", Name: "backup-a", Reason: "PodFailed", Severity: "critical", OwnerKind: "CronJob", OwnerName: "backup", FailureObservedAt: failedAt}},
+		{EmergencyIssue: models.EmergencyIssue{Resource: "pod", Namespace: "batch", Name: "backup-b", Reason: "PodFailed", Severity: "critical", OwnerKind: "CronJob", OwnerName: "backup", FailureObservedAt: failedAt.Add(time.Hour)}},
+	}
+	var buf bytes.Buffer
+	printEmergencyIssuesEnriched(&buf, issues)
+	out := buf.String()
+	if !strings.Contains(out, "🔴 CRITICAL: 0    🟡 HIGH: 0    🟠 MEDIUM: 1") || !strings.Contains(out, "Failed pods: 2") {
+		t.Fatalf("failed CronJob pods were not grouped/reconciled:\n%s", out)
+	}
+	if strings.Contains(out, "batch/backup-a") || strings.Contains(out, "batch/backup-b") {
+		t.Fatalf("historical failed pods rendered independently:\n%s", out)
+	}
+}
+
+func TestSuppressSecondaryRestartNoiseSameWorkload(t *testing.T) {
+	issues := []enrichedIssue{
+		{EmergencyIssue: models.EmergencyIssue{Resource: "pod", Namespace: "prod", Name: "api-68b7798664-a1b2c", Reason: "CrashLoopBackOff", Severity: "critical"}},
+		{EmergencyIssue: models.EmergencyIssue{Resource: "pod", Namespace: "prod", Name: "api-68b7798664-d4e5f", Reason: "HighRestartCount", Severity: "medium"}},
+		{EmergencyIssue: models.EmergencyIssue{Resource: "pod", Namespace: "other", Name: "api-68b7798664-g7h8i", Reason: "HighRestartCount", Severity: "medium"}},
+	}
+	got := suppressSecondaryRestartNoise(&store.NullStore{}, "prod", issues)
+	if len(got) != 2 || got[1].Namespace != "other" {
+		t.Fatalf("suppression crossed or failed workload/namespace boundary: %+v", got)
 	}
 }
 
