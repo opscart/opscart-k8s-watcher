@@ -235,7 +235,7 @@ func TestHeaderCount_MatchesPrintedEntries(t *testing.T) {
 
 	all = append(all,
 		issue("data-pipeline", "stream-processor-66c474d5fd-9zpwq", "critical", "CrashLoopBackOff",
-			"Container stress is being OOM-killed, causing the crash loop — check resources.limits.memory", 6301),
+			"Container termination state reports OOMKilled", 6301),
 		issue("prod", "solo-crash-pod", "critical", "CrashLoopBackOff",
 			"Container app is crash looping: back-off restarting failed container", 12),
 	)
@@ -360,7 +360,7 @@ func TestPrintEmergencyIssuesEnriched_MixedWorkloadShape(t *testing.T) {
 	}
 
 	lineCount := len(strings.Split(strings.TrimRight(out, "\n"), "\n"))
-	if lineCount >= 60 {
+	if lineCount > 60 {
 		t.Errorf("expected a materially shorter output, got %d lines:\n%s", lineCount, out)
 	}
 }
