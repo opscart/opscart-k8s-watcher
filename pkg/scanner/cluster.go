@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/opscart/opscart-k8s-watcher/pkg/models"
+	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
@@ -60,9 +61,10 @@ func (s *Scanner) FindEmergencyIssues(namespace string) ([]models.EmergencyIssue
 		return nil, fmt.Errorf("failed to list pods: %w", err)
 	}
 
+	jobOwners := s.jobOwnerIndex(namespace)
 	// Analyze each pod for problems
 	for _, pod := range podList.Items {
-		podIssues := s.analyzePodForIssues(pod)
+		podIssues := s.analyzePodForIssuesWithOwners(pod, jobOwners)
 		issues = append(issues, podIssues...)
 	}
 
@@ -75,8 +77,37 @@ func (s *Scanner) FindEmergencyIssues(namespace string) ([]models.EmergencyIssue
 	return issues, nil
 }
 
+type workloadOwner struct{ kind, name, execution string }
+
+// jobOwnerIndex follows only explicit Job owner references. A missing or
+// unreadable Job list leaves ownership unknown rather than guessing from names.
+func (s *Scanner) jobOwnerIndex(namespace string) map[string]workloadOwner {
+	jobs, err := s.clientset.BatchV1().Jobs(namespace).List(s.ctx, metav1.ListOptions{})
+	if err != nil {
+		return nil
+	}
+	owners := make(map[string]workloadOwner, len(jobs.Items))
+	for _, job := range jobs.Items {
+		owners[job.Namespace+"/"+job.Name] = ownerForJob(job)
+	}
+	return owners
+}
+
+func ownerForJob(job batchv1.Job) workloadOwner {
+	for _, ref := range job.OwnerReferences {
+		if ref.Controller != nil && *ref.Controller && ref.Kind == "CronJob" {
+			return workloadOwner{kind: "CronJob", name: ref.Name, execution: job.Name}
+		}
+	}
+	return workloadOwner{kind: "Job", name: job.Name, execution: job.Name}
+}
+
 // analyzePodForIssues checks a pod for critical issues
 func (s *Scanner) analyzePodForIssues(pod corev1.Pod) []models.EmergencyIssue {
+	return s.analyzePodForIssuesWithOwners(pod, nil)
+}
+
+func (s *Scanner) analyzePodForIssuesWithOwners(pod corev1.Pod, jobOwners map[string]workloadOwner) []models.EmergencyIssue {
 	var issues []models.EmergencyIssue
 	now := time.Now()
 	age := now.Sub(pod.CreationTimestamp.Time)
@@ -90,15 +121,21 @@ func (s *Scanner) analyzePodForIssues(pod corev1.Pod) []models.EmergencyIssue {
 	// Check pod phase
 	switch pod.Status.Phase {
 	case corev1.PodFailed:
+		owner := podWorkloadOwner(pod, jobOwners)
+		message, failedAt := failedPodEvidence(pod)
 		issues = append(issues, models.EmergencyIssue{
-			Severity:  "critical",
-			Resource:  "pod",
-			Namespace: pod.Namespace,
-			Name:      pod.Name,
-			Reason:    "PodFailed",
-			Message:   fmt.Sprintf("Pod in Failed state: %s", pod.Status.Reason),
-			Age:       age,
-			Restarts:  totalRestarts,
+			Severity:          "critical",
+			Resource:          "pod",
+			Namespace:         pod.Namespace,
+			Name:              pod.Name,
+			Reason:            "PodFailed",
+			Message:           message,
+			Age:               age,
+			Restarts:          totalRestarts,
+			OwnerKind:         owner.kind,
+			OwnerName:         owner.name,
+			OwnerExecution:    owner.execution,
+			FailureObservedAt: failedAt,
 		})
 
 	case corev1.PodPending:
@@ -186,6 +223,42 @@ func (s *Scanner) analyzePodForIssues(pod corev1.Pod) []models.EmergencyIssue {
 	}
 
 	return issues
+}
+
+func podWorkloadOwner(pod corev1.Pod, jobOwners map[string]workloadOwner) workloadOwner {
+	for _, ref := range pod.OwnerReferences {
+		if ref.Controller == nil || !*ref.Controller {
+			continue
+		}
+		if ref.Kind == "Job" {
+			if owner, ok := jobOwners[pod.Namespace+"/"+ref.Name]; ok {
+				return owner
+			}
+			return workloadOwner{kind: "Job", name: ref.Name, execution: ref.Name}
+		}
+		return workloadOwner{kind: ref.Kind, name: ref.Name}
+	}
+	return workloadOwner{}
+}
+
+func failedPodEvidence(pod corev1.Pod) (string, time.Time) {
+	for _, cs := range pod.Status.ContainerStatuses {
+		if term := cs.State.Terminated; term != nil {
+			if term.Message != "" {
+				return term.Message, term.FinishedAt.Time
+			}
+			if term.Reason != "" {
+				return fmt.Sprintf("Container %s terminated: %s", cs.Name, term.Reason), term.FinishedAt.Time
+			}
+		}
+	}
+	if pod.Status.Message != "" {
+		return pod.Status.Message, time.Time{}
+	}
+	if pod.Status.Reason != "" {
+		return pod.Status.Reason, time.Time{}
+	}
+	return "Pod phase is Failed; no termination reason was available.", time.Time{}
 }
 
 // findPVCIssues looks for problematic PVCs

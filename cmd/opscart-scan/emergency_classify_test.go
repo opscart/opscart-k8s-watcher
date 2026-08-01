@@ -45,8 +45,8 @@ func TestClassifyPod_OOMKilledMergesWithCrashLoop(t *testing.T) {
 	if got.Severity != "critical" {
 		t.Errorf("Severity = %q, want critical", got.Severity)
 	}
-	if !strings.Contains(got.Message, "Container stress is being OOM-killed") {
-		t.Errorf("Message = %q, missing causal OOM text", got.Message)
+	if got.Message != "Container termination state reports OOMKilled; the pod is currently in CrashLoopBackOff." {
+		t.Errorf("Message = %q, want observational OOM wording", got.Message)
 	}
 }
 
@@ -85,8 +85,8 @@ func TestClassifyPod_ProbeFailureRelabelsCrashLoop(t *testing.T) {
 	if got.Reason != "CrashLoopBackOff (ProbeFailure)" {
 		t.Errorf("Reason = %q, want %q", got.Reason, "CrashLoopBackOff (ProbeFailure)")
 	}
-	if !strings.Contains(got.Message, "Container app is being killed by its startup/liveness probe") {
-		t.Errorf("Message = %q, missing causal probe text", got.Message)
+	if !strings.Contains(got.Message, "Kubernetes events show repeated startup/liveness probe failures followed by container restarts") {
+		t.Errorf("Message = %q, missing observational probe text", got.Message)
 	}
 }
 
@@ -282,7 +282,7 @@ func TestClassifyPod_FlickerBetweenRunningAndWaiting_SameFingerprintEveryTime(t 
 }
 
 // End-to-end: a classified OOMKilled-caused crash loop prints with the
-// merged status label and causal message.
+// merged status label and observational message.
 func TestClassifyPod_OOMKilledMerge_PrintsCorrectly(t *testing.T) {
 	podIssues := []models.EmergencyIssue{
 		rawIssue("data-pipeline", "stream-processor-66c474d5fd-9zpwq", "critical", "CrashLoopBackOff",
@@ -306,11 +306,11 @@ func TestClassifyPod_OOMKilledMerge_PrintsCorrectly(t *testing.T) {
 	if !strings.Contains(out, "data-pipeline/stream-processor-66c474d5fd-9zpwq") {
 		t.Errorf("missing pod identity, got:\n%s", out)
 	}
-	if !strings.Contains(out, "Status: CrashLoopBackOff (OOMKilled) | Restarts: 6301 | Age: 23d") {
+	if !strings.Contains(out, "Status: CrashLoopBackOff (OOMKilled) | Restarts: 6301 | Pod Age: 23d") {
 		t.Errorf("missing combined status line, got:\n%s", out)
 	}
-	if !strings.Contains(out, "Container stress is being OOM-killed, causing the crash loop — check resources.limits.memory") {
-		t.Errorf("missing causal message, got:\n%s", out)
+	if !strings.Contains(out, "Container termination state reports OOMKilled; the pod is currently in CrashLoopBackOff.") {
+		t.Errorf("missing observational message, got:\n%s", out)
 	}
 	if !strings.Contains(out, "First detected: 14h ago") {
 		t.Errorf("missing enrichment line, got:\n%s", out)
@@ -334,8 +334,8 @@ func TestClassifyPod_ProbeFailureMerge_PrintsCorrectly(t *testing.T) {
 	if !strings.Contains(out, "Status: CrashLoopBackOff (ProbeFailure)") {
 		t.Errorf("missing relabeled status, got:\n%s", out)
 	}
-	if !strings.Contains(out, "Container app is being killed by its startup/liveness probe before it can stabilize") {
-		t.Errorf("missing causal probe message, got:\n%s", out)
+	if !strings.Contains(out, "Kubernetes events show repeated startup/liveness probe failures followed by container restarts") {
+		t.Errorf("missing observational probe message, got:\n%s", out)
 	}
 }
 

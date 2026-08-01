@@ -4,15 +4,21 @@ import "time"
 
 // EmergencyIssue represents a critical problem found in the cluster
 type EmergencyIssue struct {
-	Severity  string        `json:"severity"` // critical, high, medium, low
-	Resource  string        `json:"resource"` // pod, deployment, pvc, etc.
-	Namespace string        `json:"namespace"`
-	Name      string        `json:"name"`
-	Reason    string        `json:"reason"`
-	Message   string        `json:"message"`
-	Age       time.Duration `json:"age"`
-	Restarts  int           `json:"restarts,omitempty"`
-	LastEvent string        `json:"last_event,omitempty"`
+	Severity       string        `json:"severity"` // critical, high, medium, low
+	Resource       string        `json:"resource"` // pod, deployment, pvc, etc.
+	Namespace      string        `json:"namespace"`
+	Name           string        `json:"name"`
+	Reason         string        `json:"reason"`
+	Message        string        `json:"message"`
+	Age            time.Duration `json:"age"`
+	Restarts       int           `json:"restarts,omitempty"`
+	LastEvent      string        `json:"last_event,omitempty"`
+	OwnerKind      string        `json:"-"`
+	OwnerName      string        `json:"-"`
+	OwnerExecution string        `json:"-"`
+	// FailureObservedAt is the container termination time for a failed pod.
+	// It is deliberately separate from Age, which is Kubernetes object age.
+	FailureObservedAt time.Time `json:"-"`
 }
 
 // ClusterSnapshot represents the current state of a cluster
