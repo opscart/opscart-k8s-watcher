@@ -21,8 +21,8 @@ import (
 // any was found for its fingerprint.
 type enrichedIssue struct {
 	models.EmergencyIssue
-	FirstDetected string // formatDuration(time since first seen); "" when no history
-	ReopenCount   int
+	FirstDetected string    // formatDuration(time since first seen); "" when no history
+	ReopenCount   int       // retained for lifecycle consumers; Emergency does not render aggregates
 	firstSeenAt   time.Time // raw form of FirstDetected, used only to pick a group's representative
 }
 
@@ -47,6 +47,7 @@ func runEmergencyScan(clusterContext string) error {
 
 	enriched := enrichIssues(opStore, clusterContext, issues)
 	enriched = applyCriticalDebounce(opStore, clusterContext, enriched)
+	enriched = suppressSecondaryRestartNoise(opStore, clusterContext, enriched)
 	printEmergencyIssuesEnriched(os.Stdout, enriched)
 	return nil
 }
@@ -120,15 +121,14 @@ func classifyPod(podIssues []models.EmergencyIssue, probeFailure bool) (models.E
 	if crashLoop != nil && oom != nil {
 		out := *crashLoop
 		out.Reason = "CrashLoopBackOff (OOMKilled)"
-		container := extractCrashLoopContainer(crashLoop.Message)
-		out.Message = fmt.Sprintf("Container %s is being OOM-killed, causing the crash loop — check resources.limits.memory", container)
+		out.Message = "Container termination state reports OOMKilled; the pod is currently in CrashLoopBackOff."
 		return out, true
 	}
 	if crashLoop != nil && probeFailure {
 		out := *crashLoop
 		out.Reason = "CrashLoopBackOff (ProbeFailure)"
 		container := extractCrashLoopContainer(crashLoop.Message)
-		out.Message = fmt.Sprintf("Container %s is being killed by its startup/liveness probe before it can stabilize — check probe initialDelaySeconds/periodSeconds/failureThreshold against actual container startup time", container)
+		out.Message = fmt.Sprintf("Container %s: Kubernetes events show repeated startup/liveness probe failures followed by container restarts. Investigate probe configuration and actual startup time", container)
 		return out, true
 	}
 	if crashLoop != nil {
@@ -239,10 +239,8 @@ func detectProbeFailures(clusterContext string, issues []models.EmergencyIssue) 
 }
 
 // hasProbeFailureSignature reports whether any event message shows a
-// pod's liveness/startup probe repeatedly failing — the well-understood
-// Kubernetes pattern where a struggling-but-viable container gets killed
-// by its own probe before it can stabilize, and eventually degrades into
-// a plain CrashLoopBackOff with no other visible cause.
+// pod's liveness/startup probe repeatedly failing, followed by container
+// restarts and a CrashLoopBackOff observation.
 //
 // Matching is deliberately a tolerant, case-insensitive substring check
 // against the two phrasings Kubernetes actually emits (confirmed against
@@ -330,7 +328,7 @@ func applyCriticalDebounce(db store.Store, clusterContext string, issues []enric
 		}
 		owner := store.OwnerNameFromPod(issue.Name)
 		for _, reason := range criticalDebounceReasons {
-			candidates = append(candidates, store.Fingerprint(issue.Namespace, "Workload", owner, reason))
+			candidates = append(candidates, store.Fingerprint(issue.Namespace, "Workload", owner, canonicalIssueType(reason)))
 		}
 	}
 	if len(candidates) == 0 {
@@ -351,7 +349,7 @@ func applyCriticalDebounce(db store.Store, clusterContext string, issues []enric
 		}
 		owner := store.OwnerNameFromPod(issue.Name)
 		for _, reason := range criticalDebounceReasons {
-			rec, ok := history[store.Fingerprint(issue.Namespace, "Workload", owner, reason)]
+			rec, ok := history[store.Fingerprint(issue.Namespace, "Workload", owner, canonicalIssueType(reason))]
 			if !ok || rec == nil || rec.Status != "active" {
 				continue
 			}
@@ -362,6 +360,46 @@ func applyCriticalDebounce(db store.Store, clusterContext string, issues []enric
 		}
 	}
 	return issues
+}
+
+// suppressSecondaryRestartNoise removes only the rendered HighRestartCount
+// symptom when the same canonical workload has a stronger active incident.
+func suppressSecondaryRestartNoise(db store.Store, clusterContext string, issues []enrichedIssue) []enrichedIssue {
+	active := make(map[string]bool)
+	for _, issue := range issues {
+		t := canonicalIssueType(issue.Reason)
+		if t == "crash_loop" || t == "probe_failure" || t == "oomkilled" || t == "image_pull_backoff" {
+			active[issue.Namespace+"/"+store.OwnerNameFromPod(issue.Name)] = true
+		}
+	}
+	var fingerprints []string
+	fingerprintWorkload := make(map[string]string)
+	for _, issue := range issues {
+		if issue.Reason != "HighRestartCount" {
+			continue
+		}
+		owner := store.OwnerNameFromPod(issue.Name)
+		for _, typ := range []string{"crash_loop", "probe_failure", "oomkilled", "image_pull_backoff"} {
+			fp := store.Fingerprint(issue.Namespace, "Workload", owner, typ)
+			fingerprints = append(fingerprints, fp)
+			fingerprintWorkload[fp] = issue.Namespace + "/" + owner
+		}
+	}
+	if history, err := db.BatchGetIncidentHistory(clusterContext, fingerprints); err == nil {
+		for fp, rec := range history {
+			if rec != nil && rec.Status == "active" {
+				active[fingerprintWorkload[fp]] = true
+			}
+		}
+	}
+	out := issues[:0]
+	for _, issue := range issues {
+		if issue.Reason == "HighRestartCount" && active[issue.Namespace+"/"+store.OwnerNameFromPod(issue.Name)] {
+			continue
+		}
+		out = append(out, issue)
+	}
+	return out
 }
 
 // isCriticalDebounceReason reports whether reason is one of
@@ -403,7 +441,99 @@ func persistFindings(db store.Store, clusterContext, scanID string, issues []mod
 // scan loop uses (cmd/opscart-dashboard/scan.go), so history lines up
 // across both tools when pointed at the same --db-path.
 func incidentFingerprint(issue models.EmergencyIssue) string {
-	return store.Fingerprint(issue.Namespace, "Workload", store.OwnerNameFromPod(issue.Name), issue.Reason)
+	return store.Fingerprint(issue.Namespace, "Workload", store.OwnerNameFromPod(issue.Name), canonicalIssueType(issue.Reason))
+}
+
+func canonicalIssueType(reason string) string {
+	switch {
+	case strings.Contains(reason, "ProbeFailure"):
+		return "probe_failure"
+	case strings.Contains(reason, "OOMKilled"):
+		return "oomkilled"
+	case strings.Contains(reason, "CrashLoopBackOff"):
+		return "crash_loop"
+	case reason == "ImagePullBackOff" || reason == "ErrImagePull":
+		return "image_pull_backoff"
+	case reason == "HighRestartCount":
+		return "high_restart_count"
+	default:
+		return reason
+	}
+}
+
+// semanticIssueFamily normalizes only explicitly equivalent historical
+// aliases. It intentionally has no fuzzy matching: unrelated issue classes
+// must remain separate even when they share a namespace and workload.
+func semanticIssueFamily(issueType string) string {
+	switch issueType {
+	case "crash_loop", "CrashLoopBackOff":
+		return "crash_loop"
+	case "probe_failure", "ProbeFailure", "CrashLoopBackOff (ProbeFailure)":
+		return "probe_failure"
+	case "oomkilled", "oom_killed", "OOMKilled", "CrashLoopBackOff (OOMKilled)":
+		return "oomkilled"
+	case "image_pull_backoff", "ImagePullBackOff":
+		return "image_pull_backoff"
+	case "high_restart_count", "HighRestartCount":
+		return "high_restart_count"
+	default:
+		return issueType
+	}
+}
+
+type memoryIdentity struct {
+	namespace string
+	owner     string
+	family    string
+}
+
+func findingMemoryIdentity(issue models.EmergencyIssue) memoryIdentity {
+	return memoryIdentity{
+		namespace: issue.Namespace,
+		owner:     store.OwnerNameFromPod(issue.Name),
+		family:    semanticIssueFamily(canonicalIssueType(issue.Reason)),
+	}
+}
+
+func storedMemoryIdentity(incident store.IncidentSummary) memoryIdentity {
+	return memoryIdentity{
+		namespace: incident.Namespace,
+		owner:     store.OwnerNameFromPod(incident.Resource),
+		family:    semanticIssueFamily(incident.IssueType),
+	}
+}
+
+func reconcileHistoricalFirstSeen(issues []models.EmergencyIssue, incidents []store.IncidentSummary) map[memoryIdentity]time.Time {
+	wanted := make(map[memoryIdentity]bool, len(issues))
+	for _, issue := range issues {
+		wanted[findingMemoryIdentity(issue)] = true
+	}
+	earliest := make(map[memoryIdentity]time.Time)
+	for _, incident := range incidents {
+		identity := storedMemoryIdentity(incident)
+		if !wanted[identity] || incident.FirstSeen.IsZero() {
+			continue
+		}
+		if prior := earliest[identity]; prior.IsZero() || incident.FirstSeen.Before(prior) {
+			earliest[identity] = incident.FirstSeen
+		}
+	}
+	return earliest
+}
+
+func queryAllIncidentHistory(db store.Store, cluster string) ([]store.IncidentSummary, error) {
+	const pageSize = 200
+	var all []store.IncidentSummary
+	for page := 1; ; page++ {
+		items, total, err := db.QueryIncidents(store.IncidentFilter{Cluster: cluster, Page: page, PerPage: pageSize})
+		if err != nil {
+			return nil, err
+		}
+		all = append(all, items...)
+		if len(all) >= total || len(items) == 0 {
+			return all, nil
+		}
+	}
 }
 
 // mapIssuesToIncidents converts scan findings to the store's write format.
@@ -418,7 +548,7 @@ func mapIssuesToIncidents(issues []models.EmergencyIssue) []store.IncidentData {
 			Fingerprint:  incidentFingerprint(issue),
 			Namespace:    issue.Namespace,
 			Resource:     issue.Name,
-			IssueType:    issue.Reason,
+			IssueType:    canonicalIssueType(issue.Reason),
 			Severity:     issue.Severity,
 			DetailsJSON:  string(details),
 			RestartCount: issue.Restarts,
@@ -444,13 +574,15 @@ func enrichIssues(db store.Store, clusterContext string, issues []models.Emergen
 	if err != nil {
 		return enriched
 	}
-
+	allIncidents, aliasErr := queryAllIncidentHistory(db, clusterContext)
+	aliases := map[memoryIdentity]time.Time{}
+	if aliasErr == nil {
+		aliases = reconcileHistoricalFirstSeen(issues, allIncidents)
+	}
 	ids := make([]int64, 0, len(history))
 	for _, rec := range history {
 		ids = append(ids, rec.ID)
 	}
-	// A failed reopen-count lookup still leaves FirstDetected enriched
-	// below; reopenCounts stays nil, and indexing a nil map yields 0.
 	reopenCounts, _ := db.BatchGetReopenCounts(ids)
 
 	for i, fingerprint := range fingerprints {
@@ -461,6 +593,10 @@ func enrichIssues(db store.Store, clusterContext string, issues []models.Emergen
 		enriched[i].FirstDetected = formatDuration(time.Since(rec.FirstSeen))
 		enriched[i].ReopenCount = reopenCounts[rec.ID]
 		enriched[i].firstSeenAt = rec.FirstSeen
+		if legacyFirstSeen := aliases[findingMemoryIdentity(issues[i])]; !legacyFirstSeen.IsZero() && legacyFirstSeen.Before(rec.FirstSeen) {
+			enriched[i].FirstDetected = formatDuration(time.Since(legacyFirstSeen))
+			enriched[i].firstSeenAt = legacyFirstSeen
+		}
 	}
 	return enriched
 }
@@ -478,6 +614,7 @@ func enrichIssues(db store.Store, clusterContext string, issues []models.Emergen
 // already guarantees at most one issue per pod before issues ever reaches
 // this function.
 func printEmergencyIssuesEnriched(w io.Writer, issues []enrichedIssue) {
+	issues = aggregateFailedJobPods(issues)
 	if len(issues) == 0 {
 		fmt.Fprintln(w, "✅ No critical issues found!")
 		return
@@ -530,6 +667,49 @@ func printEmergencyIssuesEnriched(w io.Writer, issues []enrichedIssue) {
 		fmt.Fprintln(w, strings.Repeat("═", 80))
 		printIssueGroups(w, mediumGroups)
 	}
+}
+
+// aggregateFailedJobPods turns explicitly owned failed pods into one review
+// finding per Job/CronJob. Unowned failed pods remain independent findings.
+func aggregateFailedJobPods(issues []enrichedIssue) []enrichedIssue {
+	type ownerKey struct{ namespace, kind, name string }
+	groups := make(map[ownerKey][]enrichedIssue)
+	var order []ownerKey
+	var out []enrichedIssue
+	for _, issue := range issues {
+		if issue.Reason != "PodFailed" || issue.OwnerName == "" || (issue.OwnerKind != "Job" && issue.OwnerKind != "CronJob") {
+			out = append(out, issue)
+			continue
+		}
+		key := ownerKey{issue.Namespace, issue.OwnerKind, issue.OwnerName}
+		if _, exists := groups[key]; !exists {
+			order = append(order, key)
+		}
+		groups[key] = append(groups[key], issue)
+	}
+	for _, key := range order {
+		items := groups[key]
+		executions := make(map[string]bool)
+		recent := items[0]
+		for _, item := range items {
+			if item.OwnerExecution != "" {
+				executions[item.OwnerExecution] = true
+			}
+			if item.FailureObservedAt.After(recent.FailureObservedAt) || (recent.FailureObservedAt.IsZero() && item.Age < recent.Age) {
+				recent = item
+			}
+		}
+		when := "unknown"
+		if !recent.FailureObservedAt.IsZero() {
+			when = recent.FailureObservedAt.Format(time.RFC3339)
+		}
+		out = append(out, enrichedIssue{EmergencyIssue: models.EmergencyIssue{
+			Severity: "medium", Resource: strings.ToLower(key.kind), Namespace: key.namespace,
+			Name: key.name, Reason: key.kind + "FailedExecutions",
+			Message: fmt.Sprintf("Owner: %s/%s | Failed executions: %d | Failed pods: %d | Most recent failure: %s | Namespace: %s", key.kind, key.name, len(executions), len(items), when, key.namespace),
+		}})
+	}
+	return out
 }
 
 // podKey identifies a pod for dedup purposes. EmergencyIssue has no
@@ -785,12 +965,8 @@ func groupDetailLine(key groupKey, issues []enrichedIssue, rep enrichedIssue) st
 func groupRepresentative(issues []enrichedIssue) enrichedIssue {
 	rep := issues[0]
 	for _, issue := range issues[1:] {
-		switch {
-		case issue.ReopenCount > rep.ReopenCount:
-			rep = issue
-		case issue.ReopenCount == rep.ReopenCount &&
-			!issue.firstSeenAt.IsZero() &&
-			(rep.firstSeenAt.IsZero() || issue.firstSeenAt.Before(rep.firstSeenAt)):
+		if !issue.firstSeenAt.IsZero() &&
+			(rep.firstSeenAt.IsZero() || issue.firstSeenAt.Before(rep.firstSeenAt)) {
 			rep = issue
 		}
 	}
@@ -818,9 +994,8 @@ func printGroupedIssue(w io.Writer, issues []enrichedIssue) {
 	fmt.Fprintf(w, "  └─ %s\n", groupDetailLine(key, issues, rep))
 	if rep.FirstDetected != "" {
 		fmt.Fprintf(w, "  └─ First detected: %s ago (%s)\n", rep.FirstDetected, rep.Name)
-	}
-	if rep.ReopenCount > 0 {
-		fmt.Fprintf(w, "  └─ Reopened: %dx (%s)\n", rep.ReopenCount, rep.Name)
+	} else {
+		fmt.Fprintln(w, "  └─ First detected: —")
 	}
 	fmt.Fprintln(w)
 }
@@ -831,13 +1006,24 @@ func printEnrichedIssue(w io.Writer, issue enrichedIssue) {
 	if issue.Restarts > 0 {
 		fmt.Fprintf(w, " | Restarts: %d", issue.Restarts)
 	}
-	fmt.Fprintf(w, " | Age: %s\n", formatDuration(issue.Age))
+	if issue.Age > 0 {
+		label := "Pod Age"
+		switch issue.Resource {
+		case "job":
+			label = "Job Age"
+		case "cronjob":
+			label = "CronJob Age"
+		case "pvc":
+			label = "PVC Age"
+		}
+		fmt.Fprintf(w, " | %s: %s", label, formatDuration(issue.Age))
+	}
+	fmt.Fprintln(w)
 	fmt.Fprintf(w, "  └─ %s\n", issue.Message)
 	if issue.FirstDetected != "" {
 		fmt.Fprintf(w, "  └─ First detected: %s ago\n", issue.FirstDetected)
-	}
-	if issue.ReopenCount > 0 {
-		fmt.Fprintf(w, "  └─ Reopened: %dx\n", issue.ReopenCount)
+	} else {
+		fmt.Fprintln(w, "  └─ First detected: —")
 	}
 	fmt.Fprintln(w)
 }
