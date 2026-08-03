@@ -186,6 +186,59 @@ func TestEarliestRetainedObservationFallsBackToIncidents(t *testing.T) {
 	}
 }
 
+func TestGetMemoryProvenanceSelectsEarliestClusterHistory(t *testing.T) {
+	tests := []struct {
+		name          string
+		scanAge       time.Duration
+		incidentAge   time.Duration
+		wantAge       time.Duration
+		wantSource    string
+		wantNoHistory bool
+	}{
+		{name: "incident history older than scan history", scanAge: 24 * time.Hour, incidentAge: 10 * 24 * time.Hour, wantAge: 10 * 24 * time.Hour, wantSource: MemoryProvenanceIncidents},
+		{name: "scan history older than incident history", scanAge: 10 * 24 * time.Hour, incidentAge: 24 * time.Hour, wantAge: 10 * 24 * time.Hour, wantSource: MemoryProvenanceScanHistory},
+		{name: "only incident history", incidentAge: 5 * 24 * time.Hour, wantAge: 5 * 24 * time.Hour, wantSource: MemoryProvenanceIncidents},
+		{name: "only scan history", scanAge: 5 * 24 * time.Hour, wantAge: 5 * 24 * time.Hour, wantSource: MemoryProvenanceScanHistory},
+		{name: "no history", wantNoHistory: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s := openTestStore(t)
+			now := time.Now().Truncate(time.Second)
+			if tt.scanAge > 0 {
+				if _, err := s.db.Exec(`INSERT INTO scan_history (scan_id,cluster,scanned_at,success) VALUES (?,?,?,1)`, "target-scan", "target", now.Add(-tt.scanAge).Unix()); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if tt.incidentAge > 0 {
+				if _, err := s.db.Exec(`INSERT INTO incidents
+					(fingerprint,cluster,namespace,resource,issue_type,severity,first_seen,last_seen,status,current_restart_count,missing_scans)
+					VALUES (?,?,?,?,?,?,?,?,?,?,?)`, "ns/Workload/api/crash_loop", "target", "ns", "api", "crash_loop", "critical", now.Add(-tt.incidentAge).Unix(), now.Unix(), "active", 0, 0); err != nil {
+					t.Fatal(err)
+				}
+			}
+			// Older data belonging to another cluster must never influence target.
+			if _, err := s.db.Exec(`INSERT INTO scan_history (scan_id,cluster,scanned_at,success) VALUES (?,?,?,1)`, "other-scan", "other", now.Add(-30*24*time.Hour).Unix()); err != nil {
+				t.Fatal(err)
+			}
+
+			got, err := s.GetMemoryProvenance("target")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if tt.wantNoHistory {
+				if got != nil {
+					t.Fatalf("provenance=%+v, want no history", got)
+				}
+				return
+			}
+			if got == nil || got.Source != tt.wantSource || !got.EarliestRetainedObservation.Equal(now.Add(-tt.wantAge)) {
+				t.Fatalf("provenance=%+v, want time=%v source=%q", got, now.Add(-tt.wantAge), tt.wantSource)
+			}
+		})
+	}
+}
+
 func TestRestartTrendApplicabilityUsesCanonicalFamilies(t *testing.T) {
 	for _, issueType := range []string{"crash_loop", "CrashLoopBackOff", "probe_failure", "ProbeFailure", "oomkilled", "OOMKilled"} {
 		if !RestartTrendApplies(issueType) {

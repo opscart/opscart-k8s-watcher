@@ -9,6 +9,7 @@ type Store interface {
 	UpsertIncidents(cluster string, scanID string, incidents []IncidentData) error
 	ResolveMissing(cluster string, scanID string) (resolved int, err error)
 	WriteScanHistory(cluster string, scanID string, meta ScanMeta) error
+	GetMemoryProvenance(cluster string) (*MemoryProvenance, error)
 	GetOverviewTrend(cluster string) (*OverviewTrend, error)
 	GetLatestSnapshot(cluster string) (*SnapshotData, error)
 	GetIncidentHistory(cluster string, fingerprint string) (*IncidentRecord, error)
@@ -23,16 +24,32 @@ type Store interface {
 	Close() error
 }
 
-// GetEarliestRetainedObservation queries provenance when the selected store
-// supports it. Stateless and other stores report no retained history.
+const (
+	MemoryProvenanceScanHistory = "scan_history"
+	MemoryProvenanceIncidents   = "incidents"
+)
+
+// MemoryProvenance identifies the beginning of a cluster's retained OMA
+// history and the table that supplied that earliest timestamp.
+type MemoryProvenance struct {
+	EarliestRetainedObservation time.Time
+	Source                      string
+}
+
+// GetMemoryProvenance queries provenance when the selected store supports it.
+// Stateless and other stores report no retained history.
+func GetMemoryProvenance(s Store, cluster string) (*MemoryProvenance, error) {
+	return s.GetMemoryProvenance(cluster)
+}
+
+// GetEarliestRetainedObservation is the timestamp-only compatibility helper
+// used by existing presentation callers.
 func GetEarliestRetainedObservation(s Store, cluster string) (time.Time, error) {
-	type provenanceStore interface {
-		GetEarliestRetainedObservation(string) (time.Time, error)
+	provenance, err := GetMemoryProvenance(s, cluster)
+	if err != nil || provenance == nil {
+		return time.Time{}, err
 	}
-	if p, ok := s.(provenanceStore); ok {
-		return p.GetEarliestRetainedObservation(cluster)
-	}
-	return time.Time{}, nil
+	return provenance.EarliestRetainedObservation, nil
 }
 
 // AtObservationBoundary reports whether an incident was first seen within
