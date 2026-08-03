@@ -23,6 +23,28 @@ type Store interface {
 	Close() error
 }
 
+// GetEarliestRetainedObservation queries provenance when the selected store
+// supports it. Stateless and other stores report no retained history.
+func GetEarliestRetainedObservation(s Store, cluster string) (time.Time, error) {
+	type provenanceStore interface {
+		GetEarliestRetainedObservation(string) (time.Time, error)
+	}
+	if p, ok := s.(provenanceStore); ok {
+		return p.GetEarliestRetainedObservation(cluster)
+	}
+	return time.Time{}, nil
+}
+
+// AtObservationBoundary reports whether an incident was first seen within
+// five minutes either side of the earliest retained OMA observation.
+func AtObservationBoundary(firstSeen, earliest time.Time) bool {
+	if firstSeen.IsZero() || earliest.IsZero() {
+		return false
+	}
+	delta := firstSeen.Sub(earliest)
+	return delta >= -5*time.Minute && delta <= 5*time.Minute
+}
+
 type SnapshotData struct {
 	ScannedAt      time.Time
 	IncidentScore  int

@@ -9,8 +9,9 @@ import (
 )
 
 var (
-	stateless bool
-	dbPath    string
+	stateless      bool
+	dbPath         string
+	selectedDBPath string
 
 	// opStore is the operational memory store, initialized once in main()
 	// before any subcommand runs, and shared package-wide (same threading
@@ -40,6 +41,7 @@ func defaultScanDBPath() (string, error) {
 // crashing the CLI.
 func initStore() store.Store {
 	if stateless {
+		selectedDBPath = ""
 		return &store.NullStore{}
 	}
 
@@ -58,6 +60,7 @@ func initStore() store.Store {
 		log.Printf("store: persistence disabled (%v)", err)
 		return &store.NullStore{}
 	}
+	selectedDBPath = path
 	log.Printf("opscart-scan: operational memory at %s", path)
 	return sqlDB
 }

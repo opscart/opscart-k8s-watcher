@@ -5,7 +5,7 @@ import "strings"
 // Fingerprint builds a stable, human-readable incident identity.
 // Pod-name suffixes are stripped by the caller passing ownerName.
 func Fingerprint(namespace, ownerKind, ownerName, issueType string) string {
-	return namespace + "/" + ownerKind + "/" + ownerName + "/" + issueType
+	return namespace + "/" + ownerKind + "/" + ownerName + "/" + CanonicalIssueType(issueType)
 }
 
 func OwnerNameFromPod(podName string) string {

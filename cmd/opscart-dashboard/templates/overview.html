@@ -247,6 +247,9 @@
       <div>No operational memory yet</div>
     </div>
     {{end}}
+    <div class="mem-line">Earliest retained observation: <strong>{{if .EarliestRetainedObservation}}{{.EarliestRetainedObservation}}{{else}}—{{end}}</strong></div>
+    <div class="mem-line">Configured retention: <strong>{{.ConfiguredRetention}}</strong></div>
+    <div class="mem-line">Storage: <strong>{{.StorageMode}}</strong></div>
   </div>
 </div>
 </div>

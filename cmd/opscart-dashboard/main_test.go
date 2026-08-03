@@ -227,6 +227,9 @@ func TestHandleOverviewPage_CursorSetAfterQuery(t *testing.T) {
 	}
 	defer sqlDB.Close()
 	wrapped := &sinceCapturingStore{Store: sqlDB}
+	if err := sqlDB.WriteScanHistory("test-ctx", "seed", store.ScanMeta{Success: true}); err != nil {
+		t.Fatalf("WriteScanHistory: %v", err)
+	}
 
 	srv := newServer([]string{"test-ctx"}, wrapped, 90, true)
 
@@ -247,6 +250,11 @@ func TestHandleOverviewPage_CursorSetAfterQuery(t *testing.T) {
 	resp := rec.Result()
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("status = %d, want 200; body: %s", resp.StatusCode, rec.Body.String())
+	}
+	for _, want := range []string{"Earliest retained observation:", "Configured retention:", "90 days", "Storage:", "Persistent"} {
+		if !strings.Contains(rec.Body.String(), want) {
+			t.Errorf("Overview Operational Memory card missing %q", want)
+		}
 	}
 
 	// The query must have used the cursor from the incoming cookie, proving
