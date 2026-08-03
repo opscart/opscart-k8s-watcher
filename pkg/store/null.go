@@ -24,6 +24,10 @@ func (NullStore) WriteScanHistory(cluster string, scanID string, meta ScanMeta) 
 	return nil
 }
 
+func (NullStore) GetMemoryProvenance(cluster string) (*MemoryProvenance, error) {
+	return nil, nil
+}
+
 func (NullStore) GetOverviewTrend(cluster string) (*OverviewTrend, error) {
 	return &OverviewTrend{HasHistory: false}, nil
 }

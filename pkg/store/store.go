@@ -9,6 +9,7 @@ type Store interface {
 	UpsertIncidents(cluster string, scanID string, incidents []IncidentData) error
 	ResolveMissing(cluster string, scanID string) (resolved int, err error)
 	WriteScanHistory(cluster string, scanID string, meta ScanMeta) error
+	GetMemoryProvenance(cluster string) (*MemoryProvenance, error)
 	GetOverviewTrend(cluster string) (*OverviewTrend, error)
 	GetLatestSnapshot(cluster string) (*SnapshotData, error)
 	GetIncidentHistory(cluster string, fingerprint string) (*IncidentRecord, error)
@@ -21,6 +22,44 @@ type Store interface {
 	GetChangesSince(cluster string, since time.Time, limit int) ([]RecentEvent, error)
 	PruneOlderThan(cluster string, cutoff time.Time) (pruned int, err error)
 	Close() error
+}
+
+const (
+	MemoryProvenanceScanHistory = "scan_history"
+	MemoryProvenanceIncidents   = "incidents"
+)
+
+// MemoryProvenance identifies the beginning of a cluster's retained OMA
+// history and the table that supplied that earliest timestamp.
+type MemoryProvenance struct {
+	EarliestRetainedObservation time.Time
+	Source                      string
+}
+
+// GetMemoryProvenance queries provenance when the selected store supports it.
+// Stateless and other stores report no retained history.
+func GetMemoryProvenance(s Store, cluster string) (*MemoryProvenance, error) {
+	return s.GetMemoryProvenance(cluster)
+}
+
+// GetEarliestRetainedObservation is the timestamp-only compatibility helper
+// used by existing presentation callers.
+func GetEarliestRetainedObservation(s Store, cluster string) (time.Time, error) {
+	provenance, err := GetMemoryProvenance(s, cluster)
+	if err != nil || provenance == nil {
+		return time.Time{}, err
+	}
+	return provenance.EarliestRetainedObservation, nil
+}
+
+// AtObservationBoundary reports whether an incident was first seen within
+// five minutes either side of the earliest retained OMA observation.
+func AtObservationBoundary(firstSeen, earliest time.Time) bool {
+	if firstSeen.IsZero() || earliest.IsZero() {
+		return false
+	}
+	delta := firstSeen.Sub(earliest)
+	return delta >= -5*time.Minute && delta <= 5*time.Minute
 }
 
 type SnapshotData struct {

@@ -373,6 +373,10 @@ func (s *SQLiteStore) WriteSnapshot(cluster string, scanID string, d SnapshotDat
 }
 
 func (s *SQLiteStore) UpsertIncidents(cluster string, scanID string, incidents []IncidentData) error {
+	for i := range incidents {
+		incidents[i].IssueType = CanonicalIssueType(incidents[i].IssueType)
+		incidents[i].Fingerprint = normalizeFingerprint(incidents[i].Fingerprint)
+	}
 	incidents = focusIncidentsByFingerprint(incidents)
 
 	tx, err := s.db.Begin()
@@ -380,14 +384,6 @@ func (s *SQLiteStore) UpsertIncidents(cluster string, scanID string, incidents [
 		return err
 	}
 	defer tx.Rollback()
-
-	lookupStmt, err := tx.Prepare(
-		`SELECT id, resource, current_restart_count, severity, status FROM incidents WHERE cluster=? AND fingerprint=?`,
-	)
-	if err != nil {
-		return err
-	}
-	defer lookupStmt.Close()
 
 	upsertStmt, err := tx.Prepare(`
 		INSERT INTO incidents (
@@ -415,15 +411,31 @@ func (s *SQLiteStore) UpsertIncidents(cluster string, scanID string, incidents [
 	for _, inc := range incidents {
 		var existingID int64
 		var prevRestart int
-		var prevResource, prevSeverity, prevStatus string
-		lookupErr := lookupStmt.QueryRow(cluster, inc.Fingerprint).Scan(&existingID, &prevResource, &prevRestart, &prevSeverity, &prevStatus)
+		var prevFingerprint, prevResource, prevSeverity, prevStatus string
+		aliases := fingerprintAliases(inc.Fingerprint)
+		placeholders := strings.TrimRight(strings.Repeat("?,", len(aliases)), ",")
+		lookupArgs := make([]any, 0, len(aliases)+1)
+		lookupArgs = append(lookupArgs, cluster)
+		for _, alias := range aliases {
+			lookupArgs = append(lookupArgs, alias)
+		}
+		lookupErr := tx.QueryRow(fmt.Sprintf(
+			`SELECT id, fingerprint, resource, current_restart_count, severity, status
+			 FROM incidents WHERE cluster=? AND fingerprint IN (%s)
+			 ORDER BY CASE status WHEN 'active' THEN 0 ELSE 1 END ASC,
+			          first_seen ASC, id ASC LIMIT 1`, placeholders,
+		), lookupArgs...).Scan(&existingID, &prevFingerprint, &prevResource, &prevRestart, &prevSeverity, &prevStatus)
 		if lookupErr != nil && lookupErr != sql.ErrNoRows {
 			return lookupErr
 		}
 		isNew := lookupErr == sql.ErrNoRows
+		writeFingerprint := inc.Fingerprint
+		if !isNew {
+			writeFingerprint = prevFingerprint
+		}
 
 		res, err := upsertStmt.Exec(
-			inc.Fingerprint, cluster, inc.Namespace, inc.Resource, inc.IssueType,
+			writeFingerprint, cluster, inc.Namespace, inc.Resource, inc.IssueType,
 			inc.Severity, now, now, inc.DetailsJSON, scanID, inc.RestartCount,
 		)
 		if err != nil {
@@ -641,6 +653,47 @@ func (s *SQLiteStore) WriteScanHistory(cluster string, scanID string, meta ScanM
 	return err
 }
 
+// GetMemoryProvenance returns the earliest cluster-scoped retained timestamp
+// across successful scans and incident history.
+func (s *SQLiteStore) GetMemoryProvenance(cluster string) (*MemoryProvenance, error) {
+	var scanUnix, incidentUnix sql.NullInt64
+	if err := s.db.QueryRow(
+		`SELECT MIN(scanned_at) FROM scan_history WHERE cluster = ? AND success = 1`,
+		cluster,
+	).Scan(&scanUnix); err != nil {
+		return nil, err
+	}
+	if err := s.db.QueryRow(
+		`SELECT MIN(first_seen) FROM incidents WHERE cluster = ?`,
+		cluster,
+	).Scan(&incidentUnix); err != nil {
+		return nil, err
+	}
+
+	switch {
+	case scanUnix.Valid && (!incidentUnix.Valid || scanUnix.Int64 <= incidentUnix.Int64):
+		return &MemoryProvenance{
+			EarliestRetainedObservation: time.Unix(scanUnix.Int64, 0),
+			Source:                      MemoryProvenanceScanHistory,
+		}, nil
+	case incidentUnix.Valid:
+		return &MemoryProvenance{
+			EarliestRetainedObservation: time.Unix(incidentUnix.Int64, 0),
+			Source:                      MemoryProvenanceIncidents,
+		}, nil
+	default:
+		return nil, nil
+	}
+}
+
+func (s *SQLiteStore) GetEarliestRetainedObservation(cluster string) (time.Time, error) {
+	provenance, err := s.GetMemoryProvenance(cluster)
+	if err != nil || provenance == nil {
+		return time.Time{}, err
+	}
+	return provenance.EarliestRetainedObservation, nil
+}
+
 type snapshotRow struct {
 	ScannedAt      int64
 	IncidentScore  int
@@ -777,12 +830,20 @@ func (s *SQLiteStore) GetIncidentHistory(cluster string, fingerprint string) (*I
 	var firstSeen, lastSeen int64
 	var status, detailsJSON sql.NullString
 
-	err := s.db.QueryRow(
+	aliases := fingerprintAliases(fingerprint)
+	placeholders := strings.TrimRight(strings.Repeat("?,", len(aliases)), ",")
+	args := make([]any, 0, len(aliases)+1)
+	args = append(args, cluster)
+	for _, alias := range aliases {
+		args = append(args, alias)
+	}
+	err := s.db.QueryRow(fmt.Sprintf(
 		`SELECT first_seen, last_seen, status, details_json
 		 FROM incidents
-		 WHERE cluster = ? AND fingerprint = ?`,
-		cluster, fingerprint,
-	).Scan(&firstSeen, &lastSeen, &status, &detailsJSON)
+		 WHERE cluster = ? AND fingerprint IN (%s)
+		 ORDER BY CASE status WHEN 'active' THEN 0 ELSE 1 END ASC,
+		          first_seen ASC, id ASC LIMIT 1`, placeholders,
+	), args...).Scan(&firstSeen, &lastSeen, &status, &detailsJSON)
 
 	if err == sql.ErrNoRows {
 		return nil, nil
@@ -792,7 +853,7 @@ func (s *SQLiteStore) GetIncidentHistory(cluster string, fingerprint string) (*I
 	}
 
 	return &IncidentRecord{
-		Fingerprint: fingerprint,
+		Fingerprint: normalizeFingerprint(fingerprint),
 		FirstSeen:   time.Unix(firstSeen, 0),
 		LastSeen:    time.Unix(lastSeen, 0),
 		Status:      status.String,
@@ -801,14 +862,24 @@ func (s *SQLiteStore) GetIncidentHistory(cluster string, fingerprint string) (*I
 }
 
 func (s *SQLiteStore) GetIncidentTimeline(cluster string, fingerprint string) ([]IncidentEvent, error) {
-	rows, err := s.db.Query(`
+	aliases := fingerprintAliases(fingerprint)
+	placeholders := strings.TrimRight(strings.Repeat("?,", len(aliases)), ",")
+	args := make([]any, 0, len(aliases)+1)
+	args = append(args, cluster)
+	for _, alias := range aliases {
+		args = append(args, alias)
+	}
+	rows, err := s.db.Query(fmt.Sprintf(`
 		SELECT e.occurred_at, e.event_type, e.event_reason, e.restart_count,
 			e.severity, e.state, e.message
 		FROM incident_events e
-		JOIN incidents i ON i.id = e.incident_id
-		WHERE i.cluster = ? AND i.fingerprint = ?
+		WHERE e.incident_id = (
+			SELECT id FROM incidents WHERE cluster = ? AND fingerprint IN (%s)
+			ORDER BY CASE status WHEN 'active' THEN 0 ELSE 1 END ASC,
+			         first_seen ASC, id ASC LIMIT 1
+		)
 		ORDER BY e.occurred_at ASC, e.id ASC
-	`, cluster, fingerprint)
+	`, placeholders), args...)
 	if err != nil {
 		return nil, err
 	}
@@ -846,10 +917,23 @@ func (s *SQLiteStore) BatchGetIncidentHistory(cluster string, fingerprints []str
 		return out, nil
 	}
 
-	placeholders := make([]string, len(fingerprints))
-	args := make([]any, 0, len(fingerprints)+1)
+	requested := make(map[string][]string, len(fingerprints))
+	var allAliases []string
+	seenAlias := make(map[string]bool)
+	for _, fp := range fingerprints {
+		canonical := normalizeFingerprint(fp)
+		requested[canonical] = append(requested[canonical], fp)
+		for _, alias := range fingerprintAliases(fp) {
+			if !seenAlias[alias] {
+				seenAlias[alias] = true
+				allAliases = append(allAliases, alias)
+			}
+		}
+	}
+	placeholders := make([]string, len(allAliases))
+	args := make([]any, 0, len(allAliases)+1)
 	args = append(args, cluster)
-	for i, fp := range fingerprints {
+	for i, fp := range allAliases {
 		placeholders[i] = "?"
 		args = append(args, fp)
 	}
@@ -857,7 +941,9 @@ func (s *SQLiteStore) BatchGetIncidentHistory(cluster string, fingerprints []str
 	rows, err := s.db.Query(fmt.Sprintf(
 		`SELECT id, fingerprint, first_seen, last_seen, status, details_json
 		 FROM incidents
-		 WHERE cluster = ? AND fingerprint IN (%s)`,
+		 WHERE cluster = ? AND fingerprint IN (%s)
+		 ORDER BY CASE status WHEN 'active' THEN 0 ELSE 1 END ASC,
+		          first_seen ASC, id ASC`,
 		strings.Join(placeholders, ","),
 	), args...)
 	if err != nil {
@@ -872,13 +958,21 @@ func (s *SQLiteStore) BatchGetIncidentHistory(cluster string, fingerprints []str
 		if err := rows.Scan(&id, &fingerprint, &firstSeen, &lastSeen, &status, &detailsJSON); err != nil {
 			return nil, err
 		}
-		out[fingerprint] = &IncidentRecord{
+		canonical := normalizeFingerprint(fingerprint)
+		if _, chosen := out[canonical]; chosen {
+			continue
+		}
+		record := &IncidentRecord{
 			ID:          id,
-			Fingerprint: fingerprint,
+			Fingerprint: canonical,
 			FirstSeen:   time.Unix(firstSeen, 0),
 			LastSeen:    time.Unix(lastSeen, 0),
 			Status:      status.String,
 			DetailsJSON: detailsJSON.String,
+		}
+		out[canonical] = record
+		for _, original := range requested[canonical] {
+			out[original] = record
 		}
 	}
 	return out, rows.Err()
@@ -1022,8 +1116,8 @@ func (s *SQLiteStore) batchTrendEvents(ids []int64) (map[int64][]trendEvent, err
 // Namespace posture, security/configuration, and unattached-resource findings
 // have no meaningful restart trajectory and must not be labeled "stable".
 func RestartTrendApplies(issueType string) bool {
-	switch issueType {
-	case "crash_loop", "oomkilled", "oom_killed", "probe_failure":
+	switch CanonicalIssueType(issueType) {
+	case "crash_loop", "oomkilled", "probe_failure":
 		return true
 	default:
 		return false
@@ -1090,16 +1184,24 @@ func (s *SQLiteStore) QueryIncidents(f IncidentFilter) ([]IncidentSummary, int, 
 
 	if f.Text != "" {
 		like := "%" + f.Text + "%"
-		where = append(where, "(resource LIKE ? OR namespace LIKE ? OR issue_type LIKE ?)")
+		aliases := issueTypeAliases(f.Text)
+		where = append(where, "(resource LIKE ? OR namespace LIKE ? OR issue_type LIKE ? OR issue_type IN ("+
+			strings.TrimRight(strings.Repeat("?,", len(aliases)), ",")+"))")
 		args = append(args, like, like, like)
+		for _, alias := range aliases {
+			args = append(args, alias)
+		}
 	}
 	if f.Namespace != "" {
 		where = append(where, "namespace = ?")
 		args = append(args, f.Namespace)
 	}
 	if f.IssueType != "" {
-		where = append(where, "issue_type = ?")
-		args = append(args, f.IssueType)
+		aliases := issueTypeAliases(f.IssueType)
+		where = append(where, "issue_type IN ("+strings.TrimRight(strings.Repeat("?,", len(aliases)), ",")+")")
+		for _, alias := range aliases {
+			args = append(args, alias)
+		}
 	}
 	if f.Severity != "" {
 		where = append(where, "severity = ?")
@@ -1194,10 +1296,10 @@ func (s *SQLiteStore) QueryIncidents(f IncidentFilter) ([]IncidentSummary, int, 
 	items := make([]IncidentSummary, 0, len(raws))
 	for _, r := range raws {
 		summary := IncidentSummary{
-			Fingerprint:  r.fingerprint,
+			Fingerprint:  normalizeFingerprint(r.fingerprint),
 			Namespace:    r.namespace,
 			Resource:     r.resource,
-			IssueType:    r.issueType,
+			IssueType:    CanonicalIssueType(r.issueType),
 			Severity:     r.severity,
 			Status:       r.status,
 			ReopenCount:  reopenCounts[r.id],
@@ -1220,7 +1322,7 @@ func (s *SQLiteStore) countAccelerating(cluster string) (int, error) {
 	rows, err := s.db.Query(
 		`SELECT id, current_restart_count, first_seen FROM incidents
 		 WHERE cluster = ? AND status = 'active'
-		   AND issue_type IN ('crash_loop','oomkilled','oom_killed','probe_failure')`,
+		   AND issue_type IN ('crash_loop','CrashLoopBackOff','oomkilled','oom_killed','OOMKilled','CrashLoopBackOff (OOMKilled)','probe_failure','ProbeFailure','CrashLoopBackOff (ProbeFailure)')`,
 		cluster,
 	)
 	if err != nil {

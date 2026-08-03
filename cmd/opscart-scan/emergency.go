@@ -21,13 +21,25 @@ import (
 // any was found for its fingerprint.
 type enrichedIssue struct {
 	models.EmergencyIssue
-	FirstDetected string    // formatDuration(time since first seen); "" when no history
-	ReopenCount   int       // retained for lifecycle consumers; Emergency does not render aggregates
-	firstSeenAt   time.Time // raw form of FirstDetected, used only to pick a group's representative
+	FirstDetected     string    // formatDuration(time since first seen); "" when no history
+	ReopenCount       int       // retained for lifecycle consumers; Emergency does not render aggregates
+	firstSeenAt       time.Time // raw form of FirstDetected, used only to pick a group's representative
+	atHistoryBoundary bool
 }
 
 func runEmergencyScan(clusterContext string) error {
 	fmt.Printf("\n🔍 Cluster: %s\n", clusterContext)
+	if selectedDBPath != "" {
+		fmt.Printf("OMA database: %s\n", selectedDBPath)
+	} else {
+		fmt.Println("OMA database: —")
+	}
+	earliest, _ := store.GetEarliestRetainedObservation(opStore, clusterContext)
+	if earliest.IsZero() {
+		fmt.Printf("Earliest retained observation for cluster %s: —\n", clusterContext)
+	} else {
+		fmt.Printf("Earliest retained observation for cluster %s: %s\n", clusterContext, earliest.Local().Format("2006-01-02 15:04:05 MST"))
+	}
 	s, err := scanner.NewScanner(clusterContext)
 	if err != nil {
 		return fmt.Errorf("connecting to cluster: %w", err)
@@ -441,24 +453,13 @@ func persistFindings(db store.Store, clusterContext, scanID string, issues []mod
 // scan loop uses (cmd/opscart-dashboard/scan.go), so history lines up
 // across both tools when pointed at the same --db-path.
 func incidentFingerprint(issue models.EmergencyIssue) string {
-	return store.Fingerprint(issue.Namespace, "Workload", store.OwnerNameFromPod(issue.Name), canonicalIssueType(issue.Reason))
+	return store.Fingerprint(issue.Namespace, "Workload", store.OwnerNameFromPod(issue.Name), store.CanonicalIssueType(issue.Reason))
 }
 
+// canonicalIssueType remains as a package-local compatibility shim for the
+// scanner's classification helpers; the shared store function is authoritative.
 func canonicalIssueType(reason string) string {
-	switch {
-	case strings.Contains(reason, "ProbeFailure"):
-		return "probe_failure"
-	case strings.Contains(reason, "OOMKilled"):
-		return "oomkilled"
-	case strings.Contains(reason, "CrashLoopBackOff"):
-		return "crash_loop"
-	case reason == "ImagePullBackOff" || reason == "ErrImagePull":
-		return "image_pull_backoff"
-	case reason == "HighRestartCount":
-		return "high_restart_count"
-	default:
-		return reason
-	}
+	return store.CanonicalIssueType(reason)
 }
 
 // semanticIssueFamily normalizes only explicitly equivalent historical
@@ -491,7 +492,7 @@ func findingMemoryIdentity(issue models.EmergencyIssue) memoryIdentity {
 	return memoryIdentity{
 		namespace: issue.Namespace,
 		owner:     store.OwnerNameFromPod(issue.Name),
-		family:    semanticIssueFamily(canonicalIssueType(issue.Reason)),
+		family:    semanticIssueFamily(store.CanonicalIssueType(issue.Reason)),
 	}
 }
 
@@ -548,7 +549,7 @@ func mapIssuesToIncidents(issues []models.EmergencyIssue) []store.IncidentData {
 			Fingerprint:  incidentFingerprint(issue),
 			Namespace:    issue.Namespace,
 			Resource:     issue.Name,
-			IssueType:    canonicalIssueType(issue.Reason),
+			IssueType:    store.CanonicalIssueType(issue.Reason),
 			Severity:     issue.Severity,
 			DetailsJSON:  string(details),
 			RestartCount: issue.Restarts,
@@ -584,6 +585,7 @@ func enrichIssues(db store.Store, clusterContext string, issues []models.Emergen
 		ids = append(ids, rec.ID)
 	}
 	reopenCounts, _ := db.BatchGetReopenCounts(ids)
+	earliest, _ := store.GetEarliestRetainedObservation(db, clusterContext)
 
 	for i, fingerprint := range fingerprints {
 		rec, ok := history[fingerprint]
@@ -593,9 +595,11 @@ func enrichIssues(db store.Store, clusterContext string, issues []models.Emergen
 		enriched[i].FirstDetected = formatDuration(time.Since(rec.FirstSeen))
 		enriched[i].ReopenCount = reopenCounts[rec.ID]
 		enriched[i].firstSeenAt = rec.FirstSeen
+		enriched[i].atHistoryBoundary = store.AtObservationBoundary(rec.FirstSeen, earliest)
 		if legacyFirstSeen := aliases[findingMemoryIdentity(issues[i])]; !legacyFirstSeen.IsZero() && legacyFirstSeen.Before(rec.FirstSeen) {
 			enriched[i].FirstDetected = formatDuration(time.Since(legacyFirstSeen))
 			enriched[i].firstSeenAt = legacyFirstSeen
+			enriched[i].atHistoryBoundary = store.AtObservationBoundary(legacyFirstSeen, earliest)
 		}
 	}
 	return enriched
@@ -993,9 +997,12 @@ func printGroupedIssue(w io.Writer, issues []enrichedIssue) {
 	fmt.Fprintf(w, "  └─ Pods: %s\n", strings.Join(pods, ", "))
 	fmt.Fprintf(w, "  └─ %s\n", groupDetailLine(key, issues, rep))
 	if rep.FirstDetected != "" {
-		fmt.Fprintf(w, "  └─ First detected: %s ago (%s)\n", rep.FirstDetected, rep.Name)
+		fmt.Fprintf(w, "  └─ First observed by this OMA: %s ago (%s)\n", rep.FirstDetected, rep.Name)
+		if rep.atHistoryBoundary {
+			fmt.Fprintln(w, "  └─ Present when this OMA history began; earlier duration is unknown.")
+		}
 	} else {
-		fmt.Fprintln(w, "  └─ First detected: —")
+		fmt.Fprintln(w, "  └─ First observed by this OMA: —")
 	}
 	fmt.Fprintln(w)
 }
@@ -1021,9 +1028,12 @@ func printEnrichedIssue(w io.Writer, issue enrichedIssue) {
 	fmt.Fprintln(w)
 	fmt.Fprintf(w, "  └─ %s\n", issue.Message)
 	if issue.FirstDetected != "" {
-		fmt.Fprintf(w, "  └─ First detected: %s ago\n", issue.FirstDetected)
+		fmt.Fprintf(w, "  └─ First observed by this OMA: %s ago\n", issue.FirstDetected)
+		if issue.atHistoryBoundary {
+			fmt.Fprintln(w, "  └─ Present when this OMA history began; earlier duration is unknown.")
+		}
 	} else {
-		fmt.Fprintln(w, "  └─ First detected: —")
+		fmt.Fprintln(w, "  └─ First observed by this OMA: —")
 	}
 	fmt.Fprintln(w)
 }

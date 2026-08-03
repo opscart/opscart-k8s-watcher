@@ -186,6 +186,21 @@ func (srv *server) handleOverviewPage(w http.ResponseWriter, r *http.Request) {
 
 	since := readLastViewedCursor(r)
 	data := buildOverviewData(scan, ctx, srv.clusterList, srv.db, since)
+	if srv.db != nil {
+		if earliest, err := store.GetEarliestRetainedObservation(srv.db, ctx); err == nil && !earliest.IsZero() {
+			data.EarliestRetainedObservation = earliest.Local().Format("2006-01-02 15:04 MST")
+		}
+	}
+	if srv.retentionDays <= 0 {
+		data.ConfiguredRetention = "Forever"
+	} else {
+		data.ConfiguredRetention = fmt.Sprintf("%d days", srv.retentionDays)
+	}
+	if srv.dbPersistent {
+		data.StorageMode = "Persistent"
+	} else {
+		data.StorageMode = "Ephemeral"
+	}
 
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-cache, no-store, must-revalidate")
@@ -633,8 +648,11 @@ type overviewPageData struct {
 	SecurityScoreDeltaText string
 
 	// Memory scoreboard + cluster-wide recent activity
-	Scoreboard   *store.MemoryScoreboard
-	RecentEvents []changeLine
+	Scoreboard                  *store.MemoryScoreboard
+	RecentEvents                []changeLine
+	EarliestRetainedObservation string
+	ConfiguredRetention         string
+	StorageMode                 string
 
 	// What's changed since this browser last loaded the Overview page
 	ChangesSinceLastView []changeLine
