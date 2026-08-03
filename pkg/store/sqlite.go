@@ -653,30 +653,45 @@ func (s *SQLiteStore) WriteScanHistory(cluster string, scanID string, meta ScanM
 	return err
 }
 
-// GetEarliestRetainedObservation returns cluster-scoped OMA provenance.
-// Successful scans are authoritative; incident history is the fallback for
-// databases whose retained scan history is unavailable.
-func (s *SQLiteStore) GetEarliestRetainedObservation(cluster string) (time.Time, error) {
-	var unix sql.NullInt64
+// GetMemoryProvenance returns the earliest cluster-scoped retained timestamp
+// across successful scans and incident history.
+func (s *SQLiteStore) GetMemoryProvenance(cluster string) (*MemoryProvenance, error) {
+	var scanUnix, incidentUnix sql.NullInt64
 	if err := s.db.QueryRow(
 		`SELECT MIN(scanned_at) FROM scan_history WHERE cluster = ? AND success = 1`,
 		cluster,
-	).Scan(&unix); err != nil {
-		return time.Time{}, err
-	}
-	if unix.Valid {
-		return time.Unix(unix.Int64, 0), nil
+	).Scan(&scanUnix); err != nil {
+		return nil, err
 	}
 	if err := s.db.QueryRow(
 		`SELECT MIN(first_seen) FROM incidents WHERE cluster = ?`,
 		cluster,
-	).Scan(&unix); err != nil {
+	).Scan(&incidentUnix); err != nil {
+		return nil, err
+	}
+
+	switch {
+	case scanUnix.Valid && (!incidentUnix.Valid || scanUnix.Int64 <= incidentUnix.Int64):
+		return &MemoryProvenance{
+			EarliestRetainedObservation: time.Unix(scanUnix.Int64, 0),
+			Source:                      MemoryProvenanceScanHistory,
+		}, nil
+	case incidentUnix.Valid:
+		return &MemoryProvenance{
+			EarliestRetainedObservation: time.Unix(incidentUnix.Int64, 0),
+			Source:                      MemoryProvenanceIncidents,
+		}, nil
+	default:
+		return nil, nil
+	}
+}
+
+func (s *SQLiteStore) GetEarliestRetainedObservation(cluster string) (time.Time, error) {
+	provenance, err := s.GetMemoryProvenance(cluster)
+	if err != nil || provenance == nil {
 		return time.Time{}, err
 	}
-	if !unix.Valid {
-		return time.Time{}, nil
-	}
-	return time.Unix(unix.Int64, 0), nil
+	return provenance.EarliestRetainedObservation, nil
 }
 
 type snapshotRow struct {
