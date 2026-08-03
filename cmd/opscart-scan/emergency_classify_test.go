@@ -312,7 +312,7 @@ func TestClassifyPod_OOMKilledMerge_PrintsCorrectly(t *testing.T) {
 	if !strings.Contains(out, "Container termination state reports OOMKilled; the pod is currently in CrashLoopBackOff.") {
 		t.Errorf("missing observational message, got:\n%s", out)
 	}
-	if !strings.Contains(out, "First detected: 14h ago") {
+	if !strings.Contains(out, "First observed by this OMA: 14h ago") {
 		t.Errorf("missing enrichment line, got:\n%s", out)
 	}
 }

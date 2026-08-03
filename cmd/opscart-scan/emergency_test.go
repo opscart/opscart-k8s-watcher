@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"database/sql"
 	"fmt"
 	"path/filepath"
 	"strings"
@@ -279,8 +280,8 @@ func TestEnrichIssues_PreExistingIncident(t *testing.T) {
 	var buf bytes.Buffer
 	printEnrichedIssue(&buf, enriched[0])
 	out := buf.String()
-	if !strings.Contains(out, "First detected: 5d ago") {
-		t.Errorf("output missing 'First detected: 5d ago' line, got:\n%s", out)
+	if !strings.Contains(out, "First observed by this OMA: 5d ago") {
+		t.Errorf("output missing OMA first-observed line, got:\n%s", out)
 	}
 	if strings.Contains(out, "Reopened:") {
 		t.Errorf("Emergency output must not render recurrence aggregates, got:\n%s", out)
@@ -317,8 +318,8 @@ func TestEnrichIssues_BrandNewIncident(t *testing.T) {
 	var buf bytes.Buffer
 	printEnrichedIssue(&buf, enriched[0])
 	out := buf.String()
-	if !strings.Contains(out, "First detected: 0s ago") {
-		t.Errorf("output missing 'First detected: 0s ago' line, got:\n%s", out)
+	if !strings.Contains(out, "First observed by this OMA: 0s ago") {
+		t.Errorf("output missing OMA first-observed line, got:\n%s", out)
 	}
 	if strings.Contains(out, "Reopened:") {
 		t.Errorf("brand-new incident should not print a Reopened line, got:\n%s", out)
@@ -355,7 +356,7 @@ func TestEnrichIssues_NullStore_NoEnrichment(t *testing.T) {
 	if got.String() != want.String() {
 		t.Errorf("stateless output diverges from plain (unenriched) output:\ngot:\n%s\nwant:\n%s", got.String(), want.String())
 	}
-	if !strings.Contains(got.String(), "First detected: —") || strings.Contains(got.String(), "Reopened") {
+	if !strings.Contains(got.String(), "First observed by this OMA: —") || strings.Contains(got.String(), "Reopened") {
 		t.Errorf("stateless output should show unknown incident age and no recurrence aggregate, got:\n%s", got.String())
 	}
 }
@@ -384,10 +385,10 @@ func TestEmergencyMcoreProbeFailureUsesCanonicalFirstSeen(t *testing.T) {
 	var buf bytes.Buffer
 	printEmergencyIssuesEnriched(&buf, enriched)
 	out := buf.String()
-	if !strings.Contains(out, "First detected: 12d ago") {
+	if !strings.Contains(out, "First observed by this OMA: 12d ago") {
 		t.Fatalf("canonical incident first_seen was not rendered:\n%s", out)
 	}
-	if strings.Contains(out, "First detected: 0s") {
+	if strings.Contains(out, "First observed by this OMA: 0s") {
 		t.Fatalf("pod age leaked into incident age:\n%s", out)
 	}
 }
@@ -599,6 +600,52 @@ func TestApplyCriticalDebounce_ResolvedIncidentNotResurrected(t *testing.T) {
 
 	if got[0].Severity != "medium" || got[0].Reason != "HighRestartCount" {
 		t.Errorf("resolved incident was incorrectly resurrected: %+v", got[0])
+	}
+}
+
+func TestApplyCriticalDebounce_ActiveCanonicalBeatsOlderResolvedLegacyAlias(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "aliases.db")
+	sqlStore, err := store.OpenSQLite(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	canonicalFP := store.Fingerprint("auth", "Workload", "token-service", "crash_loop")
+	if err := sqlStore.UpsertIncidents("opscart", "canonical", []store.IncidentData{{
+		Fingerprint: canonicalFP, Namespace: "auth", Resource: "token-service-current",
+		IssueType: "crash_loop", Severity: "critical", RestartCount: 40,
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := sqlStore.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	rawDB, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().Unix()
+	if _, err := rawDB.Exec(`UPDATE incidents SET first_seen=? WHERE cluster=? AND fingerprint=?`, now-3600, "opscart", canonicalFP); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := rawDB.Exec(`INSERT INTO incidents
+		(fingerprint,cluster,namespace,resource,issue_type,severity,first_seen,last_seen,status,last_scan_id,current_restart_count,missing_scans)
+		VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`, "auth/Workload/token-service/CrashLoopBackOff", "opscart", "auth", "token-service-old", "CrashLoopBackOff", "critical", now-86400, now-7200, "resolved", "legacy", 20, 3); err != nil {
+		t.Fatal(err)
+	}
+	if err := rawDB.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	sqlStore, err = store.OpenSQLite(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer sqlStore.Close()
+	live := []enrichedIssue{issue("auth", "token-service-7cddf79d98-jxmtx", "medium", "HighRestartCount", "Container app has restarted 41 times", 41)}
+	got := applyCriticalDebounce(sqlStore, "opscart", live)
+	if len(got) != 1 || got[0].Severity != "critical" || got[0].Reason != "CrashLoopBackOff" {
+		t.Fatalf("active canonical crash loop was not preserved: %+v", got)
 	}
 }
 
