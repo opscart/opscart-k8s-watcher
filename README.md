@@ -213,14 +213,17 @@ environment-specific notes (minikube, multi-node, local images).
 ```bash
 go build -o opscart-scan ./cmd/opscart-scan
 
-./opscart-scan emergency --cluster prod      # War Room from terminal
-./opscart-scan security --cluster prod       # CIS scoring
-./opscart-scan waste --cluster prod          # Waste detection
-./opscart-scan cloud-costs --cluster prod    # Provider-aware cost analysis
-./opscart-scan network --cluster prod        # Network policy gaps
-./opscart-scan report --cluster prod         # HTML report
+./opscart-scan emergency --cluster prod                 # Prioritized War Room from the terminal
+./opscart-scan emergency --cluster prod --next-steps    # Include read-only kubectl inspection commands
+./opscart-scan emergency --cluster prod -n payments     # Limit triage to one namespace
+./opscart-scan security --cluster prod                  # Workload security posture
+./opscart-scan waste --cluster prod                     # Waste and drift review
+./opscart-scan cloud-costs --cluster prod               # Provider-aware cost analysis
+./opscart-scan network --cluster prod                   # NetworkPolicy gaps
+./opscart-scan report --cluster prod                    # Generate an HTML report
 ```
 
+Generated next steps are inspection commands only. OpsCart does not automatically apply, patch, delete, restart, scale, or otherwise modify workloads.
 ---
 
 ## Coming Next
