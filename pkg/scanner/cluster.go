@@ -175,6 +175,7 @@ func (s *Scanner) analyzePodForIssuesWithOwners(pod corev1.Pod, jobOwners map[st
 				Name:      pod.Name,
 				Reason:    "CrashLoopBackOff",
 				Message:   fmt.Sprintf("Container %s is crash looping: %s", cs.Name, cs.State.Waiting.Message),
+				Container: cs.Name,
 				Age:       age,
 				Restarts:  int(cs.RestartCount),
 			})
@@ -189,6 +190,7 @@ func (s *Scanner) analyzePodForIssuesWithOwners(pod corev1.Pod, jobOwners map[st
 				Name:      pod.Name,
 				Reason:    cs.State.Waiting.Reason,
 				Message:   fmt.Sprintf("Cannot pull image for container %s: %s", cs.Name, cs.State.Waiting.Message),
+				Container: cs.Name,
 				Age:       age,
 			})
 		}
@@ -202,6 +204,7 @@ func (s *Scanner) analyzePodForIssuesWithOwners(pod corev1.Pod, jobOwners map[st
 				Name:      pod.Name,
 				Reason:    "OOMKilled",
 				Message:   fmt.Sprintf("Container %s killed due to out of memory", cs.Name),
+				Container: cs.Name,
 				Age:       age,
 				Restarts:  int(cs.RestartCount),
 			})
@@ -216,6 +219,7 @@ func (s *Scanner) analyzePodForIssuesWithOwners(pod corev1.Pod, jobOwners map[st
 				Name:      pod.Name,
 				Reason:    "HighRestartCount",
 				Message:   fmt.Sprintf("Container %s has restarted %d times", cs.Name, cs.RestartCount),
+				Container: cs.Name,
 				Age:       age,
 				Restarts:  int(cs.RestartCount),
 			})
