@@ -213,9 +213,9 @@ environment-specific notes (minikube, multi-node, local images).
 ```bash
 go build -o opscart-scan ./cmd/opscart-scan
 
-./opscart-scan emergency --cluster prod                 # Prioritized War Room from the terminal
-./opscart-scan emergency --cluster prod --next-steps    # Include read-only kubectl inspection commands
-./opscart-scan emergency --cluster prod -n payments     # Limit triage to one namespace
+./opscart-scan triage --cluster prod                    # Prioritized operational triage from the terminal
+./opscart-scan triage --cluster prod --next-steps       # Include read-only kubectl inspection commands
+./opscart-scan triage --cluster prod -n payments        # Limit triage to one namespace
 ./opscart-scan security --cluster prod                  # Workload security posture
 ./opscart-scan waste --cluster prod                     # Waste and drift review
 ./opscart-scan cloud-costs --cluster prod               # Provider-aware cost analysis

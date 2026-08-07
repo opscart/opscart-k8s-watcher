@@ -38,7 +38,7 @@ func PrintEmergencyIssues(issues []models.EmergencyIssue) {
 
 	// Print summary
 	fmt.Println("╔════════════════════════════════════════════════════════════╗")
-	fmt.Println("║             WAR ROOM - EMERGENCY ISSUES                    ║")
+	fmt.Println("║             KUBERNETES OPERATIONAL TRIAGE                  ║")
 	fmt.Println("╚════════════════════════════════════════════════════════════╝")
 	fmt.Printf("\n🔴 CRITICAL: %d    🟡 HIGH: %d    🟠 MEDIUM: %d\n\n", len(critical), len(high), len(medium))
 
