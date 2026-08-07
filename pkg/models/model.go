@@ -10,6 +10,7 @@ type EmergencyIssue struct {
 	Name           string        `json:"name"`
 	Reason         string        `json:"reason"`
 	Message        string        `json:"message"`
+	Container      string        `json:"container,omitempty"`
 	Age            time.Duration `json:"age"`
 	Restarts       int           `json:"restarts,omitempty"`
 	LastEvent      string        `json:"last_event,omitempty"`
