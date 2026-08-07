@@ -21,7 +21,7 @@ const schemaVersion = 4
 
 // restartMilestones are the restart-count thresholds that generate a
 // RestartMilestone timeline event when crossed.
-var restartMilestones = []int{10, 50, 100, 500, 1000, 2500, 5000, 10000}
+var restartMilestones = []int{10, 50, 100, 500, 1000, 2500, 5000, 10000, 25000, 50000, 100000}
 
 // resolveThreshold is the number of consecutive scans an active incident
 // must be absent from before it is marked resolved. CrashLoopBackOff pods
@@ -1038,10 +1038,16 @@ func orderByClause(sortBy string, desc bool) string {
 	return col + " " + dir + ", fingerprint ASC"
 }
 
-// trendEvent is one DETECTED/RestartMilestone event, used by deriveTrend.
+// trendEvent is one DETECTED/RestartMilestone event used by deriveTrend.
 type trendEvent struct {
 	occurredAt   int64
 	restartCount int
+}
+
+type trendInput struct {
+	firstDetected trendEvent
+	hasDetected   bool
+	recent        []trendEvent
 }
 
 // batchReopenCounts returns, for each incident id, the number of REOPENED
@@ -1073,28 +1079,38 @@ func (s *SQLiteStore) batchReopenCounts(ids []int64) (map[int64]int, error) {
 	return counts, rows.Err()
 }
 
-// batchTrendEvents returns, for each incident id, its two most recent
-// DETECTED/RestartMilestone events (newest first) — the only journal
-// entries that carry both a restart count and a timestamp without scanning
-// every event. One windowed query for the whole page.
-func (s *SQLiteStore) batchTrendEvents(ids []int64) (map[int64][]trendEvent, error) {
-	out := make(map[int64][]trendEvent, len(ids))
+// batchTrendEvents returns, for each incident id, its earliest DETECTED
+// event and two most recent DETECTED/RestartMilestone points. One windowed
+// query supplies both the lifetime baseline and recent-rate points.
+func (s *SQLiteStore) batchTrendEvents(ids []int64) (map[int64]trendInput, error) {
+	out := make(map[int64]trendInput, len(ids))
 	if len(ids) == 0 {
 		return out, nil
 	}
 	placeholders, args := inClause(ids)
 	rows, err := s.db.Query(fmt.Sprintf(`
-		SELECT incident_id, occurred_at, restart_count FROM (
-			SELECT incident_id, occurred_at, restart_count,
+		WITH ranked AS (
+			SELECT incident_id, occurred_at, restart_count, event_type,
 				ROW_NUMBER() OVER (
 					PARTITION BY incident_id
 					ORDER BY occurred_at DESC, id DESC
-				) AS rn
+				) AS recent_rn,
+				CASE WHEN event_type = 'DETECTED' THEN
+					ROW_NUMBER() OVER (
+						PARTITION BY incident_id, event_type
+						ORDER BY occurred_at ASC, id ASC
+					)
+				END AS detected_rn
 			FROM incident_events
 			WHERE incident_id IN (%s)
 			  AND (event_type = 'DETECTED'
 				OR (event_type = 'UPDATED' AND event_reason = 'RestartMilestone'))
-		) WHERE rn <= 2
+		)
+		SELECT incident_id, occurred_at, restart_count,
+			event_type = 'DETECTED' AND detected_rn = 1 AS is_baseline,
+			recent_rn <= 2 AS is_recent
+		FROM ranked
+		WHERE recent_rn <= 2 OR (event_type = 'DETECTED' AND detected_rn = 1)
 		ORDER BY incident_id, occurred_at DESC
 	`, placeholders), args...)
 	if err != nil {
@@ -1104,10 +1120,19 @@ func (s *SQLiteStore) batchTrendEvents(ids []int64) (map[int64][]trendEvent, err
 	for rows.Next() {
 		var id int64
 		var e trendEvent
-		if err := rows.Scan(&id, &e.occurredAt, &e.restartCount); err != nil {
+		var isBaseline, isRecent bool
+		if err := rows.Scan(&id, &e.occurredAt, &e.restartCount, &isBaseline, &isRecent); err != nil {
 			return nil, err
 		}
-		out[id] = append(out[id], e)
+		input := out[id]
+		if isBaseline {
+			input.firstDetected = e
+			input.hasDetected = true
+		}
+		if isRecent {
+			input.recent = append(input.recent, e)
+		}
+		out[id] = input
 	}
 	return out, rows.Err()
 }
@@ -1126,39 +1151,37 @@ func RestartTrendApplies(issueType string) bool {
 
 // deriveTrend classifies an active, restart-applicable incident's trajectory as
 // "accelerating" or "stable" from its two most recent milestone-relevant
-// events (DETECTED and RestartMilestone) — the cheapest points in the
-// journal that carry both a restart count and a timestamp.
+// events (DETECTED and RestartMilestone).
 //
-// Heuristic: lifetimeRate is current restart count divided by active age in
-// days (with a one-day minimum). recentRate is the restart delta per day
-// between the two newest DETECTED/RestartMilestone journal points (with a
+// Heuristic: lifetimeRate is the restart delta since the earliest DETECTED
+// event divided by elapsed days (with a one-day minimum). recentRate is the restart delta per day
+// between the two newest retained observation points (with a
 // one-hour minimum interval). A recent rate greater than 125% of lifetime rate
 // is "accelerating". Otherwise it is "stable"; fewer than two points or a
 // latest point older than 24 hours are also "stable" because no acceleration
 // can be established from the available restart series.
 //
-// This intentionally approximates a 48h window with whatever two events
-// happen to exist rather than sampling restart_count on a fixed schedule,
-// so it stays a single indexed query with no per-row journal scan.
-// "recovering" is reserved for a future trend dimension (e.g. severity
-// de-escalation): restart counts are monotonically non-decreasing within an
-// incident's active lifetime, so this heuristic never emits it.
-func deriveTrend(events []trendEvent, currentRestart int, firstSeenUnix int64) string {
+// This intentionally approximates a 48h window with whatever two relevant
+// events happen to exist, avoiding per-scan event writes and per-row queries.
+// A decrease in either the lifetime or recent series indicates a pod-count
+// reset; observations spanning that reset are never classified accelerating.
+func deriveTrend(input trendInput, currentRestart int) string {
 	now := time.Now().Unix()
-
-	daysSinceFirst := float64(now-firstSeenUnix) / 86400
+	if !input.hasDetected || currentRestart < input.firstDetected.restartCount {
+		return "stable"
+	}
+	daysSinceFirst := float64(now-input.firstDetected.occurredAt) / 86400
 	if daysSinceFirst < 1 {
 		daysSinceFirst = 1
 	}
-	lifetimeRate := float64(currentRestart) / daysSinceFirst
+	lifetimeRate := float64(currentRestart-input.firstDetected.restartCount) / daysSinceFirst
 
-	if len(events) < 2 {
+	if len(input.recent) < 2 {
 		return "stable"
 	}
-	// events[0] is the most recent (see batchTrendEvents' DESC ordering).
-	latest, prev := events[0], events[1]
+	latest, prev := input.recent[0], input.recent[1]
 
-	if now-latest.occurredAt > 24*3600 {
+	if now-latest.occurredAt > 24*3600 || latest.restartCount < prev.restartCount || currentRestart < latest.restartCount {
 		return "stable"
 	}
 
@@ -1308,7 +1331,7 @@ func (s *SQLiteStore) QueryIncidents(f IncidentFilter) ([]IncidentSummary, int, 
 			RestartCount: r.restartCount,
 		}
 		if r.status == "active" && RestartTrendApplies(r.issueType) {
-			summary.Trend = deriveTrend(trendInputs[r.id], r.restartCount, r.firstSeen)
+			summary.Trend = deriveTrend(trendInputs[r.id], r.restartCount)
 		}
 		items = append(items, summary)
 	}
@@ -1362,7 +1385,7 @@ func (s *SQLiteStore) countAccelerating(cluster string) (int, error) {
 
 	count := 0
 	for _, r := range actives {
-		if deriveTrend(trendInputs[r.id], r.restartCount, r.firstSeen) == "accelerating" {
+		if deriveTrend(trendInputs[r.id], r.restartCount) == "accelerating" {
 			count++
 		}
 	}
