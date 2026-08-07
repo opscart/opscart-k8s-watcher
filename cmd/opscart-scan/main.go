@@ -41,6 +41,7 @@ var (
 	costFormat    string // cloud-costs: output format (table|json|html)
 	pricingSource string
 	cloudProvider string
+	nextSteps     bool
 )
 
 func main() {
@@ -143,6 +144,7 @@ Quickly find broken resources, idle workloads, security issues, and generate rep
 	emergencyCmd.Flags().StringVarP(&namespace, "namespace", "n", "", "Namespace to scan (default: all)")
 	emergencyCmd.Flags().BoolVar(&allClustersFlag, "all-clusters", false, "Scan all configured clusters")
 	emergencyCmd.Flags().StringVar(&clusterGroupFlag, "cluster-group", "", "Scan all clusters in a group")
+	emergencyCmd.Flags().BoolVar(&nextSteps, "next-steps", false, "Show safe read-only kubectl inspection commands")
 
 	// ================================================================
 	// Resources command (UPDATED for multi-cluster)

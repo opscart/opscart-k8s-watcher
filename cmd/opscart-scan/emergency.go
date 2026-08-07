@@ -60,7 +60,7 @@ func runEmergencyScan(clusterContext string) error {
 	enriched := enrichIssues(opStore, clusterContext, issues)
 	enriched = applyCriticalDebounce(opStore, clusterContext, enriched)
 	enriched = suppressSecondaryRestartNoise(opStore, clusterContext, enriched)
-	printEmergencyIssuesEnriched(os.Stdout, enriched)
+	printEmergencyIssuesEnrichedWithNextSteps(os.Stdout, enriched, clusterContext, nextSteps)
 	return nil
 }
 
@@ -618,6 +618,10 @@ func enrichIssues(db store.Store, clusterContext string, issues []models.Emergen
 // already guarantees at most one issue per pod before issues ever reaches
 // this function.
 func printEmergencyIssuesEnriched(w io.Writer, issues []enrichedIssue) {
+	printEmergencyIssuesEnrichedWithNextSteps(w, issues, "", false)
+}
+
+func printEmergencyIssuesEnrichedWithNextSteps(w io.Writer, issues []enrichedIssue, clusterContext string, showNextSteps bool) {
 	issues = aggregateFailedJobPods(issues)
 	if len(issues) == 0 {
 		fmt.Fprintln(w, "✅ No critical issues found!")
@@ -654,7 +658,7 @@ func printEmergencyIssuesEnriched(w io.Writer, issues []enrichedIssue) {
 		fmt.Fprintln(w, "🔴 CRITICAL ISSUES:")
 		fmt.Fprintln(w, strings.Repeat("═", 80))
 		for _, issue := range critical {
-			printEnrichedIssue(w, issue)
+			printEnrichedIssueWithNextSteps(w, issue, clusterContext, showNextSteps)
 		}
 		fmt.Fprintln(w)
 	}
@@ -662,14 +666,14 @@ func printEmergencyIssuesEnriched(w io.Writer, issues []enrichedIssue) {
 	if len(highGroups) > 0 {
 		fmt.Fprintln(w, "🟡 HIGH PRIORITY:")
 		fmt.Fprintln(w, strings.Repeat("═", 80))
-		printIssueGroups(w, highGroups)
+		printIssueGroupsWithNextSteps(w, highGroups, clusterContext, showNextSteps)
 		fmt.Fprintln(w)
 	}
 
 	if len(mediumGroups) > 0 {
 		fmt.Fprintln(w, "🟠 MEDIUM PRIORITY:")
 		fmt.Fprintln(w, strings.Repeat("═", 80))
-		printIssueGroups(w, mediumGroups)
+		printIssueGroupsWithNextSteps(w, mediumGroups, clusterContext, showNextSteps)
 	}
 }
 
@@ -914,12 +918,16 @@ func extractCrashLoopContainer(message string) string {
 }
 
 func printIssueGroups(w io.Writer, groups []issueGroup) {
+	printIssueGroupsWithNextSteps(w, groups, "", false)
+}
+
+func printIssueGroupsWithNextSteps(w io.Writer, groups []issueGroup, clusterContext string, showNextSteps bool) {
 	for _, g := range groups {
 		if len(g.issues) == 1 {
-			printEnrichedIssue(w, g.issues[0])
+			printEnrichedIssueWithNextSteps(w, g.issues[0], clusterContext, showNextSteps)
 			continue
 		}
-		printGroupedIssue(w, g.issues)
+		printGroupedIssueWithNextSteps(w, g.issues, clusterContext, showNextSteps)
 	}
 }
 
@@ -978,6 +986,10 @@ func groupRepresentative(issues []enrichedIssue) enrichedIssue {
 }
 
 func printGroupedIssue(w io.Writer, issues []enrichedIssue) {
+	printGroupedIssueWithNextSteps(w, issues, "", false)
+}
+
+func printGroupedIssueWithNextSteps(w io.Writer, issues []enrichedIssue, clusterContext string, showNextSteps bool) {
 	key := groupKeyFor(issues[0])
 	rep := groupRepresentative(issues)
 
@@ -997,17 +1009,25 @@ func printGroupedIssue(w io.Writer, issues []enrichedIssue) {
 	fmt.Fprintf(w, "  └─ Pods: %s\n", strings.Join(pods, ", "))
 	fmt.Fprintf(w, "  └─ %s\n", groupDetailLine(key, issues, rep))
 	if rep.FirstDetected != "" {
-		fmt.Fprintf(w, "  └─ First observed by this OMA: %s ago (%s)\n", rep.FirstDetected, rep.Name)
 		if rep.atHistoryBoundary {
-			fmt.Fprintln(w, "  └─ Present when this OMA history began; earlier duration is unknown.")
+			fmt.Fprintf(w, "  └─ OMA history: present for at least %s\n", rep.FirstDetected)
+		} else {
+			fmt.Fprintf(w, "  └─ First observed by this OMA: %s ago (%s)\n", rep.FirstDetected, rep.Name)
 		}
 	} else {
 		fmt.Fprintln(w, "  └─ First observed by this OMA: —")
+	}
+	if showNextSteps {
+		printNextInspection(w, clusterContext, issues)
 	}
 	fmt.Fprintln(w)
 }
 
 func printEnrichedIssue(w io.Writer, issue enrichedIssue) {
+	printEnrichedIssueWithNextSteps(w, issue, "", false)
+}
+
+func printEnrichedIssueWithNextSteps(w io.Writer, issue enrichedIssue, clusterContext string, showNextSteps bool) {
 	fmt.Fprintf(w, "  %s/%s\n", issue.Namespace, issue.Name)
 	fmt.Fprintf(w, "  └─ Status: %s", issue.Reason)
 	if issue.Restarts > 0 {
@@ -1028,14 +1048,76 @@ func printEnrichedIssue(w io.Writer, issue enrichedIssue) {
 	fmt.Fprintln(w)
 	fmt.Fprintf(w, "  └─ %s\n", issue.Message)
 	if issue.FirstDetected != "" {
-		fmt.Fprintf(w, "  └─ First observed by this OMA: %s ago\n", issue.FirstDetected)
 		if issue.atHistoryBoundary {
-			fmt.Fprintln(w, "  └─ Present when this OMA history began; earlier duration is unknown.")
+			fmt.Fprintf(w, "  └─ OMA history: present for at least %s\n", issue.FirstDetected)
+		} else {
+			fmt.Fprintf(w, "  └─ First observed by this OMA: %s ago\n", issue.FirstDetected)
 		}
 	} else {
 		fmt.Fprintln(w, "  └─ First observed by this OMA: —")
 	}
+	if showNextSteps {
+		printNextInspection(w, clusterContext, []enrichedIssue{issue})
+	}
 	fmt.Fprintln(w)
+}
+
+func printNextInspection(w io.Writer, clusterContext string, issues []enrichedIssue) {
+	seen := make(map[string]bool)
+	var commands []string
+	for _, issue := range issues {
+		for _, command := range inspectionCommands(clusterContext, issue) {
+			if !seen[command] {
+				seen[command] = true
+				commands = append(commands, command)
+			}
+		}
+	}
+	if len(commands) == 0 {
+		return
+	}
+	fmt.Fprintln(w, "  └─ Next inspection:")
+	for _, command := range commands {
+		fmt.Fprintf(w, "     %s\n", command)
+	}
+}
+
+func inspectionCommands(clusterContext string, issue enrichedIssue) []string {
+	if clusterContext == "" || issue.Namespace == "" || issue.Name == "" || issue.Resource != "pod" {
+		return nil
+	}
+	contextArg, podArg, namespaceArg := shellArg(clusterContext), shellArg(issue.Name), shellArg(issue.Namespace)
+	base := fmt.Sprintf("kubectl --context %s", contextArg)
+	describe := fmt.Sprintf("%s describe pod %s -n %s", base, podArg, namespaceArg)
+	events := fmt.Sprintf("%s get events -n %s --field-selector %s --sort-by=.metadata.creationTimestamp", base, namespaceArg, shellArg("involvedObject.name="+issue.Name))
+	getYAML := fmt.Sprintf("%s get pod %s -n %s -o yaml", base, podArg, namespaceArg)
+	logs := fmt.Sprintf("%s logs %s -n %s", base, podArg, namespaceArg)
+	if issue.Container != "" {
+		logs += " -c " + shellArg(issue.Container)
+	}
+	logs += " --previous"
+	switch semanticIssueFamily(issue.Reason) {
+	case "crash_loop", "high_restart_count":
+		return []string{logs, describe}
+	case "oomkilled":
+		return []string{describe, getYAML}
+	case "probe_failure", "image_pull_backoff":
+		return []string{describe, events}
+	case "pending", "Pending":
+		return []string{describe, events}
+	default:
+		return nil
+	}
+}
+
+func shellArg(value string) string {
+	if value != "" && strings.IndexFunc(value, func(r rune) bool {
+		return !(r == '-' || r == '_' || r == '.' || r == '/' || r == ':' || r == '=' ||
+			(r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9'))
+	}) == -1 {
+		return value
+	}
+	return "'" + strings.ReplaceAll(value, "'", "'\"'\"'") + "'"
 }
 
 // formatDuration matches pkg/scanner/printer.go's formatDuration exactly.
