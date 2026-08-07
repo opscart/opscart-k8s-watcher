@@ -645,7 +645,7 @@ func printEmergencyIssuesEnrichedWithNextSteps(w io.Writer, issues []enrichedIss
 	mediumGroups := groupIssues(medium)
 
 	fmt.Fprintln(w, "╔════════════════════════════════════════════════════════════╗")
-	fmt.Fprintln(w, "║             WAR ROOM - EMERGENCY ISSUES                    ║")
+	fmt.Fprintln(w, "║             KUBERNETES OPERATIONAL TRIAGE                  ║")
 	fmt.Fprintln(w, "╚════════════════════════════════════════════════════════════╝")
 	// These counts are printed-entry counts (a 3-pod group counts as 1),
 	// not underlying pod counts — the header answers "how many things do

@@ -48,7 +48,8 @@ func main() {
 	rootCmd := &cobra.Command{
 		Use:   "opscart-scan",
 		Short: "OpsCart Kubernetes War Room Scanner",
-		Long: `Emergency Kubernetes cluster scanner for war room situations.
+		Long: `Read-only Kubernetes operational triage.
+Prioritize unhealthy workloads, inspect operational history, identify security and resource issues, and generate reports across multiple clusters.
 Quickly find broken resources, idle workloads, security issues, and generate reports across multiple clusters.`,
 		PersistentPreRun: func(cmd *cobra.Command, args []string) {
 			opStore = initStore()
@@ -103,9 +104,10 @@ Quickly find broken resources, idle workloads, security issues, and generate rep
 	// Emergency command (UPDATED for multi-cluster)
 	// ================================================================
 	emergencyCmd := &cobra.Command{
-		Use:   "emergency",
-		Short: "Find critical issues immediately",
-		Long:  "Scans cluster for broken pods, failed deployments, and critical issues",
+		Use:     "triage",
+		Aliases: []string{"emergency"},
+		Short:   "Prioritized triage — find what deserves attention first",
+		Long:    "Scans cluster for broken pods, failed deployments, and critical issues",
 		Run: func(cmd *cobra.Command, args []string) {
 			clusters, isCompare, err := resolveTargetClusters()
 			if err != nil {
