@@ -245,3 +245,7 @@ Awareness tool — not for formal compliance auditing. Use [kube-bench](https://
 [![Release](https://img.shields.io/github/v/release/opscart/opscart-k8s-watcher)](https://github.com/opscart/opscart-k8s-watcher/releases)
 
 **License:** MIT
+
+## Contact
+
+Questions, feedback, or security concerns: [info@opscart.com](mailto:info@opscart.com)
