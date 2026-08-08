@@ -20,16 +20,15 @@ Lens       →  shows cluster state
 OpsCart    →  shows what deserves attention first
 ```
 
-
 ## See OpsCart in action
 
 ### Dashboard — prioritized operational intelligence
 
-[Watch the 16-second dashboard demo →](docs/media/opscart-dashboard.mp4)
+![OpsCart dashboard showing prioritized Kubernetes issues](docs/media/opscart-dashboard.gif)
 
 ### CLI — evidence-backed Kubernetes triage
 
-[Watch the 16-second CLI demo →](docs/media/opscart-cli-triage.mp4)
+![OpsCart CLI showing severity-ranked triage and operational history](docs/media/opscart-cli-triage.gif)
 
 ---
 
