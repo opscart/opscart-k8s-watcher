@@ -46,7 +46,7 @@ tmp/
 reports/
 *.html
 !cmd/opscart-dashboard/templates/*.html
-main
+/main
 demo-broken-war-room.yaml
 opscart.db
 opscart.db-shm
