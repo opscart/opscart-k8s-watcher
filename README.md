@@ -140,6 +140,41 @@ For team deployments, authenticate at the ingress layer instead with [oauth2-pro
 
 ---
 
+
+## Reproduce OpsCart findings
+
+Want to evaluate OpsCart without breaking workloads manually? The repository includes a self-contained Kubernetes failure lab with intentionally unhealthy and healthy workloads distributed across eight namespaces.
+
+The lab exercises:
+
+* CrashLoopBackOff
+* OOMKilled
+* Liveness probe failure
+* ImagePullBackOff
+* Privileged-container detection
+* Missing NetworkPolicy coverage
+* Unused PersistentVolumeClaims
+* Zero-replica Deployments
+* Healthy workloads for comparison
+
+> **Warning:** The lab intentionally creates failing workloads, invalid image
+> pulls, a privileged container, and unused storage claims. Run it only in a
+> disposable or non-production Kubernetes cluster.
+
+```bash
+./examples/failure-lab/scripts/setup.sh
+
+# Allow 30–60 seconds for failures and Kubernetes events to develop
+opscart-scan triage \
+  --cluster "$(kubectl config current-context)" \
+  --next-steps
+
+# Remove every lab-owned namespace and workload
+./examples/failure-lab/scripts/cleanup.sh
+```
+
+See the [OpsCart Kubernetes Failure Lab](examples/failure-lab/README.md) for the complete scenario inventory, setup instructions, validation commands, and cleanup procedure.
+
 ## Features
 
 ### Overview

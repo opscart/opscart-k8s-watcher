@@ -1,0 +1,41 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: checkout-api
+  namespace: payments
+  labels:
+    opscart.io/failure-lab: "true"
+    opscart.io/scenario: probe-failure
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: checkout-api
+  template:
+    metadata:
+      labels:
+        app: checkout-api
+        opscart.io/failure-lab: "true"
+        opscart.io/scenario: probe-failure
+    spec:
+      containers:
+        - name: app
+          image: nginx:alpine
+          ports:
+            - name: http
+              containerPort: 80
+          livenessProbe:
+            httpGet:
+              path: /this-path-does-not-exist
+              port: http
+            initialDelaySeconds: 3
+            periodSeconds: 5
+            timeoutSeconds: 2
+            failureThreshold: 1
+          resources:
+            requests:
+              cpu: 25m
+              memory: 32Mi
+            limits:
+              cpu: 100m
+              memory: 64Mi

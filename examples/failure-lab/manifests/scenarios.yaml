@@ -9,46 +9,69 @@
 
 ---
 # ── Namespaces ────────────────────────────────────────────────────
+
 apiVersion: v1
 kind: Namespace
 metadata:
   name: payments
+  labels:
+    opscart.io/failure-lab: "true"
+
 ---
 apiVersion: v1
 kind: Namespace
 metadata:
   name: inventory
+  labels:
+    opscart.io/failure-lab: "true"
+
 ---
 apiVersion: v1
 kind: Namespace
 metadata:
   name: auth
+  labels:
+    opscart.io/failure-lab: "true"
+
 ---
 apiVersion: v1
 kind: Namespace
 metadata:
   name: notifications
+  labels:
+    opscart.io/failure-lab: "true"
+
 ---
 apiVersion: v1
 kind: Namespace
 metadata:
   name: data-pipeline
+  labels:
+    opscart.io/failure-lab: "true"
+
 ---
 apiVersion: v1
 kind: Namespace
 metadata:
   name: api-gateway
+  labels:
+    opscart.io/failure-lab: "true"
+
 ---
 apiVersion: v1
 kind: Namespace
 metadata:
   name: platform-ops
+  labels:
+    opscart.io/failure-lab: "true"
+
 ---
 apiVersion: v1
 kind: Namespace
 metadata:
   name: reporting
-
+  labels:
+    opscart.io/failure-lab: "true"
 ---
 # ── PAYMENTS namespace ────────────────────────────────────────────
 # 2 CrashLoopBackOff pods
