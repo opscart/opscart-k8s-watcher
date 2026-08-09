@@ -37,6 +37,23 @@ OpsCart    →  shows what deserves attention first
 
 ---
 
+## How OpsCart works
+
+![Current OpsCart architecture](docs/opscart-architecture-current.png)
+
+OpsCart currently has two independent scan paths:
+
+- The CLI performs a one-shot scan whenever `opscart-scan triage` is invoked.
+- The dashboard performs scans from its own periodic timer loop.
+
+Each path reads Kubernetes state independently and maintains operational history within its own execution environment. They share parts of the underlying scanner, model, and storage implementation, but some classification and presentation behavior still differs between the two paths. Consequently, the CLI and dashboard may classify or group certain findings differently.
+
+A future design may align more incident semantics through shared canonical classification components. A shared database is not currently required or planned; scan timing and retained history may legitimately differ between the CLI and dashboard.
+
+Both paths use bounded snapshot scans rather than continuous Kubernetes watches. This keeps the core read-only and operationally simple. The tradeoff is that OpsCart provides triage at scan time rather than real-time event alerting.
+
+---
+
 ## Why OpsCart?
 
 A healthy dashboard does not always mean a healthy cluster.
