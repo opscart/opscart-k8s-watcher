@@ -130,6 +130,28 @@ minikube image load ghcr.io/opscart/opscart-dashboard:dev
 helm upgrade ... --set image.tag=dev --set image.pullPolicy=Never
 ```
 
+## Container log preview
+
+The Investigation page can fetch a bounded live preview for one container at
+a time, including separate application and sidecar containers such as
+`app` and `istio-proxy`. Current and previous container logs are selectable;
+previous logs are available only after that container has restarted.
+
+The feature is disabled by default because application logs may contain
+sensitive data. Enable it with:
+
+```bash
+helm upgrade opscart-watcher ./helm/opscart-watcher \
+  --namespace opscart-system \
+  --reuse-values \
+  --set logs.enabled=true
+```
+
+Enabling it adds only `get` on the `pods/log` subresource. Each request is
+limited to the last 200 lines and 256 KiB. Logs are fetched directly from
+Kubernetes, returned with `Cache-Control: no-store`, and never written to the
+OpsCart SQLite database. There is no combined-container view or download.
+
 ## Configuration
 
 | Parameter | Default | Description |
@@ -141,6 +163,7 @@ helm upgrade ... --set image.tag=dev --set image.pullPolicy=Never
 | `persistence.size` | `1Gi` | PVC size |
 | `persistence.storageClassName` | `""` | StorageClass (empty = cluster default) |
 | `persistence.existingClaim` | `""` | Use a pre-created PVC |
+| `logs.enabled` | `false` | Enable bounded, non-persistent current/previous container log preview |
 | `volumePermissions.enabled` | `false` | Root init container to chown the data volume |
 | `nodeSelector` | `{}` | Pod node selector |
 | `service.type` | `ClusterIP` | Service type |
@@ -152,7 +175,7 @@ helm upgrade ... --set image.tag=dev --set image.pullPolicy=Never
 ## Security
 
 - Runs as non-root (UID 65534)
-- Read-only ClusterRole (get/list only)
+- Read-only ClusterRole (get/list only; optional `pods/log` get)
 - Core scanning and embedded pricing require no cloud credentials. Optional AWS
   public pricing uses workload identity; see
   [Cost Intelligence](../../docs/07-Cost-Intelligence.md).

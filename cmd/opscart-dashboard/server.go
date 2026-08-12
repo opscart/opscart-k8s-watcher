@@ -86,6 +86,9 @@ type server struct {
 	auth          *authConfig
 	refreshState  func(*dashboardState, []string) error
 	backgroundWG  sync.WaitGroup
+	logsEnabled   bool
+	kubeClientFor kubeClientFactory
+	podLogReader  podLogReaderFunc
 }
 
 func newServer(clusterList []string, db store.Store, retentionDays int, dbPersistent bool) *server {
@@ -101,6 +104,9 @@ func newServer(clusterList []string, db store.Store, retentionDays int, dbPersis
 		retentionDays: retentionDays,
 		dbPersistent:  dbPersistent,
 		auth:          auth,
+		logsEnabled:   logPreviewEnabledFromEnv(),
+		kubeClientFor: func(ctx string) (kubernetes.Interface, error) { return kubeClient(ctx) },
+		podLogReader:  readPodLogs,
 		refreshState: func(state *dashboardState, clusters []string) error {
 			return state.refresh(clusters)
 		},
@@ -235,6 +241,7 @@ func (srv *server) newMux() http.Handler {
 	mux.HandleFunc("/namespaces", srv.handleNamespacesPage)
 	mux.HandleFunc("/optimizations", srv.handleOptimizationsPage)
 	mux.HandleFunc("/investigate", srv.handleInvestigationPage)
+	mux.HandleFunc("/api/investigation/logs", srv.handleInvestigationLogs)
 	mux.HandleFunc("/incidents", srv.handleIncidentsPage)
 	mux.HandleFunc("/security", srv.handleSecurityPage)
 	mux.HandleFunc("/waste", srv.handleWastePage)

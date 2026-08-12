@@ -31,6 +31,11 @@ persistence:
 
 retentionDays: 90   # resolved incidents/events older than this are pruned each scan cycle; 0 = keep forever
 
+logs:
+  # Live, bounded current/previous container log preview on Investigation pages.
+  # Log content is returned to the browser and is never stored by OpsCart.
+  enabled: false
+
 resources:
   requests:
     cpu: 100m

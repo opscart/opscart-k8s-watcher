@@ -4,6 +4,8 @@
 
 OpsCart's Kubernetes RBAC is `get`/`list` only — no create, update, patch, or
 delete verbs on any resource, including `endpointslices` (added in v1.7.1).
+The optional Investigation log preview adds only `get` on the `pods/log`
+subresource and is disabled by default. It does not add a mutation verb.
 There is no code path in the binary that issues a write call to the
 Kubernetes API. This is enforced at the RBAC layer, not just by convention:
 even if the binary were compromised, the ServiceAccount it runs under cannot
@@ -28,6 +30,13 @@ does not store Secret *values*, environment variable contents, or log
 bodies. Treat the database file with the same sensitivity as `kubectl get`
 output — it reveals cluster topology and workload names, not application
 data.
+
+When log preview is enabled, OpsCart fetches a maximum of 200 lines and 256
+KiB from Kubernetes only after a user requests it. The response is marked
+`no-store`; log bodies are not written to SQLite or application logs. They
+are cleared from the page when the user navigates away. Application logs can
+contain secrets, tokens, or personal data, so dashboard access should be
+granted accordingly.
 
 ## Authentication
 

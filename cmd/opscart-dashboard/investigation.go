@@ -44,17 +44,20 @@ type investigationPageData struct {
 	Clusters      []sidebarCluster
 
 	// Pod identity
-	PodName         string
-	Namespace       string
-	IssueType       string // crash_loop, image_pull_backoff, oomkilled, privileged_container, probe_failure...
-	Severity        string
-	OwnerKind       string // Deployment / StatefulSet / Job / (none)
-	OwnerName       string
-	ContainerName   string // set when the finding is container-scoped (e.g. privileged_container); empty otherwis
-	WorkloadLabel   string
-	TrackingLabel   string
-	PodAge          string
-	DescribeCommand string
+	PodName          string
+	Namespace        string
+	IssueType        string // crash_loop, image_pull_backoff, oomkilled, privileged_container, probe_failure...
+	Severity         string
+	OwnerKind        string // Deployment / StatefulSet / Job / (none)
+	OwnerName        string
+	ContainerName    string // set when the finding is container-scoped (e.g. privileged_container); empty otherwis
+	LogContainers    []investigationLogContainer
+	LogsAvailable    bool
+	DefaultLogSource string
+	WorkloadLabel    string
+	TrackingLabel    string
+	PodAge           string
+	DescribeCommand  string
 
 	// Status
 	Phase         string
@@ -235,11 +238,21 @@ func investigationHints(issueType string, stateReason string, restarts int32, po
 			Confidence: "high",
 			Title:      "Confirm privileged mode is actually required",
 			Reason:     "Most workloads do not need privileged: true — verify with the owning team.",
+			Command: fmt.Sprintf(
+				"kubectl get pod %s -n %s -o jsonpath='{range .spec.containers[*]}{.name}{\"\\tprivileged=\"}{.securityContext.privileged}{\"\\n\"}{end}'",
+				pod.Name,
+				pod.Namespace,
+			),
 		})
 		hints = append(hints, investigationHint{
 			Confidence: "medium",
 			Title:      "Replace with specific capabilities",
 			Reason:     "Use securityContext.capabilities.add for specific needs instead of full privileged access.",
+			Command: fmt.Sprintf(
+				"kubectl get pod %s -n %s -o jsonpath='{range .spec.containers[*]}{.name}{\"\\tadd=\"}{.securityContext.capabilities.add}{\"\\tdrop=\"}{.securityContext.capabilities.drop}{\"\\n\"}{end}'",
+				pod.Name,
+				pod.Namespace,
+			),
 		})
 	case "probe_failure":
 		hints = append(hints, investigationHint{
@@ -275,7 +288,7 @@ func investigationHints(issueType string, stateReason string, restarts int32, po
 }
 
 // resolveOwner walks Pod → ReplicaSet → Deployment (or returns the direct owner).
-func resolveOwner(clientset *kubernetes.Clientset, pod *corev1.Pod) (kind, name string) {
+func resolveOwner(clientset kubernetes.Interface, pod *corev1.Pod) (kind, name string) {
 	if len(pod.OwnerReferences) == 0 {
 		return "", ""
 	}
@@ -295,7 +308,7 @@ func resolveOwner(clientset *kubernetes.Clientset, pod *corev1.Pod) (kind, name 
 }
 
 // podEvents returns the last n events for a specific pod, newest first.
-func podEvents(clientset *kubernetes.Clientset, namespace, podName string, n int) []investigationEvent {
+func podEvents(clientset kubernetes.Interface, namespace, podName string, n int) []investigationEvent {
 	evList, err := clientset.CoreV1().Events(namespace).List(context.TODO(), metav1.ListOptions{
 		FieldSelector: fmt.Sprintf("involvedObject.name=%s,involvedObject.kind=Pod", podName),
 	})
@@ -393,7 +406,7 @@ func referencedResources(pod *corev1.Pod) (cms, secrets, pvcs []string) {
 }
 
 // blastRadiusSiblings returns all pods owned by the same workload.
-func blastRadiusSiblings(clientset *kubernetes.Clientset, namespace, ownerKind, ownerName string) (pods []blastRadiusPod, healthy, total int) {
+func blastRadiusSiblings(clientset kubernetes.Interface, namespace, ownerKind, ownerName string) (pods []blastRadiusPod, healthy, total int) {
 	if ownerName == "" {
 		return
 	}
@@ -443,7 +456,7 @@ func blastRadiusSiblings(clientset *kubernetes.Clientset, namespace, ownerKind, 
 }
 
 // blastRadiusServices returns services whose selector matches the pod's labels.
-func blastRadiusServices(clientset *kubernetes.Clientset, namespace string, podLabels map[string]string) []blastRadiusService {
+func blastRadiusServices(clientset kubernetes.Interface, namespace string, podLabels map[string]string) []blastRadiusService {
 	list, err := clientset.CoreV1().Services(namespace).List(context.TODO(), metav1.ListOptions{})
 	if err != nil {
 		return nil
@@ -467,7 +480,7 @@ func blastRadiusServices(clientset *kubernetes.Clientset, namespace string, podL
 }
 
 // blastRadiusSharedConfig finds other Deployments in the namespace sharing CMs or Secrets with this pod.
-func blastRadiusSharedConfig(clientset *kubernetes.Clientset, namespace, selfName string, cms, secrets []string) []blastSharedDep {
+func blastRadiusSharedConfig(clientset kubernetes.Interface, namespace, selfName string, cms, secrets []string) []blastSharedDep {
 	if len(cms) == 0 && len(secrets) == 0 {
 		return nil
 	}
@@ -503,7 +516,7 @@ func blastRadiusSharedConfig(clientset *kubernetes.Clientset, namespace, selfNam
 }
 
 // blastIngresses finds Ingress rules that route to any of the given service names.
-func blastIngresses(clientset *kubernetes.Clientset, namespace string, serviceNames []string) []blastIngressRule {
+func blastIngresses(clientset kubernetes.Interface, namespace string, serviceNames []string) []blastIngressRule {
 	if len(serviceNames) == 0 {
 		return nil
 	}
@@ -539,7 +552,7 @@ func blastIngresses(clientset *kubernetes.Clientset, namespace string, serviceNa
 
 // blastNamespaceHealth counts healthy vs total pods per workload in the namespace,
 // excluding the pod under investigation.
-func blastNamespaceHealth(clientset *kubernetes.Clientset, namespace, excludeOwnerName string) (workloads []blastNamespacePod, healthy, total int) {
+func blastNamespaceHealth(clientset kubernetes.Interface, namespace, excludeOwnerName string) (workloads []blastNamespacePod, healthy, total int) {
 	list, err := clientset.CoreV1().Pods(namespace).List(context.TODO(), metav1.ListOptions{})
 	if err != nil {
 		return
@@ -770,7 +783,7 @@ func (srv *server) handleInvestigationPage(w http.ResponseWriter, r *http.Reques
 	}
 
 	// Live cluster data — fresh client, not scan cache
-	clientset, err := kubeClient(ctx)
+	clientset, err := srv.kubeClientFor(ctx)
 	if err != nil {
 		log.Printf("investigation: kube client: %v", err)
 		http.Error(w, "cluster connection failed", http.StatusBadGateway)
@@ -830,6 +843,9 @@ func (srv *server) handleInvestigationPage(w http.ResponseWriter, r *http.Reques
 			}
 		}
 	}
+	populateInvestigationLogContainers(&data, pod)
+	data.LogsAvailable = srv.logsEnabled && len(data.LogContainers) > 0 &&
+		isActiveInvestigationTarget(scan, namespace, podName, issueType)
 
 	// Owner, events, related resources, hints
 	data.OwnerKind, data.OwnerName = resolveOwner(clientset, pod)
