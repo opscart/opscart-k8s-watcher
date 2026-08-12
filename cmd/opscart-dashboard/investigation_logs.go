@@ -36,7 +36,7 @@ type investigationLogContainer struct {
 func logPreviewEnabledFromEnv() bool {
 	raw := strings.TrimSpace(os.Getenv("OPSCART_LOGS_ENABLED"))
 	if raw == "" {
-		return false
+		return true
 	}
 	enabled, err := strconv.ParseBool(raw)
 	if err != nil {

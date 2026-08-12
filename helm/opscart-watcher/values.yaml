@@ -33,8 +33,8 @@ retentionDays: 90   # resolved incidents/events older than this are pruned each 
 
 logs:
   # Live, bounded current/previous container log preview on Investigation pages.
-  # Log content is returned to the browser and is never stored by OpsCart.
-  enabled: false
+  # Set false to disable the preview and remove pods/log RBAC.
+  enabled: true
 
 resources:
   requests:
