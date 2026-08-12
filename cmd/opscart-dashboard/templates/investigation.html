@@ -58,6 +58,15 @@
 .inv-scope-row:last-child{border-bottom:none}.inv-scope-key{color:var(--text-muted)}.inv-scope-value{color:var(--text);font-weight:500;min-width:0;overflow-wrap:anywhere}
 .inv-current-status{color:#f87171}.inv-current-status:before{content:"";display:inline-block;width:8px;height:8px;border-radius:50%;background:#f87171;margin-right:.4rem}
 .inv-describe{margin-top:.75rem}
+.inv-log-controls{display:flex;align-items:flex-end;gap:.75rem;flex-wrap:wrap;margin-bottom:.75rem}
+.inv-log-field{display:flex;flex-direction:column;gap:.35rem;min-width:190px}
+.inv-log-field label{font-size:.7rem;text-transform:uppercase;letter-spacing:.5px;color:var(--text-muted);font-weight:600}
+.inv-log-select{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius-sm);color:var(--text);font:inherit;font-size:.8rem;padding:.55rem .7rem}
+.inv-log-load{background:var(--primary);border:1px solid var(--primary);border-radius:var(--radius-sm);color:#fff;cursor:pointer;font:inherit;font-size:.78rem;font-weight:600;padding:.57rem .9rem}
+.inv-log-load:disabled{cursor:wait;opacity:.65}
+.inv-log-meta{color:var(--text-muted);font-size:.75rem;line-height:1.5;margin:.5rem 0}
+.inv-log-output{background:rgba(0,0,0,.3);border:1px solid var(--border);border-radius:var(--radius-sm);color:var(--text-secondary);font-family:'Consolas','Monaco',monospace;font-size:.76rem;line-height:1.55;margin:.75rem 0 0;max-height:420px;overflow:auto;padding:1rem;white-space:pre;word-break:normal}
+.inv-log-error{color:var(--danger);font-size:.8rem;margin-top:.75rem}
 .inv-evidence{display:flex;gap:1rem;flex-wrap:wrap;margin-bottom:1.5rem}
 .inv-evidence-chip{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius-sm);padding:0.6rem 1rem;min-width:120px}
 .inv-evidence-label{font-size:0.65rem;text-transform:uppercase;letter-spacing:0.5px;color:var(--text-muted);margin-bottom:0.25rem}
@@ -217,6 +226,36 @@ spec:
       {{if .DescribeCommand}}<div class="inv-cmd inv-describe"><code>{{.DescribeCommand}}</code><button class="wr-copy-btn" data-command="{{.DescribeCommand}}" onclick="navigator.clipboard.writeText(this.dataset.command)">Copy</button></div>{{end}}
     </section>
   </div>{{end}}
+
+  {{if .LogsAvailable}}
+  <div class="inv-section" id="container-logs" data-cluster="{{.ClusterName}}" data-namespace="{{.Namespace}}" data-pod="{{.PodName}}" data-issue-type="{{.IssueType}}">
+    <div class="inv-section-hdr">
+      <h2>Container Logs</h2>
+      <span style="font-size:.75rem;color:var(--text-muted);margin-left:auto">Live preview · not stored</span>
+    </div>
+    <div class="inv-log-controls">
+      <div class="inv-log-field">
+        <label for="inv-log-container">Container</label>
+        <select class="inv-log-select" id="inv-log-container">
+          {{range .LogContainers}}
+          <option value="{{.Name}}" data-previous="{{if .PreviousAvailable}}true{{else}}false{{end}}"{{if .Selected}} selected{{end}}>{{.Name}} · {{.Restarts}} restarts</option>
+          {{end}}
+        </select>
+      </div>
+      <div class="inv-log-field">
+        <label for="inv-log-source">Source</label>
+        <select class="inv-log-select" id="inv-log-source">
+          <option value="current"{{if eq .DefaultLogSource "current"}} selected{{end}}>Current container</option>
+          <option id="inv-log-previous" value="previous"{{if eq .DefaultLogSource "previous"}} selected{{end}}>Previous container</option>
+        </select>
+      </div>
+      <button class="inv-log-load" id="inv-log-load" type="button">Load logs</button>
+    </div>
+    <div class="inv-log-meta">Last 200 lines, maximum 256 KiB. Fetched directly from Kubernetes on request and discarded by OpsCart. Application logs may contain sensitive data.</div>
+    <div class="inv-log-error" id="inv-log-error" role="alert" hidden></div>
+    <pre class="inv-log-output" id="inv-log-output" tabindex="0" hidden></pre>
+  </div>
+  {{end}}
 
   {{if .Hints}}
   <div class="inv-section">
@@ -519,6 +558,65 @@ spec:
     if(el)el.textContent=t;
   }
   setInterval(upd,1000);upd();
+})();
+(function(){
+  var panel=document.getElementById('container-logs');
+  if(!panel)return;
+  var container=document.getElementById('inv-log-container');
+  var source=document.getElementById('inv-log-source');
+  var previous=document.getElementById('inv-log-previous');
+  var load=document.getElementById('inv-log-load');
+  var output=document.getElementById('inv-log-output');
+  var error=document.getElementById('inv-log-error');
+
+  function clearLogs(){
+    output.textContent='';
+    output.hidden=true;
+    error.textContent='';
+    error.hidden=true;
+  }
+  function syncSource(){
+    var selected=container.options[container.selectedIndex];
+    previous.disabled=selected.dataset.previous!=='true';
+    if(previous.disabled&&source.value==='previous')source.value='current';
+  }
+  container.addEventListener('change',function(){syncSource();clearLogs();});
+  source.addEventListener('change',clearLogs);
+  syncSource();
+
+  load.addEventListener('click',async function(){
+    clearLogs();
+    load.disabled=true;
+    load.textContent='Loading…';
+    output.hidden=false;
+    output.textContent='Loading logs…';
+    var params=new URLSearchParams({
+      cluster:panel.dataset.cluster,
+      ns:panel.dataset.namespace,
+      pod:panel.dataset.pod,
+      type:panel.dataset.issueType,
+      container:container.value,
+      previous:String(source.value==='previous')
+    });
+    try{
+      var response=await fetch('/api/investigation/logs?'+params.toString(),{
+        credentials:'same-origin',cache:'no-store',headers:{Accept:'application/json'}
+      });
+      var payload=await response.json();
+      if(!response.ok)throw new Error(payload.error||'Logs could not be loaded');
+      output.textContent=payload.logs||'No log output was returned for this container.';
+    }catch(err){
+      output.textContent='';
+      output.hidden=true;
+      error.textContent=err.message||'Logs could not be loaded';
+      error.hidden=false;
+    }finally{
+      load.disabled=false;
+      load.textContent='Load logs';
+    }
+  });
+  window.addEventListener('pagehide',clearLogs);
+  window.addEventListener('pageshow',function(event){if(event.persisted)clearLogs();});
 })();
 </script>
 </body>
