@@ -49,6 +49,8 @@ spec:
             {{- end }}
             - name: OPSCART_RETENTION_DAYS
               value: {{ .Values.retentionDays | quote }}
+            - name: OPSCART_LOGS_ENABLED
+              value: {{ .Values.logs.enabled | quote }}
             - name: OPSCART_AUTH_SECRET_NAME
               value: {{ include "opscart-watcher.authSecretName" . | quote }}
           ports:
