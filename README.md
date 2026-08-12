@@ -196,7 +196,7 @@ No competitor in this space — Grafana, Lens, k9s — can produce any of this, 
 - OpsCart Assessment: what the pattern means and estimated investigation time, including whether the restart rate is accelerating
 - Incident Timeline: an operational journal — first detected, restart milestones, severity changes, resolved/reoccurred — persisted across pod restarts
 - Evidence: severity, first detected, restart count, state, age, owner
-- Container Logs (optional): bounded current/previous logs for one selected container at a time, fetched live and never persisted
+- Container Logs: bounded current/previous logs for one selected container at a time, fetched live and never persisted. Enabled by default; set `OPSCART_LOGS_ENABLED=false` or Helm `logs.enabled=false` to disable it.
 - Blast Radius: replicas down, sibling pod health, services routing to the workload, ingress exposure, namespace-wide health, and a customer-impact heuristic (internal vs. possible external traffic)
 - Recommended Investigation: numbered steps with High / Medium / Low confidence and specific kubectl commands
 - Recent Events: last 10 events filtered to this pod
@@ -234,7 +234,7 @@ Namespace-level findings (unprotected namespaces, idle namespaces) get their own
 | **User** | Non-root (UID 65534) |
 | **Binary** | `CGO_ENABLED=0`, statically compiled, `-trimpath` |
 | **CVE scan** | 0 vulnerabilities (Trivy) |
-| **Cluster permissions** | Read-only ClusterRole (`get`, `list`); optional `get` on `pods/log` when log preview is enabled |
+| **Cluster permissions** | Read-only ClusterRole (`get`, `list`); includes `get` on `pods/log` by default and removes it when `logs.enabled=false` |
 | **Mutations** | None — never modifies cluster state |
 | **External calls** | None — no telemetry, no phone-home |
 | **Authentication** | Basic auth on by default, no disable path — env var, Secret, or auto-generated password |

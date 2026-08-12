@@ -168,8 +168,8 @@ func TestHandleInvestigationLogsRejectsUnavailablePreviousLogs(t *testing.T) {
 	}
 }
 
-func TestHandleInvestigationLogsDisabledByDefault(t *testing.T) {
-	t.Setenv("OPSCART_LOGS_ENABLED", "")
+func TestHandleInvestigationLogsWhenDisabled(t *testing.T) {
+	t.Setenv("OPSCART_LOGS_ENABLED", "false")
 	srv := newTestServer()
 	clientCalled := false
 	srv.kubeClientFor = func(string) (kubernetes.Interface, error) {
@@ -229,13 +229,14 @@ func TestHandleInvestigationPageRendersMultiContainerLogControls(t *testing.T) {
 	}
 }
 
-func TestLogPreviewEnabledFromEnvDefaultsOff(t *testing.T) {
+func TestLogPreviewEnabledFromEnvDefaultsOn(t *testing.T) {
 	t.Setenv("OPSCART_LOGS_ENABLED", "")
-	if logPreviewEnabledFromEnv() {
-		t.Fatal("expected log preview to be disabled when the environment variable is unset")
-	}
-	t.Setenv("OPSCART_LOGS_ENABLED", "true")
 	if !logPreviewEnabledFromEnv() {
-		t.Fatal("expected log preview to be enabled for true")
+		t.Fatal("expected log preview to be enabled by default")
+	}
+
+	t.Setenv("OPSCART_LOGS_ENABLED", "false")
+	if logPreviewEnabledFromEnv() {
+		t.Fatal("expected log preview to be disabled for false")
 	}
 }

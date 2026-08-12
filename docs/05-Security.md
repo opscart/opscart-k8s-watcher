@@ -4,8 +4,10 @@
 
 OpsCart's Kubernetes RBAC is `get`/`list` only — no create, update, patch, or
 delete verbs on any resource, including `endpointslices` (added in v1.7.1).
-The optional Investigation log preview adds only `get` on the `pods/log`
-subresource and is disabled by default. It does not add a mutation verb.
+The Investigation log preview adds only `get` on the `pods/log` subresource.
+It is enabled by default and can be disabled with
+`OPSCART_LOGS_ENABLED=false` or Helm `logs.enabled=false`. It does not add a
+mutation verb.
 There is no code path in the binary that issues a write call to the
 Kubernetes API. This is enforced at the RBAC layer, not just by convention:
 even if the binary were compromised, the ServiceAccount it runs under cannot
