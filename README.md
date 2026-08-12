@@ -138,16 +138,14 @@ random password at startup; that password changes when the process restarts.
 
 For team deployments, authenticate at the ingress layer instead with [oauth2-proxy](helm/opscart-watcher/values-oauth2-proxy-example.yaml) — supports Azure AD, Google, GitHub, and generic OIDC. See [Security](docs/05-Security.md) for the full pattern and threat model.
 
-
-The feature is enabled by default. Because application logs may contain
-sensitive data, disable it when dashboard users should not have access to
-application logs:
+The feature is enabled by default. Because application logs may contain sensitive data, disable it when dashboard users should not have access to application logs:
 
 ```bash
 helm upgrade opscart-watcher ./helm/opscart-watcher \
   --namespace opscart-system \
   --reuse-values \
   --set logs.enabled=false
+```
 ---
 
 
@@ -244,7 +242,7 @@ Namespace-level findings (unprotected namespaces, idle namespaces) get their own
 | **User** | Non-root (UID 65534) |
 | **Binary** | `CGO_ENABLED=0`, statically compiled, `-trimpath` |
 | **CVE scan** | 0 vulnerabilities (Trivy) |
-| **Cluster permissions** | Read-only ClusterRole (`get`, `list`); includes `get` on `pods/log` by default and can be disabled with `logs.enabled=false` |
+| **Cluster permissions** | - Read-only ClusterRole (`get`/`list`; includes `pods/log` access by default and removes it when `logs.enabled=false`)
 | **Mutations** | None — never modifies cluster state |
 | **External calls** | None — no telemetry, no phone-home |
 | **Authentication** | Basic auth on by default, no disable path — env var, Secret, or auto-generated password |
