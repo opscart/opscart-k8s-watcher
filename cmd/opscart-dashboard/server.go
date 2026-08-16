@@ -19,6 +19,7 @@ import (
 	awspricing "github.com/aws/aws-sdk-go-v2/service/pricing"
 	"github.com/opscart/opscart-k8s-watcher/pkg/analyzer"
 	"github.com/opscart/opscart-k8s-watcher/pkg/models"
+	"github.com/opscart/opscart-k8s-watcher/pkg/scanner"
 	"github.com/opscart/opscart-k8s-watcher/pkg/store"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
@@ -1815,6 +1816,12 @@ func runFullScan(ctx string) (*clusterScan, error) {
 	}
 
 	scan := &clusterScan{}
+	nodeScanner := scanner.NewScannerWithClientset(clientset, ctx)
+	nodeHealth, err := nodeScanner.FindNodeHealthConditions()
+	if err != nil {
+		return nil, fmt.Errorf("node health analysis: %w", err)
+	}
+	scan.nodeHealth = nodeHealth
 
 	// ── 1. Cost analysis (required) ───────────────────────────────────
 	npCostAnalyzer := analyzer.NewNodePoolCostAnalyzer(clientset, region)

@@ -12,6 +12,7 @@ import (
 
 	"github.com/opscart/opscart-k8s-watcher/pkg/analyzer"
 	"github.com/opscart/opscart-k8s-watcher/pkg/models"
+	"github.com/opscart/opscart-k8s-watcher/pkg/scanner"
 	"github.com/opscart/opscart-k8s-watcher/pkg/store"
 )
 
@@ -23,6 +24,7 @@ type clusterScan struct {
 	cisResult  *analyzer.CISResult
 	wasteAudit *analyzer.WasteAudit
 	netAudit   *analyzer.NetworkPolicyAudit
+	nodeHealth []models.NodeConditionFinding
 
 	// AllWorkloads is every Deployment/StatefulSet/DaemonSet the scan
 	// observed, regardless of the --breakdown flag — retained from the pod
@@ -106,10 +108,11 @@ func (s *dashboardState) refresh(clusterList []string) error {
 		if err := s.db.WriteSnapshot(s.ctx, scanID, snap); err != nil {
 			log.Printf("[%s] store snapshot: %v", displayName(s.ctx), err)
 		}
-		if err := s.db.UpsertIncidents(s.ctx, scanID, incidents); err != nil {
-			log.Printf("[%s] store incidents: %v", displayName(s.ctx), err)
-		}
-		if resolved, err := s.db.ResolveMissing(s.ctx, scanID); err == nil && resolved > 0 {
+		incidents = completeIncidentBatch(incidents, scan.nodeHealth)
+		resolved, persistErr := persistCompleteIncidentBatch(s.db, s.ctx, scanID, incidents)
+		if persistErr != nil {
+			log.Printf("[%s] store incidents: %v", displayName(s.ctx), persistErr)
+		} else if resolved > 0 {
 			log.Printf("[%s] %d incident(s) resolved", displayName(s.ctx), resolved)
 		}
 		if cutoff, ok := store.RetentionCutoff(s.retentionDays, time.Now()); ok {
@@ -128,6 +131,18 @@ func (s *dashboardState) refresh(clusterList []string) error {
 
 	log.Printf("[%s] scan complete: %d namespaces, $%s/month, %d critical issues", displayName(s.ctx), len(scan.report.NamespaceCosts), formatMoney(scan.report.TotalMonthlyCost), countCriticalIssues(scan))
 	return nil
+}
+
+func completeIncidentBatch(workloads []store.IncidentData, nodeFindings []models.NodeConditionFinding) []store.IncidentData {
+	complete := append([]store.IncidentData(nil), workloads...)
+	return append(complete, scanner.NodeConditionIncidents(nodeFindings)...)
+}
+
+func persistCompleteIncidentBatch(db store.Store, cluster, scanID string, incidents []store.IncidentData) (int, error) {
+	if err := db.UpsertIncidents(cluster, scanID, incidents); err != nil {
+		return 0, err
+	}
+	return db.ResolveMissing(cluster, scanID)
 }
 
 // startBackgroundRefresh ticks every interval and re-scans every cluster that

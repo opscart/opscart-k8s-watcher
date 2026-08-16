@@ -15,9 +15,15 @@ import (
 
 // Scanner handles cluster scanning operations
 type Scanner struct {
-	clientset   *kubernetes.Clientset
+	clientset   kubernetes.Interface
 	clusterName string
 	ctx         context.Context
+}
+
+// NewScannerWithClientset reuses an already-configured Kubernetes client for
+// scanners participating in a larger scan pipeline.
+func NewScannerWithClientset(clientset kubernetes.Interface, clusterName string) *Scanner {
+	return &Scanner{clientset: clientset, clusterName: clusterName, ctx: context.Background()}
 }
 
 // NewScanner creates a new scanner for the given cluster context
@@ -86,8 +92,12 @@ func (s *Scanner) jobOwnerIndex(namespace string) map[string]workloadOwner {
 	if err != nil {
 		return nil
 	}
-	owners := make(map[string]workloadOwner, len(jobs.Items))
-	for _, job := range jobs.Items {
+	return jobOwnersFromJobs(jobs.Items)
+}
+
+func jobOwnersFromJobs(jobs []batchv1.Job) map[string]workloadOwner {
+	owners := make(map[string]workloadOwner, len(jobs))
+	for _, job := range jobs {
 		owners[job.Namespace+"/"+job.Name] = ownerForJob(job)
 	}
 	return owners

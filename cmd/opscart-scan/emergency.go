@@ -49,13 +49,17 @@ func runEmergencyScan(clusterContext string) error {
 	if err != nil {
 		return fmt.Errorf("scanning cluster: %w", err)
 	}
+	nodeHealth, err := s.FindNodeHealthConditions()
+	if err != nil {
+		return fmt.Errorf("scanning node health: %w", err)
+	}
 
 	probeFailures := detectProbeFailures(clusterContext, rawIssues)
 	issues := classifyIssues(rawIssues, probeFailures)
 
 	// Persist findings to operational memory (best-effort, never blocks
 	// printing results — this is secondary to the CLI's primary job).
-	persistFindings(opStore, clusterContext, newScanID(), issues)
+	persistFindings(opStore, clusterContext, newScanID(), issues, nodeHealth)
 
 	enriched := enrichIssues(opStore, clusterContext, issues)
 	enriched = applyCriticalDebounce(opStore, clusterContext, enriched)
@@ -440,11 +444,12 @@ func criticalDebounceMessage(reason string) string {
 // persistFindings writes this scan's findings to operational memory and
 // resolves incidents absent from it. Errors are logged, not propagated —
 // printing results is the primary job; persistence is best-effort.
-func persistFindings(db store.Store, clusterContext, scanID string, issues []models.EmergencyIssue) {
-	if err := db.UpsertIncidents(clusterContext, scanID, mapIssuesToIncidents(issues)); err != nil {
+func persistFindings(db store.Store, clusterContext, scanID string, issues []models.EmergencyIssue, nodeFindings []models.NodeConditionFinding) {
+	incidents := mapIssuesToIncidents(issues)
+	incidents = append(incidents, scanner.NodeConditionIncidents(nodeFindings)...)
+	if err := db.UpsertIncidents(clusterContext, scanID, incidents); err != nil {
 		log.Printf("opscart-scan: could not write operational memory: %v", err)
-	}
-	if _, err := db.ResolveMissing(clusterContext, scanID); err != nil {
+	} else if _, err := db.ResolveMissing(clusterContext, scanID); err != nil {
 		log.Printf("opscart-scan: could not resolve missing incidents: %v", err)
 	}
 }
