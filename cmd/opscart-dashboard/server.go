@@ -705,6 +705,7 @@ type topIssue struct {
 	Namespace string
 	Resource  string
 	IssueType string
+	IsNode    bool
 
 	// Enriched from the incident registry by enrichTopIssues, matched via
 	// Namespace+Resource+IssueType above. Zero-valued when no match was
@@ -746,7 +747,7 @@ func buildOverviewData(scan *clusterScan, activeCtx string, clusterList []string
 	var criticalCount int
 	var privilegedContainers, runningAsRoot, unprotectedNamespaces int
 	if scan != nil {
-		wrIssues = collectWarRoomIssues(scan, 0)
+		wrIssues = collectWarRoomIssuesWithStore(scan, 0, db, activeCtx)
 		for _, w := range wrIssues {
 			if w.Severity == "critical" {
 				criticalCount++
@@ -1028,6 +1029,13 @@ func buildOverviewVerdict(topIssues []topIssue, resolvedSinceCursor int, cursorS
 	}
 
 	worst := topIssues[0]
+	if worst.IsNode {
+		firstDetected := worst.FirstDetectedLabel
+		if firstDetected == "" {
+			firstDetected = "recently"
+		}
+		return fmt.Sprintf("Cluster needs attention: %s, first detected %s.", worst.Title, firstDetected), line2
+	}
 
 	// Aggregated rows (orphaned PVCs, security score, zero-replica
 	// workloads) have no single Namespace/Resource/IssueType to build a
@@ -1351,7 +1359,7 @@ func buildTopIssues(scan *clusterScan, wrIssues []warRoomIssue, activeCtx string
 
 	// Severity rank for sorting
 	sevRank := map[string]int{"critical": 0, "high": 1, "medium": 2, "low": 3, "warning": 2}
-	sort.Slice(keyOrder, func(i, j int) bool {
+	sort.SliceStable(keyOrder, func(i, j int) bool {
 		if sevRank[keyOrder[i].severity] != sevRank[keyOrder[j].severity] {
 			return sevRank[keyOrder[i].severity] < sevRank[keyOrder[j].severity]
 		}
@@ -1377,9 +1385,11 @@ func buildTopIssues(scan *clusterScan, wrIssues []warRoomIssue, activeCtx string
 		// Investigation page; a group of several pods deep-links to the
 		// Incidents registry filtered to this issue type instead of
 		// arbitrarily picking grp[0]'s pod as "the" incident.
-		issueURL := investigateURL(grp[0].Namespace, grp[0].Resource, k.issueTyp, activeCtx)
+		issueURL := warRoomIssueURL(grp[0], activeCtx)
 		buttonLabel := "Fix now →"
-		if count > 1 {
+		if grp[0].IsNode {
+			buttonLabel = "View node health →"
+		} else if count > 1 {
 			issueURL = fmt.Sprintf("/incidents?cluster=%s&type=%s&status=active",
 				url.QueryEscape(activeCtx), url.QueryEscape(k.issueTyp))
 			buttonLabel = fmt.Sprintf("View all %d →", count)
@@ -1398,7 +1408,12 @@ func buildTopIssues(scan *clusterScan, wrIssues []warRoomIssue, activeCtx string
 			Namespace:   grp[0].Namespace,
 			Resource:    grp[0].Resource,
 			IssueType:   k.issueTyp,
+			IsNode:      grp[0].IsNode,
 		})
+		if grp[0].IsNode && !grp[0].IncidentFirstSeen.IsZero() {
+			issues[len(issues)-1].FirstDetectedLabel = humanAge(time.Since(grp[0].IncidentFirstSeen)) + " ago"
+			issues[len(issues)-1].MemoryLine = "First detected " + issues[len(issues)-1].FirstDetectedLabel
+		}
 	}
 
 	// Waste: orphaned PVCs (single aggregated row)
@@ -1474,6 +1489,20 @@ func formatGroupedIssue(issueType, severity string, grp []warRoomIssue) (title, 
 	moreThan3 := count - 3
 
 	switch issueType {
+	case "Ready", "DiskPressure", "MemoryPressure", "PIDPressure", "NetworkUnavailable":
+		if count == 1 {
+			title = fmt.Sprintf("%s on %s", nodeConditionLabel(grp[0]), grp[0].Resource)
+			subtitle = grp[0].Message
+			if grp[0].NodePool != "" {
+				subtitle = grp[0].NodePool + " · " + subtitle
+			}
+			countText = "1 node"
+		} else {
+			title = fmt.Sprintf("%d nodes reporting %s", count, issueType)
+			subtitle = strings.Join(samples, ", ")
+			countText = fmt.Sprintf("%d nodes", count)
+		}
+		action = fmt.Sprintf("kubectl describe node %s", grp[0].Resource)
 	case "crash_loop":
 		title = fmt.Sprintf("%d pod%s crash-looping", count, pluralS(count))
 		if count == 1 {
