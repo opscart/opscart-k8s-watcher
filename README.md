@@ -60,7 +60,7 @@ A healthy dashboard does not always mean a healthy cluster.
 
 Metrics show whether services are meeting their SLOs. OpsCart surfaces operational conditions that can remain hidden or fragmented across dashboards—crash-looping workloads, image pull failures, privileged containers, missing NetworkPolicies, unattached storage, and resource waste.
 
-This is not another alert aggregator. OpsCart preserves operational memory across scans: when an incident was first detected, whether it resolved and later reoccurred, how restart behavior changed, and which workload is currently affected. A replacement pod may be only five minutes old while the workload incident has existed for weeks. OpsCart keeps that workload-level history without presenting the new pod as the identity of the incident.
+This is not another alert aggregator. OpsCart preserves operational memory across scans: when an incident was first detected, whether it resolved and later reoccurred, how restart behavior changed, and which workload is currently represents the incident. A replacement pod may be only five minutes old while the workload incident has existed for weeks. OpsCart keeps that workload-level history without presenting the new pod as the identity of the incident.
 
 Instead of requiring operators to correlate several dashboards during triage, OpsCart presents a prioritized view of what deserves attention, the observed evidence behind it, and read-only investigation commands for the next step.
 
@@ -190,7 +190,15 @@ No competitor in this space — Grafana, Lens, k9s — can produce any of this, 
 
 **Incident Score** — A single 0–100 score derived from crash loops, image pull failures, security posture, waste, and network policy gaps. Trend arrows and a 7-point sparkline show whether the cluster is getting better or worse.
 
-**War Room** — Every critical incident in one view, prioritized by severity and restart rate. Detects crash loops, image pull failures, probe failures (containers repeatedly killed by a failing startup/liveness check before reaching Ready), and privileged containers. Each card shows the issue type, namespace, age, restart count, and a ready-to-run `kubectl` command. One click opens a full investigation.
+**War Room** — Active workload and node incidents in one prioritized view. Workload findings include crash loops, image pull failures, probe failures, and privileged containers. Kubernetes node conditions are also eligible for ranking: `Ready=False/Unknown` is CRITICAL, while `DiskPressure`, `MemoryPressure`, `PIDPressure`, and `NetworkUnavailable` are HIGH.
+
+Colocated workload count is shown as operational context and does not increase node-condition severity. Each card provides evidence and a read-only investigation path.
+
+**Node Health & Workload Placement** — Detects Kubernetes-reported node conditions including `Ready=False/Unknown`, `DiskPressure`, `MemoryPressure`, `PIDPressure`, and `NetworkUnavailable`. OpsCart correlates workloads currently scheduled to an unhealthy node using Kubernetes node placement, helping distinguish several workload symptoms from a shared infrastructure condition.
+
+Placement correlation is evidence of co-location only — it is **not a
+claim of causation**. Unscheduled pods without `spec.nodeName` are not
+correlated.
 
 **Investigation** — One click from detection to investigation. Every pod-level incident includes:
 - OpsCart Assessment: what the pattern means and estimated investigation time, including whether the restart rate is accelerating
@@ -203,6 +211,12 @@ No competitor in this space — Grafana, Lens, k9s — can produce any of this, 
 - Related Resources: ConfigMaps, Secrets, PVCs referenced by the pod spec
 
 Namespace-level findings (unprotected namespaces, idle namespaces) get their own dedicated view — a sample NetworkPolicy and namespace-scoped remediation steps, not a pod investigation that doesn't apply.
+
+**Node Investigation** — Node-condition incidents have a dedicated investigation view showing node identity, node pool, Kubernetes-reported condition status/reason/message, workload-placement correlation, and the incident timeline.
+
+When a condition resolves, OpsCart preserves the last retained condition and placement evidence while clearly distinguishing it from the current node state. Node investigations provide read-only commands such as `kubectl describe node` and do not expose application Container Logs.
+
+Node/workload relationships are labeled **correlated by node placement — not a claim of causation**.
 
 **Incidents** — The full system of record: every incident this cluster has seen, active and resolved. Search by name, namespace, or issue type; filter by severity and status; sorted and paginated. Resolved incidents stay visible with recovery time, so you can see what was broken last week — not just what's broken now.
 
@@ -285,6 +299,7 @@ go build -o opscart-scan ./cmd/opscart-scan
 ./opscart-scan network --cluster prod                   # NetworkPolicy gaps
 ./opscart-scan report --cluster prod                    # Generate an HTML report
 ```
+Emergency triage also surfaces active Kubernetes node conditions with derived severity, Kubernetes-reported reason, compact workload/pod placement counts, and read-only `kubectl describe node` guidance. Healthy nodes do not add noise to the CLI output.
 
 Generated next steps are inspection commands only. OpsCart does not automatically apply, patch, delete, restart, scale, or otherwise modify workloads.
 ---
