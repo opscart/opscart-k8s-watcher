@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"html"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -16,6 +17,17 @@ type nodeInvestigationStore struct {
 	store.Store
 	records   map[string]*store.IncidentRecord
 	timelines map[string][]store.IncidentEvent
+	summaries []store.IncidentSummary
+}
+
+func (s nodeInvestigationStore) QueryIncidents(filter store.IncidentFilter) ([]store.IncidentSummary, int, error) {
+	var matches []store.IncidentSummary
+	for _, summary := range s.summaries {
+		if filter.Status == "" || summary.Status == filter.Status {
+			matches = append(matches, summary)
+		}
+	}
+	return matches, len(matches), nil
 }
 
 func (s nodeInvestigationStore) GetIncidentHistory(_ string, fingerprint string) (*store.IncidentRecord, error) {
@@ -166,6 +178,13 @@ func TestNodeWarRoomLinkTargetsValidInvestigationRoute(t *testing.T) {
 	if workload != wantWorkload {
 		t.Fatalf("workload Investigation route changed: got %q want %q", workload, wantWorkload)
 	}
+	srv := newNodeInvestigationServer(t, "active", nil, nil)
+	req := httptest.NewRequest(http.MethodGet, link, nil)
+	rec := httptest.NewRecorder()
+	srv.handleInvestigationPage(rec, req)
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), "worker-21") || !strings.Contains(rec.Body.String(), "DiskPressure") {
+		t.Fatalf("generated War Room Node link did not open its Investigation: status=%d body=%s", rec.Code, rec.Body.String())
+	}
 }
 
 func TestIncidentRegistryNodeLinkTargetsNodeInvestigation(t *testing.T) {
@@ -186,5 +205,53 @@ func TestIncidentRegistryNodeLinkTargetsNodeInvestigation(t *testing.T) {
 	}
 	if strings.Contains(body, "pod=worker-21") {
 		t.Errorf("incident registry treated Node as a Pod")
+	}
+	marker := "window.location='"
+	start := strings.Index(body, marker)
+	if start < 0 {
+		t.Fatal("incident registry row has no navigation target")
+	}
+	start += len(marker)
+	end := strings.Index(body[start:], "'")
+	link := html.UnescapeString(body[start : start+end])
+	srv := newNodeInvestigationServer(t, "active", nil, nil)
+	req := httptest.NewRequest(http.MethodGet, link, nil)
+	page := httptest.NewRecorder()
+	srv.handleInvestigationPage(page, req)
+	if page.Code != http.StatusOK || !strings.Contains(page.Body.String(), "worker-21") || !strings.Contains(page.Body.String(), "DiskPressure") {
+		t.Fatalf("generated registry Node link did not open its Investigation: status=%d body=%s", page.Code, page.Body.String())
+	}
+}
+
+func TestMultipleNodesRemainDistinctAcrossWarRoomAndInvestigationRoutes(t *testing.T) {
+	const condition = "DiskPressure"
+	db := nodeInvestigationStore{
+		records: map[string]*store.IncidentRecord{}, timelines: map[string][]store.IncidentEvent{},
+	}
+	var findings []models.NodeConditionFinding
+	for _, node := range []string{"worker-a", "worker-b"} {
+		fingerprint := "cluster/Node/" + node + "/" + condition
+		details := nodeInvestigationDetailsJSON(t, node, "pool-a", condition, "True", nil)
+		db.records[fingerprint] = &store.IncidentRecord{Fingerprint: fingerprint, Status: "active", DetailsJSON: details}
+		db.summaries = append(db.summaries, store.IncidentSummary{
+			Fingerprint: fingerprint, Resource: node, IssueType: condition, Status: "active", Severity: "low",
+		})
+		findings = append(findings, models.NodeConditionFinding{NodeName: node, NodePool: "pool-a", ConditionType: condition, ConditionStatus: "True"})
+	}
+	scan := &clusterScan{nodeHealth: findings}
+	issues := collectActiveNodeWarRoomIssues(scan, db, "prod")
+	if len(issues) != 2 || issues[0].Resource != "worker-a" || issues[1].Resource != "worker-b" {
+		t.Fatalf("multi-node War Room representation merged or reordered Nodes: %+v", issues)
+	}
+	srv := newServer([]string{"prod"}, db, 0, true)
+	srv.getState("prod").scan = scan
+	for _, issue := range issues {
+		link := warRoomIssueURL(issue, "prod")
+		req := httptest.NewRequest(http.MethodGet, link, nil)
+		rec := httptest.NewRecorder()
+		srv.handleInvestigationPage(rec, req)
+		if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), issue.Resource) || !strings.Contains(rec.Body.String(), condition) {
+			t.Errorf("%s route failed or opened wrong context: status=%d", issue.Resource, rec.Code)
+		}
 	}
 }

@@ -53,6 +53,42 @@ func TestNodeIncidentDetectionAndMutableEvidence(t *testing.T) {
 	}
 }
 
+func TestNodeIncidentHealthyActiveResolvedBoundary(t *testing.T) {
+	s := openTestStore(t)
+	cluster := "cluster-a"
+	if err := s.UpsertIncidents(cluster, "scan-healthy", nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.ResolveMissing(cluster, "scan-healthy"); err != nil {
+		t.Fatal(err)
+	}
+	if _, total, err := s.QueryIncidents(IncidentFilter{Cluster: cluster}); err != nil || total != 0 {
+		t.Fatalf("healthy baseline created incidents: total=%d err=%v", total, err)
+	}
+
+	inc := nodeStoreIncident(cluster, "worker-21", "DiskPressure", `{}`)
+	if err := s.UpsertIncidents(cluster, "scan-active", []IncidentData{inc}); err != nil {
+		t.Fatal(err)
+	}
+	for miss := 1; miss <= resolveThreshold; miss++ {
+		scanID := fmt.Sprintf("scan-healthy-%d", miss)
+		if err := s.UpsertIncidents(cluster, scanID, nil); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := s.ResolveMissing(cluster, scanID); err != nil {
+			t.Fatal(err)
+		}
+		rec, _ := s.GetIncidentHistory(cluster, inc.Fingerprint)
+		want := "active"
+		if miss == resolveThreshold {
+			want = "resolved"
+		}
+		if rec == nil || rec.Status != want {
+			t.Fatalf("miss %d status=%+v, want %s", miss, rec, want)
+		}
+	}
+}
+
 func TestNodeIncidentConditionIsolationAndDebouncedResolution(t *testing.T) {
 	s := openTestStore(t)
 	cluster := "cluster-a"

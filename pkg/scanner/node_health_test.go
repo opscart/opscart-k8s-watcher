@@ -3,7 +3,9 @@ package scanner
 import (
 	"encoding/json"
 	"errors"
+	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -310,4 +312,97 @@ func TestFindNodeHealthConditionsCollectionFailureIsAnError(t *testing.T) {
 			t.Fatal("pod correlation failure was reported as a healthy observation")
 		}
 	})
+}
+
+func TestNodeHealthProductionFlowPersistsStableIdentityAcrossPlacementChurn(t *testing.T) {
+	transition := metav1.NewTime(time.Date(2026, 8, 16, 12, 0, 0, 0, time.UTC))
+	node := nodeWithConditions("worker-a", corev1.NodeCondition{
+		Type: corev1.NodeDiskPressure, Status: corev1.ConditionTrue,
+		Reason: "InitialReason", Message: "initial message", LastTransitionTime: transition,
+	})
+	node.Labels = map[string]string{"agentpool": "pool-a"}
+	podA := scheduledOwnedPod("apps", "api-7d8f9c6b5-abc12", "worker-a", "ReplicaSet", "api-7d8f9c6b5")
+	podB := scheduledOwnedPod("apps", "worker-0", "worker-a", "StatefulSet", "worker")
+	unbound := scheduledOwnedPod("apps", "pending-7d8f9c6b5-abc12", "", "ReplicaSet", "pending-7d8f9c6b5")
+	client := fake.NewSimpleClientset(&node, &podA, &podB, &unbound)
+	scanner := NewScannerWithClientset(client, "cluster-a")
+
+	firstFindings, err := scanner.FindNodeHealthConditions()
+	if err != nil {
+		t.Fatalf("FindNodeHealthConditions(first): %v", err)
+	}
+	if len(firstFindings) != 1 {
+		t.Fatalf("first findings = %+v", firstFindings)
+	}
+	first := NodeConditionIncidents(firstFindings)[0]
+	if first.Fingerprint != "cluster/Node/worker-a/DiskPressure" {
+		t.Fatalf("production fingerprint = %q", first.Fingerprint)
+	}
+	if strings.Contains(first.DetailsJSON, "pending") {
+		t.Fatalf("unbound pod entered persisted placement evidence: %s", first.DetailsJSON)
+	}
+	for _, want := range []string{`"name":"api"`, `"name":"worker"`, `"node_pool":"pool-a"`} {
+		if !strings.Contains(first.DetailsJSON, want) {
+			t.Errorf("first evidence missing %s: %s", want, first.DetailsJSON)
+		}
+	}
+
+	db, err := store.OpenSQLite(filepath.Join(t.TempDir(), "node-flow.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	if err := db.UpsertIncidents("cluster-a", "scan-1", []store.IncidentData{first}); err != nil {
+		t.Fatal(err)
+	}
+
+	currentNode, _ := client.CoreV1().Nodes().Get(scanner.ctx, "worker-a", metav1.GetOptions{})
+	currentNode.Labels["agentpool"] = "pool-b"
+	currentNode.Status.Conditions[0].Reason = "UpdatedReason"
+	currentNode.Status.Conditions[0].Message = "updated message"
+	currentNode.Status.Conditions[0].LastTransitionTime = metav1.NewTime(transition.Add(time.Hour))
+	if _, err := client.CoreV1().Nodes().Update(scanner.ctx, currentNode, metav1.UpdateOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	if err := client.CoreV1().Pods("apps").Delete(scanner.ctx, podB.Name, metav1.DeleteOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	podC := scheduledOwnedPod("apps", "exporter-xzqwe", "worker-a", "DaemonSet", "exporter")
+	if _, err := client.CoreV1().Pods("apps").Create(scanner.ctx, &podC, metav1.CreateOptions{}); err != nil {
+		t.Fatal(err)
+	}
+
+	secondFindings, err := scanner.FindNodeHealthConditions()
+	if err != nil {
+		t.Fatalf("FindNodeHealthConditions(second): %v", err)
+	}
+	second := NodeConditionIncidents(secondFindings)[0]
+	if second.Fingerprint != first.Fingerprint {
+		t.Fatalf("placement/evidence churn changed identity: %q -> %q", first.Fingerprint, second.Fingerprint)
+	}
+	for _, want := range []string{`"name":"api"`, `"name":"exporter"`, `"node_pool":"pool-b"`, `"reason":"UpdatedReason"`} {
+		if !strings.Contains(second.DetailsJSON, want) {
+			t.Errorf("updated evidence missing %s: %s", want, second.DetailsJSON)
+		}
+	}
+	for _, absent := range []string{`"name":"worker"`, "pending"} {
+		if strings.Contains(second.DetailsJSON, absent) {
+			t.Errorf("stale/unbound placement %s remained: %s", absent, second.DetailsJSON)
+		}
+	}
+	if err := db.UpsertIncidents("cluster-a", "scan-2", []store.IncidentData{second}); err != nil {
+		t.Fatal(err)
+	}
+	record, err := db.GetIncidentHistory("cluster-a", first.Fingerprint)
+	if err != nil || record == nil || record.DetailsJSON != second.DetailsJSON {
+		t.Fatalf("current evidence not updated: record=%+v err=%v", record, err)
+	}
+	items, total, err := db.QueryIncidents(store.IncidentFilter{Cluster: "cluster-a"})
+	if err != nil || total != 1 || len(items) != 1 {
+		t.Fatalf("evidence churn created duplicate incident: total=%d items=%+v err=%v", total, items, err)
+	}
+	events, err := db.GetIncidentTimeline("cluster-a", first.Fingerprint)
+	if err != nil || len(events) != 1 || events[0].EventType != "DETECTED" {
+		t.Fatalf("evidence churn emitted lifecycle events: %+v err=%v", events, err)
+	}
 }
