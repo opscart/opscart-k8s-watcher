@@ -273,14 +273,7 @@ func isNodeIncidentFingerprint(fingerprint string) bool {
 }
 
 func nodeWarRoomSeverity(conditionType string) (string, bool) {
-	switch conditionType {
-	case "Ready":
-		return "critical", true
-	case "DiskPressure", "MemoryPressure", "PIDPressure", "NetworkUnavailable":
-		return "high", true
-	default:
-		return "", false
-	}
+	return models.NodeConditionSeverity(conditionType)
 }
 
 func nodePlacementSummary(workloads, pods int) string {

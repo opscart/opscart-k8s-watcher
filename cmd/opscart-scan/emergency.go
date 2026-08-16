@@ -9,6 +9,7 @@ import (
 	"log"
 	"os"
 	"regexp"
+	"sort"
 	"strings"
 	"time"
 
@@ -64,8 +65,72 @@ func runEmergencyScan(clusterContext string) error {
 	enriched := enrichIssues(opStore, clusterContext, issues)
 	enriched = applyCriticalDebounce(opStore, clusterContext, enriched)
 	enriched = suppressSecondaryRestartNoise(opStore, clusterContext, enriched)
-	printEmergencyIssuesEnrichedWithNextSteps(os.Stdout, enriched, clusterContext, nextSteps)
+	printEmergencyTriage(os.Stdout, enriched, nodeHealth, clusterContext, nextSteps)
 	return nil
+}
+
+func printEmergencyTriage(w io.Writer, issues []enrichedIssue, nodeFindings []models.NodeConditionFinding, clusterContext string, showNextSteps bool) {
+	if len(issues) > 0 || len(nodeFindings) == 0 {
+		printEmergencyIssuesEnrichedWithNextSteps(w, issues, clusterContext, showNextSteps)
+	}
+	printNodeHealth(w, nodeFindings)
+}
+
+func printNodeHealth(w io.Writer, findings []models.NodeConditionFinding) {
+	type nodeIssue struct {
+		finding  models.NodeConditionFinding
+		severity string
+	}
+	issues := make([]nodeIssue, 0, len(findings))
+	for _, finding := range findings {
+		severity, ok := models.NodeConditionSeverity(finding.ConditionType)
+		if !ok {
+			continue
+		}
+		issues = append(issues, nodeIssue{finding: finding, severity: severity})
+	}
+	if len(issues) == 0 {
+		return
+	}
+	severityRank := map[string]int{"critical": 0, "high": 1}
+	sort.Slice(issues, func(i, j int) bool {
+		if severityRank[issues[i].severity] != severityRank[issues[j].severity] {
+			return severityRank[issues[i].severity] < severityRank[issues[j].severity]
+		}
+		if issues[i].finding.NodeName != issues[j].finding.NodeName {
+			return issues[i].finding.NodeName < issues[j].finding.NodeName
+		}
+		return issues[i].finding.ConditionType < issues[j].finding.ConditionType
+	})
+
+	fmt.Fprintln(w, "🔷 NODE HEALTH:")
+	fmt.Fprintln(w, strings.Repeat("═", 80))
+	for _, issue := range issues {
+		finding := issue.finding
+		condition := finding.ConditionType
+		if condition == "Ready" && finding.ConditionStatus != "" {
+			condition += "=" + finding.ConditionStatus
+		}
+		pods := 0
+		for _, workload := range finding.CorrelatedWorkloads {
+			pods += workload.PodCount
+		}
+		workloads := len(finding.CorrelatedWorkloads)
+		fmt.Fprintf(w, "%s  %s on %s\n", strings.ToUpper(issue.severity), condition, finding.NodeName)
+		if finding.Reason != "" {
+			fmt.Fprintf(w, "      Reason: %s\n", finding.Reason)
+		}
+		fmt.Fprintf(w, "      Placement: %d workload%s · %d pod%s colocated\n", workloads, pluralSuffix(workloads), pods, pluralSuffix(pods))
+		fmt.Fprintln(w, "      Correlated by node placement — not a claim of causation.")
+		fmt.Fprintf(w, "      kubectl describe node %s\n\n", finding.NodeName)
+	}
+}
+
+func pluralSuffix(count int) string {
+	if count == 1 {
+		return ""
+	}
+	return "s"
 }
 
 // classifiablePodReasons is the set of per-container "health" reasons
