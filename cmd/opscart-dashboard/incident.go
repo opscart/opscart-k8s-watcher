@@ -243,6 +243,9 @@ var getIncidentsTmpl = sync.OnceValue(func() *template.Template {
 				"isNamespaceScoped": func(issueType string) bool {
 					return issueType == "unprotected_namespace" || issueType == "idle_namespace"
 				},
+				"isNodeIncident": func(fingerprint string) bool {
+					return isNodeIncidentFingerprint(fingerprint)
+				},
 				"trendApplies": store.RestartTrendApplies,
 			}).
 			ParseFS(templateFS,

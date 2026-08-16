@@ -123,7 +123,7 @@ func TestResolvedNodeExcludedAndConditionsRemainIndependent(t *testing.T) {
 	}
 }
 
-func TestNodeWarRoomCompactContextAndInfrastructureLink(t *testing.T) {
+func TestNodeWarRoomCompactContextAndInvestigationLink(t *testing.T) {
 	finding := nodeFinding("worker-21", "DiskPressure", "True",
 		models.CorrelatedWorkload{Namespace: "payments", Kind: "Deployment", Name: "api", PodCount: 3},
 		models.CorrelatedWorkload{Namespace: "payments", Kind: "StatefulSet", Name: "db", PodCount: 2},
@@ -133,20 +133,20 @@ func TestNodeWarRoomCompactContextAndInfrastructureLink(t *testing.T) {
 		t.Fatalf("message = %q", issue.Message)
 	}
 	html := renderWarRoomCard(issue, "prod")
-	for _, want := range []string{"DiskPressure on worker-21", "Node pool: pool-a", "2 colocated workloads · 5 pods", `href="/infrastructure?cluster=prod"`, "View node health"} {
+	for _, want := range []string{"DiskPressure on worker-21", "Node pool: pool-a", "2 colocated workloads · 5 pods", "/investigate?", "node=worker-21", "type=DiskPressure", "View node health"} {
 		if !strings.Contains(html, want) {
 			t.Errorf("card missing %q: %s", want, html)
 		}
 	}
 	lower := strings.ToLower(html)
-	for _, forbidden := range []string{"affected", "impacted", "caused by", "/investigate"} {
+	for _, forbidden := range []string{"affected", "impacted", "caused by"} {
 		if strings.Contains(lower, forbidden) {
 			t.Errorf("node card contains forbidden wording/link %q: %s", forbidden, html)
 		}
 	}
 }
 
-func TestNodeTopIssuesAreDeterministicAndUseInfrastructure(t *testing.T) {
+func TestNodeTopIssuesAreDeterministicAndUseInvestigation(t *testing.T) {
 	input := []warRoomIssue{
 		{Severity: "high", Type: "MemoryPressure", Resource: "node-b", IsNode: true, Message: "0 colocated workloads · 0 pods"},
 		{Severity: "high", Type: "DiskPressure", Resource: "node-a", IsNode: true, Message: "1 colocated workload · 2 pods"},
@@ -157,7 +157,7 @@ func TestNodeTopIssuesAreDeterministicAndUseInfrastructure(t *testing.T) {
 		t.Fatalf("Top 5 ordering changed across identical input")
 	}
 	for _, issue := range first {
-		if !strings.HasPrefix(issue.URL, "/infrastructure") || strings.Contains(issue.URL, "/investigate") {
+		if !strings.HasPrefix(issue.URL, "/investigate?") || !strings.Contains(issue.URL, "node=") {
 			t.Errorf("node Top 5 URL = %q", issue.URL)
 		}
 	}

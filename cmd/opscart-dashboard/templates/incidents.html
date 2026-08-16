@@ -216,7 +216,9 @@
       <tbody>
         {{range .Incidents}}
         <tr class="{{if eq .Status "resolved"}}inc-row-resolved{{end}}"
-            {{if isNamespaceScoped .IssueType}}
+            {{if isNodeIncident .Fingerprint}}
+            onclick="window.location='/investigate?node={{.Resource}}&type={{.IssueType}}&cluster={{$.ClusterParam}}&from=incidents'"
+            {{else if isNamespaceScoped .IssueType}}
             onclick="window.location='/investigate?ns={{.Namespace}}&type={{.IssueType}}&cluster={{$.ClusterParam}}&from=incidents'"
             {{else}}
             onclick="window.location='/investigate?pod={{.Resource}}&ns={{.Namespace}}&type={{.IssueType}}&cluster={{$.ClusterParam}}&from=incidents'"
@@ -225,7 +227,10 @@
             <span class="inc-sev inc-sev-{{.Severity}}">{{.Severity}}</span>
           </td>
           <td>
-            {{if isNamespaceScoped .IssueType}}
+            {{if isNodeIncident .Fingerprint}}
+              <div class="inc-workload">Node/{{.Resource}}</div>
+              <div class="inc-pod">{{.IssueType}}</div>
+            {{else if isNamespaceScoped .IssueType}}
               <div class="inc-workload">Namespace/{{.Namespace}}</div>
               <div class="inc-pod">{{.IssueType}}</div>
             {{else}}

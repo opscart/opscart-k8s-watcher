@@ -768,10 +768,11 @@ func renderWarRoomCard(issue warRoomIssue, activeCtx string) string {
 
 func warRoomIssueURL(issue warRoomIssue, activeCtx string) string {
 	if issue.IsNode {
-		if activeCtx == "" {
-			return "/infrastructure"
+		values := url.Values{"node": {issue.Resource}, "type": {issue.Type}, "from": {"warroom"}}
+		if activeCtx != "" {
+			values.Set("cluster", activeCtx)
 		}
-		return "/infrastructure?cluster=" + url.QueryEscape(activeCtx)
+		return "/investigate?" + values.Encode()
 	}
 	return investigateURL(issue.Namespace, issue.Resource, issue.Type, activeCtx)
 }

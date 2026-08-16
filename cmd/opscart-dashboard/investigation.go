@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"html/template"
 	"log"
@@ -12,6 +13,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/opscart/opscart-k8s-watcher/pkg/models"
 	"github.com/opscart/opscart-k8s-watcher/pkg/store"
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
@@ -72,6 +74,21 @@ type investigationPageData struct {
 	NamespacePodCount int    // pods affected/exposed, from the incident's stored details
 	NamespaceFinding  string // the specific finding description
 
+	// Node-scoped condition incidents.
+	NodeScoped             bool
+	NodeName               string
+	NodePool               string
+	IncidentStatus         string
+	CurrentNodeObservation bool
+	NodeConditionStatus    string
+	NodeReason             string
+	NodeMessage            string
+	NodeLastTransition     string
+	RetainedNodeEvidence   bool
+	PlacementWorkloads     int
+	PlacementPods          int
+	PlacementNamespaces    []nodePlacementNamespace
+
 	// Blast radius
 	BlastSiblings      []blastRadiusPod     // sibling pods under same owner
 	BlastServices      []blastRadiusService // services routing to this deployment
@@ -95,6 +112,24 @@ type investigationPageData struct {
 
 	ScannedAtMs int64
 	BackURL     string
+}
+
+type nodePlacementNamespace struct {
+	Name      string
+	Workloads int
+	Pods      int
+	Items     []models.CorrelatedWorkload
+}
+
+type nodeInvestigationDetails struct {
+	NodeName            string                      `json:"node_name"`
+	NodePool            string                      `json:"node_pool"`
+	ConditionType       string                      `json:"condition_type"`
+	ConditionStatus     string                      `json:"condition_status"`
+	Reason              string                      `json:"reason"`
+	Message             string                      `json:"message"`
+	LastTransitionTime  time.Time                   `json:"last_transition_time"`
+	CorrelatedWorkloads []models.CorrelatedWorkload `json:"correlated_workloads"`
 }
 
 type blastIngressRule struct {
@@ -707,9 +742,103 @@ func populateNamespaceFinding(data *investigationPageData, scan *clusterScan, is
 	}
 }
 
+func nodePlacementNamespaces(workloads []models.CorrelatedWorkload) ([]nodePlacementNamespace, int) {
+	var groups []nodePlacementNamespace
+	pods := 0
+	for _, workload := range workloads {
+		pods += workload.PodCount
+		if len(groups) == 0 || groups[len(groups)-1].Name != workload.Namespace {
+			groups = append(groups, nodePlacementNamespace{Name: workload.Namespace})
+		}
+		group := &groups[len(groups)-1]
+		group.Items = append(group.Items, workload)
+		group.Workloads++
+		group.Pods += workload.PodCount
+	}
+	return groups, pods
+}
+
+func currentNodeFinding(scan *clusterScan, nodeName, conditionType string) (models.NodeConditionFinding, bool) {
+	if scan == nil {
+		return models.NodeConditionFinding{}, false
+	}
+	for _, finding := range scan.nodeHealth {
+		if finding.NodeName == nodeName && finding.ConditionType == conditionType {
+			return finding, true
+		}
+	}
+	return models.NodeConditionFinding{}, false
+}
+
+func populateNodeEvidence(data *investigationPageData, evidence nodeInvestigationDetails, retained bool) {
+	data.NodePool = evidence.NodePool
+	data.NodeConditionStatus = evidence.ConditionStatus
+	data.NodeReason = evidence.Reason
+	data.NodeMessage = evidence.Message
+	if !evidence.LastTransitionTime.IsZero() {
+		data.NodeLastTransition = evidence.LastTransitionTime.Local().Format("Jan 2, 2006 15:04 MST")
+	}
+	data.PlacementWorkloads = len(evidence.CorrelatedWorkloads)
+	data.PlacementNamespaces, data.PlacementPods = nodePlacementNamespaces(evidence.CorrelatedWorkloads)
+	data.RetainedNodeEvidence = retained
+}
+
+func (srv *server) handleNodeInvestigation(w http.ResponseWriter, ctx, nodeName, issueType string, scan *clusterScan, data investigationPageData) {
+	data.NodeScoped = true
+	data.NodeName = nodeName
+	data.PodName = nodeName // retained as the existing page-title value
+	data.WorkloadLabel = "Node/" + nodeName
+	data.TrackingLabel = "Node condition scoped"
+	data.DescribeCommand = fmt.Sprintf("kubectl describe node %s", nodeName)
+	data.Commands = []string{
+		data.DescribeCommand,
+		fmt.Sprintf("kubectl get pods -A --field-selector spec.nodeName=%s -o wide", nodeName),
+	}
+	data.Severity, _ = nodeWarRoomSeverity(issueType)
+	fp := store.Fingerprint("cluster", "Node", nodeName, issueType)
+	var retained nodeInvestigationDetails
+	hasIncident := false
+	if srv.db != nil {
+		if rec, err := srv.db.GetIncidentHistory(ctx, fp); err == nil && rec != nil {
+			hasIncident = true
+			data.IncidentStatus = rec.Status
+			data.FirstDetected = firstDetectedLabel(rec.FirstSeen)
+			if json.Unmarshal([]byte(rec.DetailsJSON), &retained) == nil {
+				populateNodeEvidence(&data, retained, true)
+			}
+		}
+		if events, err := srv.db.GetIncidentTimeline(ctx, fp); err == nil {
+			data.Timeline = events
+		}
+	}
+	if finding, ok := currentNodeFinding(scan, nodeName, issueType); ok {
+		data.CurrentNodeObservation = true
+		populateNodeEvidence(&data, nodeInvestigationDetails{
+			NodeName: finding.NodeName, NodePool: finding.NodePool,
+			ConditionType: finding.ConditionType, ConditionStatus: finding.ConditionStatus,
+			Reason: finding.Reason, Message: finding.Message, LastTransitionTime: finding.LastTransitionTime,
+			CorrelatedWorkloads: finding.CorrelatedWorkloads,
+		}, false)
+	}
+	if !hasIncident && !data.CurrentNodeObservation {
+		http.Error(w, "node incident not found", http.StatusNotFound)
+		return
+	}
+	if data.IncidentStatus == "" {
+		data.IncidentStatus = "active"
+	}
+	if data.CurrentNodeObservation {
+		data.OperationalSummary = fmt.Sprintf("Kubernetes currently reports %s=%s on Node %s.", issueType, data.NodeConditionStatus, nodeName)
+	} else {
+		data.OperationalSummary = "No active Kubernetes condition is currently reported for this node."
+	}
+	renderInvestigation(w, data)
+}
+
 func (srv *server) handleInvestigationPage(w http.ResponseWriter, r *http.Request) {
 	ctx := srv.activeCtx(r)
 	podName := r.URL.Query().Get("pod")
+	nodeName := r.URL.Query().Get("node")
 	namespace := r.URL.Query().Get("ns")
 	issueType := r.URL.Query().Get("type")
 
@@ -717,7 +846,7 @@ func (srv *server) handleInvestigationPage(w http.ResponseWriter, r *http.Reques
 		"unprotected_namespace": true,
 		"idle_namespace":        true,
 	}
-	if namespace == "" || issueType == "" || (podName == "" && !namespaceScopedTypes[issueType]) {
+	if issueType == "" || (nodeName == "" && (namespace == "" || (podName == "" && !namespaceScopedTypes[issueType]))) {
 		http.Error(w, "missing pod or ns query parameter", http.StatusBadRequest)
 		return
 	}
@@ -756,6 +885,10 @@ func (srv *server) handleInvestigationPage(w http.ResponseWriter, r *http.Reques
 		TrackingLabel: "Workload scoped",
 		BackURL:       backURL,
 		ScannedAtMs:   time.Now().UnixMilli(),
+	}
+	if nodeName != "" {
+		srv.handleNodeInvestigation(w, ctx, nodeName, issueType, scan, data)
+		return
 	}
 
 	if namespaceScopedTypes[issueType] {
