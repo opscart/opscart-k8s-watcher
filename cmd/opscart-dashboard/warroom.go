@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/opscart/opscart-k8s-watcher/pkg/analyzer"
+	"github.com/opscart/opscart-k8s-watcher/pkg/models"
 	"github.com/opscart/opscart-k8s-watcher/pkg/store"
 )
 
@@ -34,7 +35,7 @@ func (srv *server) handleWarRoom(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	issues := collectWarRoomIssues(scan, 5)
+	issues := collectWarRoomIssuesWithStore(scan, 5, srv.db, ctx)
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(issues)
 }
@@ -42,20 +43,26 @@ func (srv *server) handleWarRoom(w http.ResponseWriter, r *http.Request) {
 // ── War Room helpers ──────────────────────────────────────────────────────────
 
 type warRoomIssue struct {
-	Severity          string    `json:"severity"`
-	Type              string    `json:"type"`
-	Namespace         string    `json:"namespace"`
-	Resource          string    `json:"resource"`
-	Message           string    `json:"message"`
-	ResourceAgeDays   int       `json:"age_days,omitempty"`
-	IncidentFirstSeen time.Time `json:"-"`
-	KubectlCmd        string    `json:"kubectl_cmd,omitempty"`
-	RestartCount      int       `json:"restart_count,omitempty"`
-	Classification    string    `json:"classification,omitempty"`
-	Container         string    `json:"container,omitempty"`
-	WorkloadKind      string    `json:"workload_kind,omitempty"`
-	WorkloadName      string    `json:"workload_name,omitempty"`
-	Rank              int       `json:"rank,omitempty"`
+	Severity           string    `json:"severity"`
+	Type               string    `json:"type"`
+	Namespace          string    `json:"namespace"`
+	Resource           string    `json:"resource"`
+	Message            string    `json:"message"`
+	ResourceAgeDays    int       `json:"age_days,omitempty"`
+	IncidentFirstSeen  time.Time `json:"-"`
+	KubectlCmd         string    `json:"kubectl_cmd,omitempty"`
+	RestartCount       int       `json:"restart_count,omitempty"`
+	Classification     string    `json:"classification,omitempty"`
+	Container          string    `json:"container,omitempty"`
+	WorkloadKind       string    `json:"workload_kind,omitempty"`
+	WorkloadName       string    `json:"workload_name,omitempty"`
+	Rank               int       `json:"rank,omitempty"`
+	IsNode             bool      `json:"is_node,omitempty"`
+	NodePool           string    `json:"node_pool,omitempty"`
+	ColocatedWorkloads int       `json:"colocated_workloads,omitempty"`
+	ColocatedPods      int       `json:"colocated_pods,omitempty"`
+	HasPlacement       bool      `json:"has_placement,omitempty"`
+	ConditionStatus    string    `json:"condition_status,omitempty"`
 }
 
 type warRoomPageData struct {
@@ -172,7 +179,17 @@ func collectWarRoomIssues(scan *clusterScan, limit int) []warRoomIssue {
 			})
 		}
 	}
-	// Sort: critical first, then by restart count descending.
+	sortWarRoomIssues(issues)
+
+	if limit > 0 && len(issues) > limit {
+		return issues[:limit]
+	}
+	return issues
+}
+
+func sortWarRoomIssues(issues []warRoomIssue) {
+	// Sort: critical first, then by restart count descending. Stable ordering
+	// preserves the established source order for otherwise equal issues.
 	severityOrder := map[string]int{"critical": 0, "high": 1, "medium": 2, "low": 3}
 	sort.SliceStable(issues, func(i, j int) bool {
 		si := severityOrder[issues[i].Severity]
@@ -183,11 +200,91 @@ func collectWarRoomIssues(scan *clusterScan, limit int) []warRoomIssue {
 		// Within same severity: higher restart count = more urgent
 		return issues[i].RestartCount > issues[j].RestartCount
 	})
+}
 
+func collectWarRoomIssuesWithStore(scan *clusterScan, limit int, db store.Store, cluster string) []warRoomIssue {
+	issues := collectWarRoomIssues(scan, 0)
+	issues = append(issues, collectActiveNodeWarRoomIssues(scan, db, cluster)...)
+	sortWarRoomIssues(issues)
 	if limit > 0 && len(issues) > limit {
-		return issues[:limit]
+		issues = issues[:limit]
 	}
 	return issues
+}
+
+func collectActiveNodeWarRoomIssues(scan *clusterScan, db store.Store, cluster string) []warRoomIssue {
+	if db == nil {
+		return nil
+	}
+	incidents, err := queryAllIncidentSummaries(db, store.IncidentFilter{Cluster: cluster, Status: "active"})
+	if err != nil {
+		return nil
+	}
+	findings := make(map[string]map[string]models.NodeConditionFinding)
+	if scan != nil {
+		for _, finding := range scan.nodeHealth {
+			if findings[finding.NodeName] == nil {
+				findings[finding.NodeName] = make(map[string]models.NodeConditionFinding)
+			}
+			findings[finding.NodeName][finding.ConditionType] = finding
+		}
+	}
+
+	var issues []warRoomIssue
+	for _, incident := range incidents {
+		if incident.Status != "active" || !isNodeIncidentFingerprint(incident.Fingerprint) {
+			continue
+		}
+		severity, ok := nodeWarRoomSeverity(incident.IssueType)
+		if !ok {
+			continue
+		}
+		finding, hasPlacement := findings[incident.Resource][incident.IssueType]
+		workloads, pods := len(finding.CorrelatedWorkloads), 0
+		for _, workload := range finding.CorrelatedWorkloads {
+			pods += workload.PodCount
+		}
+		message := ""
+		if hasPlacement {
+			message = nodePlacementSummary(workloads, pods)
+		}
+		issues = append(issues, warRoomIssue{
+			Severity: severity, Type: incident.IssueType, Resource: incident.Resource,
+			Message:        message,
+			KubectlCmd:     fmt.Sprintf("kubectl describe node %s", incident.Resource),
+			Classification: incident.IssueType, IncidentFirstSeen: incident.FirstSeen,
+			WorkloadKind: "Node", WorkloadName: incident.Resource, IsNode: true,
+			NodePool: finding.NodePool, ColocatedWorkloads: workloads, ColocatedPods: pods, HasPlacement: hasPlacement,
+			ConditionStatus: finding.ConditionStatus,
+		})
+	}
+	sort.Slice(issues, func(i, j int) bool {
+		if issues[i].Resource != issues[j].Resource {
+			return issues[i].Resource < issues[j].Resource
+		}
+		return issues[i].Type < issues[j].Type
+	})
+	return issues
+}
+
+func isNodeIncidentFingerprint(fingerprint string) bool {
+	parts := strings.Split(fingerprint, "/")
+	return len(parts) == 4 && parts[0] == "cluster" && parts[1] == "Node"
+}
+
+func nodeWarRoomSeverity(conditionType string) (string, bool) {
+	return models.NodeConditionSeverity(conditionType)
+}
+
+func nodePlacementSummary(workloads, pods int) string {
+	return fmt.Sprintf("%d colocated workload%s · %d pod%s", workloads, plural(workloads), pods, plural(pods))
+}
+
+func nodeConditionLabel(issue warRoomIssue) string {
+	if issue.Type == "Ready" && issue.ConditionStatus != "" {
+		return "Ready=" + issue.ConditionStatus
+	}
+	return issue.Type
 }
 
 // ── War Room page ─────────────────────────────────────────────────────────────
@@ -231,7 +328,7 @@ func renderWarRoomPageWithFilters(scan *clusterScan, activeCtx string, clusterLi
 }
 
 func renderWarRoomPageWithStore(scan *clusterScan, activeCtx string, clusterList []string, query url.Values, db store.Store) string {
-	allIssues := collectWarRoomIssues(scan, 0)
+	allIssues := collectWarRoomIssuesWithStore(scan, 0, db, activeCtx)
 	for i := range allIssues {
 		enrichWarRoomIdentity(&allIssues[i], scan)
 	}
@@ -393,6 +490,10 @@ func enrichWarRoomIdentity(issue *warRoomIssue, scan *clusterScan) {
 	if issue.Classification == "" {
 		issue.Classification = classificationForIssue(issue.Type)
 	}
+	if issue.IsNode {
+		issue.WorkloadKind, issue.WorkloadName = "Node", issue.Resource
+		return
+	}
 	if isNamespaceFinding(*issue) {
 		issue.WorkloadKind, issue.WorkloadName = "Namespace", issue.Namespace
 		return
@@ -475,7 +576,7 @@ func warRoomStatsFor(issues []warRoomIssue) warRoomStats {
 			if !stats.hasOldest || incidentAgeDays > stats.oldest {
 				stats.oldest, stats.hasOldest = incidentAgeDays, true
 				stats.oldestLabel = topIssueResourceLabel(issue.Resource, issue.Namespace, issue.Type)
-				stats.oldestHref = investigateURL(issue.Namespace, issue.Resource, issue.Type, "")
+				stats.oldestHref = warRoomIssueURL(issue, "")
 			}
 		}
 		if isNamespaceFinding(issue) {
@@ -485,7 +586,7 @@ func warRoomStatsFor(issues []warRoomIssue) warRoomStats {
 		if issue.Severity == "critical" {
 			stats.activeCritical++
 		}
-		if issue.WorkloadName != "" {
+		if !issue.IsNode && issue.WorkloadName != "" {
 			workloads[issue.Namespace+"\x00"+issue.WorkloadKind+"\x00"+issue.WorkloadName] = true
 		}
 		if issue.RestartCount > 0 && (!stats.hasHighestRestarts || issue.RestartCount > stats.highestRestarts) {
@@ -497,7 +598,7 @@ func warRoomStatsFor(issues []warRoomIssue) warRoomStats {
 }
 
 func buildWarRoomBriefing(stats warRoomStats) string {
-	briefing := fmt.Sprintf("%d critical incident%s require attention across %d workload%s.",
+	briefing := fmt.Sprintf("%d critical incident%s require attention across %d active workload%s.",
 		stats.activeCritical, plural(stats.activeCritical), stats.affectedWorkloads, plural(stats.affectedWorkloads))
 	var facts []string
 	if stats.hasOldest {
@@ -586,7 +687,9 @@ func renderWarRoomCard(issue warRoomIssue, activeCtx string) string {
 		cardClass += " posture-card"
 	}
 	identity := issue.WorkloadKind + "/" + issue.WorkloadName
-	if isNamespaceFinding(issue) {
+	if issue.IsNode {
+		identity = fmt.Sprintf("%s on %s", nodeConditionLabel(issue), issue.Resource)
+	} else if isNamespaceFinding(issue) {
 		identity = "Namespace/" + issue.Namespace
 	} else if issue.WorkloadKind == "" {
 		owner := store.OwnerNameFromPod(issue.Resource)
@@ -605,13 +708,19 @@ func renderWarRoomCard(issue warRoomIssue, activeCtx string) string {
 	}
 	sb.WriteString(fmt.Sprintf(`<span class="badge %s">%s</span></div>`, sc, template.HTMLEscapeString(bl)))
 	sb.WriteString(fmt.Sprintf(`<div class="wr-name" title="%s">%s</div>`, template.HTMLEscapeString(identity), template.HTMLEscapeString(identity)))
-	if !isNamespaceFinding(issue) {
+	if issue.IsNode {
+		if issue.NodePool != "" {
+			sb.WriteString(fmt.Sprintf(`<div class="wr-focus" title="Node pool: %s">Node pool: %s</div>`, template.HTMLEscapeString(issue.NodePool), template.HTMLEscapeString(issue.NodePool)))
+		}
+	} else if !isNamespaceFinding(issue) {
 		sb.WriteString(fmt.Sprintf(`<div class="wr-focus" title="Focus Pod: %s">Focus Pod: %s</div>`, template.HTMLEscapeString(issue.Resource), template.HTMLEscapeString(issue.Resource)))
 		if issue.Container != "" {
 			sb.WriteString(fmt.Sprintf(`<div class="wr-focus" title="Container: %s">Container: %s</div>`, template.HTMLEscapeString(issue.Container), template.HTMLEscapeString(issue.Container)))
 		}
 	}
-	sb.WriteString(fmt.Sprintf(`<div class="wr-ns" title="Namespace: %s">Namespace: %s</div>`, template.HTMLEscapeString(issue.Namespace), template.HTMLEscapeString(issue.Namespace)))
+	if !issue.IsNode {
+		sb.WriteString(fmt.Sprintf(`<div class="wr-ns" title="Namespace: %s">Namespace: %s</div>`, template.HTMLEscapeString(issue.Namespace), template.HTMLEscapeString(issue.Namespace)))
+	}
 	activeFor, restarts := "—", "—"
 	if !issue.IncidentFirstSeen.IsZero() {
 		activeFor = fmt.Sprintf("%dd", int(time.Since(issue.IncidentFirstSeen).Hours()/24))
@@ -622,7 +731,11 @@ func renderWarRoomCard(issue warRoomIssue, activeCtx string) string {
 	sb.WriteString(`<div class="wr-evidence">`)
 	sb.WriteString(fmt.Sprintf(`<div><span>Classification</span><strong title="%s">%s</strong></div>`, template.HTMLEscapeString(issue.Classification), template.HTMLEscapeString(issue.Classification)))
 	sb.WriteString(fmt.Sprintf(`<div><span>Active For</span><strong>%s</strong></div>`, activeFor))
-	sb.WriteString(fmt.Sprintf(`<div><span>Restarts</span><strong>%s</strong></div>`, restarts))
+	if issue.IsNode && issue.HasPlacement {
+		sb.WriteString(fmt.Sprintf(`<div><span>Placement</span><strong>%s</strong></div>`, template.HTMLEscapeString(issue.Message)))
+	} else if !issue.IsNode {
+		sb.WriteString(fmt.Sprintf(`<div><span>Restarts</span><strong>%s</strong></div>`, restarts))
+	}
 	sb.WriteString(`</div>`)
 	if isNamespaceFinding(issue) && issue.Message != "" {
 		sb.WriteString(fmt.Sprintf(`<div class="wr-reason">%s</div>`, template.HTMLEscapeString(issue.Message)))
@@ -633,13 +746,28 @@ func renderWarRoomCard(issue warRoomIssue, activeCtx string) string {
 	sb.WriteString(`<button class="copy-btn" onclick="var b=this,c=this.previousElementSibling.textContent;navigator.clipboard.writeText(c).then(function(){b.textContent='Copied';setTimeout(function(){b.textContent='Copy'},1500)})">Copy</button>`)
 	sb.WriteString(`</div>`)
 	// Investigate button — links to investigation page
-	if investigationHref := investigateURL(issue.Namespace, issue.Resource, issue.Type, activeCtx); investigationHref != "/warroom" {
+	if investigationHref := warRoomIssueURL(issue, activeCtx); investigationHref != "/warroom" {
+		label := "Investigate →"
+		if issue.IsNode {
+			label = "View node health →"
+		}
 		sb.WriteString(fmt.Sprintf(
-			`<a class="investigate-btn" href="%s">Investigate →</a>`,
-			investigationHref))
+			`<a class="investigate-btn" href="%s">%s</a>`,
+			investigationHref, label))
 	}
 	sb.WriteString(`</footer></article>`)
 	return sb.String()
+}
+
+func warRoomIssueURL(issue warRoomIssue, activeCtx string) string {
+	if issue.IsNode {
+		values := url.Values{"node": {issue.Resource}, "type": {issue.Type}, "from": {"warroom"}}
+		if activeCtx != "" {
+			values.Set("cluster", activeCtx)
+		}
+		return "/investigate?" + values.Encode()
+	}
+	return investigateURL(issue.Namespace, issue.Resource, issue.Type, activeCtx)
 }
 
 // ── War Room page helpers ──────────────────────────────────────────────────────

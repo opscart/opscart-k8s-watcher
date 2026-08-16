@@ -47,6 +47,21 @@
 .ri-na{color:var(--text-muted);font-size:0.78rem}
 .empty-state{text-align:center;padding:3rem 1rem;color:var(--text-muted)}
 .empty-state .icon{font-size:2.5rem;margin-bottom:0.75rem}
+.node-health-help{font-size:.74rem;color:var(--text-muted)}
+.node-pool-group{margin-top:1.2rem}.node-pool-group:first-child{margin-top:0}
+.node-pool-label{font-size:.72rem;font-weight:700;text-transform:uppercase;letter-spacing:.7px;color:var(--primary-light);margin-bottom:.65rem}
+.node-health-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(340px,1fr));gap:.9rem}
+.node-health-card{border:1px solid var(--border);border-radius:var(--radius-sm);background:rgba(15,23,42,.35);padding:1rem}
+.node-health-name{font-weight:700;font-size:.95rem;margin-bottom:.7rem}
+.node-condition{border-left:3px solid var(--warning);padding:.45rem .7rem;margin-bottom:.55rem;background:rgba(245,158,11,.05)}
+.node-condition-head{display:flex;align-items:center;gap:.5rem;flex-wrap:wrap;font-size:.82rem}.node-condition-type{font-weight:700}.node-condition-separator{color:var(--text-muted)}.node-condition-status{background:rgba(245,158,11,.1);color:var(--warning);border:1px solid rgba(245,158,11,.25);font-size:.68rem;font-weight:600;margin-left:.05rem}
+.node-condition-detail{font-size:.72rem;color:var(--text-secondary);margin-top:.2rem}.node-condition-message{font-size:.72rem;color:var(--text-muted);margin-top:.2rem;overflow-wrap:anywhere}
+.placement-summary{font-size:.8rem;font-weight:600;margin-top:.85rem}.placement-disclaimer{font-size:.7rem;color:var(--text-muted);margin:.2rem 0 .7rem}
+.placement-summary-list{border:1px solid rgba(51,65,85,.7);border-radius:var(--radius-xs);overflow:hidden;margin-top:.55rem}.placement-summary-row{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:.8rem;padding:.38rem .55rem;border-bottom:1px solid rgba(51,65,85,.55);font-size:.74rem}.placement-summary-row:last-child{border-bottom:none}.placement-summary-ns{font-weight:600;overflow-wrap:anywhere}.placement-summary-count{color:var(--text-secondary);white-space:nowrap}.placement-more{font-size:.7rem;color:var(--text-muted);padding:.35rem .55rem}
+.placement-details{margin-top:.65rem}.placement-details>summary{cursor:pointer;color:var(--primary-light);font-size:.73rem;font-weight:600;list-style-position:inside}.placement-details[open]>summary{margin-bottom:.45rem}.placement-details>summary:hover{text-decoration:underline}
+.placement-ns{border-top:1px solid rgba(51,65,85,.7);padding-top:.55rem;margin-top:.55rem}.placement-ns-name{font-size:.7rem;color:var(--primary-light);font-weight:700;margin-bottom:.25rem}
+.placement-workload{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:.7rem;padding:.22rem 0;font-size:.75rem}.placement-workload-name{overflow-wrap:anywhere}.placement-workload-kind{color:var(--text-muted)}.placement-pods{color:var(--text-secondary);white-space:nowrap}
+.healthy-node-state{display:flex;align-items:center;justify-content:center;gap:.8rem;padding:1.5rem;color:var(--text-secondary)}.healthy-node-dot{width:11px;height:11px;border-radius:50%;background:var(--success);box-shadow:0 0 8px rgba(16,185,129,.4)}.healthy-node-title{font-weight:700;color:var(--success)}.healthy-node-copy{font-size:.76rem;color:var(--text-muted)}
 .footer{text-align:center;padding:1.5rem 0;color:var(--text-muted);font-size:0.75rem;border-top:1px solid var(--border);margin-top:1rem}
 </style>
 </head>
@@ -72,6 +87,59 @@
     <div class="kpi-chip"><div class="kpi-chip-val">{{.TotalMemGB}}</div><div class="kpi-chip-lbl">Total Memory</div></div>
     <div class="kpi-chip"><div class="kpi-chip-val cost">{{.TotalCost}}</div><div class="kpi-chip-lbl">Monthly Cost</div></div>
     {{if .HasRI}}<div class="kpi-chip"><div class="kpi-chip-val save">{{.TotalRI1yr}}</div><div class="kpi-chip-lbl">1yr RI Potential</div></div>{{end}}
+  </div>
+
+  <div class="section">
+    <div class="section-hdr">
+      <div class="section-title">Node Health &amp; Workload Placement</div>
+      {{if .HasUnhealthyNodes}}<div class="node-health-help">Current Kubernetes node-condition snapshot</div>{{end}}
+    </div>
+    {{if not .HasUnhealthyNodes}}
+    <div class="healthy-node-state">
+      <span class="healthy-node-dot"></span>
+      <div><div class="healthy-node-title">All nodes healthy</div><div class="healthy-node-copy">No unhealthy Kubernetes node conditions are currently reported.</div></div>
+    </div>
+    {{else}}
+      {{range .NodeHealthPools}}
+      <div class="node-pool-group">
+        <div class="node-pool-label">{{.Name}}</div>
+        <div class="node-health-grid">
+          {{range .Nodes}}
+          <article class="node-health-card">
+            <div class="node-health-name">{{.Name}}</div>
+            {{range .Conditions}}
+            <div class="node-condition">
+              <div class="node-condition-head"><span class="node-condition-type">{{.Type}}</span><span class="node-condition-separator" aria-hidden="true">·</span><span class="tag node-condition-status">Kubernetes condition: {{.Status}}</span></div>
+              {{if .Reason}}<div class="node-condition-detail">Reason: {{.Reason}}</div>{{end}}
+              <div class="node-condition-detail">Last transition: {{.LastTransition}}</div>
+              {{if .Message}}<div class="node-condition-message">{{.Message}}</div>{{end}}
+            </div>
+            {{end}}
+            <div class="placement-summary">{{.PlacementSummary}}</div>
+            <div class="placement-disclaimer">Correlated by node placement — not a claim of causation.</div>
+            {{if .NamespaceSummaries}}
+            <div class="placement-summary-list">
+              {{range .NamespaceSummaries}}<div class="placement-summary-row"><div class="placement-summary-ns">{{.Name}}</div><div class="placement-summary-count">{{.PlacementSummary}}</div></div>{{end}}
+              {{if .MoreNamespaces}}<div class="placement-more">+ {{.MoreNamespaces}} more {{if eq .MoreNamespaces 1}}namespace{{else}}namespaces{{end}}</div>{{end}}
+            </div>
+            <details class="placement-details">
+              <summary>Show workload details</summary>
+              {{range .Namespaces}}
+              <div class="placement-ns">
+                <div class="placement-ns-name">{{.Name}}</div>
+                {{range .Workloads}}
+                <div class="placement-workload"><div class="placement-workload-name"><span class="placement-workload-kind">{{.Kind}} /</span> {{.Name}}</div><div class="placement-pods">{{.PodCount}} {{if eq .PodCount 1}}pod{{else}}pods{{end}}</div></div>
+                {{end}}
+              </div>
+              {{end}}
+            </details>
+            {{end}}
+          </article>
+          {{end}}
+        </div>
+      </div>
+      {{end}}
+    {{end}}
   </div>
 
   <div class="section">

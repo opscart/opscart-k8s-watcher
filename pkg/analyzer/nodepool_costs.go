@@ -6,6 +6,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/opscart/opscart-k8s-watcher/pkg/kube"
 	"github.com/opscart/opscart-k8s-watcher/pkg/models"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -398,19 +399,7 @@ func (npa *NodePoolCostAnalyzer) extractNodeInfo(node corev1.Node) models.NodeIn
 		Provider: string(DetectNodeProvider(node)),
 	}
 
-	// AKS node pool labels
-	if pool, ok := labels["agentpool"]; ok {
-		info.NodePool = pool
-	} else if pool, ok := labels["kubernetes.azure.com/agentpool"]; ok {
-		info.NodePool = pool
-	} else if pool, ok := labels["node.kubernetes.io/instance-type"]; ok {
-		// GKE / EKS style
-		info.NodePool = labels["cloud.google.com/gke-nodepool"]
-		if info.NodePool == "" {
-			info.NodePool = labels["eks.amazonaws.com/nodegroup"]
-		}
-		_ = pool
-	}
+	info.NodePool = kube.NodePoolName(node)
 
 	// VM Size
 	if vmSize, ok := labels["node.kubernetes.io/instance-type"]; ok {

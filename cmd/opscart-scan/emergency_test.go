@@ -18,12 +18,15 @@ import (
 type fakeStore struct {
 	store.NullStore
 
-	history     *store.IncidentRecord
-	historyErr  error
-	timeline    []store.IncidentEvent
-	timelineErr error
-	upsertErr   error
-	resolveErr  error
+	history      *store.IncidentRecord
+	historyErr   error
+	timeline     []store.IncidentEvent
+	timelineErr  error
+	upsertErr    error
+	resolveErr   error
+	upsertCalls  int
+	resolveCalls int
+	upserted     []store.IncidentData
 }
 
 func (f *fakeStore) GetIncidentHistory(cluster, fingerprint string) (*store.IncidentRecord, error) {
@@ -70,10 +73,13 @@ func (f *fakeStore) BatchGetReopenCounts(ids []int64) (map[int64]int, error) {
 }
 
 func (f *fakeStore) UpsertIncidents(cluster, scanID string, incidents []store.IncidentData) error {
+	f.upsertCalls++
+	f.upserted = append([]store.IncidentData(nil), incidents...)
 	return f.upsertErr
 }
 
 func (f *fakeStore) ResolveMissing(cluster, scanID string) (int, error) {
+	f.resolveCalls++
 	return 0, f.resolveErr
 }
 
@@ -508,7 +514,7 @@ func TestPersistFindings_WriteFailureDoesNotCrash(t *testing.T) {
 	}
 
 	// Must not panic despite every store call failing.
-	persistFindings(sqlDB, "prod-cluster", "scan-1", issues)
+	persistFindings(sqlDB, "prod-cluster", "scan-1", issues, nil)
 
 	enriched := enrichIssues(sqlDB, "prod-cluster", issues)
 	if enriched[0].FirstDetected != "" || enriched[0].ReopenCount != 0 {
@@ -524,7 +530,73 @@ func TestPersistFindings_FakeStoreErrorsDoNotCrash(t *testing.T) {
 	issues := []models.EmergencyIssue{
 		{Namespace: "prod", Name: "checkout-abc", Reason: "PodFailed", Severity: "critical"},
 	}
-	persistFindings(fs, "prod-cluster", "scan-1", issues)
+	persistFindings(fs, "prod-cluster", "scan-1", issues, nil)
+}
+
+func TestPersistFindingsCombinesWorkloadAndNodeBeforeSingleLifecyclePass(t *testing.T) {
+	fs := &fakeStore{}
+	issues := []models.EmergencyIssue{{Namespace: "prod", Name: "checkout-7d8f9c6b5-jxmtx", Reason: "CrashLoopBackOff", Severity: "critical"}}
+	nodes := []models.NodeConditionFinding{{NodeName: "worker-21", ConditionType: "DiskPressure", ConditionStatus: "True"}}
+
+	persistFindings(fs, "cluster-a", "scan-1", issues, nodes)
+	if fs.upsertCalls != 1 || fs.resolveCalls != 1 {
+		t.Fatalf("lifecycle calls: upsert=%d resolve=%d, want one each", fs.upsertCalls, fs.resolveCalls)
+	}
+	if len(fs.upserted) != 2 {
+		t.Fatalf("combined batch has %d incidents, want 2: %+v", len(fs.upserted), fs.upserted)
+	}
+	if fs.upserted[0].Fingerprint != "prod/Workload/checkout/crash_loop" || fs.upserted[1].Fingerprint != "cluster/Node/worker-21/DiskPressure" {
+		t.Fatalf("combined batch = %+v", fs.upserted)
+	}
+}
+
+func TestPersistFindingsCombinedSetKeepsCategoriesPresentAndHealthyNodesAgeNormally(t *testing.T) {
+	db, err := store.OpenSQLite(filepath.Join(t.TempDir(), "combined.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	cluster := "cluster-a"
+	issues := []models.EmergencyIssue{{Namespace: "prod", Name: "checkout-7d8f9c6b5-jxmtx", Reason: "CrashLoopBackOff", Severity: "critical"}}
+	nodes := []models.NodeConditionFinding{{NodeName: "worker-21", ConditionType: "DiskPressure", ConditionStatus: "True"}}
+	workloadFP := "prod/Workload/checkout/crash_loop"
+	nodeFP := "cluster/Node/worker-21/DiskPressure"
+
+	for scan := 0; scan < 4; scan++ {
+		persistFindings(db, cluster, fmt.Sprintf("scan-present-%d", scan), issues, nodes)
+	}
+	for _, fp := range []string{workloadFP, nodeFP} {
+		rec, getErr := db.GetIncidentHistory(cluster, fp)
+		if getErr != nil || rec == nil || rec.Status != "active" {
+			t.Fatalf("present incident %q aged while combined: rec=%+v err=%v", fp, rec, getErr)
+		}
+	}
+
+	// A successful node-health observation with no findings is confirmed
+	// absence. It ages only the node incident while the present workload is
+	// refreshed in the same complete batch.
+	for scan := 1; scan <= 2; scan++ {
+		persistFindings(db, cluster, fmt.Sprintf("scan-healthy-%d", scan), issues, nil)
+		rec, _ := db.GetIncidentHistory(cluster, nodeFP)
+		if rec.Status != "active" {
+			t.Fatalf("node resolved before existing three-scan threshold on scan %d", scan)
+		}
+	}
+	persistFindings(db, cluster, "scan-healthy-3", issues, nil)
+	nodeRec, _ := db.GetIncidentHistory(cluster, nodeFP)
+	workloadRec, _ := db.GetIncidentHistory(cluster, workloadFP)
+	if nodeRec.Status != "resolved" || workloadRec.Status != "active" {
+		t.Fatalf("healthy-node lifecycle mismatch: node=%s workload=%s", nodeRec.Status, workloadRec.Status)
+	}
+}
+
+func TestPersistFindingsNoNodeConditionsPreservesExistingWorkloadBehavior(t *testing.T) {
+	fs := &fakeStore{}
+	issues := []models.EmergencyIssue{{Namespace: "prod", Name: "api-7d8f9c6b5-jxmtx", Reason: "CrashLoopBackOff", Severity: "critical"}}
+	persistFindings(fs, "cluster-a", "scan-1", issues, nil)
+	if fs.upsertCalls != 1 || fs.resolveCalls != 1 || len(fs.upserted) != 1 || fs.upserted[0].Fingerprint != "prod/Workload/api/crash_loop" {
+		t.Fatalf("workload-only behavior changed: calls=%d/%d incidents=%+v", fs.upsertCalls, fs.resolveCalls, fs.upserted)
+	}
 }
 
 type errString string
@@ -686,7 +758,7 @@ func TestApplyCriticalDebounce_RealScenario_PaymentProcessor(t *testing.T) {
 	fs := &fakeStore{
 		history: &store.IncidentRecord{Status: "active"},
 	}
-	persistFindings(fs, "test-cluster", "scan-1", run1)
+	persistFindings(fs, "test-cluster", "scan-1", run1, nil)
 
 	// Run 2: live scan lands mid-backoff and classifies it milder.
 	run2 := []enrichedIssue{

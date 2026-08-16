@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1.0">
-<title>Investigation — {{.PodName}}</title>
+<title>Investigation — {{if .NodeScoped}}{{.NodeName}}{{else}}{{.PodName}}{{end}}</title>
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
 {{template "base" .}}
 <style>
@@ -92,8 +92,8 @@
 <main class="main">
   <div class="page-hdr">
     <div>
-      <h1>{{if .NamespaceScoped}}Namespace Investigation{{else}}Workload Investigation{{end}}</h1>
-      <p>{{.Namespace}} / {{.WorkloadLabel}}</p>
+      <h1>{{if .NodeScoped}}Node Investigation{{else if .NamespaceScoped}}Namespace Investigation{{else}}Workload Investigation{{end}}</h1>
+      <p>{{if .NodeScoped}}{{.WorkloadLabel}} / {{.IssueType}}{{else}}{{.Namespace}} / {{.WorkloadLabel}}{{end}}</p>
     </div>
     <div class="page-meta">
       <div>Last scanned: <strong id="inv-age">just now</strong></div>
@@ -201,7 +201,65 @@ spec:
   </div>
   {{end}}
 
-  {{if not .NamespaceScoped}}<div class="inv-scope-grid">
+  {{if .NodeScoped}}
+  <div class="inv-scope-grid">
+    <section class="inv-scope-card">
+      <div class="inv-scope-title">▧ Operational Identity</div>
+      <div class="inv-scope-row"><span class="inv-scope-key">Entity type</span><span class="inv-scope-value">Node</span></div>
+      <div class="inv-scope-row"><span class="inv-scope-key">Node name</span><span class="inv-scope-value">{{.NodeName}}</span></div>
+      {{if .NodePool}}<div class="inv-scope-row"><span class="inv-scope-key">Node pool</span><span class="inv-scope-value">{{.NodePool}}</span></div>{{end}}
+      <div class="inv-scope-row"><span class="inv-scope-key">Condition type</span><span class="inv-scope-value">{{.IssueType}}</span></div>
+      <div class="inv-scope-row"><span class="inv-scope-key">Incident status</span><span class="inv-scope-value" style="text-transform:capitalize">{{.IncidentStatus}}</span></div>
+      {{if .FirstDetected}}<div class="inv-scope-row"><span class="inv-scope-key">First detected</span><span class="inv-scope-value">{{.FirstDetected}}</span></div>{{end}}
+    </section>
+    <section class="inv-scope-card">
+      <div class="inv-scope-title">◉ {{if .CurrentNodeObservation}}Current Observation{{else}}Last Retained Observation{{end}}</div>
+      {{if .CurrentNodeObservation}}
+      <div class="inv-scope-row"><span class="inv-scope-key">Kubernetes condition</span><span class="inv-scope-value inv-current-status">{{.IssueType}} · {{.NodeConditionStatus}}</span></div>
+      {{if .NodeReason}}<div class="inv-scope-row"><span class="inv-scope-key">Reason</span><span class="inv-scope-value">{{.NodeReason}}</span></div>{{end}}
+      {{if .NodeMessage}}<div class="inv-scope-row"><span class="inv-scope-key">Message</span><span class="inv-scope-value">{{.NodeMessage}}</span></div>{{end}}
+      {{if .NodeLastTransition}}<div class="inv-scope-row"><span class="inv-scope-key">Last transition</span><span class="inv-scope-value">{{.NodeLastTransition}}</span></div>{{end}}
+      {{else}}
+      <div class="inv-summary-text">No active Kubernetes condition is currently reported for this node.</div>
+      {{if .RetainedNodeEvidence}}
+      <div class="inv-scope-row"><span class="inv-scope-key">Condition</span><span class="inv-scope-value">{{.IssueType}} · {{.NodeConditionStatus}}</span></div>
+      {{if .NodeReason}}<div class="inv-scope-row"><span class="inv-scope-key">Last reported reason</span><span class="inv-scope-value">{{.NodeReason}}</span></div>{{end}}
+      {{if .NodeMessage}}<div class="inv-scope-row"><span class="inv-scope-key">Last reported message</span><span class="inv-scope-value">{{.NodeMessage}}</span></div>{{end}}
+      {{if .NodeLastTransition}}<div class="inv-scope-row"><span class="inv-scope-key">Last retained transition</span><span class="inv-scope-value">{{.NodeLastTransition}}</span></div>{{end}}
+      {{end}}
+      {{end}}
+      <div class="inv-cmd inv-describe"><code>{{.DescribeCommand}}</code><button class="wr-copy-btn" data-command="{{.DescribeCommand}}" onclick="navigator.clipboard.writeText(this.dataset.command)">Copy</button></div>
+    </section>
+  </div>
+
+  <div class="inv-section">
+    <div class="inv-section-hdr"><h2>Workload Placement</h2></div>
+    <div class="inv-summary">
+      <div class="inv-summary-label">Placement correlation</div>
+      <div class="inv-summary-text">Correlated by node placement — not a claim of causation.</div>
+    </div>
+    {{if .PlacementNamespaces}}
+    <div class="inv-evidence-chip" style="margin-bottom:1rem">
+      <div class="inv-evidence-label">{{if .CurrentNodeObservation}}Current placement snapshot{{else}}Last retained placement snapshot{{end}}</div>
+      <div class="inv-evidence-value" style="font-size:.88rem">{{.PlacementWorkloads}} workload group{{if ne .PlacementWorkloads 1}}s{{end}} · {{.PlacementPods}} pod{{if ne .PlacementPods 1}}s{{end}}</div>
+    </div>
+    {{range .PlacementNamespaces}}
+    <details style="margin-bottom:.65rem" open>
+      <summary style="cursor:pointer;color:var(--text);font-weight:600">{{.Name}} — {{.Workloads}} workload{{if ne .Workloads 1}}s{{end}} · {{.Pods}} pod{{if ne .Pods 1}}s{{end}}</summary>
+      <div class="inv-events-wrap" style="margin-top:.45rem"><table class="inv-events-tbl"><thead><tr><th>Kind</th><th>Name</th><th>Pods</th></tr></thead><tbody>
+      {{range .Items}}<tr><td>{{.Kind}}</td><td>{{.Name}}</td><td>{{.PodCount}}</td></tr>{{end}}
+      </tbody></table></div>
+    </details>
+    {{end}}
+    {{else if .RetainedNodeEvidence}}
+    <div class="inv-empty">No workloads were recorded in the last retained placement snapshot.</div>
+    {{else}}
+    <div class="inv-empty">No placement snapshot is available for this observation.</div>
+    {{end}}
+  </div>
+  {{end}}
+
+  {{if and (not .NamespaceScoped) (not .NodeScoped)}}<div class="inv-scope-grid">
     <section class="inv-scope-card">
       <div class="inv-scope-title">▧ Operational Identity</div>
       <div class="inv-scope-row"><span class="inv-scope-key">Classification</span><span class="inv-scope-value">{{issueTypeLabel .IssueType}}</span></div>
@@ -302,7 +360,7 @@ spec:
           {{.OccurredAt.Format "Jan 2 15:04"}}
         </span>
         <span style="font-size:0.85rem;color:var(--text);font-weight:{{if eq .EventType "UPDATED"}}400{{else}}600{{end}}">
-          {{.Message}}
+          {{if $.NodeScoped}}{{.EventType}}{{if .Message}} — {{.Message}}{{end}}{{else}}{{.Message}}{{end}}
         </span>
         {{if and .RestartCount (eq .EventReason "RestartMilestone")}}
         <span style="font-size:0.72rem;color:var(--text-muted)">({{.RestartCount}} at time of event)</span>
@@ -314,7 +372,7 @@ spec:
 </div>
 {{end}}
 
-  {{if .NamespaceScoped}}
+  {{if or .NamespaceScoped .NodeScoped}}
   {{$commands := unrepresentedCommands .Commands .Hints}}
   {{if $commands}}
   <div class="inv-section">
@@ -330,7 +388,7 @@ spec:
   {{end}}
   {{end}}
 
-{{if not .NamespaceScoped}}
+{{if and (not .NamespaceScoped) (not .NodeScoped)}}
 {{if or .BlastSiblings .BlastServices .BlastIngresses .BlastNamespacePods}}
 <div class="inv-section">
   <div class="inv-section-hdr">
@@ -516,7 +574,7 @@ spec:
   </div>
   {{end}}
 
-  {{if not .NamespaceScoped}}
+  {{if and (not .NamespaceScoped) (not .NodeScoped)}}
   <div class="inv-section">
     <div class="inv-section-hdr">
       <h2>Related Resources</h2>
@@ -546,7 +604,7 @@ spec:
 
   {{end}}
 
-  <div class="footer">OpsCart FinOps Engine &middot; Investigation &middot; {{.Namespace}} / {{.PodName}}</div>
+  <div class="footer">OpsCart FinOps Engine &middot; Investigation &middot; {{if .NodeScoped}}Node / {{.NodeName}}{{else}}{{.Namespace}} / {{.PodName}}{{end}}</div>
 </main>
 </div>
 <script>

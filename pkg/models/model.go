@@ -22,6 +22,29 @@ type EmergencyIssue struct {
 	FailureObservedAt time.Time `json:"-"`
 }
 
+// NodeConditionFinding is Kubernetes-reported evidence for one unhealthy
+// Node condition, together with workloads currently placed on that Node.
+// CorrelatedWorkloads describes placement only; it does not imply causation.
+type NodeConditionFinding struct {
+	NodeName            string               `json:"node_name"`
+	NodePool            string               `json:"node_pool,omitempty"`
+	ConditionType       string               `json:"condition_type"`
+	ConditionStatus     string               `json:"condition_status"`
+	Reason              string               `json:"reason,omitempty"`
+	Message             string               `json:"message,omitempty"`
+	LastTransitionTime  time.Time            `json:"last_transition_time"`
+	CorrelatedWorkloads []CorrelatedWorkload `json:"correlated_workloads,omitempty"`
+}
+
+// CorrelatedWorkload counts pods currently scheduled to an unhealthy Node,
+// grouped by the repository's stable workload identity.
+type CorrelatedWorkload struct {
+	Namespace string `json:"namespace"`
+	Kind      string `json:"kind"`
+	Name      string `json:"name"`
+	PodCount  int    `json:"pod_count"`
+}
+
 // ClusterSnapshot represents the current state of a cluster
 type ClusterSnapshot struct {
 	ClusterName  string            `json:"cluster_name"`
