@@ -103,24 +103,63 @@ func (srv *server) handleInfrastructurePage(w http.ResponseWriter, r *http.Reque
 }
 
 type infrastructurePageData struct {
-	ClusterName string
-	DashURL     string
-	Sidebar     template.HTML
-	PoolCount   int
-	TotalNodes  int
-	TotalCores  string
-	TotalMemGB  string
-	TotalCost   string
-	TotalRI1yr  string
-	HasRI       bool
-	HasPools    bool
-	PoolRows    []template.HTML
-	CPUReqStr   string
-	MemReqStr   string
-	RI1yrCell   template.HTML
-	RI3yrCell   template.HTML
-	ScannedAtMs int64
+	ClusterName       string
+	DashURL           string
+	Sidebar           template.HTML
+	PoolCount         int
+	TotalNodes        int
+	TotalCores        string
+	TotalMemGB        string
+	TotalCost         string
+	TotalRI1yr        string
+	HasRI             bool
+	HasPools          bool
+	PoolRows          []template.HTML
+	CPUReqStr         string
+	MemReqStr         string
+	RI1yrCell         template.HTML
+	RI3yrCell         template.HTML
+	ScannedAtMs       int64
+	NodeHealthPools   []infrastructureNodeHealthPool
+	HasUnhealthyNodes bool
 }
+
+type infrastructureNodeHealthPool struct {
+	Name  string
+	Nodes []infrastructureNodeHealthNode
+}
+
+type infrastructureNodeHealthNode struct {
+	Name               string
+	Conditions         []infrastructureNodeCondition
+	Namespaces         []infrastructureNodeNamespace
+	NamespaceSummaries []infrastructureNodeNamespace
+	MoreNamespaces     int
+	WorkloadGroups     int
+	PodCount           int
+	PlacementSummary   string
+}
+
+type infrastructureNodeCondition struct {
+	Type           string
+	Status         string
+	Reason         string
+	Message        string
+	LastTransition string
+}
+
+type infrastructureNodeNamespace struct {
+	Name             string
+	Workloads        []models.CorrelatedWorkload
+	WorkloadGroups   int
+	PodCount         int
+	PlacementSummary string
+}
+
+const (
+	defaultNodePoolDisplayName       = "default"
+	visibleNodeNamespaceSummaryLimit = 5
+)
 
 func renderInfrastructurePage(scan *clusterScan, activeCtx string, clusterList []string) string {
 	var pools []models.NodePoolCost
@@ -187,6 +226,10 @@ func renderInfrastructurePage(scan *clusterScan, activeCtx string, clusterList [
 		RI3yrCell:   ri3yrCell,
 		ScannedAtMs: scannedAt.UnixMilli(),
 	}
+	if scan != nil {
+		data.NodeHealthPools = buildInfrastructureNodeHealth(scan.nodeHealth)
+	}
+	data.HasUnhealthyNodes = len(data.NodeHealthPools) > 0
 
 	var buf strings.Builder
 	if err := getInfrastructureTmpl().Execute(&buf, data); err != nil {
@@ -194,6 +237,105 @@ func renderInfrastructurePage(scan *clusterScan, activeCtx string, clusterList [
 		return ""
 	}
 	return buf.String()
+}
+
+func buildInfrastructureNodeHealth(findings []models.NodeConditionFinding) []infrastructureNodeHealthPool {
+	type nodeKey struct{ pool, node string }
+	byNode := make(map[nodeKey][]models.NodeConditionFinding)
+	for _, finding := range findings {
+		pool := finding.NodePool
+		if pool == "" {
+			pool = defaultNodePoolDisplayName
+		}
+		key := nodeKey{pool: pool, node: finding.NodeName}
+		byNode[key] = append(byNode[key], finding)
+	}
+
+	keys := make([]nodeKey, 0, len(byNode))
+	for key := range byNode {
+		keys = append(keys, key)
+	}
+	sort.Slice(keys, func(i, j int) bool {
+		if keys[i].pool != keys[j].pool {
+			return keys[i].pool < keys[j].pool
+		}
+		return keys[i].node < keys[j].node
+	})
+
+	pools := make([]infrastructureNodeHealthPool, 0)
+	for _, key := range keys {
+		nodeFindings := byNode[key]
+		sort.Slice(nodeFindings, func(i, j int) bool {
+			return nodeFindings[i].ConditionType < nodeFindings[j].ConditionType
+		})
+		node := infrastructureNodeHealthNode{Name: key.node}
+		for _, finding := range nodeFindings {
+			transition := "Not reported"
+			if !finding.LastTransitionTime.IsZero() {
+				transition = finding.LastTransitionTime.UTC().Format("2006-01-02 15:04:05 UTC")
+			}
+			node.Conditions = append(node.Conditions, infrastructureNodeCondition{
+				Type: finding.ConditionType, Status: finding.ConditionStatus, Reason: finding.Reason,
+				Message: finding.Message, LastTransition: transition,
+			})
+		}
+
+		// Every condition on a node is correlated from the same current pod
+		// snapshot. Render it once under the physical node, not once per condition.
+		if len(nodeFindings) > 0 {
+			workloads := append([]models.CorrelatedWorkload(nil), nodeFindings[0].CorrelatedWorkloads...)
+			sort.Slice(workloads, func(i, j int) bool {
+				if workloads[i].Namespace != workloads[j].Namespace {
+					return workloads[i].Namespace < workloads[j].Namespace
+				}
+				if workloads[i].Kind != workloads[j].Kind {
+					return workloads[i].Kind < workloads[j].Kind
+				}
+				return workloads[i].Name < workloads[j].Name
+			})
+			node.WorkloadGroups = len(workloads)
+			for _, workload := range workloads {
+				node.PodCount += workload.PodCount
+				if len(node.Namespaces) == 0 || node.Namespaces[len(node.Namespaces)-1].Name != workload.Namespace {
+					node.Namespaces = append(node.Namespaces, infrastructureNodeNamespace{Name: workload.Namespace})
+				}
+				last := len(node.Namespaces) - 1
+				node.Namespaces[last].Workloads = append(node.Namespaces[last].Workloads, workload)
+				node.Namespaces[last].WorkloadGroups++
+				node.Namespaces[last].PodCount += workload.PodCount
+			}
+		}
+		for i := range node.Namespaces {
+			groupLabel, podLabel := "workloads", "pods"
+			if node.Namespaces[i].WorkloadGroups == 1 {
+				groupLabel = "workload"
+			}
+			if node.Namespaces[i].PodCount == 1 {
+				podLabel = "pod"
+			}
+			node.Namespaces[i].PlacementSummary = fmt.Sprintf("%d %s · %d %s", node.Namespaces[i].WorkloadGroups, groupLabel, node.Namespaces[i].PodCount, podLabel)
+		}
+		visibleCount := len(node.Namespaces)
+		if visibleCount > visibleNodeNamespaceSummaryLimit {
+			visibleCount = visibleNodeNamespaceSummaryLimit
+		}
+		node.NamespaceSummaries = node.Namespaces[:visibleCount]
+		node.MoreNamespaces = len(node.Namespaces) - visibleCount
+		groupLabel, podLabel := "workload groups", "pods"
+		if node.WorkloadGroups == 1 {
+			groupLabel = "workload group"
+		}
+		if node.PodCount == 1 {
+			podLabel = "pod"
+		}
+		node.PlacementSummary = fmt.Sprintf("%d %s · %d %s currently placed on this node", node.WorkloadGroups, groupLabel, node.PodCount, podLabel)
+
+		if len(pools) == 0 || pools[len(pools)-1].Name != key.pool {
+			pools = append(pools, infrastructureNodeHealthPool{Name: key.pool})
+		}
+		pools[len(pools)-1].Nodes = append(pools[len(pools)-1].Nodes, node)
+	}
+	return pools
 }
 
 var getInfrastructureTmpl = sync.OnceValue(func() *template.Template {
