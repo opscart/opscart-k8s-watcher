@@ -59,24 +59,24 @@ type PricingProvider interface {
 	SourceDescription() string
 }
 
-type azurePricingProvider struct{}
-
-func NewAzurePricingProvider() PricingProvider       { return azurePricingProvider{} }
-func (azurePricingProvider) Provider() CloudProvider { return CloudProviderAzure }
-func (azurePricingProvider) SourceDescription() string {
-	return "Embedded Azure public retail pricing catalog"
+func NewAzurePricingProvider() PricingProvider {
+	return newAzurePricingProvider(nil, azureRetailPricesURL, 24*time.Hour)
 }
-func (azurePricingProvider) Capabilities() PricingCapabilities {
+func (p *azurePricingProvider) Provider() CloudProvider { return CloudProviderAzure }
+func (p *azurePricingProvider) SourceDescription() string {
+	return "Embedded Azure public retail pricing catalog with Azure Retail Prices API fallback"
+}
+func (p *azurePricingProvider) Capabilities() PricingCapabilities {
 	return PricingCapabilities{OnDemand: true, Spot: true, Reservations: true, SavingsData: true, CapacityTypes: []string{"Regular", "Spot"}}
 }
-func (azurePricingProvider) LookupOnDemandPrice(_ context.Context, r PriceRequest) (PriceResult, error) {
-	p, ok := LookupVMPrice(r.InstanceType, r.Region)
+func (p *azurePricingProvider) LookupOnDemandPrice(ctx context.Context, r PriceRequest) (PriceResult, error) {
+	pricing, ok := LookupVMPrice(r.InstanceType, r.Region)
 	if !ok {
-		return PriceResult{}, fmt.Errorf("instance type %q is not in the embedded Azure catalog", r.InstanceType)
+		return p.lookupRetailPrice(ctx, r)
 	}
-	hourly := p.PayAsYouGoHour
+	hourly := pricing.PayAsYouGoHour
 	if strings.EqualFold(r.CapacityType, "spot") {
-		hourly = p.SpotHour
+		hourly = pricing.SpotHour
 	}
 	if hourly <= 0 {
 		return PriceResult{}, fmt.Errorf("no %s price for %q", r.CapacityType, r.InstanceType)
