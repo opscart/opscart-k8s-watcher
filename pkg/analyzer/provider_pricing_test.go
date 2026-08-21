@@ -3,10 +3,13 @@ package analyzer
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/pricing"
+	"github.com/aws/aws-sdk-go-v2/service/pricing/types"
 	"github.com/opscart/opscart-k8s-watcher/pkg/models"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -53,12 +56,14 @@ func TestAWSNodeMetadataExtraction(t *testing.T) {
 
 type fakeProductsClient struct {
 	calls  int
+	inputs []*pricing.GetProductsInput
 	output *pricing.GetProductsOutput
 	err    error
 }
 
-func (f *fakeProductsClient) GetProducts(context.Context, *pricing.GetProductsInput, ...func(*pricing.Options)) (*pricing.GetProductsOutput, error) {
+func (f *fakeProductsClient) GetProducts(_ context.Context, input *pricing.GetProductsInput, _ ...func(*pricing.Options)) (*pricing.GetProductsOutput, error) {
 	f.calls++
+	f.inputs = append(f.inputs, input)
 	return f.output, f.err
 }
 
@@ -89,6 +94,85 @@ func TestAWSFailureAndSpotUnavailable(t *testing.T) {
 	if _, err := provider.LookupOnDemandPrice(context.Background(), PriceRequest{InstanceType: "m7i.large", Region: "us-east-1", CapacityType: "SPOT"}); err == nil {
 		t.Fatal("expected Spot pricing to be unavailable")
 	}
+}
+
+func TestAWSUnknownEC2TypeIsUnpriced(t *testing.T) {
+	client := &fakeProductsClient{output: &pricing.GetProductsOutput{}}
+	provider := NewAWSPricingProvider(client, time.Hour)
+	builder := nodePoolBuilder{
+		name: "workers", provider: CloudProviderAWS, vmSize: "opscart-test-unknown-ec2-type",
+		region: "us-east-1", os: "linux", priority: "ON_DEMAND",
+		nodes: []models.NodeInfo{{CPUCapacity: 4, MemGBCapacity: 16}},
+	}
+	got := builder.build(&NodePoolCostAnalyzer{ctx: context.Background(), providers: map[CloudProvider]PricingProvider{CloudProviderAWS: provider}})
+	if got.Provider != string(CloudProviderAWS) {
+		t.Fatalf("provider = %q, want AWS", got.Provider)
+	}
+	if got.PricingAvailable || got.PricePerNodeHour != 0 || got.TotalMonthly != 0 {
+		t.Fatalf("unknown EC2 type was priced: %+v", got)
+	}
+	if !strings.Contains(got.PricingWarning, "returned 0 unambiguous hourly prices") {
+		t.Fatalf("unexpected pricing warning %q", got.PricingWarning)
+	}
+	if client.calls != 1 {
+		t.Fatalf("GetProducts calls = %d, want 1", client.calls)
+	}
+}
+
+func TestAWSOnDemandNodePoolAggregationUsesProviderResult(t *testing.T) {
+	const providerPrice = "0.2468"
+	request := PriceRequest{InstanceType: "m7i.large", Region: "us-west-2", OS: "linux", CapacityType: "ON_DEMAND"}
+	want, err := NewAWSPricingProvider(&fakeProductsClient{output: &pricing.GetProductsOutput{PriceList: []string{awsProduct(providerPrice)}}}, time.Hour).LookupOnDemandPrice(context.Background(), request)
+	if err != nil {
+		t.Fatalf("getting provider baseline: %v", err)
+	}
+	provider := NewAWSPricingProvider(&fakeProductsClient{output: &pricing.GetProductsOutput{PriceList: []string{awsProduct(providerPrice)}}}, time.Hour)
+	nodes := []models.NodeInfo{{CPUCapacity: 2, MemGBCapacity: 8}, {CPUCapacity: 2, MemGBCapacity: 8}, {CPUCapacity: 2, MemGBCapacity: 8}}
+	got := (&nodePoolBuilder{name: "workers", provider: CloudProviderAWS, vmSize: request.InstanceType, region: request.Region, os: request.OS, priority: request.CapacityType, nodes: nodes}).build(
+		&NodePoolCostAnalyzer{ctx: context.Background(), providers: map[CloudProvider]PricingProvider{CloudProviderAWS: provider}},
+	)
+	if !got.PricingAvailable || got.PricePerNodeHour != want.HourlyPrice || got.PricePerNodeMonth != want.HourlyPrice*730 || got.TotalMonthly != want.HourlyPrice*730*3 {
+		t.Fatalf("unexpected AWS pool aggregation: %+v; provider result %+v", got, want)
+	}
+	if got.SpotDiscount != 0 || got.RISavings != 0 || got.RISavings3yr != 0 {
+		t.Fatalf("AWS pool invented Spot/RI savings: %+v", got)
+	}
+}
+
+func TestAWSRegionFiltersAndMissingRegion(t *testing.T) {
+	for _, region := range []string{"us-east-1", "us-east-2", "us-west-2"} {
+		t.Run(region, func(t *testing.T) {
+			client := &fakeProductsClient{output: &pricing.GetProductsOutput{PriceList: []string{awsProduct("0.1")}}}
+			provider := NewAWSPricingProvider(client, time.Hour)
+			_, err := provider.LookupOnDemandPrice(context.Background(), PriceRequest{InstanceType: "m7i.large", Region: region, OS: "linux", CapacityType: "ON_DEMAND"})
+			if err != nil {
+				t.Fatalf("lookup failed: %v", err)
+			}
+			if got := awsFilterValue(client.inputs[0].Filters, "regionCode"); got != region {
+				t.Fatalf("regionCode filter = %q, want %q", got, region)
+			}
+		})
+	}
+	t.Run("missing", func(t *testing.T) {
+		client := &fakeProductsClient{output: &pricing.GetProductsOutput{}}
+		provider := NewAWSPricingProvider(client, time.Hour)
+		_, err := provider.LookupOnDemandPrice(context.Background(), PriceRequest{InstanceType: "m7i.large", OS: "linux", CapacityType: "ON_DEMAND"})
+		if err == nil || !strings.Contains(err.Error(), "instance type and region are required") {
+			t.Fatalf("expected missing-region error, got %v", err)
+		}
+		if client.calls != 0 {
+			t.Fatalf("GetProducts calls = %d, want 0", client.calls)
+		}
+	})
+}
+
+func awsFilterValue(filters []types.Filter, field string) string {
+	for _, filter := range filters {
+		if aws.ToString(filter.Field) == field {
+			return aws.ToString(filter.Value)
+		}
+	}
+	return ""
 }
 
 func TestAWSDoesNotUseAzureFallback(t *testing.T) {

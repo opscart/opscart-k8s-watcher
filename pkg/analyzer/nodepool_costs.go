@@ -312,7 +312,7 @@ func (b *nodePoolBuilder) build(npa *NodePoolCostAnalyzer) models.NodePoolCost {
 				riSavings3yr = (pricing.PayAsYouGoMonth - pricing.ThreeYearRI) * float64(nodeCount)
 			}
 		}
-	} else if b.provider == CloudProviderAzure && npa.providerOverride == "" {
+	} else if b.provider == CloudProviderAzure && npa.providerOverride == "" && priceErr != nil {
 		// Preserve the existing Azure-only capacity fallback. It is never used
 		// for AWS or unknown nodes.
 		if len(b.nodes) > 0 {
