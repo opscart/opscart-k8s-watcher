@@ -62,6 +62,7 @@ price     Prices API
  └───┬───┘
      ▼
 Node-pool estimate
+```
 
 The embedded catalog remains the preferred source because it can provide
 Pay-As-You-Go, Spot, and reservation pricing information. When a VM SKU is
