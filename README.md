@@ -226,7 +226,7 @@ Node/workload relationships are labeled **correlated by node placement — not a
 
 **Waste & Drift** — Zombie pods, orphaned PVCs with storage size and age, zero-replica workloads, abandoned namespaces.
 
-**Cost Intelligence** — Provider-aware worker-node estimates with namespace allocation, embedded Azure pricing, and optional AWS public pricing. See [Cost Intelligence](docs/07-Cost-Intelligence.md).
+**Cost Intelligence** — Provider-aware worker-node estimates with namespace allocation, embedded Azure pricing with Azure Retail Prices API fallback, and optional AWS public pricing. See [Cost Intelligence](docs/07-Cost-Intelligence.md).
 
 ### Platform
 
@@ -250,7 +250,7 @@ Node/workload relationships are labeled **correlated by node placement — not a
 | **CVE scan** | 0 vulnerabilities (Trivy) |
 | **Cluster permissions** | Read-only ClusterRole (`get`, `list`); includes `get` on `pods/log` by default and removes it when `logs.enabled=false` |
 | **Mutations** | None — never modifies cluster state |
-| **External calls** | None — no telemetry, no phone-home |
+| **External calls** | No telemetry or phone-home. Azure pricing may query the public Azure Retail Prices API for SKUs absent from the embedded catalog; optional AWS pricing uses the AWS Price List API. |
 | **Authentication** | Basic auth on by default, no disable path — env var, Secret, or auto-generated password |
 
 ```bash

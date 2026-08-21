@@ -8,7 +8,7 @@ public/list pricing and are not invoice or billing data.
 
 | Provider | Detection evidence | Pricing source | Initial coverage |
 |---|---|---|---|
-| Azure | `spec.providerID` starts with `azure://` | Embedded catalog | Compatible Azure worker VM SKUs, including catalog Spot and RI data |
+| Azure | `spec.providerID` starts with `azure://` | Azure | `spec.providerID` starts with `azure://` | Embedded catalog + Azure Retail Prices API fallback | Compatible Azure worker VM SKUs; catalog entries may also provide Spot and RI data |
 | AWS | `spec.providerID` starts with `aws://` | Optional AWS Price List Query API | EC2 Linux, shared-tenancy, no-preinstalled-software On-Demand compute in USD |
 | Unknown | No supported providerID evidence | None | Pricing unavailable |
 | Mixed | More than one detected provider | Provider-specific | Only nodes resolved by their own provider are included |
@@ -27,26 +27,68 @@ The dashboard and `opscart-scan cloud-costs` support:
 | `--pricing-source=auto\|embedded\|aws-api` | `OPSCART_PRICING_SOURCE` | `auto` | Enable the applicable pricing backend |
 | `--region=<region>` | — | Node label | Override the region used by the effective provider |
 
-In `auto` pricing-source mode, Azure uses the embedded catalog and AWS pricing
-remains disabled. `embedded` likewise makes no AWS call. AWS queries occur only
-when `aws-api` is explicitly selected. A manual AWS provider override does not
+In `auto` pricing-source mode, Azure first uses the embedded catalog. When an
+Azure VM SKU is not present in the embedded catalog, OpsCart falls back to the
+public Azure Retail Prices API for an exact Linux Consumption price in the
+detected region. AWS pricing remains disabled unless `aws-api` is explicitly
+selected.
+
+Azure Retail Prices API fallback does not require Azure credentials. AWS queries
+occur only when `aws-api` is explicitly selected. A manual AWS provider override does not
 bypass this opt-in.
 
 Provider mode defaults to `auto`: Azure and AWS providerIDs are detected,
 whereas Minikube and unsupported providers remain Unknown. OpsCart never uses
 Azure prices as an Unknown-provider fallback.
 
-## Azure embedded catalog
+## Azure pricing
+### Azure price resolution
 
-Azure pricing is bundled into the OpsCart release and requires no cloud
-credentials or outbound pricing request. Compatible node instance-type labels
-are matched to catalog SKUs. Azure Spot and reservation information is shown
-only when the catalog supplies it.
+OpsCart resolves Azure worker-node pricing using an embedded-first strategy:
 
-An actual detected Azure cluster retains the Azure-only capacity fallback used
-for compatible operational estimates. Manual Azure mode is stricter: OpsCart
-does not guess a SKU from local node capacity, so an unsupported `minikube`
-instance type remains Not calculated.
+```text
+Azure node
+    │
+    ▼
+Embedded SKU available?
+    │
+ ┌──┴───┐
+Yes     No
+ │       │
+ ▼       ▼
+Embedded  Azure Retail
+price     Prices API
+ │       │
+ └───┬───┘
+     ▼
+Node-pool estimate
+
+The embedded catalog remains the preferred source because it can provide
+Pay-As-You-Go, Spot, and reservation pricing information. When a VM SKU is
+missing from the catalog, OpsCart queries the Azure Retail Prices API for an
+exact Linux On-Demand Consumption price in the detected region.
+
+API-resolved SKUs do not receive fabricated Spot or reservation savings.
+
+Azure pricing uses an embedded catalog first. Compatible node instance-type
+labels are matched directly to catalog SKUs, preserving the existing bundled
+Pay-As-You-Go, Spot, and reservation pricing data.
+
+When an exact Azure VM SKU is not present in the embedded catalog, OpsCart
+queries the public Azure Retail Prices API using the VM SKU and region. The
+fallback selects an exact Linux, regular On-Demand Consumption hourly price and
+caches successful resolutions in memory.
+
+The Azure Retail Prices API fallback does not require Azure credentials. It does
+require outbound access to `prices.azure.com`.
+
+Spot and reservation savings are shown only when that information is available
+from the embedded catalog. OpsCart does not invent Spot or RI savings for a SKU
+resolved only through the Retail Prices API.
+
+If neither exact catalog pricing nor the Retail Prices API resolves the SKU,
+an actual detected Azure cluster may retain the existing Azure-only capacity
+fallback for a compatible operational estimate.
 
 ## Optional AWS public pricing
 
@@ -73,8 +115,8 @@ failures, network failures, missing metadata, and ambiguous API results leave
 pricing unavailable with a warning.
 
 Spot capacity is detected and displayed but is not priced as On-Demand. Until
-EC2 Spot pricing is integrated, Spot cost is Not calculated and excluded from
-the estimated total.
+EC2 Spot pricing is not integrated. Spot cost is shown as Not calculated and
+excluded from the estimate.
 
 ## Coverage, allocation, and scope
 
@@ -143,8 +185,10 @@ Check the instance type, region, and capacity type:
 kubectl get nodes -L node.kubernetes.io/instance-type,topology.kubernetes.io/region,eks.amazonaws.com/capacityType
 ```
 
-For Azure manual mode, confirm the instance type is a real compatible catalog
-SKU; OpsCart will not invent one. For AWS, select `--pricing-source=aws-api`,
-confirm the EC2 instance type and region, allow `pricing:GetProducts`, and
-verify outbound connectivity and workload identity. Spot remains unavailable
-by design.
+For Azure, confirm the node reports a real Azure VM SKU and region. OpsCart
+checks the embedded catalog first and, for missing SKUs, can query the Azure
+Retail Prices API for an exact Linux On-Demand price. If API fallback is needed,
+confirm outbound access to `prices.azure.com`.
+
+For AWS, select `--pricing-source=aws-api`, confirm the EC2 instance type and
+region, allow `pricing:GetProducts`, and verify AWS Pricing API connectivity.
