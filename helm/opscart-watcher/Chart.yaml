@@ -2,8 +2,8 @@ apiVersion: v2
 name: opscart-watcher
 description: Read-only Kubernetes operational triage dashboard
 type: application
-version: 0.2.2
-appVersion: "v1.11.0"
+version: 0.2.3
+appVersion: "v1.11.1"
 home: https://opscart.com
 sources:
   - https://github.com/opscart/opscart-k8s-watcher

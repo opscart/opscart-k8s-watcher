@@ -33,7 +33,7 @@
 replicaCount: 1
 image:
   repository: ghcr.io/opscart/opscart-dashboard
-  tag: v1.11.0
+  tag: v1.11.1
 
 persistence:
   enabled: true

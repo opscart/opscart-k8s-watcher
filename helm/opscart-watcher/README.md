@@ -158,7 +158,7 @@ OpsCart SQLite database. There is no combined-container view or download.
 | Parameter | Default | Description |
 |-----------|---------|-------------|
 | `image.repository` | `ghcr.io/opscart/opscart-dashboard` | Image repository |
-| `image.tag` | `v1.11.0` | Image tag |
+| `image.tag` | `v1.11.1` | Image tag |
 | `image.pullPolicy` | `Always` | Pull policy |
 | `persistence.enabled` | `true` | Persist incident history on a PVC |
 | `persistence.size` | `1Gi` | PVC size |
