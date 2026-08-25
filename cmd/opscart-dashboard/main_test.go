@@ -429,6 +429,51 @@ func TestBuildWorkloadHealthGrid(t *testing.T) {
 			t.Fatalf("expected single orphan-svc/critical cell, got %+v", got)
 		}
 	})
+
+	t.Run("StatefulSet replica issue rolls up into its owning StatefulSet, not a separate cell", func(t *testing.T) {
+		// Reproduces the reported bug: a crash-looping StatefulSet replica
+		// (prometheus-0) previously showed the parent StatefulSet as
+		// healthy while the replica appeared as its own orphaned critical
+		// workload cell. store.OwnerNameFromPod is deliberately
+		// instance-scoped (design contract, fingerprint-symmetry fix), so
+		// buildWorkloadHealthGrid must resolve the rollup itself using
+		// AllWorkloads, not rely on OwnerNameFromPod to collapse it.
+		scan := &clusterScan{
+			AllWorkloads: []models.WorkloadRef{
+				{Name: "prometheus", Kind: "StatefulSet", Namespace: "monitoring"},
+			},
+			wasteAudit: &analyzer.WasteAudit{
+				StalePods: []analyzer.StalePod{
+					{Name: "prometheus-0", Namespace: "monitoring", Kind: analyzer.StalePodZombie, Status: "CrashLoopBackOff", RestartCount: 12, AgeDays: 1},
+				},
+			},
+		}
+		got := buildWorkloadHealthGrid(scan)
+		if len(got) != 1 {
+			t.Fatalf("expected exactly one cell (the StatefulSet, not a separate replica cell), got %d: %+v", len(got), got)
+		}
+		if got[0].Name != "prometheus" || got[0].Severity != "critical" {
+			t.Fatalf("expected {prometheus, critical}, got %+v", got[0])
+		}
+	})
+
+	t.Run("ordinal-suffixed pod with no matching StatefulSet is not misattributed", func(t *testing.T) {
+		// A bare pod coincidentally named like "worker-0" must NOT be
+		// collapsed into a StatefulSet named "worker" unless that
+		// StatefulSet actually exists in AllWorkloads — the rollup only
+		// ever applies to a confirmed real owner, never a string guess.
+		scan := &clusterScan{
+			wasteAudit: &analyzer.WasteAudit{
+				StalePods: []analyzer.StalePod{
+					{Name: "worker-0", Namespace: "batch", Kind: analyzer.StalePodZombie, Status: "CrashLoopBackOff", RestartCount: 5, AgeDays: 1},
+				},
+			},
+		}
+		got := buildWorkloadHealthGrid(scan)
+		if len(got) != 1 || got[0].Name != "worker-0" {
+			t.Fatalf("expected the bare pod's own cell (no false StatefulSet rollup), got %+v", got)
+		}
+	})
 }
 
 // fullyPopulatedOverviewData builds an overviewPageData with every optional
