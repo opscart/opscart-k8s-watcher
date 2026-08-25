@@ -1787,3 +1787,96 @@ func TestRedesignedPagesPreserveClusterQueryLinks(t *testing.T) {
 		}
 	}
 }
+
+// ── Node findings in aggregate counters ─────────────────────────────────
+//
+// Node conditions are visible in War Room (via the DB-aware
+// collectActiveNodeWarRoomIssues) but calcIncidentScore, countCriticalIssues,
+// and the persisted snapshot's critical/warnings tally all read from the
+// plain, non-DB collectWarRoomIssues — which never included node findings.
+// These read scan.nodeHealth directly instead: it's already the current
+// scan's data, no DB query, and no risk of the staleness that a DB-backed
+// collector would introduce here (calcIncidentScore runs before this
+// scan's node incidents are persisted).
+
+func TestCountCriticalIssuesIncludesCriticalNodeFindings(t *testing.T) {
+	scan := &clusterScan{
+		nodeHealth: []models.NodeConditionFinding{
+			{NodeName: "node-1", ConditionType: "Ready", ConditionStatus: "False"},
+			{NodeName: "node-2", ConditionType: "DiskPressure", ConditionStatus: "True"},
+		},
+	}
+	got := countCriticalIssues(scan)
+	if got != 1 {
+		t.Fatalf("countCriticalIssues = %d, want 1 (only Ready=False is critical; DiskPressure is high, not critical)", got)
+	}
+}
+
+func TestCalcIncidentScorePenalizesCriticalNodeCondition(t *testing.T) {
+	clean := &clusterScan{}
+	cleanScore, _, _ := calcIncidentScore(clean)
+
+	withCriticalNode := &clusterScan{
+		nodeHealth: []models.NodeConditionFinding{
+			{NodeName: "node-1", ConditionType: "Ready", ConditionStatus: "False"},
+		},
+	}
+	gotScore, _, _ := calcIncidentScore(withCriticalNode)
+
+	if gotScore >= cleanScore {
+		t.Fatalf("score with a critical node condition (%d) should be lower than a clean scan (%d)", gotScore, cleanScore)
+	}
+	if cleanScore-gotScore != 10 {
+		t.Errorf("expected exactly the -10 critical-node penalty, got a %d point drop", cleanScore-gotScore)
+	}
+}
+
+func TestCalcIncidentScorePenalizesHighNodeConditionLessThanCritical(t *testing.T) {
+	withHighNode := &clusterScan{
+		nodeHealth: []models.NodeConditionFinding{
+			{NodeName: "node-1", ConditionType: "DiskPressure", ConditionStatus: "True"},
+		},
+	}
+	gotScore, _, _ := calcIncidentScore(withHighNode)
+	if 100-gotScore != 4 {
+		t.Errorf("expected exactly the -4 high-node penalty, got a %d point drop", 100-gotScore)
+	}
+}
+
+func TestCalcIncidentScoreNodePenaltiesCap(t *testing.T) {
+	var findings []models.NodeConditionFinding
+	for i := 0; i < 10; i++ {
+		findings = append(findings, models.NodeConditionFinding{
+			NodeName: fmt.Sprintf("node-%d", i), ConditionType: "Ready", ConditionStatus: "False",
+		})
+	}
+	gotScore, _, _ := calcIncidentScore(&clusterScan{nodeHealth: findings})
+	if 100-gotScore != 30 {
+		t.Errorf("expected the critical-node penalty capped at -30 (10 nodes x -10 would be -100), got a %d point drop", 100-gotScore)
+	}
+}
+
+func TestTallySnapshotCountsIncludesNodeFindings(t *testing.T) {
+	issues := []warRoomIssue{
+		{Severity: "critical"},
+		{Severity: "high"},
+	}
+	nodeHealth := []models.NodeConditionFinding{
+		{NodeName: "node-1", ConditionType: "Ready", ConditionStatus: "False"},        // critical
+		{NodeName: "node-2", ConditionType: "MemoryPressure", ConditionStatus: "True"}, // high -> warnings
+	}
+	critical, warnings := tallySnapshotCounts(issues, nodeHealth)
+	if critical != 2 {
+		t.Errorf("critical = %d, want 2 (1 pod issue + 1 Ready=False node)", critical)
+	}
+	if warnings != 2 {
+		t.Errorf("warnings = %d, want 2 (1 pod issue + 1 MemoryPressure node)", warnings)
+	}
+}
+
+func TestTallySnapshotCountsEmptyInputs(t *testing.T) {
+	critical, warnings := tallySnapshotCounts(nil, nil)
+	if critical != 0 || warnings != 0 {
+		t.Errorf("tallySnapshotCounts(nil, nil) = (%d, %d), want (0, 0)", critical, warnings)
+	}
+}

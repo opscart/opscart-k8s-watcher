@@ -83,15 +83,9 @@ func (s *dashboardState) refresh(clusterList []string) error {
 		incScore, _, _ := calcIncidentScore(scan)
 		issues := collectWarRoomIssues(scan, 0)
 
-		critical, warnings := 0, 0
+		critical, warnings := tallySnapshotCounts(issues, scan.nodeHealth)
 		var incidents []store.IncidentData
 		for _, is := range issues {
-			if is.Severity == "critical" {
-				critical++
-			} else {
-				warnings++
-			}
-
 			details, _ := json.Marshal(map[string]any{
 				"resource_age_days": is.ResourceAgeDays,
 				"message":           is.Message,
@@ -144,6 +138,32 @@ func (s *dashboardState) refresh(clusterList []string) error {
 
 	log.Printf("[%s] scan complete: %d namespaces, $%s/month, %d critical issues", displayName(s.ctx), len(scan.report.NamespaceCosts), formatMoney(scan.report.TotalMonthlyCost), countCriticalIssues(scan))
 	return nil
+}
+
+// tallySnapshotCounts computes the critical/warning counts for a scan
+// snapshot. Pod-scoped issues come from collectWarRoomIssues; node findings
+// are counted separately from nodeHealth because collectWarRoomIssues has
+// no DB access to correlate node incidents (see collectActiveNodeWarRoomIssues,
+// which does but requires a persisted incident to already exist — wrong
+// timing for this call site, which runs before this scan's node incidents
+// are persisted).
+func tallySnapshotCounts(issues []warRoomIssue, nodeHealth []models.NodeConditionFinding) (critical, warnings int) {
+	for _, is := range issues {
+		if is.Severity == "critical" {
+			critical++
+		} else {
+			warnings++
+		}
+	}
+	for _, finding := range nodeHealth {
+		switch sev, _ := models.NodeConditionSeverity(finding.ConditionType); sev {
+		case "critical":
+			critical++
+		case "high":
+			warnings++
+		}
+	}
+	return critical, warnings
 }
 
 func completeIncidentBatch(workloads []store.IncidentData, nodeFindings []models.NodeConditionFinding) []store.IncidentData {
