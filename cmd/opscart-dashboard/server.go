@@ -1268,38 +1268,22 @@ func buildWorkloadHealthGrid(scan *clusterScan) []workloadHealthCell {
 	}
 
 	type workloadKey struct{ namespace, name string }
-
-	// Known StatefulSet names per namespace, from the real workload list —
-	// no new clientset call, this data is already collected on every scan.
-	// Keyed by "namespace/name" (plain string) rather than a struct, so it
-	// can be passed to statefulSetOwnerForInstance without needing a
-	// package-level type shared between the two functions.
-	statefulSets := map[string]bool{}
-	for _, w := range scan.AllWorkloads {
-		if w.Kind == "StatefulSet" {
-			statefulSets[w.Namespace+"/"+w.Name] = true
-		}
-	}
-
 	severityOf := map[workloadKey]string{}
 
 	for _, issue := range collectWarRoomIssues(scan, 0) {
 		if issue.Namespace == "" || issue.Resource == "" || issue.Resource == "namespace" {
 			continue // namespace-level issues (e.g. unprotected_namespace) aren't workloads
 		}
-		// store.OwnerNameFromPod is deliberately instance-scoped for
-		// StatefulSet replicas (prometheus-0 stays prometheus-0) — that's
-		// the correct identity for incident fingerprints, but WRONG here:
-		// aggregating health by workload means a StatefulSet's replicas
-		// must roll up into their one owning StatefulSet, or the parent
-		// shows healthy while its failing replica appears as a separate,
-		// orphaned "critical workload" next to it. Collapse to the known
-		// StatefulSet owner only when AllWorkloads confirms it's real —
-		// never a blind ordinal-stripping guess.
+		// Confirmed ownership first (scan.PodWorkloads — real
+		// OwnerReferences), never a name-pattern guess. Aggregating
+		// health by workload means a StatefulSet's replicas must roll up
+		// into their one owning StatefulSet — using name matching alone
+		// (as this used to) can misattribute an unrelated pod that
+		// merely shares a StatefulSet's naming pattern.
 		name := store.OwnerNameFromPod(issue.Resource)
-		if !statefulSets[issue.Namespace+"/"+name] {
-			if owner, ok := statefulSetOwnerForInstance(issue.Namespace, name, statefulSets); ok {
-				name = owner
+		if scan.PodWorkloads != nil {
+			if ref, ok := scan.PodWorkloads[issue.Namespace+"/"+issue.Resource]; ok && ref.Kind == "StatefulSet" {
+				name = ref.Name
 			}
 		}
 		key := workloadKey{namespace: issue.Namespace, name: name}
@@ -1341,31 +1325,6 @@ func buildWorkloadHealthGrid(scan *clusterScan) []workloadHealthCell {
 		return grid[i].Name < grid[j].Name
 	})
 	return grid
-}
-
-// statefulSetOwnerForInstance reports whether name (an instance-scoped
-// identity like "prometheus-0") is a replica of a StatefulSet the scan
-// actually observed in this namespace, and if so returns that StatefulSet's
-// real name. It never guesses: the candidate parent must be a confirmed
-// entry in statefulSets (keyed "namespace/name"), so a coincidentally
-// ordinal-suffixed pod name (e.g. a bare pod named "worker-0" with no
-// owning StatefulSet) is left alone rather than misattributed.
-func statefulSetOwnerForInstance(namespace, name string, statefulSets map[string]bool) (string, bool) {
-	idx := strings.LastIndex(name, "-")
-	if idx < 0 || idx == len(name)-1 {
-		return "", false
-	}
-	ordinal := name[idx+1:]
-	for _, r := range ordinal {
-		if r < '0' || r > '9' {
-			return "", false
-		}
-	}
-	candidate := name[:idx]
-	if statefulSets[namespace+"/"+candidate] {
-		return candidate, true
-	}
-	return "", false
 }
 
 // investigateURL builds a deep link to the Investigation page for a single
@@ -1928,6 +1887,7 @@ func runFullScan(ctx string) (*clusterScan, error) {
 	// Retained regardless of --breakdown — this is the same pod enumeration
 	// already fetched above, not a second cluster call.
 	scan.AllWorkloads = resourceAnalysis.Workloads
+	scan.PodWorkloads = resourceAnalysis.PodWorkloads
 
 	nsCosts := npCostAnalyzer.AllocateNamespaceCosts(
 		poolCosts, resourceAnalysis.Namespaces,

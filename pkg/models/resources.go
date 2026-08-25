@@ -24,6 +24,17 @@ type ClusterResourceAnalysis struct {
 	// enumerating pods for the namespace breakdown above — a rollup of the
 	// same pod list, not a second cluster fetch.
 	Workloads []WorkloadRef `json:"workloads,omitempty"`
+
+	// PodWorkloads is the confirmed pod -> owning workload mapping for
+	// every pod observed, keyed by "namespace/podName". It is the single
+	// source of truth for pod ownership: consumers that need to attribute
+	// a pod-scoped finding to its real workload (War Room identity,
+	// Overview health-grid aggregation) must use this map rather than
+	// re-deriving ownership from name patterns, which cannot distinguish
+	// a real StatefulSet replica from an unrelated pod that merely shares
+	// its naming pattern (e.g. a Deployment pod literally named
+	// "worker-0" in a namespace that also has a StatefulSet "worker").
+	PodWorkloads map[string]WorkloadRef `json:"pod_workloads,omitempty"`
 }
 
 // WorkloadRef identifies a single Deployment/StatefulSet/DaemonSet, derived

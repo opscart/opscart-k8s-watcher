@@ -434,13 +434,16 @@ func TestBuildWorkloadHealthGrid(t *testing.T) {
 		// Reproduces the reported bug: a crash-looping StatefulSet replica
 		// (prometheus-0) previously showed the parent StatefulSet as
 		// healthy while the replica appeared as its own orphaned critical
-		// workload cell. store.OwnerNameFromPod is deliberately
-		// instance-scoped (design contract, fingerprint-symmetry fix), so
-		// buildWorkloadHealthGrid must resolve the rollup itself using
-		// AllWorkloads, not rely on OwnerNameFromPod to collapse it.
+		// workload cell. buildWorkloadHealthGrid resolves the rollup via
+		// scan.PodWorkloads — confirmed ownership from real
+		// OwnerReferences, populated alongside AllWorkloads by
+		// AnalyzeClusterResources in production — not a name guess.
 		scan := &clusterScan{
 			AllWorkloads: []models.WorkloadRef{
 				{Name: "prometheus", Kind: "StatefulSet", Namespace: "monitoring"},
+			},
+			PodWorkloads: map[string]models.WorkloadRef{
+				"monitoring/prometheus-0": {Name: "prometheus", Kind: "StatefulSet", Namespace: "monitoring"},
 			},
 			wasteAudit: &analyzer.WasteAudit{
 				StalePods: []analyzer.StalePod{
@@ -458,10 +461,9 @@ func TestBuildWorkloadHealthGrid(t *testing.T) {
 	})
 
 	t.Run("ordinal-suffixed pod with no matching StatefulSet is not misattributed", func(t *testing.T) {
-		// A bare pod coincidentally named like "worker-0" must NOT be
-		// collapsed into a StatefulSet named "worker" unless that
-		// StatefulSet actually exists in AllWorkloads — the rollup only
-		// ever applies to a confirmed real owner, never a string guess.
+		// A bare pod coincidentally named like "worker-0" with no
+		// confirmed ownership mapping must NOT be collapsed into any
+		// StatefulSet.
 		scan := &clusterScan{
 			wasteAudit: &analyzer.WasteAudit{
 				StalePods: []analyzer.StalePod{
@@ -472,6 +474,43 @@ func TestBuildWorkloadHealthGrid(t *testing.T) {
 		got := buildWorkloadHealthGrid(scan)
 		if len(got) != 1 || got[0].Name != "worker-0" {
 			t.Fatalf("expected the bare pod's own cell (no false StatefulSet rollup), got %+v", got)
+		}
+	})
+
+	t.Run("Deployment pod named like a StatefulSet replica is not misattributed to a colliding StatefulSet", func(t *testing.T) {
+		// The exact collision scenario: a Deployment named "worker-0"
+		// produces a pod also named "worker-0" (Deployment names without
+		// a ReplicaSet hash suffix are unusual but not impossible — e.g.
+		// a single-replica Deployment whose pod template name collides).
+		// The namespace ALSO has an unrelated StatefulSet named "worker".
+		// A pure name-pattern check (old behavior) would wrongly roll this
+		// pod's issue into the StatefulSet "worker". Confirmed ownership
+		// via PodWorkloads must prevent that: this pod's real owner is
+		// the Deployment, not the StatefulSet.
+		scan := &clusterScan{
+			AllWorkloads: []models.WorkloadRef{
+				{Name: "worker", Kind: "StatefulSet", Namespace: "batch"},
+				{Name: "worker-0", Kind: "Deployment", Namespace: "batch"},
+			},
+			PodWorkloads: map[string]models.WorkloadRef{
+				"batch/worker-0": {Name: "worker-0", Kind: "Deployment", Namespace: "batch"},
+			},
+			wasteAudit: &analyzer.WasteAudit{
+				StalePods: []analyzer.StalePod{
+					{Name: "worker-0", Namespace: "batch", Kind: analyzer.StalePodZombie, Status: "CrashLoopBackOff", RestartCount: 5, AgeDays: 1},
+				},
+			},
+		}
+		got := buildWorkloadHealthGrid(scan)
+		byName := map[string]string{}
+		for _, cell := range got {
+			byName[cell.Name] = cell.Severity
+		}
+		if sev, ok := byName["worker"]; ok && sev == "critical" {
+			t.Fatalf("StatefulSet 'worker' must NOT be marked critical — the failing pod belongs to the unrelated Deployment 'worker-0': %+v", got)
+		}
+		if sev := byName["worker-0"]; sev != "critical" {
+			t.Fatalf("Deployment 'worker-0' should be critical (it's the pod's real owner), got %+v", got)
 		}
 	})
 }

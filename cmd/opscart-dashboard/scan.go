@@ -31,6 +31,14 @@ type clusterScan struct {
 	// enumeration ResourceAnalyzer.AnalyzeClusterResources already performs
 	// for cost allocation, not a second cluster fetch.
 	AllWorkloads []models.WorkloadRef
+
+	// PodWorkloads is the confirmed pod -> owning workload map from the
+	// same pod enumeration, keyed by "namespace/podName". This is the
+	// single source of truth for pod ownership — used instead of
+	// name-pattern matching (store.OwnerNameFromPod + prefix checks),
+	// which cannot distinguish a real StatefulSet replica from an
+	// unrelated pod sharing its naming pattern.
+	PodWorkloads map[string]models.WorkloadRef
 }
 
 // ── Per-cluster state ─────────────────────────────────────────────────────────

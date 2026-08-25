@@ -498,8 +498,36 @@ func enrichWarRoomIdentity(issue *warRoomIssue, scan *clusterScan) {
 		issue.WorkloadKind, issue.WorkloadName = "Namespace", issue.Namespace
 		return
 	}
-	owner := store.OwnerNameFromPod(issue.Resource)
 	issue.WorkloadKind, issue.WorkloadName = "Pod", issue.Resource
+
+	// Confirmed ownership first (scan.PodWorkloads — real OwnerReferences
+	// captured during pod enumeration), never a name-pattern guess. A
+	// Deployment pod literally named like a StatefulSet's replica (e.g.
+	// "worker-0" in a namespace that also has a StatefulSet "worker")
+	// cannot be misattributed this way, unlike the prefix-matching
+	// fallback below.
+	if scan != nil && scan.PodWorkloads != nil {
+		if ref, ok := scan.PodWorkloads[issue.Namespace+"/"+issue.Resource]; ok {
+			if ref.Kind == "StatefulSet" {
+				// War Room stays instance-scoped for StatefulSets (design
+				// contract: prometheus-0 and prometheus-1 keep separate
+				// histories) — only the Kind is confirmed here, the pod's
+				// own identity is kept as WorkloadName.
+				issue.WorkloadKind, issue.WorkloadName = "StatefulSet", issue.Resource
+			} else {
+				issue.WorkloadKind, issue.WorkloadName = ref.Kind, ref.Name
+			}
+			return
+		}
+	}
+
+	// Fallback: no confirmed mapping (e.g. scan.PodWorkloads unset in a
+	// synthetic test fixture, or a namespace-filtered scan that didn't
+	// enumerate this pod). Name-pattern heuristic, same as before this
+	// fix — can theoretically misattribute on a naming collision, which
+	// is exactly why the confirmed path above is preferred whenever
+	// available.
+	owner := store.OwnerNameFromPod(issue.Resource)
 	if scan == nil {
 		if owner != issue.Resource {
 			issue.WorkloadKind, issue.WorkloadName = "Deployment", owner
