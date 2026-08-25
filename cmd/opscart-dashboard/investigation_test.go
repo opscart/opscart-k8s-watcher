@@ -99,7 +99,7 @@ func TestHandleInvestigationPage_NamespaceScopedWithoutPodParameter(t *testing.T
 	if strings.Contains(rec.Body.String(), "critical infrastructure exposed") {
 		t.Errorf("complete rendered namespace page contained unsupported finding text")
 	}
-	if !strings.Contains(rec.Body.String(), "No default-deny NetworkPolicy detected in a system namespace") {
+	if !strings.Contains(rec.Body.String(), "No NetworkPolicy found in this namespace") {
 		t.Errorf("rendered namespace page missing mapped finding")
 	}
 }
@@ -145,7 +145,7 @@ func TestPopulateNamespaceFinding(t *testing.T) {
 		if data.NamespacePodCount != 8 || data.NamespaceFinding == "" {
 			t.Errorf("expected pod count 8 and non-empty finding, got %d / %q", data.NamespacePodCount, data.NamespaceFinding)
 		}
-		if data.NamespaceFinding != "No default-deny NetworkPolicy detected in a system namespace" {
+		if data.NamespaceFinding != "No NetworkPolicy found in this namespace — all pods can communicate freely" {
 			t.Errorf("unexpected mapped finding: %q", data.NamespaceFinding)
 		}
 	})

@@ -1146,6 +1146,10 @@ func (srv *server) handleSecurityPage(w http.ResponseWriter, r *http.Request) {
 		data.ScanCoverage = "Unavailable"
 	case !data.NetworkAvailable:
 		data.ScanCoverage = "Partial"
+	case scan.netAudit != nil && len(scan.netAudit.Warnings) > 0:
+		// Some namespace(s) couldn't be checked (API error) — the network
+		// audit ran, but its result is incomplete, not the full picture.
+		data.ScanCoverage = "Partial"
 	default:
 		data.ScanCoverage = "Complete"
 	}
