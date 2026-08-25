@@ -1371,6 +1371,21 @@ func PrintWasteAudit(audit *WasteAudit, minAgeDays int) {
 	printWasteSummary(audit)
 }
 
+// splitMisconfiguredHPAs separates currently-active failures
+// (ScalingActive=False) from age-gated tuning-review candidates
+// (AlwaysAtMin), so callers classify waste findings without conflating a
+// live break with a review suggestion.
+func splitMisconfiguredHPAs(hpas []MisconfiguredHPA) (active, tuning int) {
+	for _, hpa := range hpas {
+		if hpa.IsActive {
+			active++
+		} else {
+			tuning++
+		}
+	}
+	return active, tuning
+}
+
 func printExecutiveSummary(audit *WasteAudit) {
 	zombieCount := 0
 	for _, p := range audit.StalePods {
@@ -1379,9 +1394,17 @@ func printExecutiveSummary(audit *WasteAudit) {
 		}
 	}
 
-	criticalCount := len(audit.AbandonedNamespaces) + zombieCount + len(audit.OrphanedPVCs)
+	// BrokenIngress is only ever produced from a currently-broken backend
+	// (IsActive is always true for it — see the waste detector). Among
+	// MisconfiguredHPAs, only the ScalingActive=False ones are live
+	// failures; AlwaysAtMin is a tuning-review candidate, not an active
+	// break, and stays in the warning bucket below.
+	activeIngresses := len(audit.BrokenIngresses)
+	activeHPAs, tuningHPAs := splitMisconfiguredHPAs(audit.MisconfiguredHPAs)
+
+	criticalCount := len(audit.AbandonedNamespaces) + zombieCount + len(audit.OrphanedPVCs) + activeIngresses + activeHPAs
 	warningCount := len(audit.StaleJobs) + len(audit.ZeroReplicaWorkloads) +
-		len(audit.OrphanedServices) + len(audit.BrokenIngresses) + len(audit.MisconfiguredHPAs)
+		len(audit.OrphanedServices) + tuningHPAs
 
 	fmt.Println("EXECUTIVE SUMMARY")
 	fmt.Println("═══════════════════════════════════════════════════════════")
@@ -1416,6 +1439,12 @@ func printExecutiveSummary(audit *WasteAudit) {
 	if len(audit.AbandonedNamespaces) > 0 {
 		fmt.Printf("     • %d abandoned namespace(s)\n", len(audit.AbandonedNamespaces))
 	}
+	if activeIngresses > 0 {
+		fmt.Printf("     • %d broken ingress(es) — active routing failure\n", activeIngresses)
+	}
+	if activeHPAs > 0 {
+		fmt.Printf("     • %d HPA(s) currently reporting ScalingActive=False\n", activeHPAs)
+	}
 	if criticalCount == 0 {
 		fmt.Println("     • None")
 	}
@@ -1431,11 +1460,8 @@ func printExecutiveSummary(audit *WasteAudit) {
 	if len(audit.ZeroReplicaWorkloads) > 0 {
 		fmt.Printf("     • %d zero-replica workload(s)\n", len(audit.ZeroReplicaWorkloads))
 	}
-	if len(audit.BrokenIngresses) > 0 {
-		fmt.Printf("     • %d broken ingress(es)\n", len(audit.BrokenIngresses))
-	}
-	if len(audit.MisconfiguredHPAs) > 0 {
-		fmt.Printf("     • %d misconfigured HPA(s)\n", len(audit.MisconfiguredHPAs))
+	if tuningHPAs > 0 {
+		fmt.Printf("     • %d HPA(s) at minReplicas — tuning review candidate\n", tuningHPAs)
 	}
 	if warningCount == 0 {
 		fmt.Println("     • None")
@@ -1469,11 +1495,15 @@ func printWasteScorecard(audit *WasteAudit) {
 	printScoreRow("Unmanaged Pods (no controller)", bareCount, "🔴")
 	printScoreRow("Orphaned PVCs", len(audit.OrphanedPVCs), "🔴")
 	printScoreRow("Orphaned Services", len(audit.OrphanedServices), "🟡")
-	printScoreRow("Broken Ingresses", len(audit.BrokenIngresses), "🟡")
+	printScoreRow("Broken Ingresses", len(audit.BrokenIngresses), "🔴") // always an active routing failure when present
 	printScoreRow("Stale Jobs/CronJobs", len(audit.StaleJobs), "🟡")
 	printScoreRow("Zero-Replica Workloads", len(audit.ZeroReplicaWorkloads), "🟡")
 	printScoreRow("Old ReplicaSets", len(audit.OldReplicaSets), "🟢")
-	printScoreRow("Misconfigured HPAs", len(audit.MisconfiguredHPAs), "🟢")
+	hpaEmoji := "🟢" // tuning candidates only (AlwaysAtMin)
+	if active, _ := splitMisconfiguredHPAs(audit.MisconfiguredHPAs); active > 0 {
+		hpaEmoji = "🔴" // at least one HPA currently reporting ScalingActive=False
+	}
+	printScoreRow("Misconfigured HPAs", len(audit.MisconfiguredHPAs), hpaEmoji)
 
 	fmt.Println("───────────────────────────────────────────────────────────")
 	fmt.Printf("  Total waste items found:  %d\n", audit.TotalWasteItems)
