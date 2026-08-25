@@ -2,6 +2,21 @@ package store
 
 import "strings"
 
+// Canonical issue-type identifiers. Producers and consumers must use these
+// constants (or normalize raw input through CanonicalIssueType) instead of
+// string literals, so the compiler catches vocabulary drift between the
+// scanner, dashboard, CLI, and store layers.
+const (
+	IssueCrashLoop            = "crash_loop"
+	IssueProbeFailure         = "probe_failure"
+	IssueOOMKilled            = "oomkilled"
+	IssueImagePullBackOff     = "image_pull_backoff"
+	IssueHighRestartCount     = "high_restart_count"
+	IssuePrivilegedContainer  = "privileged_container"
+	IssueUnprotectedNamespace = "unprotected_namespace"
+	IssueIdleNamespace        = "idle_namespace"
+)
+
 // CanonicalIssueType returns the durable issue type used by new writes.
 // Unknown issue types are intentionally preserved verbatim.
 func CanonicalIssueType(issueType string) string {
