@@ -691,3 +691,32 @@ func TestHPAYoungAndHealthyProducesNoFinding(t *testing.T) {
 		t.Fatalf("healthy scaling HPA should produce no finding: %+v", audit.MisconfiguredHPAs)
 	}
 }
+
+// TestSplitMisconfiguredHPAs guards the CLI summary-labeling fix: active
+// failures (ScalingActive=False) must be counted separately from tuning
+// candidates (AlwaysAtMin), so a live autoscaling failure never gets
+// silently folded into a "warning" bucket or shown with a green scorecard
+// emoji next to other, merely-worth-reviewing findings.
+func TestSplitMisconfiguredHPAs(t *testing.T) {
+	hpas := []MisconfiguredHPA{
+		{Name: "a", IsActive: true},
+		{Name: "b", IsActive: false},
+		{Name: "c", IsActive: true},
+		{Name: "d", IsActive: false},
+		{Name: "e", IsActive: false},
+	}
+	active, tuning := splitMisconfiguredHPAs(hpas)
+	if active != 2 {
+		t.Errorf("active = %d, want 2", active)
+	}
+	if tuning != 3 {
+		t.Errorf("tuning = %d, want 3", tuning)
+	}
+}
+
+func TestSplitMisconfiguredHPAsEmpty(t *testing.T) {
+	active, tuning := splitMisconfiguredHPAs(nil)
+	if active != 0 || tuning != 0 {
+		t.Errorf("splitMisconfiguredHPAs(nil) = (%d, %d), want (0, 0)", active, tuning)
+	}
+}

@@ -51,6 +51,12 @@ func (s *dashboardState) refresh(clusterList []string) error {
 	}
 	defer s.scanning.Store(false)
 
+	// Timer covers the full cycle — scan, render, and persistence — so
+	// DurationMS reflects what "scan duration" actually means to a reader.
+	// Previously this started after runFullScan/renderHTML completed, so
+	// the recorded duration measured only the persistence block below.
+	start := time.Now()
+
 	scan, err := runFullScan(s.ctx)
 	if err != nil {
 		return err
@@ -65,7 +71,6 @@ func (s *dashboardState) refresh(clusterList []string) error {
 	// Persist to operational memory (best-effort, never blocks scan)
 	if s.db != nil {
 		scanID := newScanID()
-		start := time.Now()
 
 		incScore, _, _ := calcIncidentScore(scan)
 		issues := collectWarRoomIssues(scan, 0)
