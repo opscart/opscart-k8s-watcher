@@ -15,8 +15,13 @@ import (
 )
 
 const (
-	nodeConditionPersistenceSeverity = "low"
-	nodeIncidentScope                = "cluster"
+	nodeIncidentScope = "cluster"
+	// fallbackNodeConditionSeverity is used only for a condition type
+	// models.NodeConditionSeverity doesn't recognize, so persistence never
+	// fails outright on an unexpected/future condition type. It must not be
+	// used for any condition the classifier already knows about — those
+	// take their real severity below.
+	fallbackNodeConditionSeverity = "low"
 )
 
 type nodeConditionDetails struct {
@@ -49,12 +54,22 @@ func NodeConditionIncidents(findings []models.NodeConditionFinding) []store.Inci
 			CorrelationSemantics: "correlated_by_node_placement",
 			CorrelatedWorkloads:  finding.CorrelatedWorkloads,
 		})
+		// Persisted severity must match what the War Room already displays
+		// for this same finding (models.NodeConditionSeverity — see
+		// nodeWarRoomSeverity in the dashboard). A Ready=False node shown
+		// as critical live must not be persisted as "low"; that silently
+		// corrupts incident listings, historical counts, and scoring that
+		// read the stored value instead of re-deriving it.
+		severity, ok := models.NodeConditionSeverity(finding.ConditionType)
+		if !ok {
+			severity = fallbackNodeConditionSeverity
+		}
 		incidents = append(incidents, store.IncidentData{
 			Fingerprint: store.Fingerprint(nodeIncidentScope, "Node", finding.NodeName, finding.ConditionType),
 			Namespace:   "",
 			Resource:    finding.NodeName,
 			IssueType:   finding.ConditionType,
-			Severity:    nodeConditionPersistenceSeverity,
+			Severity:    severity,
 			DetailsJSON: string(details),
 		})
 	}
