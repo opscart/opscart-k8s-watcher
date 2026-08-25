@@ -431,14 +431,14 @@ func calcIncidentScore(scan *clusterScan) (score int, color string, label string
 	unprotectedNS := 0
 
 	for _, issue := range issues {
-		switch issue.Type {
-		case "crash_loop":
+		switch store.CanonicalIssueType(issue.Type) {
+		case store.IssueCrashLoop:
 			crashLoops++
-		case "image_pull":
+		case store.IssueImagePullBackOff:
 			imagePulls++
-		case "oom_killed":
+		case store.IssueOOMKilled:
 			oomKills++
-		case "unprotected_namespace":
+		case store.IssueUnprotectedNamespace:
 			unprotectedNS++
 		}
 	}
@@ -1488,7 +1488,7 @@ func formatGroupedIssue(issueType, severity string, grp []warRoomIssue) (title, 
 	nsCount := len(namespaces)
 	moreThan3 := count - 3
 
-	switch issueType {
+	switch store.CanonicalIssueType(issueType) {
 	case "Ready", "DiskPressure", "MemoryPressure", "PIDPressure", "NetworkUnavailable":
 		if count == 1 {
 			title = fmt.Sprintf("%s on %s", nodeConditionLabel(grp[0]), grp[0].Resource)
@@ -1515,11 +1515,11 @@ func formatGroupedIssue(issueType, severity string, grp []warRoomIssue) (title, 
 		}
 		countText = fmt.Sprintf("%d pod%s", count, pluralS(count))
 		action = fmt.Sprintf("kubectl logs %s -n %s", samples[0], grp[0].Namespace)
-	case "oom_killed":
+	case store.IssueOOMKilled:
 		title = fmt.Sprintf("%d pod%s OOMKilled", count, pluralS(count))
 		subtitle = fmt.Sprintf("Out of memory across %d namespace%s", nsCount, pluralS(nsCount))
 		countText = fmt.Sprintf("%d pod%s", count, pluralS(count))
-	case "image_pull":
+	case store.IssueImagePullBackOff:
 		title = fmt.Sprintf("%d ImagePullBackOff failure%s", count, pluralS(count))
 		subtitle = fmt.Sprintf("Image pull failures across %d namespace%s", nsCount, pluralS(nsCount))
 		countText = fmt.Sprintf("%d pod%s", count, pluralS(count))
@@ -1549,14 +1549,14 @@ func formatGroupedIssue(issueType, severity string, grp []warRoomIssue) (title, 
 }
 
 func humanizeWRType(t string) string {
-	switch t {
-	case "crash_loop":
+	switch store.CanonicalIssueType(t) {
+	case store.IssueCrashLoop:
 		return "Pod crash looping"
-	case "oom_killed":
+	case store.IssueOOMKilled:
 		return "Pod OOMKilled"
-	case "image_pull":
+	case store.IssueImagePullBackOff:
 		return "Image pull failure"
-	case "unprotected_namespace":
+	case store.IssueUnprotectedNamespace:
 		return "Namespace"
 	default:
 		return t
