@@ -24,8 +24,8 @@ type NetworkPolicyAuditor struct {
 
 type NetworkPolicyAudit struct {
 	TotalNamespaces       int
-	ProtectedNamespaces   []NamespaceNetworkStatus // every pod covered, both directions where declared
-	UnprotectedNamespaces []NamespaceNetworkStatus // some or all pods uncovered — see CoveredPodCount
+	ProtectedNamespaces   []NamespaceNetworkStatus // every observed pod has configured ingress and egress coverage
+	UnprotectedNamespaces []NamespaceNetworkStatus // at least one observed pod lacks full directional coverage
 	TotalPolicies         int
 	HighRiskNamespaces    int
 	Warnings              []NetworkAuditWarning
@@ -55,6 +55,13 @@ type NamespaceNetworkStatus struct {
 	CoveredPodCount   int
 	UncoveredPodCount int
 
+	// FullyCoveredPodCount counts pods for which the same pod has both
+	// ingress and egress coverage. CoverageGapPodCount is its complement;
+	// unlike UncoveredPodCount, it also includes pods selected by a policy
+	// that covers only one direction or explicitly allows all traffic.
+	FullyCoveredPodCount int
+	CoverageGapPodCount  int
+
 	// IngressCoveredPods/EgressCoveredPods: of the covered pods, how many
 	// are covered by a policy that actually restricts that direction
 	// (PolicyTypes includes it) AND that direction isn't rendered moot by
@@ -73,12 +80,9 @@ type NamespaceNetworkStatus struct {
 	HasDefaultDenyIngress bool
 	HasDefaultDenyEgress  bool
 
-	// HasIngressRestriction/HasEgressRestriction: true when at least one
-	// policy in the namespace declares that PolicyType — kept for
-	// backward-compatible callers, but does NOT imply full coverage or
-	// that the restriction isn't overridden by an allow-all policy
-	// covering the same pods. Prefer IngressCoveredPods/EgressCoveredPods
-	// for anything evidence-sensitive.
+	// HasIngressRestriction/HasEgressRestriction describe namespace-wide
+	// configured coverage: every observed pod must be covered in that
+	// direction, after accounting for additive allow-all policies.
 	HasIngressRestriction bool
 	HasEgressRestriction  bool
 
@@ -127,8 +131,6 @@ func (n *NetworkPolicyAuditor) AuditNetworkPolicies(filterNamespace string) (*Ne
 		return nil, fmt.Errorf("listing namespaces: %w", err)
 	}
 
-	audit.TotalNamespaces = len(nsList.Items)
-
 	for _, ns := range nsList.Items {
 		nsName := ns.Name
 
@@ -137,7 +139,6 @@ func (n *NetworkPolicyAuditor) AuditNetworkPolicies(filterNamespace string) (*Ne
 		// 2. Well-known name patterns for infrastructure components
 		// 3. User-provided skip list via --skip-namespaces flag
 		if n.shouldSkipNamespace(nsName, ns.Labels) {
-			audit.TotalNamespaces--
 			continue
 		}
 
@@ -145,6 +146,9 @@ func (n *NetworkPolicyAuditor) AuditNetworkPolicies(filterNamespace string) (*Ne
 		if filterNamespace != "" && filterNamespace != nsName {
 			continue
 		}
+		// Include namespaces whose API requests later fail: they remain in
+		// scope even though their policy coverage cannot be established.
+		audit.TotalNamespaces++
 
 		// Get pods — needed for real coverage (which pods each policy
 		// selector actually matches), not just a count.
@@ -167,10 +171,12 @@ func (n *NetworkPolicyAuditor) AuditNetworkPolicies(filterNamespace string) (*Ne
 
 		env := detectEnvironment(nsName)
 		status := NamespaceNetworkStatus{
-			Name:        nsName,
-			Environment: env,
-			PodCount:    len(pods.Items),
-			PolicyCount: len(policies.Items),
+			Name:                nsName,
+			Environment:         env,
+			PodCount:            len(pods.Items),
+			PolicyCount:         len(policies.Items),
+			UncoveredPodCount:   len(pods.Items),
+			CoverageGapPodCount: len(pods.Items),
 		}
 
 		if len(policies.Items) > 0 {
@@ -185,10 +191,7 @@ func (n *NetworkPolicyAuditor) AuditNetworkPolicies(filterNamespace string) (*Ne
 		// A namespace with no pods has nothing to protect — vacuously
 		// protected, not a finding. Otherwise, require full coverage in
 		// both directions across every pod actually present.
-		if status.PodCount == 0 ||
-			(status.CoveredPodCount == status.PodCount &&
-				status.IngressCoveredPods == status.PodCount &&
-				status.EgressCoveredPods == status.PodCount) {
+		if status.PodCount == 0 || status.FullyCoveredPodCount == status.PodCount {
 			audit.ProtectedNamespaces = append(audit.ProtectedNamespaces, status)
 		} else {
 			audit.UnprotectedNamespaces = append(audit.UnprotectedNamespaces, status)
@@ -328,12 +331,10 @@ func (n *NetworkPolicyAuditor) analyzeCoverage(status *NamespaceNetworkStatus, p
 		if ingress {
 			detail.Types = append(detail.Types, "Ingress")
 			detail.IngressRules = len(policy.Spec.Ingress)
-			status.HasIngressRestriction = true
 		}
 		if egress {
 			detail.Types = append(detail.Types, "Egress")
 			detail.EgressRules = len(policy.Spec.Egress)
-			status.HasEgressRestriction = true
 		}
 		detail.AllowsAllIngress = ingress && policyAllowsAllIngress(policy)
 		detail.AllowsAllEgress = egress && policyAllowsAllEgress(policy)
@@ -380,61 +381,60 @@ func (n *NetworkPolicyAuditor) analyzeCoverage(status *NamespaceNetworkStatus, p
 		// Additive semantics: one allow-all policy makes that direction
 		// unrestricted for this pod regardless of other, more restrictive
 		// policies also selecting it.
-		if ingressRestricted && !ingressAllowedAll {
+		ingressCovered := ingressRestricted && !ingressAllowedAll
+		egressCovered := egressRestricted && !egressAllowedAll
+		if ingressCovered {
 			status.IngressCoveredPods++
 		}
-		if egressRestricted && !egressAllowedAll {
+		if egressCovered {
 			status.EgressCoveredPods++
+		}
+		if ingressCovered && egressCovered {
+			status.FullyCoveredPodCount++
 		}
 	}
 	status.UncoveredPodCount = status.PodCount - status.CoveredPodCount
+	status.CoverageGapPodCount = status.PodCount - status.FullyCoveredPodCount
+	status.HasIngressRestriction = status.PodCount > 0 && status.IngressCoveredPods == status.PodCount
+	status.HasEgressRestriction = status.PodCount > 0 && status.EgressCoveredPods == status.PodCount
 }
 
 func (n *NetworkPolicyAuditor) analyzeRisk(status *NamespaceNetworkStatus) {
 	// Fully protected (or empty) namespaces are not a risk finding.
-	if status.PodCount == 0 ||
-		(status.CoveredPodCount == status.PodCount &&
-			status.IngressCoveredPods == status.PodCount &&
-			status.EgressCoveredPods == status.PodCount) {
+	if status.PodCount == 0 || status.FullyCoveredPodCount == status.PodCount {
 		return
 	}
 
 	env := status.Environment
 	var coverageClause string
-	if status.CoveredPodCount == 0 {
-		coverageClause = "no network isolation - all pods can communicate freely"
+	if status.PolicyCount == 0 {
+		coverageClause = "no NetworkPolicy was observed"
+	} else if status.CoveredPodCount == 0 {
+		coverageClause = "no observed pods are selected by the existing NetworkPolicies"
 	} else {
 		coverageClause = fmt.Sprintf(
-			"partial coverage - %d of %d pods lack full ingress/egress restriction",
-			status.UncoveredPodCount, status.PodCount,
+			"%d of %d observed pods lack configured ingress and egress coverage",
+			status.CoverageGapPodCount, status.PodCount,
 		)
 	}
 
 	switch env {
 	case "PRODUCTION":
 		status.RiskLevel = "HIGH"
-		status.RiskReason = "Production namespace with " + coverageClause
+		status.RiskReason = "Production namespace: " + coverageClause
 	case "STAGING":
 		status.RiskLevel = "HIGH"
-		if status.CoveredPodCount == 0 {
-			status.RiskReason = "Staging namespace unprotected - can be used as pivot point in attacks"
-		} else {
-			status.RiskReason = "Staging namespace has " + coverageClause + " - can be used as pivot point in attacks"
-		}
+		status.RiskReason = "Staging namespace: " + coverageClause
 	case "SYSTEM":
 		status.RiskLevel = "HIGH"
-		if status.CoveredPodCount == 0 {
-			status.RiskReason = "System namespace unprotected - critical infrastructure exposed"
-		} else {
-			status.RiskReason = "System namespace has " + coverageClause + " - critical infrastructure exposed"
-		}
+		status.RiskReason = "System namespace: " + coverageClause
 	default:
 		if status.PodCount > 10 {
 			status.RiskLevel = "MEDIUM"
-			status.RiskReason = fmt.Sprintf("Development namespace with %d pods - consider basic isolation", status.PodCount)
+			status.RiskReason = "Development namespace: " + coverageClause
 		} else {
 			status.RiskLevel = "LOW"
-			status.RiskReason = "Development/test namespace - low risk but isolation recommended"
+			status.RiskReason = "Development/test namespace: " + coverageClause
 		}
 	}
 }
@@ -522,7 +522,7 @@ func PrintNetworkPolicyAudit(audit *NetworkPolicyAudit) {
 	fmt.Println("║              NETWORK POLICY ANALYSIS                      ║")
 	fmt.Println("╠════════════════════════════════════════════════════════════╣")
 	fmt.Println("║  • Shows NetworkPolicy coverage across all namespaces      ║")
-	fmt.Println("║  • Missing policies = unrestricted pod-to-pod traffic      ║")
+	fmt.Println("║  • Reports observed pod selectors and policy directions    ║")
 	fmt.Println("║  • Use with kube-bench for full network security audit     ║")
 	fmt.Println("╚════════════════════════════════════════════════════════════╝")
 	fmt.Println()
@@ -530,13 +530,16 @@ func PrintNetworkPolicyAudit(audit *NetworkPolicyAudit) {
 	// Summary
 	protected := len(audit.ProtectedNamespaces)
 	unprotected := len(audit.UnprotectedNamespaces)
-	total := protected + unprotected
+	total := audit.TotalNamespaces
+	if total == 0 {
+		total = protected + unprotected + len(audit.Warnings)
+	}
 
 	fmt.Println("═══════════════════════════════════════════════════════════")
 	fmt.Println("NETWORK POLICY SUMMARY")
 	fmt.Println("═══════════════════════════════════════════════════════════")
 	fmt.Printf("Total Namespaces:         %d\n", total)
-	fmt.Printf("Protected (full coverage):%d\n", protected)
+	fmt.Printf("Protected (full coverage): %d\n", protected)
 	fmt.Printf("Unprotected (gap found):  %d\n", unprotected)
 	fmt.Printf("Total NetworkPolicies:    %d\n", audit.TotalPolicies)
 	fmt.Printf("High Risk Namespaces:     %d\n", audit.HighRiskNamespaces)
@@ -638,22 +641,19 @@ func printUnprotectedNamespace(ns NamespaceNetworkStatus) {
 	fmt.Printf("  %s %s %s (%s) - %s RISK\n", riskEmoji, envLabel, ns.Name, podLabel(ns.PodCount), ns.RiskLevel)
 	if ns.PolicyCount > 0 {
 		fmt.Printf("     📊 %d of %d pods have full ingress+egress coverage (%d policies present)\n",
-			minInt(ns.IngressCoveredPods, ns.EgressCoveredPods), ns.PodCount, ns.PolicyCount)
+			ns.FullyCoveredPodCount, ns.PodCount, ns.PolicyCount)
 	}
 	fmt.Printf("     ⚠️  %s\n", ns.RiskReason)
 	fmt.Println()
 }
 
-func minInt(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
-}
-
 func printNetworkRecommendations(audit *NetworkPolicyAudit) {
 	if len(audit.UnprotectedNamespaces) == 0 {
-		fmt.Println("\n🎉 All namespaces have NetworkPolicies! Great security posture.")
+		if len(audit.Warnings) > 0 {
+			printNetworkAuditWarnings(audit.Warnings)
+			return
+		}
+		fmt.Println("\n✅ All observed pods have full configured NetworkPolicy coverage.")
 		return
 	}
 
@@ -672,7 +672,11 @@ func printNetworkRecommendations(audit *NetworkPolicyAudit) {
 	if len(highRisk) > 0 {
 		fmt.Printf("\n🔴 IMMEDIATE ACTION - %d high-risk namespaces:\n", len(highRisk))
 		for i, ns := range highRisk {
-			fmt.Printf("  %d. Add NetworkPolicy to '%s' (%s, %s)\n", i+1, ns.Name, ns.Environment, podLabel(ns.PodCount))
+			if ns.PolicyCount == 0 {
+				fmt.Printf("  %d. Add NetworkPolicy to '%s' (%s, %s)\n", i+1, ns.Name, ns.Environment, podLabel(ns.PodCount))
+			} else {
+				fmt.Printf("  %d. Review NetworkPolicy selectors and directions in '%s' (%s, %s)\n", i+1, ns.Name, ns.Environment, podLabel(ns.PodCount))
+			}
 		}
 	}
 
@@ -703,11 +707,16 @@ func printNetworkRecommendations(audit *NetworkPolicyAudit) {
 		}
 	}
 
-	if len(audit.Warnings) > 0 {
-		fmt.Println("\n⚠️  AUDIT INCOMPLETE - the following namespaces could not be checked:")
-		for _, w := range audit.Warnings {
-			fmt.Printf("  • %s (%s): %s\n", w.Namespace, w.Operation, w.Message)
-		}
+	printNetworkAuditWarnings(audit.Warnings)
+}
+
+func printNetworkAuditWarnings(warnings []NetworkAuditWarning) {
+	if len(warnings) == 0 {
+		return
+	}
+	fmt.Println("\n⚠️  AUDIT INCOMPLETE - the following namespaces could not be checked:")
+	for _, warning := range warnings {
+		fmt.Printf("  • %s (%s): %s\n", warning.Namespace, warning.Operation, warning.Message)
 	}
 }
 

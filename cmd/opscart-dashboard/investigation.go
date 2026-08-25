@@ -70,9 +70,11 @@ type investigationPageData struct {
 	FirstDetected string
 
 	// Namespace-scoped findings (unprotected_namespace, idle_namespace) — no pod involved
-	NamespaceScoped   bool
-	NamespacePodCount int    // pods affected/exposed, from the incident's stored details
-	NamespaceFinding  string // the specific finding description
+	NamespaceScoped              bool
+	NamespacePodCount            int    // observed pods in the namespace
+	NamespacePolicyCount         int    // observed NetworkPolicy objects
+	NamespaceCoverageGapPodCount int    // observed pods without full directional coverage
+	NamespaceFinding             string // the specific finding description
 
 	// Node-scoped condition incidents.
 	NodeScoped             bool
@@ -178,7 +180,7 @@ func investigationHints(issueType string, stateReason string, restarts int32, po
 		hints = append(hints, investigationHint{
 			Confidence: "high",
 			Title:      "Evaluate a default-deny NetworkPolicy",
-			Reason:     "No NetworkPolicy was detected; review the namespace's intended ingress and egress controls before applying a default-deny policy.",
+			Reason:     "Review existing NetworkPolicy selectors and intended ingress and egress controls before considering a default-deny policy.",
 			Command:    fmt.Sprintf("kubectl get networkpolicies -n %s", namespace),
 		})
 		hints = append(hints, investigationHint{
@@ -723,12 +725,14 @@ func populateNamespaceFinding(data *investigationPageData, scan *clusterScan, is
 		for _, ns := range scan.netAudit.UnprotectedNamespaces {
 			if ns.Name == namespace {
 				data.NamespacePodCount = ns.PodCount
+				data.NamespacePolicyCount = ns.PolicyCount
+				data.NamespaceCoverageGapPodCount = ns.CoverageGapPodCount
 				if ns.PolicyCount == 0 {
-					data.NamespaceFinding = "No NetworkPolicy found in this namespace — all pods can communicate freely"
+					data.NamespaceFinding = "No NetworkPolicy found in this namespace."
 				} else {
 					data.NamespaceFinding = fmt.Sprintf(
-						"%d NetworkPolicy object(s) present, but %d of %d pods lack full ingress/egress coverage",
-						ns.PolicyCount, ns.UncoveredPodCount, ns.PodCount,
+						"%d NetworkPolicy object(s) present, but %d of %d observed pods lack configured ingress and egress coverage",
+						ns.PolicyCount, ns.CoverageGapPodCount, ns.PodCount,
 					)
 				}
 				data.Severity = strings.ToLower(ns.RiskLevel)
@@ -1127,7 +1131,14 @@ func buildOperationalSummary(data *investigationPageData) string {
 		var summary string
 		switch data.IssueType {
 		case "unprotected_namespace":
-			summary = fmt.Sprintf("No NetworkPolicy was detected in the %s namespace.", data.Namespace)
+			if data.NamespacePolicyCount == 0 {
+				summary = fmt.Sprintf("No NetworkPolicy was detected in the %s namespace.", data.Namespace)
+			} else {
+				summary = fmt.Sprintf(
+					"Existing NetworkPolicies do not fully cover %d of %d observed pods in the %s namespace.",
+					data.NamespaceCoverageGapPodCount, data.NamespacePodCount, data.Namespace,
+				)
+			}
 		case "idle_namespace":
 			summary = fmt.Sprintf("An idle namespace finding is active for the %s namespace.", data.Namespace)
 		default:

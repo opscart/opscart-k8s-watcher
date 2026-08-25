@@ -130,6 +130,12 @@ func TestPopulateNamespaceFinding(t *testing.T) {
 		netAudit: &analyzer.NetworkPolicyAudit{
 			UnprotectedNamespaces: []analyzer.NamespaceNetworkStatus{
 				{Name: "exposed-ns", PodCount: 8, RiskReason: "Production namespace with no network isolation"},
+				{
+					Name: "partial-ns", PodCount: 2, PolicyCount: 1,
+					CoveredPodCount: 2, UncoveredPodCount: 0,
+					FullyCoveredPodCount: 0, CoverageGapPodCount: 2,
+					RiskLevel: "HIGH",
+				},
 			},
 		},
 		wasteAudit: &analyzer.WasteAudit{
@@ -145,8 +151,21 @@ func TestPopulateNamespaceFinding(t *testing.T) {
 		if data.NamespacePodCount != 8 || data.NamespaceFinding == "" {
 			t.Errorf("expected pod count 8 and non-empty finding, got %d / %q", data.NamespacePodCount, data.NamespaceFinding)
 		}
-		if data.NamespaceFinding != "No NetworkPolicy found in this namespace — all pods can communicate freely" {
+		if data.NamespaceFinding != "No NetworkPolicy found in this namespace." {
 			t.Errorf("unexpected mapped finding: %q", data.NamespaceFinding)
+		}
+	})
+
+	t.Run("partial coverage preserves existing policies and actual gap", func(t *testing.T) {
+		data := &investigationPageData{}
+		populateNamespaceFinding(data, scan, "unprotected_namespace", "partial-ns")
+		if data.NamespacePodCount != 2 || data.NamespacePolicyCount != 1 || data.NamespaceCoverageGapPodCount != 2 {
+			t.Fatalf("namespace evidence was not carried to the investigation page: %+v", data)
+		}
+		if !strings.Contains(data.NamespaceFinding, "2 of 2 observed pods") ||
+			strings.Contains(data.NamespaceFinding, "0 of 2") ||
+			strings.Contains(data.NamespaceFinding, "No NetworkPolicy") {
+			t.Fatalf("partial coverage finding misrepresented configured policies: %q", data.NamespaceFinding)
 		}
 	})
 
@@ -207,6 +226,61 @@ func TestBuildOperationalSummaryNamespaceScoped(t *testing.T) {
 	for _, unsupported := range []string{"restarted", "critical infrastructure exposed", "every pod"} {
 		if strings.Contains(summary, unsupported) {
 			t.Errorf("namespace-scoped summary contains unsupported language %q: %q", unsupported, summary)
+		}
+	}
+}
+
+func TestBuildOperationalSummaryNamespaceScopedPartialPolicyCoverage(t *testing.T) {
+	data := &investigationPageData{
+		NamespaceScoped:              true,
+		Namespace:                    "payments-prod",
+		NamespaceFinding:             "existing NetworkPolicy has a directional coverage gap",
+		IssueType:                    "unprotected_namespace",
+		NamespacePodCount:            2,
+		NamespacePolicyCount:         1,
+		NamespaceCoverageGapPodCount: 2,
+		Severity:                     "high",
+	}
+	summary := buildOperationalSummary(data)
+	for _, want := range []string{"Existing NetworkPolicies", "2 of 2 observed pods", "payments-prod", "classified as high"} {
+		if !strings.Contains(summary, want) {
+			t.Errorf("partial coverage summary omitted %q: %q", want, summary)
+		}
+	}
+	if strings.Contains(summary, "No NetworkPolicy was detected") {
+		t.Fatalf("partial coverage summary claimed existing policies were absent: %q", summary)
+	}
+}
+
+func TestHandleInvestigationPage_PartialPolicyCoverageDoesNotClaimMissingPolicy(t *testing.T) {
+	srv := newTestServer()
+	state := srv.getState(bogusClusterCtx)
+	state.scan = &clusterScan{
+		netAudit: &analyzer.NetworkPolicyAudit{
+			UnprotectedNamespaces: []analyzer.NamespaceNetworkStatus{{
+				Name: "payments-prod", PodCount: 2, PolicyCount: 1,
+				CoveredPodCount: 2, UncoveredPodCount: 0,
+				FullyCoveredPodCount: 0, CoverageGapPodCount: 2,
+				RiskLevel: "HIGH",
+			}},
+		},
+	}
+	req := httptest.NewRequest(http.MethodGet,
+		"/investigate?ns=payments-prod&type=unprotected_namespace&cluster="+bogusClusterCtx, nil)
+	rec := httptest.NewRecorder()
+	srv.handleInvestigationPage(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("partial-coverage investigation status = %d: %s", rec.Code, rec.Body.String())
+	}
+	body := rec.Body.String()
+	for _, want := range []string{"2 of 2 observed pods", "Existing NetworkPolicies", "Review existing NetworkPolicy selectors"} {
+		if !strings.Contains(body, want) {
+			t.Errorf("partial-coverage investigation omitted %q", want)
+		}
+	}
+	for _, forbidden := range []string{"No NetworkPolicy was detected", "No NetworkPolicy found", "0 of 2 observed pods"} {
+		if strings.Contains(body, forbidden) {
+			t.Errorf("partial-coverage investigation rendered unsupported text %q", forbidden)
 		}
 	}
 }

@@ -902,6 +902,7 @@ type securityPageData struct {
 	UnprotectedNS         []analyzer.NamespaceNetworkStatus
 	ProtectedNSCount      int
 	NetworkNamespaceTotal int
+	NetworkAuditWarnings  []analyzer.NetworkAuditWarning
 	NetworkAvailable      bool
 	ScanCoverage          string
 }
@@ -1137,6 +1138,7 @@ func (srv *server) handleSecurityPage(w http.ResponseWriter, r *http.Request) {
 		data.UnprotectedNS = scan.netAudit.UnprotectedNamespaces
 		data.ProtectedNSCount = len(scan.netAudit.ProtectedNamespaces)
 		data.NetworkNamespaceTotal = scan.netAudit.TotalNamespaces
+		data.NetworkAuditWarnings = scan.netAudit.Warnings
 		if data.NetworkNamespaceTotal == 0 {
 			data.NetworkNamespaceTotal = data.ProtectedNSCount + len(data.UnprotectedNS)
 		}

@@ -167,8 +167,8 @@ func collectWarRoomIssues(scan *clusterScan, limit int) []warRoomIssue {
 					if ns.PolicyCount != 1 {
 						policyWord = "policies"
 					}
-					message = fmt.Sprintf("%d of %d pods lack full ingress/egress coverage (%d %s present)",
-						ns.UncoveredPodCount, ns.PodCount, ns.PolicyCount, policyWord)
+					message = fmt.Sprintf("%d of %d observed pods lack configured ingress and egress coverage (%d %s present)",
+						ns.CoverageGapPodCount, ns.PodCount, ns.PolicyCount, policyWord)
 				}
 				issues = append(issues, warRoomIssue{
 					Severity:       "high",

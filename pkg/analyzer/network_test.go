@@ -2,8 +2,12 @@ package analyzer
 
 import (
 	"context"
+	"io"
+	"os"
+	"strings"
 	"testing"
 
+	"github.com/opscart/opscart-k8s-watcher/pkg/models"
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -53,6 +57,32 @@ func findStatus(list []NamespaceNetworkStatus, name string) (NamespaceNetworkSta
 	return NamespaceNetworkStatus{}, false
 }
 
+func captureNetworkAuditOutput(t *testing.T, render func()) string {
+	t.Helper()
+	reader, writer, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("create stdout pipe: %v", err)
+	}
+	originalStdout := os.Stdout
+	os.Stdout = writer
+	defer func() {
+		os.Stdout = originalStdout
+		reader.Close()
+		writer.Close()
+	}()
+
+	render()
+	if err := writer.Close(); err != nil {
+		t.Fatalf("close stdout pipe: %v", err)
+	}
+	os.Stdout = originalStdout
+	output, err := io.ReadAll(reader)
+	if err != nil {
+		t.Fatalf("read captured stdout: %v", err)
+	}
+	return string(output)
+}
+
 // ── Core reported bug: partial selector coverage ───────────────────────────
 
 func TestAuditNetworkPoliciesPartialSelectorCoverageIsUnprotected(t *testing.T) {
@@ -81,6 +111,79 @@ func TestAuditNetworkPoliciesPartialSelectorCoverageIsUnprotected(t *testing.T) 
 	}
 	if status.PodCount != 3 || status.CoveredPodCount != 1 || status.UncoveredPodCount != 2 {
 		t.Fatalf("coverage counts wrong: %+v", status)
+	}
+	if status.FullyCoveredPodCount != 1 || status.CoverageGapPodCount != 2 {
+		t.Fatalf("same-pod directional coverage counts wrong: %+v", status)
+	}
+	if status.HasIngressRestriction || status.HasEgressRestriction {
+		t.Fatalf("partial selector coverage must not set namespace-wide restriction flags: %+v", status)
+	}
+}
+
+func TestAuditNetworkPoliciesIngressOnlyCountsEveryPodAsDirectionalGap(t *testing.T) {
+	na := newTestNetworkAuditor(
+		nsObj("payments-prod"),
+		podWithLabels("payments-prod", "api-1", map[string]string{"app": "api"}),
+		podWithLabels("payments-prod", "api-2", map[string]string{"app": "api"}),
+		policy("payments-prod", "deny-ingress", metav1.LabelSelector{},
+			[]networkingv1.PolicyType{networkingv1.PolicyTypeIngress}, nil, nil),
+	)
+	audit, err := na.AuditNetworkPolicies("")
+	if err != nil {
+		t.Fatalf("AuditNetworkPolicies: %v", err)
+	}
+	status, ok := findStatus(audit.UnprotectedNamespaces, "payments-prod")
+	if !ok {
+		t.Fatalf("ingress-only coverage must remain a directional finding: %+v", audit)
+	}
+	if status.CoveredPodCount != 2 || status.UncoveredPodCount != 0 {
+		t.Fatalf("existing selector-coverage semantics changed: %+v", status)
+	}
+	if status.IngressCoveredPods != 2 || status.EgressCoveredPods != 0 ||
+		status.FullyCoveredPodCount != 0 || status.CoverageGapPodCount != 2 {
+		t.Fatalf("directional coverage counts wrong: %+v", status)
+	}
+	if !status.HasIngressRestriction || status.HasEgressRestriction {
+		t.Fatalf("namespace-wide direction flags wrong: %+v", status)
+	}
+	if !strings.Contains(status.RiskReason, "2 of 2 observed pods") ||
+		strings.Contains(status.RiskReason, "0 of 2") {
+		t.Fatalf("risk reason does not describe the actual directional gap: %q", status.RiskReason)
+	}
+}
+
+func TestAuditNetworkPoliciesDisjointDirectionsDoNotCountAsFullyCovered(t *testing.T) {
+	na := newTestNetworkAuditor(
+		nsObj("split-prod"),
+		podWithLabels("split-prod", "ingress-pod", map[string]string{"role": "ingress"}),
+		podWithLabels("split-prod", "egress-pod", map[string]string{"role": "egress"}),
+		policy("split-prod", "ingress-only",
+			metav1.LabelSelector{MatchLabels: map[string]string{"role": "ingress"}},
+			[]networkingv1.PolicyType{networkingv1.PolicyTypeIngress}, nil, nil),
+		policy("split-prod", "egress-only",
+			metav1.LabelSelector{MatchLabels: map[string]string{"role": "egress"}},
+			[]networkingv1.PolicyType{networkingv1.PolicyTypeEgress}, nil, nil),
+	)
+	audit, err := na.AuditNetworkPolicies("")
+	if err != nil {
+		t.Fatalf("AuditNetworkPolicies: %v", err)
+	}
+	status, ok := findStatus(audit.UnprotectedNamespaces, "split-prod")
+	if !ok {
+		t.Fatalf("disjoint directions must not be reported fully covered: %+v", audit)
+	}
+	if status.CoveredPodCount != 2 || status.UncoveredPodCount != 0 ||
+		status.IngressCoveredPods != 1 || status.EgressCoveredPods != 1 ||
+		status.FullyCoveredPodCount != 0 || status.CoverageGapPodCount != 2 {
+		t.Fatalf("same-pod directional intersection was not preserved: %+v", status)
+	}
+	if status.HasIngressRestriction || status.HasEgressRestriction {
+		t.Fatalf("partial directional coverage must not set namespace-wide flags: %+v", status)
+	}
+	output := captureNetworkAuditOutput(t, func() { printUnprotectedNamespace(status) })
+	if !strings.Contains(output, "0 of 2 pods have full ingress+egress coverage") ||
+		strings.Contains(output, "1 of 2 pods have full ingress+egress coverage") {
+		t.Fatalf("CLI used directional totals instead of same-pod coverage: %s", output)
 	}
 }
 
@@ -113,6 +216,9 @@ func TestAuditNetworkPoliciesAllowAllIngressNotCovered(t *testing.T) {
 	}
 	if status.IngressCoveredPods != 0 {
 		t.Errorf("IngressCoveredPods should be 0 (allow-all rule), got %d", status.IngressCoveredPods)
+	}
+	if status.FullyCoveredPodCount != 0 || status.CoverageGapPodCount != 1 || status.HasIngressRestriction {
+		t.Errorf("allow-all must remain a directional coverage gap: %+v", status)
 	}
 }
 
@@ -241,6 +347,78 @@ func TestAuditNetworkPoliciesPodListFailureRecordsWarning(t *testing.T) {
 	}
 }
 
+func TestAuditNetworkPoliciesFilteredNamespaceCountIncludesFailedChecks(t *testing.T) {
+	t.Run("filter excludes other and infrastructure namespaces", func(t *testing.T) {
+		na := newTestNetworkAuditor(nsObj("payments"), nsObj("billing"), nsObj("kube-system"))
+		audit, err := na.AuditNetworkPolicies("payments")
+		if err != nil {
+			t.Fatalf("AuditNetworkPolicies: %v", err)
+		}
+		if audit.TotalNamespaces != 1 || len(audit.ProtectedNamespaces) != 1 {
+			t.Fatalf("filtered audit counted namespaces outside its scope: %+v", audit)
+		}
+	})
+
+	t.Run("failed target remains in the filtered denominator", func(t *testing.T) {
+		na := newTestNetworkAuditor(nsObj("payments"), nsObj("billing"))
+		na.clientset.(*fake.Clientset).PrependReactor("list", "networkpolicies", func(ktesting.Action) (bool, runtime.Object, error) {
+			return true, nil, context.DeadlineExceeded
+		})
+		audit, err := na.AuditNetworkPolicies("payments")
+		if err != nil {
+			t.Fatalf("AuditNetworkPolicies: %v", err)
+		}
+		if audit.TotalNamespaces != 1 || len(audit.Warnings) != 1 || audit.Warnings[0].Namespace != "payments" {
+			t.Fatalf("failed namespace disappeared from the filtered audit scope: %+v", audit)
+		}
+	})
+}
+
+func TestPrintNetworkPolicyAuditWarningsDoNotProduceFalseAllClear(t *testing.T) {
+	audit := &NetworkPolicyAudit{
+		TotalNamespaces: 2,
+		ProtectedNamespaces: []NamespaceNetworkStatus{{
+			Name: "healthy", PodCount: 1, PolicyCount: 1,
+			CoveredPodCount: 1, FullyCoveredPodCount: 1,
+			IngressCoveredPods: 1, EgressCoveredPods: 1,
+			HasIngressRestriction: true, HasEgressRestriction: true,
+		}},
+		Warnings: []NetworkAuditWarning{{
+			Namespace: "blocked", Operation: "list NetworkPolicies", Message: "forbidden",
+		}},
+	}
+	output := captureNetworkAuditOutput(t, func() { PrintNetworkPolicyAudit(audit) })
+	for _, want := range []string{"Total Namespaces:         2", "50%", "AUDIT INCOMPLETE", "blocked", "forbidden"} {
+		if !strings.Contains(output, want) {
+			t.Errorf("incomplete CLI audit omitted %q: %s", want, output)
+		}
+	}
+	for _, forbidden := range []string{"All observed pods have full", "Great security posture", "100%"} {
+		if strings.Contains(output, forbidden) {
+			t.Errorf("incomplete CLI audit reported unsupported success %q: %s", forbidden, output)
+		}
+	}
+}
+
+func TestCISNetworkPolicyControlDoesNotPassIncompleteAudit(t *testing.T) {
+	audit := &NetworkPolicyAudit{
+		TotalNamespaces:     2,
+		ProtectedNamespaces: []NamespaceNetworkStatus{{Name: "healthy"}},
+		Warnings:            []NetworkAuditWarning{{Namespace: "blocked", Operation: "list Pods", Message: "forbidden"}},
+	}
+	result := CalculateCISScore(&models.SecurityAudit{}, audit)
+	for _, control := range result.Controls {
+		if control.ID != "5.7.3" {
+			continue
+		}
+		if control.Passed || !strings.Contains(control.Finding, "Audit incomplete") {
+			t.Fatalf("CIS 5.7.3 passed or omitted incomplete evidence: %+v", control)
+		}
+		return
+	}
+	t.Fatal("CIS result omitted control 5.7.3")
+}
+
 // ── Empty namespace and full coverage ───────────────────────────────────
 
 func TestAuditNetworkPoliciesEmptyNamespaceIsProtected(t *testing.T) {
@@ -271,5 +449,33 @@ func TestAuditNetworkPoliciesFullDenyAllIsProtected(t *testing.T) {
 	}
 	if !status.HasDefaultDenyIngress || !status.HasDefaultDenyEgress {
 		t.Errorf("expected both directional default-deny flags set: %+v", status)
+	}
+	if status.FullyCoveredPodCount != 1 || status.CoverageGapPodCount != 0 ||
+		!status.HasIngressRestriction || !status.HasEgressRestriction {
+		t.Errorf("full namespace-wide directional coverage was not preserved: %+v", status)
+	}
+}
+
+func TestAuditNetworkPoliciesNoPolicyCountsEveryObservedPodAsUncovered(t *testing.T) {
+	na := newTestNetworkAuditor(
+		nsObj("apps"),
+		podWithLabels("apps", "api-1", map[string]string{"app": "api"}),
+		podWithLabels("apps", "api-2", map[string]string{"app": "api"}),
+	)
+	audit, err := na.AuditNetworkPolicies("")
+	if err != nil {
+		t.Fatalf("AuditNetworkPolicies: %v", err)
+	}
+	status, ok := findStatus(audit.UnprotectedNamespaces, "apps")
+	if !ok {
+		t.Fatalf("namespace without policies disappeared from findings: %+v", audit)
+	}
+	if status.CoveredPodCount != 0 || status.UncoveredPodCount != 2 ||
+		status.FullyCoveredPodCount != 0 || status.CoverageGapPodCount != 2 {
+		t.Fatalf("missing policies did not mark every observed pod as uncovered: %+v", status)
+	}
+	if !strings.Contains(status.RiskReason, "no NetworkPolicy was observed") ||
+		strings.Contains(status.RiskReason, "communicate freely") {
+		t.Fatalf("risk reason exceeded observed evidence: %q", status.RiskReason)
 	}
 }

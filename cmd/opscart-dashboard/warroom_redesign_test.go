@@ -101,6 +101,43 @@ func TestNamespacePostureEvidenceAndIdentity(t *testing.T) {
 	}
 }
 
+func TestNamespacePartialPolicyCoverageUsesDirectionalGapEverywhere(t *testing.T) {
+	scan := &clusterScan{
+		netAudit: &analyzer.NetworkPolicyAudit{
+			UnprotectedNamespaces: []analyzer.NamespaceNetworkStatus{{
+				Name: "payments-prod", PodCount: 2, PolicyCount: 1,
+				CoveredPodCount: 2, UncoveredPodCount: 0,
+				FullyCoveredPodCount: 0, CoverageGapPodCount: 2,
+				RiskLevel: "HIGH",
+			}},
+		},
+	}
+	issues := collectWarRoomIssues(scan, 0)
+	if len(issues) != 1 {
+		t.Fatalf("expected one namespace coverage finding, got: %+v", issues)
+	}
+	if issues[0].Classification != "Incomplete NetworkPolicy coverage" ||
+		!strings.Contains(issues[0].Message, "2 of 2 observed pods") ||
+		strings.Contains(issues[0].Message, "0 of 2") {
+		t.Fatalf("War Room used selector coverage instead of directional coverage: %+v", issues[0])
+	}
+	body := renderWarRoomPage(scan, "prod", []string{"prod"})
+	if !strings.Contains(body, "2 of 2 observed pods") || strings.Contains(body, "No NetworkPolicy present") {
+		t.Fatalf("War Room page misrepresented a configured policy: %s", body)
+	}
+
+	title, subtitle, _, action := formatGroupedIssue("unprotected_namespace", "high", issues)
+	if title != "1 namespace with NetworkPolicy coverage gap" ||
+		!strings.Contains(subtitle, "coverage gap observed") ||
+		action != "kubectl get networkpolicies -n payments-prod" {
+		t.Fatalf("grouped namespace finding retained missing-policy wording: %q / %q / %q", title, subtitle, action)
+	}
+	_, label := warRoomTypeLabel("unprotected_namespace")
+	if label != "NetPolicy gap" {
+		t.Fatalf("namespace finding short label still claims policies are absent: %q", label)
+	}
+}
+
 func TestWarRoomSearchAndFilters(t *testing.T) {
 	issues := []warRoomIssue{
 		{Severity: "critical", Type: "crash_loop", Namespace: "payments", Resource: "checkout-7cddf79d98-jxmtx", WorkloadKind: "Deployment", WorkloadName: "checkout", Classification: "CrashLoopBackOff", Container: "api"},
