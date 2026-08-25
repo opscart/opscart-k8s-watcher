@@ -471,6 +471,33 @@ func calcIncidentScore(scan *clusterScan) (score int, color string, label string
 	}
 	penalties += nsPenalty
 
+	// Node conditions: uses scan.nodeHealth directly rather than the
+	// DB-backed War Room node-issue query. calcIncidentScore runs before
+	// this scan's node incidents are persisted (see refresh() in scan.go),
+	// so a DB query here would read the PREVIOUS scan's data, not this
+	// one — scan.nodeHealth is what this scan pass actually observed.
+	criticalNodes, highNodes := 0, 0
+	for _, finding := range scan.nodeHealth {
+		switch sev, _ := models.NodeConditionSeverity(finding.ConditionType); sev {
+		case "critical":
+			criticalNodes++
+		case "high":
+			highNodes++
+		}
+	}
+	// Critical node conditions (e.g. Ready=False): -10 each, cap at -30
+	nodeCriticalPenalty := criticalNodes * 10
+	if nodeCriticalPenalty > 30 {
+		nodeCriticalPenalty = 30
+	}
+	penalties += nodeCriticalPenalty
+	// High node conditions (pressure/network): -4 each, cap at -12
+	nodeHighPenalty := highNodes * 4
+	if nodeHighPenalty > 12 {
+		nodeHighPenalty = 12
+	}
+	penalties += nodeHighPenalty
+
 	// Waste: orphaned PVCs -1 each, cap at -5
 	if scan.wasteAudit != nil {
 		pvcPenalty := len(scan.wasteAudit.OrphanedPVCs)
@@ -519,6 +546,15 @@ func countCriticalIssues(scan *clusterScan) int {
 	count := 0
 	for _, issue := range issues {
 		if issue.Severity == "critical" {
+			count++
+		}
+	}
+	// Node conditions aren't in collectWarRoomIssues (that one requires DB
+	// access to correlate against persisted incidents — see
+	// collectActiveNodeWarRoomIssues). Count directly from this scan's
+	// observed node findings instead.
+	for _, finding := range scan.nodeHealth {
+		if sev, _ := models.NodeConditionSeverity(finding.ConditionType); sev == "critical" {
 			count++
 		}
 	}
