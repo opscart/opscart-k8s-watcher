@@ -156,14 +156,28 @@ func collectWarRoomIssues(scan *clusterScan, limit int) []warRoomIssue {
 	if scan.netAudit != nil {
 		for _, ns := range scan.netAudit.UnprotectedNamespaces {
 			if ns.RiskLevel == "HIGH" {
+				classification := "Missing NetworkPolicy"
+				message := fmt.Sprintf("%d pods in namespace, no NetworkPolicy present", ns.PodCount)
+				if ns.PolicyCount > 0 {
+					// This namespace HAS policies — the gap is coverage,
+					// not absence. Never claim "missing" when a policy
+					// exists; state the actual gap.
+					classification = "Incomplete NetworkPolicy coverage"
+					policyWord := "policy"
+					if ns.PolicyCount != 1 {
+						policyWord = "policies"
+					}
+					message = fmt.Sprintf("%d of %d pods lack full ingress/egress coverage (%d %s present)",
+						ns.UncoveredPodCount, ns.PodCount, ns.PolicyCount, policyWord)
+				}
 				issues = append(issues, warRoomIssue{
 					Severity:       "high",
 					Type:           "unprotected_namespace",
 					Namespace:      ns.Name,
 					Resource:       "namespace",
-					Message:        fmt.Sprintf("%d pods in namespace", ns.PodCount),
+					Message:        message,
 					KubectlCmd:     fmt.Sprintf("kubectl get networkpolicies -n %s", ns.Name),
-					Classification: "Missing default-deny NetworkPolicy",
+					Classification: classification,
 				})
 			}
 		}
@@ -478,7 +492,7 @@ func classificationForIssue(issueType string) string {
 	case "privileged_container":
 		return "Privileged container"
 	case "unprotected_namespace":
-		return "Missing default-deny NetworkPolicy"
+		return "NetworkPolicy coverage gap"
 	case "idle_namespace":
 		return "Idle namespace"
 	default:

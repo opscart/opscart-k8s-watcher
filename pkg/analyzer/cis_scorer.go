@@ -37,14 +37,22 @@ func CalculateCISScore(audit *models.SecurityAudit, netAudit *NetworkPolicyAudit
 	if netAudit != nil {
 		unprotected := len(netAudit.UnprotectedNamespaces)
 		total := netAudit.TotalNamespaces
-		if unprotected == 0 && total > 0 {
-			net573Passed = true
-			net573Finding = fmt.Sprintf("All %d namespaces have NetworkPolicies ✅", total)
-		} else if total == 0 {
-			net573Finding = "No namespaces found to evaluate"
-		} else {
+		switch {
+		case len(netAudit.Warnings) > 0:
+			// An incomplete audit must never report a false pass — some
+			// namespace's coverage is genuinely unknown, not confirmed good.
 			net573Finding = fmt.Sprintf(
-				"%d of %d namespaces have no NetworkPolicy (%d high-risk)",
+				"Audit incomplete — %d namespace(s) could not be checked (see network audit warnings)",
+				len(netAudit.Warnings),
+			)
+		case unprotected == 0 && total > 0:
+			net573Passed = true
+			net573Finding = fmt.Sprintf("All %d namespaces have full NetworkPolicy coverage ✅", total)
+		case total == 0:
+			net573Finding = "No namespaces found to evaluate"
+		default:
+			net573Finding = fmt.Sprintf(
+				"%d of %d namespaces have a NetworkPolicy coverage gap (%d high-risk)",
 				unprotected, total, netAudit.HighRiskNamespaces,
 			)
 		}

@@ -83,7 +83,7 @@ func TestNamespacePostureEvidenceAndIdentity(t *testing.T) {
 	issues := collectWarRoomIssues(scan, 0)
 	body := renderWarRoomPage(scan, "prod", []string{"prod"})
 	for _, want := range []string{
-		"Namespace/monitoring", "Missing default-deny NetworkPolicy", "8 pods in namespace",
+		"Namespace/monitoring", "Missing NetworkPolicy", "8 pods in namespace, no NetworkPolicy present",
 		"kubectl get networkpolicies -n monitoring", "Namespace/batch",
 		"No pods found. Namespace is 30 days old with zero workloads",
 	} {

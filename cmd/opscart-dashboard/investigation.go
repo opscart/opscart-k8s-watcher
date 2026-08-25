@@ -723,7 +723,14 @@ func populateNamespaceFinding(data *investigationPageData, scan *clusterScan, is
 		for _, ns := range scan.netAudit.UnprotectedNamespaces {
 			if ns.Name == namespace {
 				data.NamespacePodCount = ns.PodCount
-				data.NamespaceFinding = "No default-deny NetworkPolicy detected in a system namespace"
+				if ns.PolicyCount == 0 {
+					data.NamespaceFinding = "No NetworkPolicy found in this namespace — all pods can communicate freely"
+				} else {
+					data.NamespaceFinding = fmt.Sprintf(
+						"%d NetworkPolicy object(s) present, but %d of %d pods lack full ingress/egress coverage",
+						ns.PolicyCount, ns.UncoveredPodCount, ns.PodCount,
+					)
+				}
 				data.Severity = strings.ToLower(ns.RiskLevel)
 				return
 			}
