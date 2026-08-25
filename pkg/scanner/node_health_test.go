@@ -245,8 +245,8 @@ func TestNodeConditionIncidentsIdentityAndMutableEvidence(t *testing.T) {
 	if first.Fingerprint != "cluster/Node/worker-21/DiskPressure" || second.Fingerprint != first.Fingerprint {
 		t.Fatalf("fingerprints changed with evidence: first=%q second=%q", first.Fingerprint, second.Fingerprint)
 	}
-	if first.Severity != "low" || first.Namespace != "" || first.Resource != "worker-21" || first.IssueType != "DiskPressure" {
-		t.Fatalf("unexpected incident mapping: %+v", first)
+	if first.Severity != "high" || first.Namespace != "" || first.Resource != "worker-21" || first.IssueType != "DiskPressure" {
+		t.Fatalf("unexpected incident mapping (DiskPressure must use models.NodeConditionSeverity, not a hardcoded value): %+v", first)
 	}
 	if first.DetailsJSON == second.DetailsJSON {
 		t.Fatal("mutable evidence did not change details_json")
@@ -404,5 +404,41 @@ func TestNodeHealthProductionFlowPersistsStableIdentityAcrossPlacementChurn(t *t
 	events, err := db.GetIncidentTimeline("cluster-a", first.Fingerprint)
 	if err != nil || len(events) != 1 || events[0].EventType != "DETECTED" {
 		t.Fatalf("evidence churn emitted lifecycle events: %+v err=%v", events, err)
+	}
+}
+
+// TestNodeConditionIncidentsSeverityMatchesDisplayClassifier guards the
+// severity-consistency bug: a node condition shown as critical in the War
+// Room (via models.NodeConditionSeverity) must be persisted with that same
+// severity, not a hardcoded value. Previously every node incident was
+// persisted as "low" regardless of condition type, so a Ready=False node —
+// critical everywhere it was displayed — silently showed as low severity
+// in incident listings, historical counts, and any scoring that reads the
+// stored value.
+func TestNodeConditionIncidentsSeverityMatchesDisplayClassifier(t *testing.T) {
+	cases := []struct {
+		conditionType string
+		wantSeverity  string
+	}{
+		{"Ready", "critical"},
+		{"DiskPressure", "high"},
+		{"MemoryPressure", "high"},
+		{"PIDPressure", "high"},
+		{"NetworkUnavailable", "high"},
+		// A condition type the classifier doesn't recognize must not fail
+		// persistence outright; it falls back rather than matching any of
+		// the known severities.
+		{"SomeFutureConditionType", "low"},
+	}
+	for _, c := range cases {
+		finding := models.NodeConditionFinding{
+			NodeName: "worker-1", ConditionType: c.conditionType,
+			ConditionStatus: "True", Reason: c.conditionType,
+		}
+		got := NodeConditionIncidents([]models.NodeConditionFinding{finding})[0]
+		if got.Severity != c.wantSeverity {
+			t.Errorf("NodeConditionIncidents(%s).Severity = %q, want %q (must match models.NodeConditionSeverity used for display)",
+				c.conditionType, got.Severity, c.wantSeverity)
+		}
 	}
 }
