@@ -638,6 +638,72 @@ func TestOverviewTemplate_RendersFullyPopulatedData(t *testing.T) {
 	}
 }
 
+// TestOverviewTemplate_IncidentScoreUsesHigherIsBetterColors guards the
+// score-color semantics: calcIncidentScore defines a higher score as healthier,
+// so low scores must render red and high scores green. The template previously
+// applied the inverse classes even though the adjacent Security Score used the
+// correct ordering.
+func TestOverviewTemplate_IncidentScoreUsesHigherIsBetterColors(t *testing.T) {
+	tests := []struct {
+		name      string
+		score     int
+		wantClass string
+	}{
+		{name: "low score is bad", score: 30, wantClass: "bad"},
+		{name: "middle score is warning", score: 62, wantClass: "warn"},
+		{name: "high score is good", score: 90, wantClass: "good"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			data := fullyPopulatedOverviewData()
+			data.IncidentScore = tt.score
+
+			var buf strings.Builder
+			if err := getOverviewTmpl().Execute(&buf, data); err != nil {
+				t.Fatalf("template execution failed: %v", err)
+			}
+
+			want := fmt.Sprintf(`<div class="bottom-val n %s">%d/100</div>`, tt.wantClass, tt.score)
+			if !strings.Contains(buf.String(), want) {
+				t.Fatalf("incident score %d did not render class %q", tt.score, tt.wantClass)
+			}
+		})
+	}
+}
+
+// TestOverviewTemplate_IncidentScoreDeltaUsesImprovementColors guards the
+// delta direction: a positive score delta is an improvement and a negative
+// delta is a regression. html/template escapes the plus sign in text output.
+func TestOverviewTemplate_IncidentScoreDeltaUsesImprovementColors(t *testing.T) {
+	tests := []struct {
+		name      string
+		delta     string
+		wantClass string
+		wantText  string
+	}{
+		{name: "increase is good", delta: "+10", wantClass: "good", wantText: "&#43;10"},
+		{name: "decrease is bad", delta: "-10", wantClass: "bad", wantText: "-10"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			data := fullyPopulatedOverviewData()
+			data.IncidentScoreDeltaText = tt.delta
+
+			var buf strings.Builder
+			if err := getOverviewTmpl().Execute(&buf, data); err != nil {
+				t.Fatalf("template execution failed: %v", err)
+			}
+
+			want := fmt.Sprintf(`<div class="bottom-delta %s">%s from last scan</div>`, tt.wantClass, tt.wantText)
+			if !strings.Contains(buf.String(), want) {
+				t.Fatalf("incident score delta %q did not render class %q", tt.delta, tt.wantClass)
+			}
+		})
+	}
+}
+
 // TestOverviewTemplate_RendersEmptyData exercises the opposite path: every
 // optional/slice field at its zero value (nil Scoreboard, no TopIssues, no
 // feed entries, no health lists), proving the template's empty-state
@@ -1862,7 +1928,7 @@ func TestTallySnapshotCountsIncludesNodeFindings(t *testing.T) {
 		{Severity: "high"},
 	}
 	nodeHealth := []models.NodeConditionFinding{
-		{NodeName: "node-1", ConditionType: "Ready", ConditionStatus: "False"},        // critical
+		{NodeName: "node-1", ConditionType: "Ready", ConditionStatus: "False"},         // critical
 		{NodeName: "node-2", ConditionType: "MemoryPressure", ConditionStatus: "True"}, // high -> warnings
 	}
 	critical, warnings := tallySnapshotCounts(issues, nodeHealth)

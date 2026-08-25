@@ -399,8 +399,8 @@
 <div class="bottom-strip">
   <div class="bottom-metric bs-item">
     <div class="bottom-lbl l">Incident Score</div>
-    <div class="bottom-val n{{if lt .IncidentScore 50}} good{{else if lt .IncidentScore 80}} warn{{else}} bad{{end}}">{{.IncidentScore}}/100</div>
-    {{if .IncidentScoreDeltaText}}<div class="bottom-delta {{if hasPrefix .IncidentScoreDeltaText "+"}}bad{{else}}good{{end}}">{{.IncidentScoreDeltaText}} from last scan</div>{{end}}
+    <div class="bottom-val n{{if lt .IncidentScore 50}} bad{{else if lt .IncidentScore 80}} warn{{else}} good{{end}}">{{.IncidentScore}}/100</div>
+    {{if .IncidentScoreDeltaText}}<div class="bottom-delta {{if hasPrefix .IncidentScoreDeltaText "+"}}good{{else}}bad{{end}}">{{.IncidentScoreDeltaText}} from last scan</div>{{end}}
   </div>
   <div class="bottom-metric bs-item">
     <div class="bottom-lbl l">Security Score</div>
