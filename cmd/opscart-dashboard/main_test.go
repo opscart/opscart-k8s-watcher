@@ -540,7 +540,7 @@ func fullyPopulatedOverviewData() overviewPageData {
 				MemoryLine: "First detected 2d ago · accelerating",
 			},
 			{
-				Rank: 2, Title: "2 namespaces missing NetworkPolicy", Subtitle: "Including checkout, payments",
+				Rank: 2, Title: "2 namespaces with NetworkPolicy coverage gaps", Subtitle: "Including checkout, payments",
 				Severity: "high", SeverityLbl: "HIGH", CountText: "2 ns", URL: "/warroom",
 				Namespace: "checkout", Resource: "namespace", IssueType: "unprotected_namespace",
 				FirstDetectedLabel: "5d ago",
@@ -718,7 +718,7 @@ func (s *queryIncidentsStubStore) QueryIncidents(f store.IncidentFilter) ([]stor
 func TestBuildOverviewVerdict_UnprotectedNamespaceUsesNamespaceNotLiteralResource(t *testing.T) {
 	topIssues := []topIssue{
 		{
-			Title:              "1 namespace missing NetworkPolicy",
+			Title:              "1 namespace with NetworkPolicy coverage gap",
 			Namespace:          "payments-prod",
 			Resource:           "namespace",
 			IssueType:          "unprotected_namespace",
@@ -776,7 +776,7 @@ func TestBuildOverviewVerdict_MatchesTopIssuesZero(t *testing.T) {
 			IssueType: "crash_loop", GroupSize: 5, FirstDetectedLabel: "2d ago", TrendVal: "accelerating",
 		},
 		{
-			Title: "2 namespaces missing NetworkPolicy", Namespace: "payments", Resource: "namespace",
+			Title: "2 namespaces with NetworkPolicy coverage gaps", Namespace: "payments", Resource: "namespace",
 			IssueType: "unprotected_namespace", GroupSize: 2, FirstDetectedLabel: "1d ago",
 		},
 	}
@@ -1508,6 +1508,54 @@ func TestSecurityPageScanStatesAndClaims(t *testing.T) {
 		}
 		if !strings.Contains(body, "Passed checks") || !strings.Contains(body, "<details") {
 			t.Fatal("passed checks are not rendered in a collapsed details element")
+		}
+	})
+
+	t.Run("partial policy coverage reports actual directional gap", func(t *testing.T) {
+		securityAudit := &models.SecurityAudit{TotalPodsAudited: 2}
+		networkAudit := &analyzer.NetworkPolicyAudit{
+			TotalNamespaces: 1,
+			UnprotectedNamespaces: []analyzer.NamespaceNetworkStatus{{
+				Name: "payments-prod", PodCount: 2, PolicyCount: 1,
+				CoveredPodCount: 2, UncoveredPodCount: 0,
+				FullyCoveredPodCount: 0, CoverageGapPodCount: 2,
+				RiskLevel: "HIGH",
+			}},
+		}
+		result := analyzer.CalculateCISScore(securityAudit, networkAudit)
+		body := renderSecurityForTest(t, &clusterScan{
+			secAudit: securityAudit, cisResult: &result, netAudit: networkAudit,
+		})
+		if !strings.Contains(body, "2 of 2 observed pods lack configured ingress and egress coverage") ||
+			strings.Contains(body, "0 of 2 observed pods") ||
+			strings.Contains(body, "No NetworkPolicy detected in namespace payments-prod") {
+			t.Fatalf("Security page misrepresented existing policy coverage: %s", body)
+		}
+	})
+
+	t.Run("audit warnings are visible and suppress false pass", func(t *testing.T) {
+		securityAudit := &models.SecurityAudit{}
+		networkAudit := &analyzer.NetworkPolicyAudit{
+			TotalNamespaces:     2,
+			ProtectedNamespaces: []analyzer.NamespaceNetworkStatus{{Name: "healthy"}},
+			Warnings: []analyzer.NetworkAuditWarning{{
+				Namespace: "blocked", Operation: "list NetworkPolicies", Message: "forbidden",
+			}},
+		}
+		result := analyzer.CalculateCISScore(securityAudit, networkAudit)
+		body := renderSecurityForTest(t, &clusterScan{
+			secAudit: securityAudit, cisResult: &result, netAudit: networkAudit,
+		})
+		for _, want := range []string{
+			"Scan coverage is Partial", "Unavailable NetworkPolicy Checks", "blocked", "list NetworkPolicies", "forbidden",
+			"NetworkPolicy coverage could not be verified for every namespace",
+		} {
+			if !strings.Contains(body, want) {
+				t.Errorf("incomplete network audit omitted %q", want)
+			}
+		}
+		if strings.Contains(body, "Every evaluated namespace has full configured NetworkPolicy coverage") {
+			t.Fatal("incomplete network audit rendered a false passing state")
 		}
 	})
 

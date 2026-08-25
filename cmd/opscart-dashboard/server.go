@@ -1539,9 +1539,9 @@ func formatGroupedIssue(issueType, severity string, grp []warRoomIssue) (title, 
 		countText = fmt.Sprintf("%d pod%s", count, pluralS(count))
 		action = fmt.Sprintf("kubectl describe pod %s -n %s", samples[0], grp[0].Namespace)
 	case "unprotected_namespace":
-		title = fmt.Sprintf("%d namespace%s missing NetworkPolicy", count, pluralS(count))
+		title = fmt.Sprintf("%d namespace%s with NetworkPolicy coverage gap%s", count, pluralS(count), pluralS(count))
 		if count == 1 {
-			subtitle = fmt.Sprintf("%s has no network isolation", grp[0].Namespace)
+			subtitle = fmt.Sprintf("NetworkPolicy coverage gap observed in %s", grp[0].Namespace)
 		} else {
 			nsList := []string{}
 			for ns := range namespaces {
@@ -1553,7 +1553,7 @@ func formatGroupedIssue(issueType, severity string, grp []warRoomIssue) (title, 
 			subtitle = fmt.Sprintf("Including %s", strings.Join(nsList, ", "))
 		}
 		countText = fmt.Sprintf("%d ns", count)
-		action = "kubectl apply default-deny NetworkPolicy"
+		action = fmt.Sprintf("kubectl get networkpolicies -n %s", grp[0].Namespace)
 	default:
 		title = fmt.Sprintf("%d %s issue%s", count, humanizeWRType(issueType), pluralS(count))
 		subtitle = fmt.Sprintf("Across %d namespace%s", nsCount, pluralS(nsCount))
@@ -1821,7 +1821,7 @@ func warRoomTypeLabel(t string) (iconClass, label string) {
 	case "privileged_container":
 		return "wri-priv", "Privileged"
 	case "unprotected_namespace":
-		return "wri-netpol", "No NetPolicy"
+		return "wri-netpol", "NetPolicy gap"
 	case "orphaned_pvc":
 		return "wri-pvc", "Orphaned PVC"
 	case "zero_replica":
