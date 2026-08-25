@@ -6,7 +6,9 @@ import (
 	"testing"
 	"time"
 
+	autoscalingv2 "k8s.io/api/autoscaling/v2"
 	corev1 "k8s.io/api/core/v1"
+	networkingv1 "k8s.io/api/networking/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/kubernetes/fake"
@@ -485,5 +487,207 @@ func TestEventsFetchedOncePerNamespaceNotPerPod(t *testing.T) {
 
 	if eventListCalls != 1 {
 		t.Errorf("events List called %d times for 3 pods in one namespace, want exactly 1 (must be batched per-namespace, not per-pod)", eventListCalls)
+	}
+}
+
+// ── Active-vs-age-gated malfunction detection ──────────────────────────────
+//
+// Currently-broken resources (Ingress backends with no ready endpoints,
+// HPAs reporting ScalingActive=False) must be reported immediately, not
+// hidden behind minAgeDays. Age-gating remains correct for findings
+// inferred from a sustained pattern (AlwaysAtMin), which needs time to
+// become a meaningful signal. The Service-availability detector (matched
+// pods with no ready endpoints) was deliberately deferred to a separate PR
+// pending a batched EndpointSlice query design — see PR discussion on
+// per-Service API call cost at scale.
+
+func TestFormatDurationSinceSubDay(t *testing.T) {
+	cases := []struct {
+		ago  time.Duration
+		want string
+	}{
+		{30 * time.Second, "1m"},
+		{45 * time.Minute, "45m"},
+		{2 * time.Hour, "2h"},
+		{25 * time.Hour, "1d"},
+	}
+	for _, c := range cases {
+		got := formatDurationSince(time.Now().Add(-c.ago))
+		if got != c.want {
+			t.Errorf("formatDurationSince(-%s) = %q, want %q", c.ago, got, c.want)
+		}
+	}
+}
+
+func ingressFixture(name, namespace, host, svcName string, ageDays int) *networkingv1.Ingress {
+	pathType := networkingv1.PathTypePrefix
+	return &networkingv1.Ingress{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:              name,
+			Namespace:         namespace,
+			CreationTimestamp: metav1.Time{Time: time.Now().Add(-time.Duration(ageDays) * 24 * time.Hour)},
+		},
+		Spec: networkingv1.IngressSpec{
+			Rules: []networkingv1.IngressRule{{
+				Host: host,
+				IngressRuleValue: networkingv1.IngressRuleValue{
+					HTTP: &networkingv1.HTTPIngressRuleValue{
+						Paths: []networkingv1.HTTPIngressPath{{
+							PathType: &pathType,
+							Backend: networkingv1.IngressBackend{
+								Service: &networkingv1.IngressServiceBackend{
+									Name: svcName,
+									Port: networkingv1.ServiceBackendPort{Number: 80},
+								},
+							},
+						}},
+					},
+				},
+			}},
+		},
+	}
+}
+
+func TestBrokenIngressNotAgeGated(t *testing.T) {
+	// Ingress created today (age 0), backend has zero ready endpoints.
+	// Before the fix, minAgeDays=7 hid this for a week.
+	ing := ingressFixture("checkout", "shop", "checkout.example.com", "checkout-svc", 0)
+	svc := oldService("checkout-svc", "shop", map[string]string{"app": "checkout"}, corev1.ServiceTypeClusterIP)
+	svc.CreationTimestamp = metav1.Time{Time: time.Now()}
+
+	wa := newTestAuditor(7, ing, svc)
+	audit := &WasteAudit{}
+	if err := wa.detectBrokenIngresses(audit, ""); err != nil {
+		t.Fatalf("detectBrokenIngresses: %v", err)
+	}
+	if len(audit.BrokenIngresses) != 1 {
+		t.Fatalf("broken ingresses = %d, want 1 (must not be age-gated): %+v", len(audit.BrokenIngresses), audit.BrokenIngresses)
+	}
+	got := audit.BrokenIngresses[0]
+	if !got.IsActive {
+		t.Errorf("broken ingress finding should be marked IsActive")
+	}
+	if strings.Contains(got.Reason, "will fail") || strings.Contains(got.Reason, "will return errors") {
+		t.Errorf("reason overclaims an observed request outcome: %q", got.Reason)
+	}
+}
+
+func TestBrokenIngressEndpointCheckErrorSurfacesAsWarningNotFalsePositive(t *testing.T) {
+	ing := ingressFixture("checkout", "shop", "checkout.example.com", "checkout-svc", 0)
+	svc := oldService("checkout-svc", "shop", map[string]string{"app": "checkout"}, corev1.ServiceTypeClusterIP)
+
+	wa := newTestAuditor(7, ing, svc)
+	wa.clientset.(*fake.Clientset).PrependReactor("list", "endpointslices", func(ktesting.Action) (bool, runtime.Object, error) {
+		return true, nil, context.DeadlineExceeded
+	})
+
+	audit := &WasteAudit{}
+	if err := wa.detectBrokenIngresses(audit, ""); err != nil {
+		t.Fatalf("detectBrokenIngresses: %v", err)
+	}
+	if len(audit.BrokenIngresses) != 0 {
+		t.Fatalf("an EndpointSlice API error must not fabricate a broken-ingress finding: %+v", audit.BrokenIngresses)
+	}
+	found := false
+	for _, w := range audit.DetectorWarnings {
+		if w.Category == "Broken ingresses" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected a detector warning for the endpoint-check failure, got: %+v", audit.DetectorWarnings)
+	}
+}
+
+func hpaFixture(name, namespace string, ageDays int, minReplicas, currentReplicas, desiredReplicas int32, conditions []autoscalingv2.HorizontalPodAutoscalerCondition) *autoscalingv2.HorizontalPodAutoscaler {
+	return &autoscalingv2.HorizontalPodAutoscaler{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:              name,
+			Namespace:         namespace,
+			CreationTimestamp: metav1.Time{Time: time.Now().Add(-time.Duration(ageDays) * 24 * time.Hour)},
+		},
+		Spec: autoscalingv2.HorizontalPodAutoscalerSpec{
+			ScaleTargetRef: autoscalingv2.CrossVersionObjectReference{Kind: "Deployment", Name: "checkout"},
+			MinReplicas:    &minReplicas,
+			MaxReplicas:    10,
+		},
+		Status: autoscalingv2.HorizontalPodAutoscalerStatus{
+			CurrentReplicas: currentReplicas,
+			DesiredReplicas: desiredReplicas,
+			Conditions:      conditions,
+		},
+	}
+}
+
+func TestHPAScalingInactiveNotAgeGated(t *testing.T) {
+	hpa := hpaFixture("checkout-hpa", "shop", 0, 1, 1, 1, []autoscalingv2.HorizontalPodAutoscalerCondition{
+		{Type: "ScalingActive", Status: "False", Reason: "FailedGetResourceMetric", Message: "unable to get metrics",
+			LastTransitionTime: metav1.Time{Time: time.Now().Add(-2 * time.Hour)}},
+	})
+	wa := newTestAuditor(7, hpa)
+	audit := &WasteAudit{}
+	if err := wa.detectMisconfiguredHPAs(audit, ""); err != nil {
+		t.Fatalf("detectMisconfiguredHPAs: %v", err)
+	}
+	if len(audit.MisconfiguredHPAs) != 1 {
+		t.Fatalf("misconfigured HPAs = %d, want 1 (ScalingActive=False must not be age-gated): %+v", len(audit.MisconfiguredHPAs), audit.MisconfiguredHPAs)
+	}
+	got := audit.MisconfiguredHPAs[0]
+	if !got.IsActive {
+		t.Errorf("ScalingActive=False finding should be marked IsActive")
+	}
+	if !strings.Contains(got.Reason, "for 2h") {
+		t.Errorf("reason should report real failure duration (2h), got: %q", got.Reason)
+	}
+	if strings.Contains(got.Reason, "inactive for 0 days") {
+		t.Errorf("reason must not substitute object age for failure duration: %q", got.Reason)
+	}
+}
+
+func TestHPAAlwaysAtMinStaysAgeGatedAndDoesNotOverclaimHistory(t *testing.T) {
+	hpa := hpaFixture("checkout-hpa", "shop", 35, 1, 1, 1, nil)
+	wa := newTestAuditor(7, hpa)
+	audit := &WasteAudit{}
+	if err := wa.detectMisconfiguredHPAs(audit, ""); err != nil {
+		t.Fatalf("detectMisconfiguredHPAs: %v", err)
+	}
+	if len(audit.MisconfiguredHPAs) != 1 {
+		t.Fatalf("misconfigured HPAs = %d, want 1: %+v", len(audit.MisconfiguredHPAs), audit.MisconfiguredHPAs)
+	}
+	got := audit.MisconfiguredHPAs[0]
+	if got.IsActive {
+		t.Errorf("AlwaysAtMin is a tuning candidate, not an active failure")
+	}
+	if strings.Contains(got.Reason, "never scaled up") {
+		t.Errorf("reason overclaims history the detector never observed: %q", got.Reason)
+	}
+}
+
+func TestHPAAlwaysAtMinSuppressedWhenScalingActiveAlreadyFired(t *testing.T) {
+	hpa := hpaFixture("checkout-hpa", "shop", 35, 1, 1, 1, []autoscalingv2.HorizontalPodAutoscalerCondition{
+		{Type: "ScalingActive", Status: "False", Reason: "FailedGetResourceMetric", Message: "unable to get metrics"},
+	})
+	wa := newTestAuditor(7, hpa)
+	audit := &WasteAudit{}
+	if err := wa.detectMisconfiguredHPAs(audit, ""); err != nil {
+		t.Fatalf("detectMisconfiguredHPAs: %v", err)
+	}
+	if len(audit.MisconfiguredHPAs) != 1 {
+		t.Fatalf("expected exactly one finding for one broken HPA (no AlwaysAtMin duplicate), got %d: %+v", len(audit.MisconfiguredHPAs), audit.MisconfiguredHPAs)
+	}
+	if audit.MisconfiguredHPAs[0].Condition == "AlwaysAtMin" {
+		t.Errorf("ScalingActive=False finding should take precedence, not AlwaysAtMin")
+	}
+}
+
+func TestHPAYoungAndHealthyProducesNoFinding(t *testing.T) {
+	hpa := hpaFixture("checkout-hpa", "shop", 1, 1, 3, 3, nil)
+	wa := newTestAuditor(7, hpa)
+	audit := &WasteAudit{}
+	if err := wa.detectMisconfiguredHPAs(audit, ""); err != nil {
+		t.Fatalf("detectMisconfiguredHPAs: %v", err)
+	}
+	if len(audit.MisconfiguredHPAs) != 0 {
+		t.Fatalf("healthy scaling HPA should produce no finding: %+v", audit.MisconfiguredHPAs)
 	}
 }

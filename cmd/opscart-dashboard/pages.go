@@ -1253,10 +1253,18 @@ func buildWasteReviewRows(a *analyzer.WasteAudit, idle []analyzer.StalePod) (res
 		drift = append(drift, wasteReviewRow{"Zero-replica workload", item.Name, item.Namespace, item.Reason, fmt.Sprintf("%dd", item.AgeDays), "—", "Intent review", wasteCommand(strings.ToLower(item.Kind), item.Name, item.Namespace), item.Score})
 	}
 	for _, item := range a.BrokenIngresses {
-		drift = append(drift, wasteReviewRow{"Broken ingress", item.Name, item.Namespace, item.Reason, fmt.Sprintf("%dd", item.AgeDays), "—", "Configuration review", wasteCommand("ingress", item.Name, item.Namespace), item.Score})
+		status := "Active routing failure"
+		if !item.IsActive {
+			status = "Configuration review"
+		}
+		drift = append(drift, wasteReviewRow{"Broken ingress", item.Name, item.Namespace, item.Reason, fmt.Sprintf("%dd", item.AgeDays), "—", status, wasteCommand("ingress", item.Name, item.Namespace), item.Score})
 	}
 	for _, item := range a.MisconfiguredHPAs {
-		drift = append(drift, wasteReviewRow{"Misconfigured HPA", item.Name, item.Namespace, item.Reason, fmt.Sprintf("%dd", item.AgeDays), "—", "Configuration review", wasteCommand("hpa", item.Name, item.Namespace), item.Score})
+		status := "Configuration review"
+		if item.IsActive {
+			status = "Active autoscaling failure"
+		}
+		drift = append(drift, wasteReviewRow{"Misconfigured HPA", item.Name, item.Namespace, item.Reason, fmt.Sprintf("%dd", item.AgeDays), "—", status, wasteCommand("hpa", item.Name, item.Namespace), item.Score})
 	}
 	for _, item := range a.OldReplicaSets {
 		housekeeping = append(housekeeping, wasteReviewRow{"Old ReplicaSet", item.Name, item.Namespace, item.Reason, fmt.Sprintf("%dd", item.AgeDays), "—", "Housekeeping; excluded from total", wasteCommand("replicaset", item.Name, item.Namespace), item.Score})

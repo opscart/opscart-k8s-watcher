@@ -175,6 +175,9 @@ type BrokenIngress struct {
 	Hosts     []string
 	Reason    string // which backend is missing
 	Score     float64
+	// IsActive is always true for BrokenIngress: it is only ever
+	// produced from currently-observed missing endpoints, never age-gated.
+	IsActive bool
 }
 
 // ----------------------------------------------------------------
@@ -191,6 +194,9 @@ type MisconfiguredHPA struct {
 	Condition   string // ScalingDisabled, MetricNotAvailable, AlwaysAtMin
 	Reason      string
 	Score       float64
+	// IsActive is true for a currently K8s-reported ScalingActive=False
+	// condition, false for the age-gated AlwaysAtMin tuning candidate.
+	IsActive bool
 }
 
 // ================================================================
@@ -281,6 +287,24 @@ func (a *WasteAudit) addDetectorWarning(category string, err error) {
 		Category: category,
 		Error:    err.Error(),
 	})
+}
+
+// formatDurationSince renders the time elapsed since t in the coarsest
+// meaningful unit, so a failure that started 2 hours ago reads "2h", not
+// the misleading "0 day(s)" that integer-day truncation would produce.
+func formatDurationSince(t time.Time) string {
+	elapsed := time.Since(t)
+	if elapsed < time.Hour {
+		mins := int(elapsed.Minutes())
+		if mins < 1 {
+			mins = 1
+		}
+		return fmt.Sprintf("%dm", mins)
+	}
+	if elapsed < 24*time.Hour {
+		return fmt.Sprintf("%dh", int(elapsed.Hours()))
+	}
+	return fmt.Sprintf("%dd", int(elapsed.Hours()/24))
 }
 
 // ================================================================
@@ -1108,13 +1132,14 @@ func (w *WasteAuditor) detectBrokenIngresses(audit *WasteAudit, filterNamespace 
 		}
 
 		ageDays := int(now.Sub(ing.CreationTimestamp.Time).Hours() / 24)
-		if ageDays < w.minAgeDays {
-			continue
-		}
+
+		// No age gate: a backend with zero ready endpoints is a current
+		// condition, not something that needs time to become meaningful.
+		// Age-gating this finding hides a currently-broken route for the
+		// entire gate window.
 
 		missingBackends := []string{}
 
-		// Check each rule's backend service exists and has endpoints
 		for _, rule := range ing.Spec.Rules {
 			if rule.HTTP == nil {
 				continue
@@ -1124,19 +1149,29 @@ func (w *WasteAuditor) detectBrokenIngresses(audit *WasteAudit, filterNamespace 
 					continue
 				}
 				svcName := path.Backend.Service.Name
-				hasReady, _ := kube.ServiceHasReadyEndpoints(w.ctx, w.clientset, ing.Namespace, svcName)
+				hasReady, err := kube.ServiceHasReadyEndpoints(w.ctx, w.clientset, ing.Namespace, svcName)
+				if err != nil {
+					// An API failure means endpoint status is UNKNOWN, not
+					// zero. Surface it as a detector warning rather than
+					// fabricating an outage finding.
+					audit.addDetectorWarning("Broken ingresses",
+						fmt.Errorf("checking endpoints for %s/%s (backend of ingress %s): %w", ing.Namespace, svcName, ing.Name, err))
+					continue
+				}
 				if !hasReady {
-					missingBackends = append(missingBackends, fmt.Sprintf("%s → %s (no endpoints)", rule.Host, svcName))
+					missingBackends = append(missingBackends, fmt.Sprintf("%s → %s (no ready endpoints)", rule.Host, svcName))
 				}
 			}
 		}
 
-		// Also check default backend
 		if ing.Spec.DefaultBackend != nil && ing.Spec.DefaultBackend.Service != nil {
 			svcName := ing.Spec.DefaultBackend.Service.Name
-			hasReady, _ := kube.ServiceHasReadyEndpoints(w.ctx, w.clientset, ing.Namespace, svcName)
-			if !hasReady {
-				missingBackends = append(missingBackends, fmt.Sprintf("default-backend → %s (no endpoints)", svcName))
+			hasReady, err := kube.ServiceHasReadyEndpoints(w.ctx, w.clientset, ing.Namespace, svcName)
+			if err != nil {
+				audit.addDetectorWarning("Broken ingresses",
+					fmt.Errorf("checking endpoints for %s/%s (default backend of ingress %s): %w", ing.Namespace, svcName, ing.Name, err))
+			} else if !hasReady {
+				missingBackends = append(missingBackends, fmt.Sprintf("default-backend → %s (no ready endpoints)", svcName))
 			}
 		}
 
@@ -1148,12 +1183,11 @@ func (w *WasteAuditor) detectBrokenIngresses(audit *WasteAudit, filterNamespace 
 				}
 			}
 
+			// Evidence-only wording: we observed zero ready endpoints, not
+			// actual request failures.
 			reason := fmt.Sprintf(
-				"Ingress is %d days old and has %d backend(s) with no active endpoints: %s. "+
-					"Traffic arriving at %v will return errors.",
-				ageDays, len(missingBackends),
+				"Ingress backend currently has no ready endpoints for: %s.",
 				strings.Join(missingBackends, "; "),
-				hosts,
 			)
 
 			audit.BrokenIngresses = append(audit.BrokenIngresses, BrokenIngress{
@@ -1162,7 +1196,8 @@ func (w *WasteAuditor) detectBrokenIngresses(audit *WasteAudit, filterNamespace 
 				AgeDays:   ageDays,
 				Hosts:     hosts,
 				Reason:    reason,
-				Score:     float64(ageDays)*0.4 + float64(len(missingBackends))*10,
+				Score:     float64(len(missingBackends)) * 10,
+				IsActive:  true,
 			})
 		}
 	}
@@ -1220,23 +1255,30 @@ func (w *WasteAuditor) detectMisconfiguredHPAs(audit *WasteAudit, filterNamespac
 		}
 
 		ageDays := int(now.Sub(hpa.CreationTimestamp.Time).Hours() / 24)
-		if ageDays < w.minAgeDays {
-			continue
-		}
 
 		minReplicas := int32(1)
 		if hpa.Spec.MinReplicas != nil {
 			minReplicas = *hpa.Spec.MinReplicas
 		}
 
-		// Check HPA conditions for issues
+		// A currently K8s-reported ScalingActive=False is a live condition —
+		// no age gate. Duration comes from the condition's own transition
+		// time (rendered in the coarsest meaningful unit — minutes, hours,
+		// or days), never substituted with the HPA object's age.
+		scalingInactive := false
 		for _, cond := range hpa.Status.Conditions {
 			if cond.Type == "ScalingActive" && cond.Status == "False" {
+				scalingInactive = true
+
+				var durationClause string
+				if !cond.LastTransitionTime.IsZero() {
+					durationClause = fmt.Sprintf(" for %s", formatDurationSince(cond.LastTransitionTime.Time))
+				}
+
 				reason := fmt.Sprintf(
-					"HPA targeting '%s' has been inactive for %d days. "+
-						"Condition: %s - %s. "+
-						"The HPA exists but cannot function, so autoscaling is disabled effectively.",
-					hpa.Spec.ScaleTargetRef.Name, ageDays,
+					"HPA targeting '%s' currently reports ScalingActive=False%s (reason: %s - %s). "+
+						"Autoscaling is not functioning while this condition persists.",
+					hpa.Spec.ScaleTargetRef.Name, durationClause,
 					cond.Reason, cond.Message,
 				)
 				audit.MisconfiguredHPAs = append(audit.MisconfiguredHPAs, MisconfiguredHPA{
@@ -1248,21 +1290,29 @@ func (w *WasteAuditor) detectMisconfiguredHPAs(audit *WasteAudit, filterNamespac
 					AgeDays:     ageDays,
 					Condition:   string(cond.Reason),
 					Reason:      reason,
-					Score:       float64(ageDays) * 0.3,
+					Score:       100, // active failure — ranks above tuning candidates
+					IsActive:    true,
 				})
 				break
 			}
 		}
 
-		// HPA where current == min for a very long time (not scaling up)
-		if hpa.Status.CurrentReplicas == minReplicas &&
+		// AlwaysAtMin is a point-in-time snapshot (current==desired==min at
+		// THIS scan), not observed history — it must not claim the HPA
+		// "never scaled up". Kept age-gated: this is a tuning-review
+		// candidate, not a proven active failure. Suppressed when the same
+		// HPA already produced a ScalingActive=False finding this scan, so
+		// one broken HPA doesn't produce two overlapping findings.
+		if !scalingInactive &&
+			ageDays >= w.minAgeDays &&
+			hpa.Status.CurrentReplicas == minReplicas &&
 			hpa.Status.DesiredReplicas == minReplicas &&
 			ageDays > 30 {
 			reason := fmt.Sprintf(
-				"HPA targeting '%s' has been at minReplicas (%d) for %d days and never scaled up. "+
-					"Either the workload has no traffic/load, the metric source is wrong, "+
-					"or the HPA thresholds are set too high.",
-				hpa.Spec.ScaleTargetRef.Name, minReplicas, ageDays,
+				"HPA is %d days old and currently has both current and desired replicas "+
+					"equal to minReplicas (%d) at this scan. Review scaling history and demand "+
+					"before changing configuration.",
+				ageDays, minReplicas,
 			)
 			audit.MisconfiguredHPAs = append(audit.MisconfiguredHPAs, MisconfiguredHPA{
 				Name:        hpa.Name,
@@ -1274,6 +1324,7 @@ func (w *WasteAuditor) detectMisconfiguredHPAs(audit *WasteAudit, filterNamespac
 				Condition:   "AlwaysAtMin",
 				Reason:      reason,
 				Score:       float64(ageDays) * 0.2,
+				IsActive:    false,
 			})
 		}
 	}
@@ -1623,7 +1674,11 @@ func printBrokenIngresses(audit *WasteAudit) {
 	fmt.Printf("🟡 INGRESSES WITH MISSING BACKENDS (%d)\n", len(audit.BrokenIngresses))
 	fmt.Println("═══════════════════════════════════════════════════════════")
 	for _, ing := range audit.BrokenIngresses {
-		fmt.Printf("\n  🌐 %s (namespace: %s)\n", ing.Name, ing.Namespace)
+		activeNote := ""
+		if ing.IsActive {
+			activeNote = " 🔴 ACTIVE NOW"
+		}
+		fmt.Printf("\n  🌐 %s (namespace: %s)%s\n", ing.Name, ing.Namespace, activeNote)
 		fmt.Printf("     Hosts:   %s\n", strings.Join(ing.Hosts, ", "))
 		fmt.Printf("     Age:     %d days\n", ing.AgeDays)
 		fmt.Printf("     Finding: %s\n", ing.Reason)
@@ -1640,7 +1695,11 @@ func printMisconfiguredHPAs(audit *WasteAudit) {
 	fmt.Printf("🟢 MISCONFIGURED HPAs (%d)\n", len(audit.MisconfiguredHPAs))
 	fmt.Println("═══════════════════════════════════════════════════════════")
 	for _, hpa := range audit.MisconfiguredHPAs {
-		fmt.Printf("\n  📈 %s → %s (namespace: %s)\n", hpa.Name, hpa.TargetName, hpa.Namespace)
+		activeNote := ""
+		if hpa.IsActive {
+			activeNote = " 🔴 ACTIVE NOW"
+		}
+		fmt.Printf("\n  📈 %s → %s (namespace: %s)%s\n", hpa.Name, hpa.TargetName, hpa.Namespace, activeNote)
 		fmt.Printf("     Replicas: min=%d max=%d  Condition: %s\n", hpa.MinReplicas, hpa.MaxReplicas, hpa.Condition)
 		fmt.Printf("     Age:      %d days\n", hpa.AgeDays)
 		fmt.Printf("     Finding:  %s\n", hpa.Reason)
