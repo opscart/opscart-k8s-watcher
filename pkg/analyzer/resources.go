@@ -50,6 +50,12 @@ func (ra *ResourceAnalyzer) AnalyzeClusterResources(namespace string) (*models.C
 	// Roll the same pod list up to one entry per owning workload — no
 	// second cluster fetch, just a different view of data already in hand.
 	analysis.Workloads = workloadsFromPods(podList.Items)
+	// Preserve the confirmed per-pod ownership too, so consumers that need
+	// to attribute a specific pod-scoped finding to its real workload
+	// (War Room identity, Overview health-grid aggregation) don't have to
+	// re-derive it from name patterns, which cannot distinguish a real
+	// StatefulSet replica from an unrelated pod sharing its naming pattern.
+	analysis.PodWorkloads = podWorkloadMap(podList.Items)
 
 	// Analyze by namespace
 	namespaceMap := make(map[string]*models.NamespaceResourceUsage)
@@ -165,23 +171,65 @@ func workloadsFromPods(pods []corev1.Pod) []models.WorkloadRef {
 }
 
 // workloadRefForPod resolves a pod's owning Deployment/StatefulSet/DaemonSet
-// from its OwnerReferences. ReplicaSet-owned pods (the common Deployment
-// case) roll up to the Deployment name by stripping the ReplicaSet's own
-// hash suffix — the ReplicaSet object itself is not fetched, avoiding a
-// second API call. StatefulSet/DaemonSet owner names are used verbatim;
-// those controllers name pods deterministically, no suffix to strip.
+// from its OwnerReferences. The controlling reference (Controller == true)
+// is used when present — a pod can carry multiple OwnerReferences, and only
+// the controller is authoritative; falling back to the first matching Kind
+// regardless of Controller could pick a non-controlling reference. When no
+// reference is explicitly marked as controller (uncommon, but not
+// guaranteed by the API), the first recognized Kind is used as before.
+// ReplicaSet-owned pods (the common Deployment case) roll up to the
+// Deployment name by stripping the ReplicaSet's own hash suffix — the
+// ReplicaSet object itself is not fetched, avoiding a second API call.
+// StatefulSet/DaemonSet owner names are used verbatim; those controllers
+// name pods deterministically, no suffix to strip.
 func workloadRefForPod(pod corev1.Pod) (models.WorkloadRef, bool) {
 	for _, owner := range pod.OwnerReferences {
-		switch owner.Kind {
-		case "ReplicaSet":
-			return models.WorkloadRef{Name: stripHashSuffix(owner.Name), Kind: "Deployment", Namespace: pod.Namespace}, true
-		case "StatefulSet":
-			return models.WorkloadRef{Name: owner.Name, Kind: "StatefulSet", Namespace: pod.Namespace}, true
-		case "DaemonSet":
-			return models.WorkloadRef{Name: owner.Name, Kind: "DaemonSet", Namespace: pod.Namespace}, true
+		if owner.Controller != nil && *owner.Controller {
+			// The controller is authoritative — if it's a Kind we don't
+			// roll up (e.g. Job), the pod isn't attributed to a tracked
+			// workload at all; don't fall through to scan other,
+			// non-controlling references, which could misattribute via
+			// an unrelated or stale owner reference.
+			return workloadRefForOwner(pod.Namespace, owner)
+		}
+	}
+	// No reference explicitly marked as controller (uncommon, but not
+	// guaranteed by the API) — fall back to the first recognized Kind.
+	for _, owner := range pod.OwnerReferences {
+		if ref, ok := workloadRefForOwner(pod.Namespace, owner); ok {
+			return ref, true
 		}
 	}
 	return models.WorkloadRef{}, false
+}
+
+func workloadRefForOwner(namespace string, owner metav1.OwnerReference) (models.WorkloadRef, bool) {
+	switch owner.Kind {
+	case "ReplicaSet":
+		return models.WorkloadRef{Name: stripHashSuffix(owner.Name), Kind: "Deployment", Namespace: namespace}, true
+	case "StatefulSet":
+		return models.WorkloadRef{Name: owner.Name, Kind: "StatefulSet", Namespace: namespace}, true
+	case "DaemonSet":
+		return models.WorkloadRef{Name: owner.Name, Kind: "DaemonSet", Namespace: namespace}, true
+	}
+	return models.WorkloadRef{}, false
+}
+
+// podWorkloadKey is the PodWorkloads map key convention: "namespace/podName".
+func podWorkloadKey(namespace, podName string) string {
+	return namespace + "/" + podName
+}
+
+// podWorkloadMap builds the confirmed pod -> owning workload map from the
+// same pod list already collected for workloadsFromPods — no second fetch.
+func podWorkloadMap(pods []corev1.Pod) map[string]models.WorkloadRef {
+	out := make(map[string]models.WorkloadRef, len(pods))
+	for _, pod := range pods {
+		if ref, ok := workloadRefForPod(pod); ok {
+			out[podWorkloadKey(pod.Namespace, pod.Name)] = ref
+		}
+	}
+	return out
 }
 
 // stripHashSuffix removes a trailing ReplicaSet hash segment, e.g.

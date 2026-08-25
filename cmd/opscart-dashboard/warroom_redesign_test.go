@@ -232,3 +232,50 @@ func TestWarRoomDenseEqualCardsAndResetVisibility(t *testing.T) {
 		t.Fatal("active filter did not render full-height Reset control")
 	}
 }
+
+// TestEnrichWarRoomIdentityUsesConfirmedOwnershipOverNamePattern guards the
+// naming-collision fix: when scan.PodWorkloads has a confirmed mapping for
+// a pod, that mapping is used directly — never the name-pattern fallback,
+// which cannot distinguish a real StatefulSet replica from an unrelated
+// pod (e.g. a Deployment) that merely shares its naming pattern.
+func TestEnrichWarRoomIdentityUsesConfirmedOwnershipOverNamePattern(t *testing.T) {
+	// Namespace has an unrelated StatefulSet "worker" AND a Deployment
+	// whose pod is literally named "worker-0". A name-pattern check alone
+	// (strings.HasPrefix) would misattribute "worker-0" to the StatefulSet.
+	scan := &clusterScan{
+		AllWorkloads: []models.WorkloadRef{
+			{Name: "worker", Kind: "StatefulSet", Namespace: "batch"},
+			{Name: "worker-0", Kind: "Deployment", Namespace: "batch"},
+		},
+		PodWorkloads: map[string]models.WorkloadRef{
+			"batch/worker-0": {Name: "worker-0", Kind: "Deployment", Namespace: "batch"},
+		},
+	}
+	issue := warRoomIssue{Severity: "critical", Type: "crash_loop", Resource: "worker-0", Namespace: "batch"}
+	enrichWarRoomIdentity(&issue, scan)
+
+	if issue.WorkloadKind != "Deployment" || issue.WorkloadName != "worker-0" {
+		t.Fatalf("expected confirmed ownership (Deployment/worker-0), got %s/%s — the StatefulSet naming collision was not prevented",
+			issue.WorkloadKind, issue.WorkloadName)
+	}
+}
+
+// TestEnrichWarRoomIdentityStatefulSetStaysInstanceScopedWithConfirmedOwnership
+// confirms that confirmed ownership doesn't break the StatefulSet
+// instance-scoping design contract: only Kind is taken from the confirmed
+// mapping, WorkloadName stays the pod's own identity (prometheus-0, not
+// prometheus), matching existing War Room card behavior.
+func TestEnrichWarRoomIdentityStatefulSetStaysInstanceScopedWithConfirmedOwnership(t *testing.T) {
+	scan := &clusterScan{
+		PodWorkloads: map[string]models.WorkloadRef{
+			"monitoring/prometheus-0": {Name: "prometheus", Kind: "StatefulSet", Namespace: "monitoring"},
+		},
+	}
+	issue := warRoomIssue{Severity: "critical", Type: "crash_loop", Resource: "prometheus-0", Namespace: "monitoring"}
+	enrichWarRoomIdentity(&issue, scan)
+
+	if issue.WorkloadKind != "StatefulSet" || issue.WorkloadName != "prometheus-0" {
+		t.Fatalf("expected StatefulSet/prometheus-0 (instance-scoped), got %s/%s",
+			issue.WorkloadKind, issue.WorkloadName)
+	}
+}
