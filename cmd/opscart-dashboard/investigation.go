@@ -904,7 +904,7 @@ func (srv *server) handleInvestigationPage(w http.ResponseWriter, r *http.Reques
 		}
 		data.OperationalSummary = buildOperationalSummary(&data)
 
-		fp := store.Fingerprint(namespace, "Workload", store.OwnerNameFromPod(podName), issueType)
+		fp := store.WorkloadFingerprintForPod(namespace, podName, issueType)
 		if rec, err := srv.db.GetIncidentHistory(ctx, fp); err == nil && rec != nil {
 			data.FirstDetected = firstDetectedLabel(rec.FirstSeen)
 		}
@@ -1011,12 +1011,13 @@ func (srv *server) handleInvestigationPage(w http.ResponseWriter, r *http.Reques
 	data.BlastNamespacePods, data.BlastNsHealthy, data.BlastNsTotal = blastNamespaceHealth(clientset, namespace, data.OwnerName)
 	data.CustomerImpact = deriveCustomerImpact(data.BlastIngresses, data.BlastServices)
 
-	// ── NEW: First detected (from incidents table) ────────────────────────────
-	ownerNameForFP := data.OwnerName
-	if ownerNameForFP == "" {
-		ownerNameForFP = store.OwnerNameFromPod(podName)
-	}
-	fp := store.Fingerprint(namespace, "Workload", ownerNameForFP, issueType)
+	// ── First detected (from incidents table) ─────────────────────────────────
+	// Lookup identity must be SYMMETRIC with the write path (scan persistence),
+	// which derives the owner segment from the pod name. data.OwnerName comes
+	// from real OwnerReferences and is correct for display/blast radius, but
+	// diverges from stored fingerprints for StatefulSets (owner "prometheus"
+	// vs stored instance "prometheus-0"), so it must not be used here.
+	fp := store.WorkloadFingerprintForPod(namespace, podName, issueType)
 	if rec, err := srv.db.GetIncidentHistory(ctx, fp); err == nil && rec != nil {
 		data.FirstDetected = firstDetectedLabel(rec.FirstSeen)
 	}
