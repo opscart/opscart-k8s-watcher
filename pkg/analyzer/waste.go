@@ -7,7 +7,9 @@ import (
 	"strings"
 	"time"
 
+	"github.com/opscart/opscart-k8s-watcher/pkg/classify"
 	"github.com/opscart/opscart-k8s-watcher/pkg/kube"
+	"github.com/opscart/opscart-k8s-watcher/pkg/models"
 	autoscalingv2 "k8s.io/api/autoscaling/v2"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -71,7 +73,7 @@ type StalePodKind string
 
 const (
 	StalePodIdle   StalePodKind = "IDLE"   // old + no recent activity
-	StalePodZombie StalePodKind = "ZOMBIE" // CrashLoopBackOff / OOMKilled for days
+	StalePodZombie StalePodKind = "ZOMBIE" // currently-active pod/container failure
 )
 
 type StalePod struct {
@@ -83,9 +85,10 @@ type StalePod struct {
 	LastActivityDays int // days since last restart (or age if never restarted)
 	RestartCount     int32
 	// For ZOMBIE pods:
-	Status string // CrashLoopBackOff, OOMKilled, etc.
-	Reason string // data-driven explanation
-	Score  float64
+	Status   string // CrashLoopBackOff, OOMKilled, etc.
+	Severity string // shared pod classifier severity; empty means legacy critical
+	Reason   string // data-driven explanation
+	Score    float64
 }
 
 // ----------------------------------------------------------------
@@ -430,6 +433,131 @@ func (w *WasteAuditor) probeFailurePodsByNamespace(namespace string) (map[string
 	return result, nil
 }
 
+// classifyStalePodFailure translates one Kubernetes Pod snapshot into the
+// same raw issue vocabulary produced by pkg/scanner, then delegates the
+// priority decision to the shared classifier. Evidence collection remains in
+// the analyzer for now; sharing that snapshot collector is a separate change.
+func classifyStalePodFailure(pod corev1.Pod, ageDays int, hasProbeFailureEvent bool) (StalePod, bool) {
+	issues := make([]models.EmergencyIssue, 0, len(pod.Status.ContainerStatuses)*2)
+	var totalRestarts int32
+	var notReady int
+	hasDirectFailure := false
+
+	newIssue := func(cs corev1.ContainerStatus, severity, reason, message string) models.EmergencyIssue {
+		return models.EmergencyIssue{
+			Severity:  severity,
+			Resource:  "pod",
+			Namespace: pod.Namespace,
+			Name:      pod.Name,
+			Reason:    reason,
+			Message:   message,
+			Container: cs.Name,
+			Restarts:  int(cs.RestartCount),
+		}
+	}
+
+	for _, cs := range pod.Status.ContainerStatuses {
+		totalRestarts += cs.RestartCount
+		if !cs.Ready {
+			notReady++
+		}
+
+		if waiting := cs.State.Waiting; waiting != nil {
+			switch waiting.Reason {
+			case "CrashLoopBackOff":
+				hasDirectFailure = true
+				issues = append(issues, newIssue(cs, "critical", waiting.Reason,
+					fmt.Sprintf("Container %s is crash looping: %s", cs.Name, waiting.Message)))
+			case "OOMKilled":
+				hasDirectFailure = true
+				issues = append(issues, newIssue(cs, "critical", waiting.Reason,
+					fmt.Sprintf("Container %s killed due to out of memory", cs.Name)))
+			case "Error":
+				hasDirectFailure = true
+				issues = append(issues, newIssue(cs, "critical", waiting.Reason,
+					fmt.Sprintf("Container %s is waiting in Error state: %s", cs.Name, waiting.Message)))
+			case "ImagePullBackOff", "ErrImagePull":
+				hasDirectFailure = true
+				issues = append(issues, newIssue(cs, "high", waiting.Reason,
+					fmt.Sprintf("Cannot pull image for container %s: %s", cs.Name, waiting.Message)))
+			}
+		}
+
+		// OOM evidence is reported by Kubernetes on the last termination
+		// state, not normally as the current Waiting reason. The old dashboard
+		// path missed this evidence even though the CLI scanner already used it.
+		if terminated := cs.LastTerminationState.Terminated; terminated != nil && terminated.Reason == "OOMKilled" {
+			hasDirectFailure = true
+			issues = append(issues, newIssue(cs, "critical", "OOMKilled",
+				fmt.Sprintf("Container %s killed due to out of memory", cs.Name)))
+		}
+
+		if cs.RestartCount > 10 && pod.Status.Phase == corev1.PodRunning {
+			issues = append(issues, newIssue(cs, "medium", "HighRestartCount",
+				fmt.Sprintf("Container %s has restarted %d times", cs.Name, cs.RestartCount)))
+		}
+	}
+
+	if hasProbeFailureEvent && notReady > 0 {
+		// Event evidence is direct enough to classify immediately; no restart
+		// threshold is required. The explicit issue also lets a Running pod
+		// classify as standalone ProbeFailure while a Waiting pod merges it
+		// with CrashLoopBackOff through the same shared priority function.
+		issues = append(issues, models.EmergencyIssue{
+			Severity: "critical", Resource: "pod", Namespace: pod.Namespace, Name: pod.Name,
+			Reason: "ProbeFailure", Restarts: int(totalRestarts),
+			Message: fmt.Sprintf(
+				"%d/%d containers are not ready. Kubernetes events reported a startup or liveness probe failure and container restart (%d restarts observed).",
+				notReady, len(pod.Status.ContainerStatuses), totalRestarts,
+			),
+		})
+	} else if !hasDirectFailure && notReady > 0 && totalRestarts > 10 && pod.Status.Phase == corev1.PodRunning {
+		// Preserve the existing dashboard fallback when Event access is absent
+		// or the event has expired. Direct Crash/OOM/ImagePull/Error evidence
+		// wins over this inference; ProbeFailure still wins over a mere high
+		// restart count.
+		issues = append(issues, models.EmergencyIssue{
+			Severity: "critical", Resource: "pod", Namespace: pod.Namespace, Name: pod.Name,
+			Reason: "ProbeFailure", Restarts: int(totalRestarts),
+			Message: fmt.Sprintf(
+				"%d/%d containers not ready after %d restarts — startup or liveness probe likely failing.",
+				notReady, len(pod.Status.ContainerStatuses), totalRestarts,
+			),
+		})
+	}
+
+	classified, ok := classify.PodFailure(issues, false)
+	if !ok {
+		return StalePod{}, false
+	}
+
+	return StalePod{
+		Name:         pod.Name,
+		Namespace:    pod.Namespace,
+		Kind:         StalePodZombie,
+		AgeDays:      ageDays,
+		RestartCount: totalRestarts,
+		Status:       dashboardPodStatus(classified.Reason),
+		Severity:     classified.Severity,
+		Reason:       classified.Message,
+		Score:        float64(ageDays)*0.4 + float64(totalRestarts)*0.3,
+	}, true
+}
+
+// dashboardPodStatus keeps the durable dashboard category stable across the
+// brief Running/Waiting phase flicker of a crash loop. The shared classifier's
+// richer merged reason remains in its message and in CLI presentation.
+func dashboardPodStatus(classifiedReason string) string {
+	switch classifiedReason {
+	case "CrashLoopBackOff (OOMKilled)":
+		return "OOMKilled"
+	case "CrashLoopBackOff (ProbeFailure)":
+		return "ProbeFailure"
+	default:
+		return classifiedReason
+	}
+}
+
 func (w *WasteAuditor) detectStalePods(audit *WasteAudit, filterNamespace string) error {
 	pods, err := w.clientset.CoreV1().Pods(filterNamespace).List(w.ctx, metav1.ListOptions{TimeoutSeconds: int64Ptr(10)})
 	if err != nil {
@@ -461,107 +589,14 @@ func (w *WasteAuditor) detectStalePods(audit *WasteAudit, filterNamespace string
 		}
 		hasProbeFailureEvent := probeFailurePods[pod.Namespace][pod.Name]
 
-		// ── EVENT-BACKED PROBE FAILURE (checked first) ──────────────
-		// Overrides instantaneous phase: a pod with confirmed probe-failure
-		// events and not-ready containers above the restart threshold is
-		// classified as ProbeFailure regardless of whether THIS scan caught
-		// it Waiting/CrashLoopBackOff or briefly Running.
-		{
-			var totalRestarts int32
-			var notReady int
-			for _, cs := range pod.Status.ContainerStatuses {
-				totalRestarts += cs.RestartCount
-				if !cs.Ready {
-					notReady++
-				}
-			}
-			// No restart threshold here, deliberately. The >10 threshold on the
-			// fallback path below exists because that path INFERS probe failure
-			// from pod phase alone and needs a proxy for "this is persistent, not
-			// a blip". Here we have Kubernetes directly reporting "failed liveness
-			// probe, will be restarted" — that's conclusive, not inferred. Worse,
-			// requiring 10 restarts is self-defeating: exponential backoff stretches
-			// restarts far enough apart that probe events have aged out of the event
-			// log by the time a pod reaches 11, so both conditions can almost never
-			// hold at once. Classify while the evidence exists; ResolveMissing's
-			// debounce keeps the incident active afterward even once events expire.
-			if hasProbeFailureEvent && notReady > 0 {
-				audit.StalePods = append(audit.StalePods, StalePod{
-					Name:         pod.Name,
-					Namespace:    pod.Namespace,
-					Kind:         StalePodZombie,
-					AgeDays:      ageDays,
-					RestartCount: totalRestarts,
-					Status:       "ProbeFailure",
-					Reason: fmt.Sprintf(
-						"%d/%d containers are not ready. Kubernetes events reported a "+
-							"startup or liveness probe failure and container restart "+
-							"(%d restarts observed).",
-						notReady, len(pod.Status.ContainerStatuses), totalRestarts,
-					),
-					Score: float64(ageDays)*0.4 + float64(totalRestarts)*0.3,
-				})
-				goto nextPod
-			}
-		}
-
-		// ── ZOMBIE detection: CrashLoopBackOff / OOMKilled ──────────
-		// Age gate is deliberately skipped — a crashing pod is a problem
-		// on day 0. The minAgeDays filter only applies to idle pod detection.
-		for _, cs := range pod.Status.ContainerStatuses {
-			if cs.State.Waiting != nil {
-				reason := cs.State.Waiting.Reason
-				if reason == "CrashLoopBackOff" || reason == "OOMKilled" ||
-					reason == "Error" || reason == "ImagePullBackOff" {
-
-					explanation := fmt.Sprintf(
-						"Container '%s' has been in %s state. Pod is %d days old with %d restarts. "+
-							"This workload is not functioning and consuming scheduling resources.",
-						cs.Name, reason, ageDays, cs.RestartCount,
-					)
-
-					audit.StalePods = append(audit.StalePods, StalePod{
-						Name:         pod.Name,
-						Namespace:    pod.Namespace,
-						Kind:         StalePodZombie,
-						AgeDays:      ageDays,
-						RestartCount: cs.RestartCount,
-						Status:       reason,
-						Reason:       explanation,
-						Score:        float64(ageDays)*0.4 + float64(cs.RestartCount)*0.3,
-					})
-					goto nextPod
-				}
-			}
-		}
-		{
-			// Fallback ProbeFailure: today's phase-based heuristic, used when
-			// no probe-failure event evidence is available (events expired,
-			// RBAC denied, or the audit above didn't match).
-			var totalRestarts int32
-			var notReady int
-			for _, cs := range pod.Status.ContainerStatuses {
-				totalRestarts += cs.RestartCount
-				if !cs.Ready {
-					notReady++
-				}
-			}
-			if notReady > 0 && totalRestarts > 10 && pod.Status.Phase == corev1.PodRunning {
-				audit.StalePods = append(audit.StalePods, StalePod{
-					Name:         pod.Name,
-					Namespace:    pod.Namespace,
-					Kind:         StalePodZombie,
-					AgeDays:      ageDays,
-					RestartCount: totalRestarts,
-					Status:       "ProbeFailure",
-					Reason: fmt.Sprintf(
-						"%d/%d containers not ready after %d restarts — startup or liveness probe likely failing.",
-						notReady, len(pod.Status.ContainerStatuses), totalRestarts,
-					),
-					Score: float64(ageDays)*0.4 + float64(totalRestarts)*0.3,
-				})
-				goto nextPod
-			}
+		// ── ACTIVE POD-FAILURE CLASSIFICATION ───────────────────────
+		// The CLI and dashboard now reduce the same independent container
+		// signals through pkg/classify. This deliberately inspects every
+		// container before deciding; API container order cannot choose the
+		// winning issue. Age is not a gate for an active malfunction.
+		if stale, ok := classifyStalePodFailure(pod, ageDays, hasProbeFailureEvent); ok {
+			audit.StalePods = append(audit.StalePods, stale)
+			goto nextPod
 		}
 
 		// ── IDLE detection: old pod, no recent restart activity ──────
