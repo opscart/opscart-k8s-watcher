@@ -3,9 +3,11 @@ package scanner
 import (
 	"context"
 	"fmt"
+	"log"
 	"time"
 
 	"github.com/opscart/opscart-k8s-watcher/pkg/models"
+	appsv1 "k8s.io/api/apps/v1"
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -74,6 +76,29 @@ func (s *Scanner) FindEmergencyIssues(namespace string) ([]models.EmergencyIssue
 		issues = append(issues, podIssues...)
 	}
 
+	// A Failed pod is terminal evidence, not automatically a current
+	// workload outage. Reconcile ReplicaSet-owned failures against their
+	// actual Deployment controller and current Deployment status. Controller
+	// lookups are best-effort but never silent: on an API error the original
+	// findings are preserved (fail open to visibility) and a warning is logged.
+	var replicaSets []appsv1.ReplicaSet
+	var deployments []appsv1.Deployment
+	if hasReplicaSetPodFailed(issues) {
+		replicaSetList, listErr := s.clientset.AppsV1().ReplicaSets(namespace).List(s.ctx, metav1.ListOptions{})
+		if listErr != nil {
+			log.Printf("scanner: PodFailed reconciliation skipped for ReplicaSet-owned pods: list ReplicaSets: %v", listErr)
+		} else {
+			replicaSets = replicaSetList.Items
+			deploymentList, deploymentErr := s.clientset.AppsV1().Deployments(namespace).List(s.ctx, metav1.ListOptions{})
+			if deploymentErr != nil {
+				log.Printf("scanner: PodFailed reconciliation skipped for ReplicaSet-owned pods: list Deployments: %v", deploymentErr)
+			} else {
+				deployments = deploymentList.Items
+			}
+		}
+	}
+	issues = reconcilePodFailedAgainstDeploymentHealth(issues, podList.Items, replicaSets, deployments)
+
 	// Check for PVC issues
 	pvcIssues, err := s.findPVCIssues(namespace)
 	if err == nil {
@@ -81,6 +106,177 @@ func (s *Scanner) FindEmergencyIssues(namespace string) ([]models.EmergencyIssue
 	}
 
 	return issues, nil
+}
+
+type deploymentKey struct {
+	namespace string
+	name      string
+}
+
+type deploymentHealth struct {
+	desired   int32
+	available int32
+	current   bool
+}
+
+func hasReplicaSetPodFailed(issues []models.EmergencyIssue) bool {
+	for _, issue := range issues {
+		if issue.Reason == "PodFailed" && issue.OwnerKind == "ReplicaSet" {
+			return true
+		}
+	}
+	return false
+}
+
+// reconcilePodFailedAgainstDeploymentHealth removes retained terminal pod
+// evidence from active triage only when Kubernetes provides sufficient,
+// current controller evidence. Ownership follows the explicit chain
+// Pod -> ReplicaSet -> Deployment; pod-name shape is never used.
+//
+//   - healthy or intentionally scaled-to-zero Deployment: omit PodFailed;
+//   - unavailable Deployment with a more specific live pod finding: omit the
+//     redundant PodFailed and keep the specific finding;
+//   - unavailable Deployment with no specific diagnosis: keep exactly one
+//     critical PodFailed representative for that Deployment;
+//   - unresolved/stale controller evidence: preserve PodFailed unchanged;
+//   - genuinely bare failed pod: keep it as a high-severity review finding;
+//   - Job/CronJob/StatefulSet/DaemonSet/standalone ReplicaSet: unchanged.
+func reconcilePodFailedAgainstDeploymentHealth(
+	issues []models.EmergencyIssue,
+	pods []corev1.Pod,
+	replicaSets []appsv1.ReplicaSet,
+	deployments []appsv1.Deployment,
+) []models.EmergencyIssue {
+	podsByKey := make(map[string]corev1.Pod, len(pods))
+	for _, pod := range pods {
+		podsByKey[pod.Namespace+"/"+pod.Name] = pod
+	}
+
+	replicaSetDeployments := make(map[deploymentKey]deploymentKey, len(replicaSets))
+	for _, replicaSet := range replicaSets {
+		deploymentName, ok := controllingOwnerName(replicaSet.OwnerReferences, "Deployment")
+		if !ok {
+			continue // standalone ReplicaSet or ownership is not authoritative
+		}
+		replicaSetDeployments[deploymentKey{replicaSet.Namespace, replicaSet.Name}] = deploymentKey{replicaSet.Namespace, deploymentName}
+	}
+
+	podDeployments := make(map[string]deploymentKey, len(pods))
+	for _, pod := range pods {
+		replicaSetName, ok := controllingOwnerName(pod.OwnerReferences, "ReplicaSet")
+		if !ok {
+			continue
+		}
+		if deployment, exists := replicaSetDeployments[deploymentKey{pod.Namespace, replicaSetName}]; exists {
+			podDeployments[pod.Namespace+"/"+pod.Name] = deployment
+		}
+	}
+
+	healthByDeployment := make(map[deploymentKey]deploymentHealth, len(deployments))
+	for _, deployment := range deployments {
+		desired := int32(1) // Kubernetes default when spec.replicas is omitted
+		if deployment.Spec.Replicas != nil {
+			desired = *deployment.Spec.Replicas
+		}
+		healthByDeployment[deploymentKey{deployment.Namespace, deployment.Name}] = deploymentHealth{
+			desired:   desired,
+			available: deployment.Status.AvailableReplicas,
+			current:   deployment.Status.ObservedGeneration >= deployment.Generation,
+		}
+	}
+
+	specificFinding := make(map[deploymentKey]bool)
+	for _, issue := range issues {
+		if issue.Resource != "pod" || issue.Reason == "PodFailed" {
+			continue
+		}
+		if deployment, ok := podDeployments[issue.Namespace+"/"+issue.Name]; ok {
+			specificFinding[deployment] = true
+		}
+	}
+
+	// Pick one stable representative for an unavailable Deployment that has
+	// no more specific diagnosis. The selection is independent of API list
+	// order: newest observed failure wins, then lexical pod name.
+	representative := make(map[deploymentKey]int)
+	failedCount := make(map[deploymentKey]int)
+	for i, issue := range issues {
+		if issue.Reason != "PodFailed" {
+			continue
+		}
+		deployment, ok := podDeployments[issue.Namespace+"/"+issue.Name]
+		if !ok {
+			continue
+		}
+		health, known := healthByDeployment[deployment]
+		if !known || !health.current || health.available >= health.desired || specificFinding[deployment] {
+			continue
+		}
+		failedCount[deployment]++
+		prior, exists := representative[deployment]
+		if !exists || preferFailedPodRepresentative(issue, issues[prior]) {
+			representative[deployment] = i
+		}
+	}
+
+	out := make([]models.EmergencyIssue, 0, len(issues))
+	for i, issue := range issues {
+		if issue.Reason != "PodFailed" {
+			out = append(out, issue)
+			continue
+		}
+
+		deployment, resolved := podDeployments[issue.Namespace+"/"+issue.Name]
+		if resolved {
+			health, known := healthByDeployment[deployment]
+			if !known || !health.current {
+				out = append(out, issue) // incomplete/stale evidence: preserve visibility
+				continue
+			}
+			if health.available >= health.desired || specificFinding[deployment] {
+				continue // historical or redundant terminal evidence
+			}
+			if representative[deployment] != i {
+				continue
+			}
+			issue.Message = fmt.Sprintf(
+				"Deployment %q is unavailable (%d/%d replicas available). %d retained failed pod(s) were observed; representative evidence: %s",
+				deployment.name, health.available, health.desired, failedCount[deployment], issue.Message,
+			)
+			out = append(out, issue)
+			continue
+		}
+
+		// Only a pod with no OwnerReferences at all is safely called bare.
+		// Unknown/non-controller ownership remains critical rather than being
+		// guessed away.
+		if pod, ok := podsByKey[issue.Namespace+"/"+issue.Name]; ok && len(pod.OwnerReferences) == 0 {
+			issue.Severity = "high"
+			issue.Message = "Bare pod is terminal and has no controller to declare replacement intent; review whether it is still required. " + issue.Message
+		}
+		out = append(out, issue)
+	}
+
+	return out
+}
+
+func controllingOwnerName(refs []metav1.OwnerReference, kind string) (string, bool) {
+	for _, ref := range refs {
+		if ref.Controller != nil && *ref.Controller && ref.Kind == kind {
+			return ref.Name, true
+		}
+	}
+	return "", false
+}
+
+func preferFailedPodRepresentative(candidate, current models.EmergencyIssue) bool {
+	if candidate.FailureObservedAt.After(current.FailureObservedAt) {
+		return true
+	}
+	if current.FailureObservedAt.After(candidate.FailureObservedAt) {
+		return false
+	}
+	return candidate.Name < current.Name
 }
 
 type workloadOwner struct{ kind, name, execution string }
