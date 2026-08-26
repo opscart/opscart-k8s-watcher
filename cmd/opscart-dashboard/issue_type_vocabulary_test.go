@@ -3,6 +3,7 @@ package main
 import (
 	"testing"
 
+	"github.com/opscart/opscart-k8s-watcher/pkg/analyzer"
 	"github.com/opscart/opscart-k8s-watcher/pkg/store"
 )
 
@@ -18,9 +19,13 @@ import (
 func TestZombieTypeEmitsCanonicalIssueTypes(t *testing.T) {
 	statuses := []string{
 		"OOMKilled",
+		"CrashLoopBackOff (OOMKilled)",
 		"ImagePullBackOff",
+		"ErrImagePull",
 		"ProbeFailure",
+		"CrashLoopBackOff (ProbeFailure)",
 		"CrashLoopBackOff",
+		"HighRestartCount",
 		"anything-else-falls-back",
 	}
 	for _, status := range statuses {
@@ -29,6 +34,25 @@ func TestZombieTypeEmitsCanonicalIssueTypes(t *testing.T) {
 			t.Errorf("zombieTypeForStatus(%q) = %q, which is not canonical (canonical: %q)",
 				status, got, store.CanonicalIssueType(got))
 		}
+	}
+}
+
+func TestCollectWarRoomIssuesPreservesSharedClassifierSeverity(t *testing.T) {
+	scan := &clusterScan{wasteAudit: &analyzer.WasteAudit{StalePods: []analyzer.StalePod{
+		{Name: "image-pod", Namespace: "apps", Kind: analyzer.StalePodZombie, Status: "ErrImagePull", Severity: "high"},
+		{Name: "restart-pod", Namespace: "apps", Kind: analyzer.StalePodZombie, Status: "HighRestartCount", Severity: "medium"},
+	}}}
+
+	issues := collectWarRoomIssues(scan, 0)
+	if len(issues) != 2 {
+		t.Fatalf("collectWarRoomIssues returned %d issues, want 2: %+v", len(issues), issues)
+	}
+	got := map[string]string{}
+	for _, issue := range issues {
+		got[issue.Resource] = issue.Severity
+	}
+	if got["image-pod"] != "high" || got["restart-pod"] != "medium" {
+		t.Fatalf("shared severities were not preserved: %+v", got)
 	}
 }
 

@@ -115,8 +115,12 @@ func collectWarRoomIssues(scan *clusterScan, limit int) []warRoomIssue {
 		for _, pod := range scan.wasteAudit.StalePods {
 			if pod.Kind == analyzer.StalePodZombie {
 				itype := zombieTypeForStatus(pod.Status)
+				severity := pod.Severity
+				if severity == "" {
+					severity = "critical" // compatibility with older/synthetic StalePod values
+				}
 				issues = append(issues, warRoomIssue{
-					Severity:        "critical",
+					Severity:        severity,
 					Type:            itype,
 					Namespace:       pod.Namespace,
 					Resource:        pod.Name,
@@ -815,15 +819,12 @@ func warRoomIssueURL(issue warRoomIssue, activeCtx string) string {
 // ── War Room page helpers ──────────────────────────────────────────────────────
 
 func zombieTypeForStatus(status string) string {
-	switch status {
-	case "OOMKilled":
-		return "oomkilled"
-	case "ImagePullBackOff":
-		return "image_pull_backoff"
-	case "ProbeFailure":
-		return "probe_failure"
+	switch canonical := store.CanonicalIssueType(status); canonical {
+	case store.IssueOOMKilled, store.IssueImagePullBackOff, store.IssueProbeFailure,
+		store.IssueCrashLoop, store.IssueHighRestartCount:
+		return canonical
 	default:
-		return "crash_loop"
+		return store.IssueCrashLoop
 	}
 }
 

@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/opscart/opscart-k8s-watcher/pkg/classify"
 	"github.com/opscart/opscart-k8s-watcher/pkg/models"
 	"github.com/opscart/opscart-k8s-watcher/pkg/scanner"
 	"github.com/opscart/opscart-k8s-watcher/pkg/store"
@@ -133,103 +134,16 @@ func pluralSuffix(count int) string {
 	return "s"
 }
 
-// classifiablePodReasons is the set of per-container "health" reasons
-// analyzePodForIssues (pkg/scanner/cluster.go) can emit for a pod:
-// CrashLoopBackOff, OOMKilled, ImagePullBackOff/ErrImagePull, and
-// HighRestartCount are each their own independent `if`, not an if/else
-// chain, so the SAME pod commonly produces two or more of these in a
-// single scan (e.g. a container with >10 restarts that also happens to
-// be Waiting in CrashLoopBackOff this instant satisfies both the
-// CrashLoopBackOff check and the HighRestartCount check at once). A
-// crash-looping pod's own brief post-backoff Running window can also
-// make different single reasons from this set appear on consecutive
-// scans, even with no real change in the pod's health. classifyPod
-// collapses whichever of these reasons a pod has this run into exactly
-// one verdict, so a physical pod problem never produces more than one
-// fingerprint/incident. Reasons outside this set (PodFailed, Pending,
-// PVC issues) are unaffected — classifyIssues passes them through
-// untouched.
-var classifiablePodReasons = map[string]bool{
-	"CrashLoopBackOff": true,
-	"OOMKilled":        true,
-	"ImagePullBackOff": true,
-	"ErrImagePull":     true,
-	"HighRestartCount": true,
-}
-
-// classifyPod picks exactly one issue to represent a single pod's
-// classifiable issues (see classifiablePodReasons), in this exact
-// priority order, first match wins:
-//
-//  1. OOMKilled + CrashLoopBackOff -> "CrashLoopBackOff (OOMKilled)", CRITICAL
-//  2. ProbeFailure signature + CrashLoopBackOff -> "CrashLoopBackOff (ProbeFailure)", CRITICAL
-//  3. Plain CrashLoopBackOff (neither of the above) -> "CrashLoopBackOff", CRITICAL
-//  4. ImagePullBackOff / ErrImagePull -> unchanged (HIGH, exactly as the scanner classifies it)
-//  5. HighRestartCount, only if none of 1-4 matched -> "HighRestartCount", MEDIUM
-//  6. Otherwise -> ok is false: podIssues held nothing classifiable
-//
-// One case sits outside that 6-step list but is required to preserve
-// pre-existing behavior: OOMKilled with NO CrashLoopBackOff present.
-// cs.LastTerminationState is sticky — it keeps reporting "OOMKilled"
-// until the container's next restart, long after the container is back
-// to Running — so a pod that OOM'd once and stabilized still carries a
-// live OOMKilled signal indefinitely. That's already CRITICAL and no
-// less real for lacking a current crash loop, so it's checked directly
-// after case 3, before ImagePullBackOff/HighRestartCount, on the same
-// "CRITICAL beats everything below it" logic as cases 1-3.
-//
-// probeFailure is detectProbeFailures' pre-computed result for this pod:
-// checking recent events needs a clientset call per pod, done once up
-// front (see detectProbeFailures) rather than inside this pure function.
-//
-// podIssues must all share the same namespace/name (one physical pod);
-// callers (classifyIssues, tests) are responsible for that grouping.
+// classifyPod retains the command-local seam used by the CLI tests while the
+// actual priority contract lives in pkg/classify and is shared with the
+// dashboard analyzer.
 func classifyPod(podIssues []models.EmergencyIssue, probeFailure bool) (models.EmergencyIssue, bool) {
-	var crashLoop, oom, imagePull, highRestart *models.EmergencyIssue
-	for i := range podIssues {
-		switch podIssues[i].Reason {
-		case "CrashLoopBackOff":
-			crashLoop = &podIssues[i]
-		case "OOMKilled":
-			oom = &podIssues[i]
-		case "ImagePullBackOff", "ErrImagePull":
-			imagePull = &podIssues[i]
-		case "HighRestartCount":
-			highRestart = &podIssues[i]
-		}
-	}
-
-	if crashLoop != nil && oom != nil {
-		out := *crashLoop
-		out.Reason = "CrashLoopBackOff (OOMKilled)"
-		out.Message = "Container termination state reports OOMKilled; the pod is currently in CrashLoopBackOff."
-		return out, true
-	}
-	if crashLoop != nil && probeFailure {
-		out := *crashLoop
-		out.Reason = "CrashLoopBackOff (ProbeFailure)"
-		container := extractCrashLoopContainer(crashLoop.Message)
-		out.Message = fmt.Sprintf("Container %s: Kubernetes events show repeated startup/liveness probe failures followed by container restarts. Investigate probe configuration and actual startup time", container)
-		return out, true
-	}
-	if crashLoop != nil {
-		return *crashLoop, true
-	}
-	if oom != nil {
-		return *oom, true
-	}
-	if imagePull != nil {
-		return *imagePull, true
-	}
-	if highRestart != nil {
-		return *highRestart, true
-	}
-	return models.EmergencyIssue{}, false
+	return classify.PodFailure(podIssues, probeFailure)
 }
 
-// classifyIssues is this task's root fix applied to a full scan: every
-// pod-resource issue whose Reason is in classifiablePodReasons is grouped
-// by pod and reduced to classifyPod's single verdict. Every other issue —
+// classifyIssues applies the shared classifier to a full CLI scan: every
+// pod-resource issue whose reason participates in pod-failure classification
+// is grouped by pod and reduced to one verdict. Every other issue —
 // a non-pod resource (e.g. PVC) or a pod issue classifyPod doesn't cover
 // (PodFailed, Pending) — passes through untouched, exactly once. A pod's
 // classified verdict takes the position of that pod's first classifiable
@@ -241,7 +155,7 @@ func classifyIssues(issues []models.EmergencyIssue, probeFailureByPod map[string
 
 	out := make([]models.EmergencyIssue, 0, len(issues))
 	for _, iss := range issues {
-		if iss.Resource != "pod" || !classifiablePodReasons[iss.Reason] {
+		if iss.Resource != "pod" || !classify.IsPodFailureReason(iss.Reason) {
 			out = append(out, iss)
 			continue
 		}
@@ -261,9 +175,9 @@ func classifyIssues(issues []models.EmergencyIssue, probeFailureByPod map[string
 	}
 
 	// Drop the zero-value placeholder for any pod whose classifiable
-	// issues, against all expectation, still failed to classify (see
-	// classifyPod's step 6) — every reason in classifiablePodReasons is
-	// handled explicitly above, so this is defensive, not reachable today.
+	// issues, against all expectation, still failed to classify. Every reason
+	// accepted by classify.IsPodFailureReason is handled by PodFailure, so this
+	// is defensive, not reachable today.
 	filtered := out[:0]
 	for _, iss := range out {
 		if iss.Reason == "" && iss.Name == "" && iss.Namespace == "" {
@@ -790,12 +704,8 @@ func aggregateFailedJobPods(issues []enrichedIssue) []enrichedIssue {
 	return out
 }
 
-// podKey identifies a pod for dedup purposes. EmergencyIssue has no
-// separate container field (the container name only ever appears inside
-// Message's free text), so namespace+pod name is the finest-grained key
-// available; in practice every case this file's classification and
-// dedup logic handle is a whole pod reported twice, not two different
-// containers in it.
+// podKey identifies a physical pod for classification and deduplication;
+// container-specific signals intentionally share this namespace/name key.
 func podKey(namespace, name string) string {
 	return namespace + "/" + name
 }
@@ -804,8 +714,8 @@ func podKey(namespace, name string) string {
 // shows up once as Pending (from analyzePodForIssues' pod-phase check)
 // and once as ImagePullBackOff/ErrImagePull (from its per-container
 // check) for the same root cause — these are two different reasons, so
-// classifyPod's single-pod collapse (scoped to classifiablePodReasons)
-// doesn't touch Pending at all. Keep only the more actionable
+// the shared pod-failure classifier doesn't touch Pending at all. Keep only
+// the more actionable
 // ImagePullBackOff/ErrImagePull entry. A Pending pod with no matching
 // image-pull entry is a distinct, real scenario and is left alone.
 func dedupeHighTier(high []enrichedIssue) []enrichedIssue {
@@ -939,10 +849,6 @@ var (
 	// HighRestartCount message, e.g. "Container node-exporter has
 	// restarted 88 times".
 	restartContainerRe = regexp.MustCompile(`^Container (\S+) has restarted \d+ times`)
-	// crashLoopContainerRe matches the container name out of a
-	// CrashLoopBackOff message, e.g. "Container stress is crash
-	// looping: ...".
-	crashLoopContainerRe = regexp.MustCompile(`^Container (\S+) is crash looping`)
 )
 
 // extractRegistryHost pulls the registry hostname out of an
@@ -973,18 +879,6 @@ func extractRestartContainer(message string) string {
 		return m[1]
 	}
 	return ""
-}
-
-// extractCrashLoopContainer pulls the container name out of a
-// CrashLoopBackOff message (see cluster.go's "Container %s is crash
-// looping: %s" format), for classifyPod's merged CrashLoopBackOff+
-// OOMKilled/ProbeFailure message. Falls back to a generic noun if the
-// message doesn't match the expected shape.
-func extractCrashLoopContainer(message string) string {
-	if m := crashLoopContainerRe.FindStringSubmatch(message); len(m) == 2 {
-		return m[1]
-	}
-	return "container"
 }
 
 func printIssueGroups(w io.Writer, groups []issueGroup) {

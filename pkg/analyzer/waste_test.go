@@ -379,7 +379,7 @@ func TestProbeFailureEventOverridesCrashLoopClassification(t *testing.T) {
 	if strings.Contains(sp.Reason, "process itself is not the problem") {
 		t.Fatalf("probe evidence made an unsupported causal claim: %q", sp.Reason)
 	}
-	if !strings.Contains(sp.Reason, "Kubernetes events reported a startup or liveness probe failure and container restart") {
+	if !strings.Contains(sp.Reason, "Kubernetes events show repeated startup/liveness probe failures followed by container restarts") {
 		t.Fatalf("probe evidence wording missing observed event semantics: %q", sp.Reason)
 	}
 }
@@ -456,6 +456,96 @@ func TestClassificationDeterministicAcrossPhaseFlicker(t *testing.T) {
 	}
 	if spWaiting.Status != "ProbeFailure" {
 		t.Errorf("Status = %q, want %q", spWaiting.Status, "ProbeFailure")
+	}
+}
+
+func TestPodFailureClassificationUsesLastTerminationOOMAndSharedPriority(t *testing.T) {
+	pod := crashLoopPod("oom-worker", "default")
+	pod.Status.ContainerStatuses = append(pod.Status.ContainerStatuses, corev1.ContainerStatus{
+		Name:         "oom-sidecar",
+		RestartCount: 3,
+		Ready:        true,
+		LastTerminationState: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{
+			Reason: "OOMKilled",
+		}},
+	})
+
+	audit, err := newTestAuditor(7, pod).AuditWaste("")
+	if err != nil {
+		t.Fatalf("AuditWaste: %v", err)
+	}
+	sp, found := findStalePod(audit.StalePods, "default", "oom-worker")
+	if !found {
+		t.Fatalf("pod not found in StalePods; got %+v", audit.StalePods)
+	}
+	if sp.Status != "OOMKilled" || sp.Severity != "critical" {
+		t.Fatalf("got Status=%q Severity=%q, want OOMKilled/critical", sp.Status, sp.Severity)
+	}
+	if !strings.Contains(sp.Reason, "termination state reports OOMKilled") {
+		t.Fatalf("merged OOM evidence message missing: %q", sp.Reason)
+	}
+}
+
+func TestPodFailureClassificationIndependentOfContainerOrder(t *testing.T) {
+	statuses := []corev1.ContainerStatus{
+		{
+			Name: "puller", RestartCount: 1,
+			State: corev1.ContainerState{Waiting: &corev1.ContainerStateWaiting{Reason: "ErrImagePull"}},
+		},
+		{
+			Name: "worker", RestartCount: 2,
+			LastTerminationState: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{Reason: "OOMKilled"}},
+		},
+	}
+
+	classifyOrder := func(name string, containerStatuses []corev1.ContainerStatus) StalePod {
+		pod := &corev1.Pod{
+			ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "default", CreationTimestamp: metav1.Now()},
+			Status:     corev1.PodStatus{Phase: corev1.PodRunning, ContainerStatuses: containerStatuses},
+		}
+		audit, err := newTestAuditor(7, pod).AuditWaste("")
+		if err != nil {
+			t.Fatalf("AuditWaste(%s): %v", name, err)
+		}
+		sp, found := findStalePod(audit.StalePods, "default", name)
+		if !found {
+			t.Fatalf("pod %s not found in StalePods; got %+v", name, audit.StalePods)
+		}
+		return sp
+	}
+
+	forward := classifyOrder("forward", statuses)
+	reverse := classifyOrder("reverse", []corev1.ContainerStatus{statuses[1], statuses[0]})
+	if forward.Status != "OOMKilled" || reverse.Status != forward.Status || reverse.Severity != forward.Severity {
+		t.Fatalf("classification changed with API container order: forward=%+v reverse=%+v", forward, reverse)
+	}
+}
+
+func TestImagePullAndHighRestartUseSharedSeverities(t *testing.T) {
+	imagePod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: "image-pod", Namespace: "default", CreationTimestamp: metav1.Now()},
+		Status: corev1.PodStatus{Phase: corev1.PodPending, ContainerStatuses: []corev1.ContainerStatus{{
+			Name: "app", State: corev1.ContainerState{Waiting: &corev1.ContainerStateWaiting{Reason: "ErrImagePull"}},
+		}}},
+	}
+	restartPod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: "restart-pod", Namespace: "default", CreationTimestamp: metav1.Now()},
+		Status: corev1.PodStatus{Phase: corev1.PodRunning, ContainerStatuses: []corev1.ContainerStatus{{
+			Name: "app", Ready: true, RestartCount: 12,
+		}}},
+	}
+
+	audit, err := newTestAuditor(7, imagePod, restartPod).AuditWaste("")
+	if err != nil {
+		t.Fatalf("AuditWaste: %v", err)
+	}
+	imageFinding, imageFound := findStalePod(audit.StalePods, "default", "image-pod")
+	restartFinding, restartFound := findStalePod(audit.StalePods, "default", "restart-pod")
+	if !imageFound || imageFinding.Status != "ErrImagePull" || imageFinding.Severity != "high" {
+		t.Fatalf("image finding = %+v found=%v, want ErrImagePull/high", imageFinding, imageFound)
+	}
+	if !restartFound || restartFinding.Status != "HighRestartCount" || restartFinding.Severity != "medium" {
+		t.Fatalf("restart finding = %+v found=%v, want HighRestartCount/medium", restartFinding, restartFound)
 	}
 }
 
