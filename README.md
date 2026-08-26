@@ -6,6 +6,7 @@
 [![Release](https://img.shields.io/github/v/release/opscart/opscart-k8s-watcher)](https://github.com/opscart/opscart-k8s-watcher/releases)
 [![Docker](https://img.shields.io/badge/docker-ghcr.io%2Fopscart-blue)](https://ghcr.io/opscart/opscart-dashboard)
 [![Trivy](https://img.shields.io/badge/trivy-0%20CVEs-success)](https://trivy.dev)
+[![CI](https://github.com/opscart/opscart-k8s-watcher/actions/workflows/ci.yml/badge.svg)](https://github.com/opscart/opscart-k8s-watcher/actions/workflows/ci.yml)
 
 **Read-only** &nbsp;·&nbsp; **No agents** &nbsp;·&nbsp; **Credential-free core** &nbsp;·&nbsp; **Deploy in 30 seconds**
 
@@ -46,11 +47,13 @@ OpsCart currently has two independent scan paths:
 - The CLI performs a one-shot scan whenever `opscart-scan triage` is invoked.
 - The dashboard performs scans from its own periodic timer loop.
 
-Each path reads Kubernetes state independently and maintains operational history within its own execution environment. They share parts of the underlying scanner, model, and storage implementation, but some classification and presentation behavior still differs between the two paths. Consequently, the CLI and dashboard may classify or group certain findings differently.
+Each path acquires Kubernetes state independently and maintains operational history within its own execution environment. The paths now share canonical components: `pkg/classify` for deterministic pod-failure verdicts, issue-type and workload-identity contracts, common models, and the store implementation. This keeps priority and multi-container handling consistent for crash loops, OOM kills, probe failures, image-pull failures, and restart signals.
 
-A future design may align more incident semantics through shared canonical classification components. A shared database is not currently required or planned; scan timing and retained history may legitimately differ between the CLI and dashboard.
+Resource-specific detectors, scan timing, grouping, scoring, rendering, and retained history remain path-specific. The CLI and dashboard can therefore present or group findings differently even though they use the same pod-failure classification contract.
 
-Both paths use bounded snapshot scans rather than continuous Kubernetes watches. This keeps the core read-only and operationally simple. The tradeoff is that OpsCart provides triage at scan time rather than real-time event alerting.
+The target architecture is to move more resource acquisition and normalization into a shared pipeline while preserving separate triggers, renderers, and operational-history environments. A shared database is not required or planned; scan timing and retained history may legitimately differ.
+
+Neither path uses a continuous Kubernetes watch. Bounded snapshot scans keep OpsCart read-only and operationally simple, with the tradeoff that it provides triage at scan time rather than real-time event alerting.
 
 ---
 
@@ -60,7 +63,7 @@ A healthy dashboard does not always mean a healthy cluster.
 
 Metrics show whether services are meeting their SLOs. OpsCart surfaces operational conditions that can remain hidden or fragmented across dashboards—crash-looping workloads, image pull failures, privileged containers, missing NetworkPolicies, unattached storage, and resource waste.
 
-This is not another alert aggregator. OpsCart preserves operational memory across scans: when an incident was first detected, whether it resolved and later reoccurred, how restart behavior changed, and which workload is currently represents the incident. A replacement pod may be only five minutes old while the workload incident has existed for weeks. OpsCart keeps that workload-level history without presenting the new pod as the identity of the incident.
+This is not another alert aggregator. OpsCart preserves operational memory across scans: when an incident was first detected, whether it resolved and later reoccurred, how restart behavior changed, and which pod currently represents the incident. A replacement pod may be only five minutes old while the workload incident has existed for weeks. OpsCart keeps that workload-level history without presenting the new pod as the identity of the incident.
 
 Instead of requiring operators to correlate several dashboards during triage, OpsCart presents a prioritized view of what deserves attention, the observed evidence behind it, and read-only investigation commands for the next step.
 
@@ -188,7 +191,7 @@ No competitor in this space — Grafana, Lens, k9s — can produce any of this, 
 
 ### Operational Triage
 
-**Incident Score** — A single 0–100 score derived from crash loops, image pull failures, security posture, waste, and network policy gaps. Trend arrows and a 7-point sparkline show whether the cluster is getting better or worse.
+**Incident Score** — A single 0–100 score derived from crash loops, image-pull failures, unhealthy node conditions, security posture, waste, and NetworkPolicy coverage gaps. Trend arrows and a 7-point sparkline show whether the cluster is getting better or worse.
 
 **War Room** — Active workload and node incidents in one prioritized view. Workload findings include crash loops, image pull failures, probe failures, and privileged containers. Kubernetes node conditions are also eligible for ranking: `Ready=False/Unknown` is CRITICAL, while `DiskPressure`, `MemoryPressure`, `PIDPressure`, and `NetworkUnavailable` are HIGH.
 
@@ -222,9 +225,9 @@ Node/workload relationships are labeled **correlated by node placement — not a
 
 ### Operational Insights
 
-**Security Posture** — CIS Kubernetes Benchmark scoring. Failed controls shown first, risk breakdown by category, prioritized remediation actions.
+**Security Posture** — CIS Kubernetes Benchmark scoring, workload-security findings, and per-pod NetworkPolicy selector coverage. NetworkPolicy analysis distinguishes ingress and egress coverage, detects directional default-deny policies, reports partially covered namespaces, and surfaces incomplete API checks rather than presenting an uncertain audit as a pass.
 
-**Waste & Drift** — Zombie pods, orphaned PVCs with storage size and age, zero-replica workloads, abandoned namespaces.
+**Waste & Drift** — Age-gated review candidates such as orphaned PVCs, zero-replica workloads, and abandoned namespaces. Currently active Ingress routing and HPA autoscaling failures are labeled separately as operational failures rather than financial waste. Failed pods are tracked through operational incidents instead of being presented as waste.
 
 **Cost Intelligence** — Provider-aware worker-node estimates with namespace allocation, embedded Azure pricing with Azure Retail Prices API fallback, and optional AWS public pricing. See [Cost Intelligence](docs/07-Cost-Intelligence.md).
 
