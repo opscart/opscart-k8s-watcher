@@ -1,0 +1,13 @@
+<!DOCTYPE html>
+<html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0"><title>Scanner Diagnostics — OpsCart</title>{{template "base" .}}</head><body>
+<main class="main">
+  <div class="page-hdr"><div><h1>Scanner Diagnostics</h1><p>Measurement from the latest completed background-compatible full scan.</p></div></div>
+  <section class="section"><h2 class="section-title">{{.Cluster}}</h2>
+    <p>Last completed scan: <strong>{{.CompletedAt}}</strong></p><p>Scan duration: <strong>{{.Duration}}</strong></p><p>Current scan interval: <strong>{{.Interval}}</strong></p>
+  </section>
+  <section class="section"><h2 class="section-title">Latest scan measurements</h2>
+    <p>Kubernetes API calls: <strong>{{.Requests}}</strong> · API errors: <strong>{{.Errors}}</strong></p>
+    <p>Pods examined: <strong>{{.Pods}}</strong> · Nodes: <strong>{{.Nodes}}</strong> · Namespaces: <strong>{{.Namespaces}}</strong> · Events: <strong>{{.Events}}</strong></p>
+  </section>
+  <section class="section"><h2 class="section-title">Top API operations</h2>{{range .TopOperations}}<p><strong>{{.Operation}}</strong> {{.Resource}} — {{.Count}}</p>{{else}}<p class="muted">No completed scan data.</p>{{end}}</section>
+</main></body></html>

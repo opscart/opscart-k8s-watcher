@@ -143,7 +143,7 @@ func runDashboard(_ *cobra.Command, _ []string) error {
 		stopBackground()
 		srv.backgroundWG.Wait()
 	}()
-	srv.startBackgroundRefresh(backgroundCtx, 60*time.Second)
+	srv.startBackgroundRefresh(backgroundCtx, dashboardScanInterval)
 
 	addr := ":" + port
 	var httpHandlers sync.WaitGroup
