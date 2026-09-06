@@ -2016,6 +2016,7 @@ func runFullScan(ctx string, scanCounters *apiCounters) (*clusterScan, error) {
 	// ── 3. Waste audit (best effort) ──────────────────────────────────
 	wasteAuditor, cancel := analyzer.NewWasteAuditor(clientset, dashboardWasteMinAgeDays)
 	defer cancel()
+	wasteAuditor.WithPodSnapshot(ra.PodSnapshot(), namespace == "")
 	if wasteAudit, err := wasteAuditor.AuditWaste(""); err == nil {
 		scan.wasteAudit = wasteAudit
 	} else {

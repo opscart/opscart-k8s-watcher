@@ -2,6 +2,7 @@ package analyzer
 
 import (
 	"context"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -25,6 +26,116 @@ func newTestAuditor(minAgeDays int, objs ...interface{}) *WasteAuditor {
 		clientset:  fake.NewSimpleClientset(runtimeObjs...),
 		minAgeDays: minAgeDays,
 		ctx:        context.Background(),
+	}
+}
+
+func oldNamespace(name string, ageDays int) *corev1.Namespace {
+	return &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{
+		Name: name, CreationTimestamp: metav1.NewTime(time.Now().Add(-time.Duration(ageDays) * 24 * time.Hour)),
+	}}
+}
+
+func namespacePod(namespace, name string, phase corev1.PodPhase) *corev1.Pod {
+	return &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace}, Status: corev1.PodStatus{Phase: phase}}
+}
+
+func runAbandonedNamespaceDetector(t *testing.T, auditor *WasteAuditor) []AbandonedNamespace {
+	t.Helper()
+	audit := &WasteAudit{}
+	if err := auditor.detectAbandonedNamespaces(audit, ""); err != nil {
+		t.Fatalf("detectAbandonedNamespaces: %v", err)
+	}
+	return audit.AbandonedNamespaces
+}
+
+func TestAbandonedNamespacesSharedSnapshotMatchesLegacy(t *testing.T) {
+	objects := []interface{}{
+		oldNamespace("empty", 30), oldNamespace("stopped", 20), oldNamespace("active", 15),
+		namespacePod("stopped", "failed", corev1.PodFailed),
+		namespacePod("stopped", "pending", corev1.PodPending),
+		namespacePod("active", "running", corev1.PodRunning),
+	}
+	legacy := runAbandonedNamespaceDetector(t, newTestAuditor(7, objects...))
+	sharedAuditor := newTestAuditor(7, objects...)
+	sharedAuditor.WithPodSnapshot([]corev1.Pod{
+		*objects[3].(*corev1.Pod), *objects[4].(*corev1.Pod), *objects[5].(*corev1.Pod),
+	}, true)
+	shared := runAbandonedNamespaceDetector(t, sharedAuditor)
+	if !reflect.DeepEqual(shared, legacy) {
+		t.Fatalf("shared snapshot changed abandoned namespaces:\nshared=%+v\nlegacy=%+v", shared, legacy)
+	}
+}
+
+func TestAbandonedNamespacesSharedSnapshotPreservesEmptyOldNamespace(t *testing.T) {
+	wa := newTestAuditor(7, oldNamespace("empty", 30))
+	wa.WithPodSnapshot([]corev1.Pod{}, true)
+	got := runAbandonedNamespaceDetector(t, wa)
+	if len(got) != 1 || got[0].Name != "empty" || got[0].PodCount != 0 || !strings.Contains(got[0].Reason, "No pods found") {
+		t.Fatalf("empty old namespace changed: %+v", got)
+	}
+}
+
+func TestAbandonedNamespacesSharedSnapshotExcludesNamespaceWithRunningPods(t *testing.T) {
+	wa := newTestAuditor(7, oldNamespace("active", 30))
+	wa.WithPodSnapshot([]corev1.Pod{*namespacePod("active", "api", corev1.PodRunning)}, true)
+	if got := runAbandonedNamespaceDetector(t, wa); len(got) != 0 {
+		t.Fatalf("namespace with running Pods reported abandoned: %+v", got)
+	}
+}
+
+func TestAbandonedNamespacesSharedSnapshotIncludesOnlyNonRunningPods(t *testing.T) {
+	wa := newTestAuditor(7, oldNamespace("stopped", 30))
+	wa.WithPodSnapshot([]corev1.Pod{
+		*namespacePod("stopped", "failed", corev1.PodFailed),
+		*namespacePod("stopped", "pending", corev1.PodPending),
+	}, true)
+	got := runAbandonedNamespaceDetector(t, wa)
+	if len(got) != 1 || got[0].PodCount != 2 || !strings.Contains(got[0].Reason, "none are Running") {
+		t.Fatalf("non-running Pod classification changed: %+v", got)
+	}
+}
+
+func TestAbandonedNamespacesSharedSnapshotPreservesEligibilityFiltering(t *testing.T) {
+	wa := newTestAuditor(7,
+		oldNamespace("eligible", 30), oldNamespace("default", 30),
+		oldNamespace("kube-system", 30), oldNamespace("young", 2),
+	)
+	wa.WithPodSnapshot([]corev1.Pod{}, true)
+	got := runAbandonedNamespaceDetector(t, wa)
+	if len(got) != 1 || got[0].Name != "eligible" {
+		t.Fatalf("namespace eligibility filtering changed: %+v", got)
+	}
+}
+
+func TestAbandonedNamespacesClusterWideSnapshotPerformsNoPodLists(t *testing.T) {
+	wa := newTestAuditor(7, oldNamespace("one", 30), oldNamespace("two", 30))
+	wa.WithPodSnapshot([]corev1.Pod{}, true)
+	runAbandonedNamespaceDetector(t, wa)
+	for _, action := range wa.clientset.(*fake.Clientset).Actions() {
+		if action.GetVerb() == "list" && action.GetResource().Resource == "pods" {
+			t.Fatalf("unexpected Pod LIST for namespace %q", action.GetNamespace())
+		}
+	}
+}
+
+func TestAbandonedNamespacesNamespaceScopedSnapshotFallsBackToPodLists(t *testing.T) {
+	apiPod := namespacePod("stopped", "failed", corev1.PodFailed)
+	wa := newTestAuditor(7, oldNamespace("stopped", 30), apiPod)
+	// This deliberately conflicts with the API Pod. A namespace-scoped
+	// snapshot must be ignored, leaving the legacy request and result intact.
+	wa.WithPodSnapshot([]corev1.Pod{*namespacePod("stopped", "running", corev1.PodRunning)}, false)
+	got := runAbandonedNamespaceDetector(t, wa)
+	if len(got) != 1 || got[0].PodCount != 1 {
+		t.Fatalf("namespace-scoped snapshot did not use legacy result: %+v", got)
+	}
+	podLists := 0
+	for _, action := range wa.clientset.(*fake.Clientset).Actions() {
+		if action.GetVerb() == "list" && action.GetResource().Resource == "pods" {
+			podLists++
+		}
+	}
+	if podLists != 1 {
+		t.Fatalf("Pod LIST calls = %d, want 1", podLists)
 	}
 }
 

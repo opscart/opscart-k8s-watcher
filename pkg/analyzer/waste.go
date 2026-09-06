@@ -22,9 +22,10 @@ import (
 // ================================================================
 
 type WasteAuditor struct {
-	clientset  kubernetes.Interface
-	ctx        context.Context
-	minAgeDays int
+	clientset       kubernetes.Interface
+	ctx             context.Context
+	minAgeDays      int
+	podsByNamespace map[string][]corev1.Pod
 }
 
 type WasteAudit struct {
@@ -217,6 +218,21 @@ func NewWasteAuditor(clientset kubernetes.Interface, minAgeDays int) (*WasteAudi
 	}, cancel
 }
 
+// WithPodSnapshot supplies Pods already retrieved by a preceding analyzer.
+// Only a genuinely cluster-wide snapshot is retained; namespace-scoped input
+// leaves detectors on their existing Kubernetes API retrieval paths.
+func (w *WasteAuditor) WithPodSnapshot(pods []corev1.Pod, clusterWide bool) *WasteAuditor {
+	if !clusterWide {
+		w.podsByNamespace = nil
+		return w
+	}
+	w.podsByNamespace = make(map[string][]corev1.Pod)
+	for _, pod := range pods {
+		w.podsByNamespace[pod.Namespace] = append(w.podsByNamespace[pod.Namespace], pod)
+	}
+	return w
+}
+
 // ================================================================
 // Main Audit
 // ================================================================
@@ -344,15 +360,22 @@ func (w *WasteAuditor) detectAbandonedNamespaces(audit *WasteAudit, filterNamesp
 			continue
 		}
 
-		// Count running pods
-		pods, err := w.clientset.CoreV1().Pods(nsName).List(w.ctx, metav1.ListOptions{TimeoutSeconds: int64Ptr(10)})
-		if err != nil {
-			return fmt.Errorf("list pods in namespace %q: %w", nsName, err)
+		// Count running pods. A non-nil map, including an empty map, is a
+		// cluster-wide snapshot; otherwise retain the legacy namespace LIST.
+		var namespacePods []corev1.Pod
+		if w.podsByNamespace == nil {
+			pods, err := w.clientset.CoreV1().Pods(nsName).List(w.ctx, metav1.ListOptions{TimeoutSeconds: int64Ptr(10)})
+			if err != nil {
+				return fmt.Errorf("list pods in namespace %q: %w", nsName, err)
+			}
+			namespacePods = pods.Items
+		} else {
+			namespacePods = w.podsByNamespace[nsName]
 		}
 
-		podCount := len(pods.Items)
+		podCount := len(namespacePods)
 		runningCount := 0
-		for _, p := range pods.Items {
+		for _, p := range namespacePods {
 			if p.Status.Phase == corev1.PodRunning {
 				runningCount++
 			}
