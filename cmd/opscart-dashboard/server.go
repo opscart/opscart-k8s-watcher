@@ -2024,10 +2024,19 @@ func runFullScan(ctx string, scanCounters *apiCounters) (*clusterScan, error) {
 
 	// ── 4. Network policy audit (best effort) ─────────────────────────
 	netAuditor := analyzer.NewNetworkPolicyAuditor(clientset)
-	if netAudit, err := netAuditor.AuditNetworkPolicies(""); err == nil {
+	var netAudit *analyzer.NetworkPolicyAudit
+	var netErr error
+	if namespace == "" {
+		netAudit, netErr = netAuditor.AuditNetworkPoliciesWithPods("", ra.PodSnapshot())
+	} else {
+		// ResourceAnalyzer honored a namespace filter, so its snapshot is not
+		// cluster-wide and cannot preserve the network audit's all-namespace scope.
+		netAudit, netErr = netAuditor.AuditNetworkPolicies("")
+	}
+	if netErr == nil {
 		scan.netAudit = netAudit
 	} else {
-		log.Printf("[%s] network audit skipped: %v", displayName(ctx), err)
+		log.Printf("[%s] network audit skipped: %v", displayName(ctx), netErr)
 	}
 
 	// ── 5. CIS score (derived from security + network audits) ─────────

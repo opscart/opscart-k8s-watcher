@@ -2,8 +2,10 @@ package analyzer
 
 import (
 	"context"
+	"errors"
 	"io"
 	"os"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -330,6 +332,100 @@ func TestAuditNetworkPoliciesAPIFailureRecordsWarning(t *testing.T) {
 	}
 	if _, ok := findStatus(audit.UnprotectedNamespaces, "broken"); ok {
 		t.Error("a namespace with an audit warning must not appear in UnprotectedNamespaces either — its coverage is unknown, not confirmed bad")
+	}
+}
+
+func TestAuditNetworkPoliciesSharedPodsPreservesFindings(t *testing.T) {
+	objects := []interface{}{
+		nsObj("payments"),
+		podWithLabels("payments", "api", map[string]string{"app": "api"}),
+		podWithLabels("payments", "worker", map[string]string{"app": "worker"}),
+		policy("payments", "api-only", metav1.LabelSelector{MatchLabels: map[string]string{"app": "api"}},
+			[]networkingv1.PolicyType{networkingv1.PolicyTypeIngress, networkingv1.PolicyTypeEgress},
+			[]networkingv1.NetworkPolicyIngressRule{{From: []networkingv1.NetworkPolicyPeer{{}}}},
+			[]networkingv1.NetworkPolicyEgressRule{{To: []networkingv1.NetworkPolicyPeer{{}}}}),
+	}
+	legacy, err := newTestNetworkAuditor(objects...).AuditNetworkPolicies("")
+	if err != nil {
+		t.Fatalf("legacy audit: %v", err)
+	}
+	shared, err := newTestNetworkAuditor(objects...).AuditNetworkPoliciesWithPods("", []corev1.Pod{
+		*objects[1].(*corev1.Pod), *objects[2].(*corev1.Pod),
+	})
+	if err != nil {
+		t.Fatalf("shared audit: %v", err)
+	}
+	if !reflect.DeepEqual(shared, legacy) {
+		t.Fatalf("shared snapshot changed findings:\nshared=%+v\nlegacy=%+v", shared, legacy)
+	}
+}
+
+func TestAuditNetworkPoliciesSharedPodsPreservesEmptyNamespace(t *testing.T) {
+	na := newTestNetworkAuditor(nsObj("empty"))
+	audit, err := na.AuditNetworkPoliciesWithPods("", []corev1.Pod{})
+	if err != nil {
+		t.Fatalf("AuditNetworkPoliciesWithPods: %v", err)
+	}
+	status, ok := findStatus(audit.ProtectedNamespaces, "empty")
+	if !ok || status.PodCount != 0 || status.CoverageGapPodCount != 0 {
+		t.Fatalf("empty eligible namespace behavior changed: %+v", audit)
+	}
+}
+
+func TestAuditNetworkPoliciesSharedPodsPreservesSelectorBehavior(t *testing.T) {
+	na := newTestNetworkAuditor(
+		nsObj("payments"),
+		policy("payments", "api-only", metav1.LabelSelector{MatchLabels: map[string]string{"app": "api"}},
+			[]networkingv1.PolicyType{networkingv1.PolicyTypeIngress, networkingv1.PolicyTypeEgress},
+			[]networkingv1.NetworkPolicyIngressRule{{From: []networkingv1.NetworkPolicyPeer{{}}}},
+			[]networkingv1.NetworkPolicyEgressRule{{To: []networkingv1.NetworkPolicyPeer{{}}}}),
+	)
+	audit, err := na.AuditNetworkPoliciesWithPods("", []corev1.Pod{
+		*podWithLabels("payments", "api", map[string]string{"app": "api"}),
+		*podWithLabels("payments", "worker", map[string]string{"app": "worker"}),
+	})
+	if err != nil {
+		t.Fatalf("AuditNetworkPoliciesWithPods: %v", err)
+	}
+	status, ok := findStatus(audit.UnprotectedNamespaces, "payments")
+	if !ok || status.PodCount != 2 || status.CoveredPodCount != 1 || status.UncoveredPodCount != 1 || status.FullyCoveredPodCount != 1 {
+		t.Fatalf("selector behavior changed with shared Pods: %+v", audit)
+	}
+}
+
+func TestAuditNetworkPoliciesSharedPodsRetainsNetworkPolicyErrors(t *testing.T) {
+	na := newTestNetworkAuditor(nsObj("broken"))
+	na.clientset.(*fake.Clientset).PrependReactor("list", "networkpolicies", func(ktesting.Action) (bool, runtime.Object, error) {
+		return true, nil, context.DeadlineExceeded
+	})
+	audit, err := na.AuditNetworkPoliciesWithPods("", []corev1.Pod{})
+	if err != nil {
+		t.Fatalf("AuditNetworkPoliciesWithPods: %v", err)
+	}
+	if len(audit.Warnings) != 1 || audit.Warnings[0].Namespace != "broken" || audit.Warnings[0].Operation != "list NetworkPolicies" {
+		t.Fatalf("NetworkPolicy error behavior changed: %+v", audit.Warnings)
+	}
+	if _, ok := findStatus(audit.ProtectedNamespaces, "broken"); ok {
+		t.Fatal("namespace with a NetworkPolicy error appeared protected")
+	}
+	if _, ok := findStatus(audit.UnprotectedNamespaces, "broken"); ok {
+		t.Fatal("namespace with a NetworkPolicy error appeared unprotected")
+	}
+}
+
+func TestAuditNetworkPoliciesSharedPodsPerformsNoPodLists(t *testing.T) {
+	na := newTestNetworkAuditor(nsObj("one"), nsObj("two"))
+	podLists := 0
+	na.clientset.(*fake.Clientset).PrependReactor("list", "pods", func(ktesting.Action) (bool, runtime.Object, error) {
+		podLists++
+		return true, nil, errors.New("unexpected Pod LIST")
+	})
+	_, err := na.AuditNetworkPoliciesWithPods("", []corev1.Pod{*podWithLabels("one", "api", nil)})
+	if err != nil {
+		t.Fatalf("AuditNetworkPoliciesWithPods: %v", err)
+	}
+	if podLists != 0 {
+		t.Fatalf("Pod LIST calls = %d, want 0", podLists)
 	}
 }
 
