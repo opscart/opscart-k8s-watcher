@@ -22,9 +22,11 @@ import (
 // ================================================================
 
 type WasteAuditor struct {
-	clientset  kubernetes.Interface
-	ctx        context.Context
-	minAgeDays int
+	clientset       kubernetes.Interface
+	ctx             context.Context
+	minAgeDays      int
+	podSnapshot     []corev1.Pod
+	podsByNamespace map[string][]corev1.Pod
 }
 
 type WasteAudit struct {
@@ -217,6 +219,33 @@ func NewWasteAuditor(clientset kubernetes.Interface, minAgeDays int) (*WasteAudi
 	}, cancel
 }
 
+// WithPodSnapshot supplies Pods already retrieved by a preceding analyzer.
+// Only a genuinely cluster-wide snapshot is retained; namespace-scoped input
+// leaves detectors on their existing Kubernetes API retrieval paths.
+func (w *WasteAuditor) WithPodSnapshot(pods []corev1.Pod, clusterWide bool) *WasteAuditor {
+	if !clusterWide {
+		w.podSnapshot = nil
+		w.podsByNamespace = nil
+		return w
+	}
+	w.podSnapshot = append(w.podSnapshot[:0], pods...)
+	w.podsByNamespace = make(map[string][]corev1.Pod)
+	for _, pod := range pods {
+		w.podsByNamespace[pod.Namespace] = append(w.podsByNamespace[pod.Namespace], pod)
+	}
+	return w
+}
+
+func (w *WasteAuditor) sharedPods(filterNamespace string) ([]corev1.Pod, bool) {
+	if w.podsByNamespace == nil {
+		return nil, false
+	}
+	if filterNamespace != "" {
+		return w.podsByNamespace[filterNamespace], true
+	}
+	return w.podSnapshot, true
+}
+
 // ================================================================
 // Main Audit
 // ================================================================
@@ -344,15 +373,22 @@ func (w *WasteAuditor) detectAbandonedNamespaces(audit *WasteAudit, filterNamesp
 			continue
 		}
 
-		// Count running pods
-		pods, err := w.clientset.CoreV1().Pods(nsName).List(w.ctx, metav1.ListOptions{TimeoutSeconds: int64Ptr(10)})
-		if err != nil {
-			return fmt.Errorf("list pods in namespace %q: %w", nsName, err)
+		// Count running pods. A non-nil map, including an empty map, is a
+		// cluster-wide snapshot; otherwise retain the legacy namespace LIST.
+		var namespacePods []corev1.Pod
+		if w.podsByNamespace == nil {
+			pods, err := w.clientset.CoreV1().Pods(nsName).List(w.ctx, metav1.ListOptions{TimeoutSeconds: int64Ptr(10)})
+			if err != nil {
+				return fmt.Errorf("list pods in namespace %q: %w", nsName, err)
+			}
+			namespacePods = pods.Items
+		} else {
+			namespacePods = w.podsByNamespace[nsName]
 		}
 
-		podCount := len(pods.Items)
+		podCount := len(namespacePods)
 		runningCount := 0
-		for _, p := range pods.Items {
+		for _, p := range namespacePods {
 			if p.Status.Phase == corev1.PodRunning {
 				runningCount++
 			}
@@ -409,19 +445,24 @@ func (w *WasteAuditor) detectAbandonedNamespaces(audit *WasteAudit, filterNamesp
 // An event-list failure returns an empty map for classification and an error
 // so the audit can preserve that the pod detector was incomplete.
 func (w *WasteAuditor) probeFailurePodsByNamespace(namespace string) (map[string]bool, error) {
-	result := make(map[string]bool)
-
 	events, err := w.clientset.CoreV1().Events(namespace).List(w.ctx, metav1.ListOptions{
 		FieldSelector:  "involvedObject.kind=Pod",
 		TimeoutSeconds: int64Ptr(10),
 	})
 	if err != nil {
 		fmt.Printf("⚠️  Could not list events in namespace %q for probe-failure detection: %v\n", namespace, err)
-		return result, err
+		return map[string]bool{}, err
 	}
+	return probeFailurePodsFromEvents(events.Items), nil
+}
 
-	for _, ev := range events.Items {
+func probeFailurePodsFromEvents(events []corev1.Event) map[string]bool {
+	result := make(map[string]bool)
+	for _, ev := range events {
 		if ev.InvolvedObject.Kind != "" && ev.InvolvedObject.Kind != "Pod" {
+			continue
+		}
+		if ev.Type != corev1.EventTypeWarning {
 			continue
 		}
 		lower := strings.ToLower(ev.Message)
@@ -429,8 +470,7 @@ func (w *WasteAuditor) probeFailurePodsByNamespace(namespace string) (map[string
 			result[ev.InvolvedObject.Name] = true
 		}
 	}
-
-	return result, nil
+	return result
 }
 
 // classifyStalePodFailure translates one Kubernetes Pod snapshot into the
@@ -559,12 +599,34 @@ func dashboardPodStatus(classifiedReason string) string {
 }
 
 func (w *WasteAuditor) detectStalePods(audit *WasteAudit, filterNamespace string) error {
-	pods, err := w.clientset.CoreV1().Pods(filterNamespace).List(w.ctx, metav1.ListOptions{TimeoutSeconds: int64Ptr(10)})
-	if err != nil {
-		return err
+	return w.detectStalePodsWithClusterEvents(audit, filterNamespace, true)
+}
+
+func (w *WasteAuditor) detectStalePodsWithClusterEvents(audit *WasteAudit, filterNamespace string, useClusterEvents bool) error {
+	podItems, shared := w.sharedPods(filterNamespace)
+	if !shared {
+		pods, err := w.clientset.CoreV1().Pods(filterNamespace).List(w.ctx, metav1.ListOptions{TimeoutSeconds: int64Ptr(10)})
+		if err != nil {
+			return err
+		}
+		podItems = pods.Items
 	}
 
 	now := time.Now()
+
+	var eventsByNamespace map[string][]corev1.Event
+	if useClusterEvents {
+		events, listErr := w.clientset.CoreV1().Events("").List(w.ctx, metav1.ListOptions{
+			FieldSelector:  "involvedObject.kind=Pod,type=Warning",
+			TimeoutSeconds: int64Ptr(10),
+		})
+		if listErr == nil {
+			eventsByNamespace = make(map[string][]corev1.Event)
+			for _, event := range events.Items {
+				eventsByNamespace[event.Namespace] = append(eventsByNamespace[event.Namespace], event)
+			}
+		}
+	}
 
 	// Namespace event cache: fetched at most once per namespace encountered,
 	// not once per pod (a 350-pod cluster must not turn into hundreds of
@@ -572,7 +634,7 @@ func (w *WasteAuditor) detectStalePods(audit *WasteAudit, filterNamespace string
 	probeFailurePods := make(map[string]map[string]bool)
 	var eventScanErr error
 
-	for _, pod := range pods.Items {
+	for _, pod := range podItems {
 		// Skip system namespaces
 		if isInfraPattern(pod.Namespace) {
 			continue
@@ -581,10 +643,14 @@ func (w *WasteAuditor) detectStalePods(audit *WasteAudit, filterNamespace string
 		ageDays := int(now.Sub(pod.CreationTimestamp.Time).Hours() / 24)
 
 		if _, ok := probeFailurePods[pod.Namespace]; !ok {
-			var err error
-			probeFailurePods[pod.Namespace], err = w.probeFailurePodsByNamespace(pod.Namespace)
-			if err != nil && eventScanErr == nil {
-				eventScanErr = fmt.Errorf("list pod events in namespace %q: %w", pod.Namespace, err)
+			if eventsByNamespace != nil {
+				probeFailurePods[pod.Namespace] = probeFailurePodsFromEvents(eventsByNamespace[pod.Namespace])
+			} else {
+				var err error
+				probeFailurePods[pod.Namespace], err = w.probeFailurePodsByNamespace(pod.Namespace)
+				if err != nil && eventScanErr == nil {
+					eventScanErr = fmt.Errorf("list pod events in namespace %q: %w", pod.Namespace, err)
+				}
 			}
 		}
 		hasProbeFailureEvent := probeFailurePods[pod.Namespace][pod.Name]
@@ -686,14 +752,18 @@ func (w *WasteAuditor) detectOrphanedPVCs(audit *WasteAudit, filterNamespace str
 		return err
 	}
 
-	// Build set of PVCs actively used by pods
-	pods, err := w.clientset.CoreV1().Pods(filterNamespace).List(w.ctx, metav1.ListOptions{TimeoutSeconds: int64Ptr(10)})
-	if err != nil {
-		return fmt.Errorf("list pods for PVC reference detection: %w", err)
+	// Build set of PVCs actively used by pods.
+	podItems, shared := w.sharedPods(filterNamespace)
+	if !shared {
+		pods, err := w.clientset.CoreV1().Pods(filterNamespace).List(w.ctx, metav1.ListOptions{TimeoutSeconds: int64Ptr(10)})
+		if err != nil {
+			return fmt.Errorf("list pods for PVC reference detection: %w", err)
+		}
+		podItems = pods.Items
 	}
 
 	usedPVCs := map[string]bool{}
-	for _, pod := range pods.Items {
+	for _, pod := range podItems {
 		for _, vol := range pod.Spec.Volumes {
 			if vol.PersistentVolumeClaim != nil {
 				key := pod.Namespace + "/" + vol.PersistentVolumeClaim.ClaimName
@@ -1065,9 +1135,13 @@ func (w *WasteAuditor) detectOrphanedServices(audit *WasteAudit, filterNamespace
 	if err != nil {
 		return err
 	}
-	pods, err := w.clientset.CoreV1().Pods(filterNamespace).List(w.ctx, metav1.ListOptions{TimeoutSeconds: int64Ptr(10)})
-	if err != nil {
-		return fmt.Errorf("list pods for Service selector matching: %w", err)
+	podItems, shared := w.sharedPods(filterNamespace)
+	if !shared {
+		pods, err := w.clientset.CoreV1().Pods(filterNamespace).List(w.ctx, metav1.ListOptions{TimeoutSeconds: int64Ptr(10)})
+		if err != nil {
+			return fmt.Errorf("list pods for Service selector matching: %w", err)
+		}
+		podItems = pods.Items
 	}
 
 	now := time.Now()
@@ -1102,7 +1176,7 @@ func (w *WasteAuditor) detectOrphanedServices(audit *WasteAudit, filterNamespace
 
 		selector := labels.SelectorFromSet(svc.Spec.Selector)
 		matchedPods := 0
-		for _, pod := range pods.Items {
+		for _, pod := range podItems {
 			if pod.Namespace == svc.Namespace && selector.Matches(labels.Set(pod.Labels)) {
 				matchedPods++
 			}

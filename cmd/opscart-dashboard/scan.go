@@ -51,6 +51,7 @@ type dashboardState struct {
 	scanning      atomic.Bool
 	db            store.Store
 	retentionDays int
+	observation   scanObservation
 }
 
 func (s *dashboardState) refresh(clusterList []string) error {
@@ -65,7 +66,8 @@ func (s *dashboardState) refresh(clusterList []string) error {
 	// the recorded duration measured only the persistence block below.
 	start := time.Now()
 
-	scan, err := runFullScan(s.ctx)
+	scanCounters := newAPICounters()
+	scan, err := runFullScan(s.ctx, scanCounters)
 	if err != nil {
 		return err
 	}
@@ -135,6 +137,10 @@ func (s *dashboardState) refresh(clusterList []string) error {
 			Version:    Version,
 		})
 	}
+
+	s.mu.Lock()
+	s.observation = scanObservation{CompletedAt: time.Now(), Duration: time.Since(start), API: scanCounters.snapshot()}
+	s.mu.Unlock()
 
 	log.Printf("[%s] scan complete: %d namespaces, $%s/month, %d critical issues", displayName(s.ctx), len(scan.report.NamespaceCosts), formatMoney(scan.report.TotalMonthlyCost), countCriticalIssues(scan))
 	return nil

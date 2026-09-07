@@ -22,7 +22,7 @@ const (
 	investigationLogMaxBytes  int64 = 256 * 1024
 )
 
-type kubeClientFactory func(string) (kubernetes.Interface, error)
+type kubeClientFactory func(string, *apiCounters) (kubernetes.Interface, error)
 
 type podLogReaderFunc func(context.Context, kubernetes.Interface, string, string, *corev1.PodLogOptions) ([]byte, error)
 
@@ -133,7 +133,7 @@ func (srv *server) handleInvestigationLogs(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	clientset, err := srv.kubeClientFor(ctxName)
+	clientset, err := srv.kubeClientFor(ctxName, nil)
 	if err != nil {
 		log.Printf("investigation logs: kube client: %v", err)
 		writeInvestigationLogError(w, http.StatusBadGateway, "cluster connection failed")

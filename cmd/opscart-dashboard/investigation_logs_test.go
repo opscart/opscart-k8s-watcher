@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/opscart/opscart-k8s-watcher/pkg/analyzer"
 	corev1 "k8s.io/api/core/v1"
@@ -66,7 +67,7 @@ func newContainerLogTestServer(t *testing.T) *server {
 	srv := newTestServer()
 	srv.logsEnabled = true
 	clientset := fake.NewSimpleClientset(multiContainerInvestigationPod())
-	srv.kubeClientFor = func(string) (kubernetes.Interface, error) {
+	srv.kubeClientFor = func(string, *apiCounters) (kubernetes.Interface, error) {
 		return clientset, nil
 	}
 	state := srv.getState(bogusClusterCtx)
@@ -148,6 +149,35 @@ func TestHandleInvestigationLogsSelectsOneContainerAndSource(t *testing.T) {
 	}
 }
 
+func TestInvestigationLogsAreExcludedFromLatestInvestigationMeasurement(t *testing.T) {
+	srv := newContainerLogTestServer(t)
+	counters := newAPICounters()
+	counters.recordRequest("GET", "replicasets", "200")
+	srv.completeInvestigation("payments", "fraud-detection-abc123", time.Now().Add(-time.Second), counters)
+	want := srv.investigationSnapshot()
+	originalFactory := srv.kubeClientFor
+	srv.kubeClientFor = func(ctx string, local *apiCounters) (kubernetes.Interface, error) {
+		if local != nil {
+			t.Fatal("log endpoint received Investigation-local counters")
+		}
+		return originalFactory(ctx, local)
+	}
+	srv.podLogReader = func(context.Context, kubernetes.Interface, string, string, *corev1.PodLogOptions) ([]byte, error) {
+		return []byte("log line"), nil
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/investigation/logs?cluster="+bogusClusterCtx+"&ns=payments&pod=fraud-detection-abc123&type=crash_loop&container=app&previous=true", nil)
+	rec := httptest.NewRecorder()
+	srv.handleInvestigationLogs(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("log status = %d: %s", rec.Code, rec.Body.String())
+	}
+	got := srv.investigationSnapshot()
+	if got.CompletedAt != want.CompletedAt || got.API.Requests[apiMetricKey{"GET", "replicasets", "200"}] != 1 {
+		t.Fatalf("log request replaced latest Investigation: got %+v, want %+v", got, want)
+	}
+}
+
 func TestHandleInvestigationLogsRejectsUnavailablePreviousLogs(t *testing.T) {
 	srv := newContainerLogTestServer(t)
 	readerCalled := false
@@ -172,7 +202,7 @@ func TestHandleInvestigationLogsWhenDisabled(t *testing.T) {
 	t.Setenv("OPSCART_LOGS_ENABLED", "false")
 	srv := newTestServer()
 	clientCalled := false
-	srv.kubeClientFor = func(string) (kubernetes.Interface, error) {
+	srv.kubeClientFor = func(string, *apiCounters) (kubernetes.Interface, error) {
 		clientCalled = true
 		return nil, nil
 	}
@@ -192,7 +222,7 @@ func TestHandleInvestigationLogsWhenDisabled(t *testing.T) {
 func TestHandleInvestigationLogsRejectsNonIssuePod(t *testing.T) {
 	srv := newContainerLogTestServer(t)
 	clientCalled := false
-	srv.kubeClientFor = func(string) (kubernetes.Interface, error) {
+	srv.kubeClientFor = func(string, *apiCounters) (kubernetes.Interface, error) {
 		clientCalled = true
 		return nil, nil
 	}

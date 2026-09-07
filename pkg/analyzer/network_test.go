@@ -2,8 +2,10 @@ package analyzer
 
 import (
 	"context"
+	"errors"
 	"io"
 	"os"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -330,6 +332,246 @@ func TestAuditNetworkPoliciesAPIFailureRecordsWarning(t *testing.T) {
 	}
 	if _, ok := findStatus(audit.UnprotectedNamespaces, "broken"); ok {
 		t.Error("a namespace with an audit warning must not appear in UnprotectedNamespaces either — its coverage is unknown, not confirmed bad")
+	}
+}
+
+func TestAuditNetworkPoliciesSharedPodsPreservesFindings(t *testing.T) {
+	objects := []interface{}{
+		nsObj("payments"),
+		podWithLabels("payments", "api", map[string]string{"app": "api"}),
+		podWithLabels("payments", "worker", map[string]string{"app": "worker"}),
+		policy("payments", "api-only", metav1.LabelSelector{MatchLabels: map[string]string{"app": "api"}},
+			[]networkingv1.PolicyType{networkingv1.PolicyTypeIngress, networkingv1.PolicyTypeEgress},
+			[]networkingv1.NetworkPolicyIngressRule{{From: []networkingv1.NetworkPolicyPeer{{}}}},
+			[]networkingv1.NetworkPolicyEgressRule{{To: []networkingv1.NetworkPolicyPeer{{}}}}),
+	}
+	legacy, err := newTestNetworkAuditor(objects...).AuditNetworkPolicies("")
+	if err != nil {
+		t.Fatalf("legacy audit: %v", err)
+	}
+	shared, err := newTestNetworkAuditor(objects...).AuditNetworkPoliciesWithPods("", []corev1.Pod{
+		*objects[1].(*corev1.Pod), *objects[2].(*corev1.Pod),
+	})
+	if err != nil {
+		t.Fatalf("shared audit: %v", err)
+	}
+	if !reflect.DeepEqual(shared, legacy) {
+		t.Fatalf("shared snapshot changed findings:\nshared=%+v\nlegacy=%+v", shared, legacy)
+	}
+}
+
+func TestAuditNetworkPoliciesSharedPodsPreservesEmptyNamespace(t *testing.T) {
+	na := newTestNetworkAuditor(nsObj("empty"))
+	audit, err := na.AuditNetworkPoliciesWithPods("", []corev1.Pod{})
+	if err != nil {
+		t.Fatalf("AuditNetworkPoliciesWithPods: %v", err)
+	}
+	status, ok := findStatus(audit.ProtectedNamespaces, "empty")
+	if !ok || status.PodCount != 0 || status.CoverageGapPodCount != 0 {
+		t.Fatalf("empty eligible namespace behavior changed: %+v", audit)
+	}
+}
+
+func TestAuditNetworkPoliciesSharedPodsPreservesSelectorBehavior(t *testing.T) {
+	na := newTestNetworkAuditor(
+		nsObj("payments"),
+		policy("payments", "api-only", metav1.LabelSelector{MatchLabels: map[string]string{"app": "api"}},
+			[]networkingv1.PolicyType{networkingv1.PolicyTypeIngress, networkingv1.PolicyTypeEgress},
+			[]networkingv1.NetworkPolicyIngressRule{{From: []networkingv1.NetworkPolicyPeer{{}}}},
+			[]networkingv1.NetworkPolicyEgressRule{{To: []networkingv1.NetworkPolicyPeer{{}}}}),
+	)
+	audit, err := na.AuditNetworkPoliciesWithPods("", []corev1.Pod{
+		*podWithLabels("payments", "api", map[string]string{"app": "api"}),
+		*podWithLabels("payments", "worker", map[string]string{"app": "worker"}),
+	})
+	if err != nil {
+		t.Fatalf("AuditNetworkPoliciesWithPods: %v", err)
+	}
+	status, ok := findStatus(audit.UnprotectedNamespaces, "payments")
+	if !ok || status.PodCount != 2 || status.CoveredPodCount != 1 || status.UncoveredPodCount != 1 || status.FullyCoveredPodCount != 1 {
+		t.Fatalf("selector behavior changed with shared Pods: %+v", audit)
+	}
+}
+
+func TestAuditNetworkPoliciesSharedPodsRetainsNetworkPolicyErrors(t *testing.T) {
+	na := newTestNetworkAuditor(nsObj("broken"))
+	na.clientset.(*fake.Clientset).PrependReactor("list", "networkpolicies", func(ktesting.Action) (bool, runtime.Object, error) {
+		return true, nil, context.DeadlineExceeded
+	})
+	audit, err := na.AuditNetworkPoliciesWithPods("", []corev1.Pod{})
+	if err != nil {
+		t.Fatalf("AuditNetworkPoliciesWithPods: %v", err)
+	}
+	if len(audit.Warnings) != 1 || audit.Warnings[0].Namespace != "broken" || audit.Warnings[0].Operation != "list NetworkPolicies" {
+		t.Fatalf("NetworkPolicy error behavior changed: %+v", audit.Warnings)
+	}
+	if _, ok := findStatus(audit.ProtectedNamespaces, "broken"); ok {
+		t.Fatal("namespace with a NetworkPolicy error appeared protected")
+	}
+	if _, ok := findStatus(audit.UnprotectedNamespaces, "broken"); ok {
+		t.Fatal("namespace with a NetworkPolicy error appeared unprotected")
+	}
+}
+
+func TestAuditNetworkPoliciesSharedPodsPerformsNoPodLists(t *testing.T) {
+	na := newTestNetworkAuditor(nsObj("one"), nsObj("two"))
+	podLists := 0
+	na.clientset.(*fake.Clientset).PrependReactor("list", "pods", func(ktesting.Action) (bool, runtime.Object, error) {
+		podLists++
+		return true, nil, errors.New("unexpected Pod LIST")
+	})
+	_, err := na.AuditNetworkPoliciesWithPods("", []corev1.Pod{*podWithLabels("one", "api", nil)})
+	if err != nil {
+		t.Fatalf("AuditNetworkPoliciesWithPods: %v", err)
+	}
+	if podLists != 0 {
+		t.Fatalf("Pod LIST calls = %d, want 0", podLists)
+	}
+}
+
+func TestAuditNetworkPoliciesClusterPolicySnapshotMatchesLegacy(t *testing.T) {
+	objects := []interface{}{
+		nsObj("payments-prod"), nsObj("workers"), nsObj("empty"), nsObj("kube-system"),
+		podWithLabels("payments-prod", "api", map[string]string{"app": "api"}),
+		podWithLabels("payments-prod", "worker", map[string]string{"app": "worker"}),
+		podWithLabels("workers", "worker", map[string]string{"app": "worker"}),
+		policy("payments-prod", "api-ingress", metav1.LabelSelector{MatchLabels: map[string]string{"app": "api"}},
+			[]networkingv1.PolicyType{networkingv1.PolicyTypeIngress}, nil, nil),
+		policy("payments-prod", "api-egress", metav1.LabelSelector{MatchLabels: map[string]string{"app": "api"}},
+			[]networkingv1.PolicyType{networkingv1.PolicyTypeEgress}, nil, nil),
+		policy("workers", "worker-deny-all", metav1.LabelSelector{},
+			[]networkingv1.PolicyType{networkingv1.PolicyTypeIngress, networkingv1.PolicyTypeEgress}, nil, nil),
+		policy("kube-system", "ignored", metav1.LabelSelector{},
+			[]networkingv1.PolicyType{networkingv1.PolicyTypeIngress}, nil, nil),
+	}
+	pods := map[string][]corev1.Pod{
+		"payments-prod": {*objects[4].(*corev1.Pod), *objects[5].(*corev1.Pod)},
+		"workers":       {*objects[6].(*corev1.Pod)},
+	}
+	legacy, err := newTestNetworkAuditor(objects...).auditNetworkPolicies("", pods, false)
+	if err != nil {
+		t.Fatalf("legacy audit: %v", err)
+	}
+	fast, err := newTestNetworkAuditor(objects...).auditNetworkPolicies("", pods, true)
+	if err != nil {
+		t.Fatalf("snapshot audit: %v", err)
+	}
+	if !reflect.DeepEqual(fast, legacy) {
+		t.Fatalf("cluster policy snapshot changed results:\nfast=%+v\nlegacy=%+v", fast, legacy)
+	}
+}
+
+func TestAuditNetworkPoliciesClusterPolicySnapshotIsolatesNamespaces(t *testing.T) {
+	na := newTestNetworkAuditor(
+		nsObj("open"), nsObj("locked"),
+		policy("locked", "deny-all", metav1.LabelSelector{},
+			[]networkingv1.PolicyType{networkingv1.PolicyTypeIngress, networkingv1.PolicyTypeEgress}, nil, nil),
+	)
+	audit, err := na.AuditNetworkPoliciesWithPods("", []corev1.Pod{
+		*podWithLabels("open", "api", nil), *podWithLabels("locked", "api", nil),
+	})
+	if err != nil {
+		t.Fatalf("AuditNetworkPoliciesWithPods: %v", err)
+	}
+	if _, ok := findStatus(audit.UnprotectedNamespaces, "open"); !ok {
+		t.Fatalf("policy from another namespace protected open: %+v", audit)
+	}
+	if _, ok := findStatus(audit.ProtectedNamespaces, "locked"); !ok {
+		t.Fatalf("locked namespace was not protected: %+v", audit)
+	}
+}
+
+func TestAuditNetworkPoliciesClusterPolicySnapshotPreservesNamespaceFiltering(t *testing.T) {
+	na := newTestNetworkAuditor(nsObj("payments"), nsObj("billing"), nsObj("kube-system"))
+	audit, err := na.AuditNetworkPoliciesWithPods("payments", []corev1.Pod{
+		*podWithLabels("payments", "api", nil), *podWithLabels("billing", "api", nil),
+	})
+	if err != nil {
+		t.Fatalf("AuditNetworkPoliciesWithPods: %v", err)
+	}
+	if audit.TotalNamespaces != 1 {
+		t.Fatalf("TotalNamespaces = %d, want 1", audit.TotalNamespaces)
+	}
+	if _, ok := findStatus(audit.UnprotectedNamespaces, "payments"); !ok {
+		t.Fatalf("filtered namespace missing: %+v", audit)
+	}
+	if _, ok := findStatus(audit.UnprotectedNamespaces, "billing"); ok {
+		t.Fatalf("non-target namespace included: %+v", audit)
+	}
+}
+
+func TestAuditNetworkPoliciesClusterPolicySnapshotUsesOneClusterList(t *testing.T) {
+	na := newTestNetworkAuditor(nsObj("one"), nsObj("two"))
+	if _, err := na.AuditNetworkPoliciesWithPods("", nil); err != nil {
+		t.Fatalf("AuditNetworkPoliciesWithPods: %v", err)
+	}
+	clusterLists, namespaceLists := 0, 0
+	for _, action := range na.clientset.(*fake.Clientset).Actions() {
+		if action.GetVerb() != "list" || action.GetResource().Resource != "networkpolicies" {
+			continue
+		}
+		if action.GetNamespace() == "" {
+			clusterLists++
+		} else {
+			namespaceLists++
+		}
+	}
+	if clusterLists != 1 || namespaceLists != 0 {
+		t.Fatalf("NetworkPolicy LISTs: cluster=%d namespace=%d, want 1/0", clusterLists, namespaceLists)
+	}
+}
+
+func TestAuditNetworkPoliciesClusterListFailureFallsBack(t *testing.T) {
+	na := newTestNetworkAuditor(nsObj("one"), nsObj("two"))
+	na.clientset.(*fake.Clientset).PrependReactor("list", "networkpolicies", func(action ktesting.Action) (bool, runtime.Object, error) {
+		if action.GetNamespace() == "" {
+			return true, nil, errors.New("cluster-wide list forbidden")
+		}
+		return false, nil, nil
+	})
+	if _, err := na.AuditNetworkPoliciesWithPods("", nil); err != nil {
+		t.Fatalf("AuditNetworkPoliciesWithPods: %v", err)
+	}
+	clusterLists, namespaceLists := 0, 0
+	for _, action := range na.clientset.(*fake.Clientset).Actions() {
+		if action.GetVerb() != "list" || action.GetResource().Resource != "networkpolicies" {
+			continue
+		}
+		if action.GetNamespace() == "" {
+			clusterLists++
+		} else {
+			namespaceLists++
+		}
+	}
+	if clusterLists != 1 || namespaceLists != 2 {
+		t.Fatalf("fallback NetworkPolicy LISTs: cluster=%d namespace=%d, want 1/2", clusterLists, namespaceLists)
+	}
+}
+
+func TestAuditNetworkPoliciesFallbackPreservesPartialResultsAndWarnings(t *testing.T) {
+	na := newTestNetworkAuditor(nsObj("healthy"), nsObj("broken"))
+	na.clientset.(*fake.Clientset).PrependReactor("list", "networkpolicies", func(action ktesting.Action) (bool, runtime.Object, error) {
+		switch action.GetNamespace() {
+		case "":
+			return true, nil, errors.New("cluster-wide list forbidden")
+		case "broken":
+			return true, nil, context.DeadlineExceeded
+		default:
+			return false, nil, nil
+		}
+	})
+	audit, err := na.AuditNetworkPoliciesWithPods("", nil)
+	if err != nil {
+		t.Fatalf("AuditNetworkPoliciesWithPods: %v", err)
+	}
+	if audit.TotalNamespaces != 2 || len(audit.Warnings) != 1 || audit.Warnings[0].Namespace != "broken" || audit.Warnings[0].Operation != "list NetworkPolicies" {
+		t.Fatalf("fallback warnings changed: %+v", audit)
+	}
+	if _, ok := findStatus(audit.ProtectedNamespaces, "healthy"); !ok {
+		t.Fatalf("successful namespace result was lost: %+v", audit)
+	}
+	if _, ok := findStatus(audit.ProtectedNamespaces, "broken"); ok {
+		t.Fatalf("failed namespace appeared in partial results: %+v", audit)
 	}
 }
 

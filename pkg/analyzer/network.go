@@ -123,12 +123,43 @@ func (n *NetworkPolicyAuditor) WithSkipNamespaces(namespaces []string) *NetworkP
 // ================================================================
 
 func (n *NetworkPolicyAuditor) AuditNetworkPolicies(filterNamespace string) (*NetworkPolicyAudit, error) {
+	return n.auditNetworkPolicies(filterNamespace, nil, true)
+}
+
+// AuditNetworkPoliciesWithPods performs the same audit using a previously
+// successful cluster-wide Pod snapshot. NetworkPolicies remain fetched once
+// per eligible namespace so their existing failure behavior is unchanged.
+func (n *NetworkPolicyAuditor) AuditNetworkPoliciesWithPods(filterNamespace string, pods []corev1.Pod) (*NetworkPolicyAudit, error) {
+	podsByNamespace := make(map[string][]corev1.Pod)
+	for _, pod := range pods {
+		podsByNamespace[pod.Namespace] = append(podsByNamespace[pod.Namespace], pod)
+	}
+	return n.auditNetworkPolicies(filterNamespace, podsByNamespace, true)
+}
+
+// A nil podsByNamespace retains the original behavior of listing Pods in
+// each namespace. A non-nil map, including an empty map, is a supplied
+// snapshot and therefore performs no Pod LIST calls.
+// When usePolicySnapshot is true, a successful cluster-wide NetworkPolicy
+// LIST supplies every namespace. If it fails, the loop retains the original
+// namespace-scoped retrieval and warning behavior.
+func (n *NetworkPolicyAuditor) auditNetworkPolicies(filterNamespace string, podsByNamespace map[string][]corev1.Pod, usePolicySnapshot bool) (*NetworkPolicyAudit, error) {
 	audit := &NetworkPolicyAudit{}
 
 	// Get namespaces
 	nsList, err := n.clientset.CoreV1().Namespaces().List(n.ctx, metav1.ListOptions{})
 	if err != nil {
 		return nil, fmt.Errorf("listing namespaces: %w", err)
+	}
+
+	var policiesByNamespace map[string][]networkingv1.NetworkPolicy
+	if usePolicySnapshot {
+		if policies, listErr := n.clientset.NetworkingV1().NetworkPolicies("").List(n.ctx, metav1.ListOptions{}); listErr == nil {
+			policiesByNamespace = make(map[string][]networkingv1.NetworkPolicy)
+			for _, policy := range policies.Items {
+				policiesByNamespace[policy.Namespace] = append(policiesByNamespace[policy.Namespace], policy)
+			}
+		}
 	}
 
 	for _, ns := range nsList.Items {
@@ -152,36 +183,48 @@ func (n *NetworkPolicyAuditor) AuditNetworkPolicies(filterNamespace string) (*Ne
 
 		// Get pods — needed for real coverage (which pods each policy
 		// selector actually matches), not just a count.
-		pods, err := n.clientset.CoreV1().Pods(nsName).List(n.ctx, metav1.ListOptions{})
-		if err != nil {
-			audit.Warnings = append(audit.Warnings, NetworkAuditWarning{
-				Namespace: nsName, Operation: "list Pods", Message: err.Error(),
-			})
-			continue // no pod data means coverage can't be computed at all for this namespace
+		var namespacePods []corev1.Pod
+		if podsByNamespace == nil {
+			pods, err := n.clientset.CoreV1().Pods(nsName).List(n.ctx, metav1.ListOptions{})
+			if err != nil {
+				audit.Warnings = append(audit.Warnings, NetworkAuditWarning{
+					Namespace: nsName, Operation: "list Pods", Message: err.Error(),
+				})
+				continue // no pod data means coverage can't be computed at all for this namespace
+			}
+			namespacePods = pods.Items
+		} else {
+			namespacePods = podsByNamespace[nsName]
 		}
 
 		// Get NetworkPolicies in this namespace
-		policies, err := n.clientset.NetworkingV1().NetworkPolicies(nsName).List(n.ctx, metav1.ListOptions{})
-		if err != nil {
-			audit.Warnings = append(audit.Warnings, NetworkAuditWarning{
-				Namespace: nsName, Operation: "list NetworkPolicies", Message: err.Error(),
-			})
-			continue
+		var namespacePolicies []networkingv1.NetworkPolicy
+		if policiesByNamespace == nil {
+			policies, err := n.clientset.NetworkingV1().NetworkPolicies(nsName).List(n.ctx, metav1.ListOptions{})
+			if err != nil {
+				audit.Warnings = append(audit.Warnings, NetworkAuditWarning{
+					Namespace: nsName, Operation: "list NetworkPolicies", Message: err.Error(),
+				})
+				continue
+			}
+			namespacePolicies = policies.Items
+		} else {
+			namespacePolicies = policiesByNamespace[nsName]
 		}
 
 		env := detectEnvironment(nsName)
 		status := NamespaceNetworkStatus{
 			Name:                nsName,
 			Environment:         env,
-			PodCount:            len(pods.Items),
-			PolicyCount:         len(policies.Items),
-			UncoveredPodCount:   len(pods.Items),
-			CoverageGapPodCount: len(pods.Items),
+			PodCount:            len(namespacePods),
+			PolicyCount:         len(namespacePolicies),
+			UncoveredPodCount:   len(namespacePods),
+			CoverageGapPodCount: len(namespacePods),
 		}
 
-		if len(policies.Items) > 0 {
-			audit.TotalPolicies += len(policies.Items)
-			n.analyzeCoverage(&status, pods.Items, policies.Items)
+		if len(namespacePolicies) > 0 {
+			audit.TotalPolicies += len(namespacePolicies)
+			n.analyzeCoverage(&status, namespacePods, namespacePolicies)
 		}
 		n.analyzeRisk(&status)
 		if status.RiskLevel == "HIGH" {

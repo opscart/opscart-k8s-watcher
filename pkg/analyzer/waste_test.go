@@ -2,6 +2,7 @@ package analyzer
 
 import (
 	"context"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -25,6 +26,243 @@ func newTestAuditor(minAgeDays int, objs ...interface{}) *WasteAuditor {
 		clientset:  fake.NewSimpleClientset(runtimeObjs...),
 		minAgeDays: minAgeDays,
 		ctx:        context.Background(),
+	}
+}
+
+func oldNamespace(name string, ageDays int) *corev1.Namespace {
+	return &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{
+		Name: name, CreationTimestamp: metav1.NewTime(time.Now().Add(-time.Duration(ageDays) * 24 * time.Hour)),
+	}}
+}
+
+func namespacePod(namespace, name string, phase corev1.PodPhase) *corev1.Pod {
+	return &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace}, Status: corev1.PodStatus{Phase: phase}}
+}
+
+func runAbandonedNamespaceDetector(t *testing.T, auditor *WasteAuditor) []AbandonedNamespace {
+	t.Helper()
+	audit := &WasteAudit{}
+	if err := auditor.detectAbandonedNamespaces(audit, ""); err != nil {
+		t.Fatalf("detectAbandonedNamespaces: %v", err)
+	}
+	return audit.AbandonedNamespaces
+}
+
+func TestAbandonedNamespacesSharedSnapshotMatchesLegacy(t *testing.T) {
+	objects := []interface{}{
+		oldNamespace("empty", 30), oldNamespace("stopped", 20), oldNamespace("active", 15),
+		namespacePod("stopped", "failed", corev1.PodFailed),
+		namespacePod("stopped", "pending", corev1.PodPending),
+		namespacePod("active", "running", corev1.PodRunning),
+	}
+	legacy := runAbandonedNamespaceDetector(t, newTestAuditor(7, objects...))
+	sharedAuditor := newTestAuditor(7, objects...)
+	sharedAuditor.WithPodSnapshot([]corev1.Pod{
+		*objects[3].(*corev1.Pod), *objects[4].(*corev1.Pod), *objects[5].(*corev1.Pod),
+	}, true)
+	shared := runAbandonedNamespaceDetector(t, sharedAuditor)
+	if !reflect.DeepEqual(shared, legacy) {
+		t.Fatalf("shared snapshot changed abandoned namespaces:\nshared=%+v\nlegacy=%+v", shared, legacy)
+	}
+}
+
+func TestAbandonedNamespacesSharedSnapshotPreservesEmptyOldNamespace(t *testing.T) {
+	wa := newTestAuditor(7, oldNamespace("empty", 30))
+	wa.WithPodSnapshot([]corev1.Pod{}, true)
+	got := runAbandonedNamespaceDetector(t, wa)
+	if len(got) != 1 || got[0].Name != "empty" || got[0].PodCount != 0 || !strings.Contains(got[0].Reason, "No pods found") {
+		t.Fatalf("empty old namespace changed: %+v", got)
+	}
+}
+
+func TestAbandonedNamespacesSharedSnapshotExcludesNamespaceWithRunningPods(t *testing.T) {
+	wa := newTestAuditor(7, oldNamespace("active", 30))
+	wa.WithPodSnapshot([]corev1.Pod{*namespacePod("active", "api", corev1.PodRunning)}, true)
+	if got := runAbandonedNamespaceDetector(t, wa); len(got) != 0 {
+		t.Fatalf("namespace with running Pods reported abandoned: %+v", got)
+	}
+}
+
+func TestAbandonedNamespacesSharedSnapshotIncludesOnlyNonRunningPods(t *testing.T) {
+	wa := newTestAuditor(7, oldNamespace("stopped", 30))
+	wa.WithPodSnapshot([]corev1.Pod{
+		*namespacePod("stopped", "failed", corev1.PodFailed),
+		*namespacePod("stopped", "pending", corev1.PodPending),
+	}, true)
+	got := runAbandonedNamespaceDetector(t, wa)
+	if len(got) != 1 || got[0].PodCount != 2 || !strings.Contains(got[0].Reason, "none are Running") {
+		t.Fatalf("non-running Pod classification changed: %+v", got)
+	}
+}
+
+func TestAbandonedNamespacesSharedSnapshotPreservesEligibilityFiltering(t *testing.T) {
+	wa := newTestAuditor(7,
+		oldNamespace("eligible", 30), oldNamespace("default", 30),
+		oldNamespace("kube-system", 30), oldNamespace("young", 2),
+	)
+	wa.WithPodSnapshot([]corev1.Pod{}, true)
+	got := runAbandonedNamespaceDetector(t, wa)
+	if len(got) != 1 || got[0].Name != "eligible" {
+		t.Fatalf("namespace eligibility filtering changed: %+v", got)
+	}
+}
+
+func TestAbandonedNamespacesClusterWideSnapshotPerformsNoPodLists(t *testing.T) {
+	wa := newTestAuditor(7, oldNamespace("one", 30), oldNamespace("two", 30))
+	wa.WithPodSnapshot([]corev1.Pod{}, true)
+	runAbandonedNamespaceDetector(t, wa)
+	for _, action := range wa.clientset.(*fake.Clientset).Actions() {
+		if action.GetVerb() == "list" && action.GetResource().Resource == "pods" {
+			t.Fatalf("unexpected Pod LIST for namespace %q", action.GetNamespace())
+		}
+	}
+}
+
+func TestAbandonedNamespacesNamespaceScopedSnapshotFallsBackToPodLists(t *testing.T) {
+	apiPod := namespacePod("stopped", "failed", corev1.PodFailed)
+	wa := newTestAuditor(7, oldNamespace("stopped", 30), apiPod)
+	// This deliberately conflicts with the API Pod. A namespace-scoped
+	// snapshot must be ignored, leaving the legacy request and result intact.
+	wa.WithPodSnapshot([]corev1.Pod{*namespacePod("stopped", "running", corev1.PodRunning)}, false)
+	got := runAbandonedNamespaceDetector(t, wa)
+	if len(got) != 1 || got[0].PodCount != 1 {
+		t.Fatalf("namespace-scoped snapshot did not use legacy result: %+v", got)
+	}
+	podLists := 0
+	for _, action := range wa.clientset.(*fake.Clientset).Actions() {
+		if action.GetVerb() == "list" && action.GetResource().Resource == "pods" {
+			podLists++
+		}
+	}
+	if podLists != 1 {
+		t.Fatalf("Pod LIST calls = %d, want 1", podLists)
+	}
+}
+
+func countPodLists(actions []ktesting.Action) int {
+	count := 0
+	for _, action := range actions {
+		if action.GetVerb() == "list" && action.GetResource().Resource == "pods" {
+			count++
+		}
+	}
+	return count
+}
+
+func TestWasteClusterWideSnapshotAvoidsThreeDetectorPodLists(t *testing.T) {
+	pod := servicePod("api-1", "app", map[string]string{"app": "api"}, corev1.PodRunning, true)
+	wa := newTestAuditor(7, pod, oldService("api", "app", map[string]string{"app": "api"}, corev1.ServiceTypeClusterIP))
+	wa.WithPodSnapshot([]corev1.Pod{*pod}, true)
+	if _, err := wa.AuditWaste(""); err != nil {
+		t.Fatalf("AuditWaste: %v", err)
+	}
+	if got := countPodLists(wa.clientset.(*fake.Clientset).Actions()); got != 0 {
+		t.Fatalf("Pod LISTs with cluster-wide snapshot = %d, want 0", got)
+	}
+}
+
+func TestWasteSharedPodSnapshotPreservesDetectorResults(t *testing.T) {
+	t.Run("stale pods", func(t *testing.T) {
+		pod := crashLoopPod("api", "app")
+		event := probeFailureEvent("api.probe", "api", "app")
+		legacyAudit := &WasteAudit{}
+		if err := newTestAuditor(1, pod, event).detectStalePods(legacyAudit, ""); err != nil {
+			t.Fatalf("legacy stale pods: %v", err)
+		}
+		sharedAuditor := newTestAuditor(1, event)
+		sharedAuditor.WithPodSnapshot([]corev1.Pod{*pod}, true)
+		sharedAudit := &WasteAudit{}
+		if err := sharedAuditor.detectStalePods(sharedAudit, ""); err != nil {
+			t.Fatalf("shared stale pods: %v", err)
+		}
+		if !reflect.DeepEqual(sharedAudit.StalePods, legacyAudit.StalePods) {
+			t.Fatalf("shared snapshot changed stale Pods:\nshared=%+v\nlegacy=%+v", sharedAudit.StalePods, legacyAudit.StalePods)
+		}
+	})
+
+	t.Run("orphaned PVCs", func(t *testing.T) {
+		pvc := &corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{Name: "data", Namespace: "app", CreationTimestamp: metav1.NewTime(time.Now().Add(-30 * 24 * time.Hour))}, Status: corev1.PersistentVolumeClaimStatus{Phase: corev1.ClaimBound}}
+		pod := namespacePod("other", "api", corev1.PodRunning)
+		pod.Spec.Volumes = []corev1.Volume{{VolumeSource: corev1.VolumeSource{PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: "data"}}}}
+		legacyAudit := &WasteAudit{}
+		if err := newTestAuditor(7, pvc, pod).detectOrphanedPVCs(legacyAudit, ""); err != nil {
+			t.Fatalf("legacy PVCs: %v", err)
+		}
+		sharedAuditor := newTestAuditor(7, pvc)
+		sharedAuditor.WithPodSnapshot([]corev1.Pod{*pod}, true)
+		sharedAudit := &WasteAudit{}
+		if err := sharedAuditor.detectOrphanedPVCs(sharedAudit, ""); err != nil {
+			t.Fatalf("shared PVCs: %v", err)
+		}
+		if !reflect.DeepEqual(sharedAudit.OrphanedPVCs, legacyAudit.OrphanedPVCs) {
+			t.Fatalf("shared snapshot changed orphaned PVCs:\nshared=%+v\nlegacy=%+v", sharedAudit.OrphanedPVCs, legacyAudit.OrphanedPVCs)
+		}
+	})
+
+	t.Run("orphaned services", func(t *testing.T) {
+		service := oldService("api", "app", map[string]string{"app": "api"}, corev1.ServiceTypeClusterIP)
+		pod := servicePod("api-1", "other", map[string]string{"app": "api"}, corev1.PodRunning, true)
+		legacyAudit := &WasteAudit{}
+		if err := newTestAuditor(7, service, pod).detectOrphanedServices(legacyAudit, ""); err != nil {
+			t.Fatalf("legacy services: %v", err)
+		}
+		sharedAuditor := newTestAuditor(7, service)
+		sharedAuditor.WithPodSnapshot([]corev1.Pod{*pod}, true)
+		sharedAudit := &WasteAudit{}
+		if err := sharedAuditor.detectOrphanedServices(sharedAudit, ""); err != nil {
+			t.Fatalf("shared services: %v", err)
+		}
+		if !reflect.DeepEqual(sharedAudit.OrphanedServices, legacyAudit.OrphanedServices) {
+			t.Fatalf("shared snapshot changed orphaned Services:\nshared=%+v\nlegacy=%+v", sharedAudit.OrphanedServices, legacyAudit.OrphanedServices)
+		}
+	})
+}
+
+func TestWastePodSnapshotFallbackPaths(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		configure func(*WasteAuditor)
+	}{
+		{name: "absent"},
+		{name: "namespace scoped", configure: func(wa *WasteAuditor) {
+			wa.WithPodSnapshot([]corev1.Pod{*namespacePod("app", "snapshot-only", corev1.PodRunning)}, false)
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			wa := newTestAuditor(7)
+			if tc.configure != nil {
+				tc.configure(wa)
+			}
+			if _, err := wa.AuditWaste(""); err != nil {
+				t.Fatalf("AuditWaste: %v", err)
+			}
+			if got := countPodLists(wa.clientset.(*fake.Clientset).Actions()); got != 3 {
+				t.Fatalf("legacy Pod LISTs = %d, want 3", got)
+			}
+		})
+	}
+}
+
+func TestWastePodListErrorsPreserveFallbackWarnings(t *testing.T) {
+	wa := newTestAuditor(7)
+	wa.clientset.(*fake.Clientset).PrependReactor("list", "pods", func(ktesting.Action) (bool, runtime.Object, error) {
+		return true, nil, context.DeadlineExceeded
+	})
+	audit, err := wa.AuditWaste("")
+	if err != nil {
+		t.Fatalf("AuditWaste: %v", err)
+	}
+	warnings := make(map[string]bool)
+	for _, warning := range audit.DetectorWarnings {
+		warnings[warning.Category] = true
+	}
+	for _, category := range []string{"Zombie and idle/unmanaged pods", "Unattached PVC candidates", "Orphaned services"} {
+		if !warnings[category] {
+			t.Errorf("missing legacy detector warning %q: %+v", category, audit.DetectorWarnings)
+		}
+	}
+	if got := countPodLists(wa.clientset.(*fake.Clientset).Actions()); got != 3 {
+		t.Fatalf("failed legacy Pod LISTs = %d, want 3", got)
 	}
 }
 
@@ -577,6 +815,182 @@ func TestEventsFetchedOncePerNamespaceNotPerPod(t *testing.T) {
 
 	if eventListCalls != 1 {
 		t.Errorf("events List called %d times for 3 pods in one namespace, want exactly 1 (must be batched per-namespace, not per-pod)", eventListCalls)
+	}
+}
+
+func eventListScopes(actions []ktesting.Action) (cluster, namespace int) {
+	for _, action := range actions {
+		if action.GetVerb() != "list" || action.GetResource().Resource != "events" {
+			continue
+		}
+		if action.GetNamespace() == "" {
+			cluster++
+		} else {
+			namespace++
+		}
+	}
+	return
+}
+
+func TestClusterEventSnapshotUsesOneRequestWithRequiredSelector(t *testing.T) {
+	wa := newTestAuditor(1, crashLoopPod("pod-a", "app"), crashLoopPod("pod-b", "other"))
+	audit := &WasteAudit{}
+	if err := wa.detectStalePods(audit, ""); err != nil {
+		t.Fatalf("detectStalePods: %v", err)
+	}
+	client := wa.clientset.(*fake.Clientset)
+	cluster, namespace := eventListScopes(client.Actions())
+	if cluster != 1 || namespace != 0 {
+		t.Fatalf("Event LISTs: cluster=%d namespace=%d, want 1/0", cluster, namespace)
+	}
+	for _, action := range client.Actions() {
+		if action.GetVerb() == "list" && action.GetResource().Resource == "events" {
+			selector := action.(ktesting.ListAction).GetListRestrictions().Fields.String()
+			if selector != "involvedObject.kind=Pod,type=Warning" {
+				t.Fatalf("aggregate Event selector = %q", selector)
+			}
+		}
+	}
+}
+
+func TestClusterEventSnapshotMatchesLegacyResults(t *testing.T) {
+	podA := crashLoopPod("api", "payments")
+	podB := crashLoopPod("worker", "workers")
+	eventA := probeFailureEvent("api.probe", "api", "payments")
+	objects := []interface{}{podA, podB, eventA}
+	legacyAudit := &WasteAudit{}
+	if err := newTestAuditor(1, objects...).detectStalePodsWithClusterEvents(legacyAudit, "", false); err != nil {
+		t.Fatalf("legacy detection: %v", err)
+	}
+	aggregateAudit := &WasteAudit{}
+	if err := newTestAuditor(1, objects...).detectStalePodsWithClusterEvents(aggregateAudit, "", true); err != nil {
+		t.Fatalf("aggregate detection: %v", err)
+	}
+	if !reflect.DeepEqual(aggregateAudit.StalePods, legacyAudit.StalePods) {
+		t.Fatalf("aggregate Events changed findings:\naggregate=%+v\nlegacy=%+v", aggregateAudit.StalePods, legacyAudit.StalePods)
+	}
+}
+
+func TestClusterEventSnapshotKeepsPodNamesNamespaceIsolated(t *testing.T) {
+	wa := newTestAuditor(1,
+		crashLoopPod("api", "with-probe"), crashLoopPod("api", "without-probe"),
+		probeFailureEvent("api.probe", "api", "with-probe"),
+	)
+	audit := &WasteAudit{}
+	if err := wa.detectStalePods(audit, ""); err != nil {
+		t.Fatalf("detectStalePods: %v", err)
+	}
+	withProbe, _ := findStalePod(audit.StalePods, "with-probe", "api")
+	withoutProbe, _ := findStalePod(audit.StalePods, "without-probe", "api")
+	if withProbe.Status != "ProbeFailure" || withoutProbe.Status != "CrashLoopBackOff" {
+		t.Fatalf("cross-namespace evidence contamination: with=%+v without=%+v", withProbe, withoutProbe)
+	}
+}
+
+func TestClusterEventSnapshotExcludesInfraNamespaces(t *testing.T) {
+	wa := newTestAuditor(1,
+		crashLoopPod("api", "kube-system"),
+		probeFailureEvent("api.probe", "api", "kube-system"),
+	)
+	audit := &WasteAudit{}
+	if err := wa.detectStalePods(audit, ""); err != nil {
+		t.Fatalf("detectStalePods: %v", err)
+	}
+	if len(audit.StalePods) != 0 {
+		t.Fatalf("infrastructure Pod was analyzed: %+v", audit.StalePods)
+	}
+}
+
+func TestProbeFailureEvidenceFiltersEventKindTypeAndMessage(t *testing.T) {
+	matching := probeFailureEvent("matching", "matching", "app")
+	secondSignature := probeFailureEvent("second", "second", "app")
+	secondSignature.Message = "Startup probe, will be restarted after failure"
+	normal := probeFailureEvent("normal", "normal", "app")
+	normal.Type = corev1.EventTypeNormal
+	nonPod := probeFailureEvent("node", "node", "app")
+	nonPod.InvolvedObject.Kind = "Node"
+	nonMatching := probeFailureEvent("other", "other", "app")
+	nonMatching.Message = "Container image pull failed"
+	got := probeFailurePodsFromEvents([]corev1.Event{*matching, *secondSignature, *normal, *nonPod, *nonMatching})
+	if !got["matching"] || !got["second"] {
+		t.Fatalf("probe signatures not recognized: %+v", got)
+	}
+	for _, excluded := range []string{"normal", "node", "other"} {
+		if got[excluded] {
+			t.Fatalf("Event %q incorrectly supplied probe evidence: %+v", excluded, got)
+		}
+	}
+}
+
+func TestClusterEventSnapshotNoMatchingEventsLeavesEvidenceEmpty(t *testing.T) {
+	wa := newTestAuditor(1, crashLoopPod("api", "app"))
+	audit := &WasteAudit{}
+	if err := wa.detectStalePods(audit, ""); err != nil {
+		t.Fatalf("detectStalePods: %v", err)
+	}
+	finding, ok := findStalePod(audit.StalePods, "app", "api")
+	if !ok || finding.Status != "CrashLoopBackOff" {
+		t.Fatalf("empty Event evidence changed classification: %+v", audit.StalePods)
+	}
+}
+
+func TestProbeFailureEvidenceIgnoresDuplicatesCountOrderAndSeries(t *testing.T) {
+	event := probeFailureEvent("api.probe", "api", "app")
+	event.Count = 37
+	event.Series = &corev1.EventSeries{Count: 91, LastObservedTime: metav1.MicroTime{Time: time.Now()}}
+	duplicate := event.DeepCopy()
+	duplicate.Name = "api.probe.duplicate"
+	forward := probeFailurePodsFromEvents([]corev1.Event{*event, *duplicate})
+	reverse := probeFailurePodsFromEvents([]corev1.Event{*duplicate, *event})
+	if !reflect.DeepEqual(forward, map[string]bool{"api": true}) || !reflect.DeepEqual(reverse, forward) {
+		t.Fatalf("count/order/series affected boolean evidence: forward=%+v reverse=%+v", forward, reverse)
+	}
+}
+
+func TestClusterEventListFailureFallsBackToNamespaceLists(t *testing.T) {
+	wa := newTestAuditor(1, crashLoopPod("api", "one"), crashLoopPod("worker", "two"))
+	wa.clientset.(*fake.Clientset).PrependReactor("list", "events", func(action ktesting.Action) (bool, runtime.Object, error) {
+		if action.GetNamespace() == "" {
+			return true, nil, context.DeadlineExceeded
+		}
+		return false, nil, nil
+	})
+	audit := &WasteAudit{}
+	if err := wa.detectStalePods(audit, ""); err != nil {
+		t.Fatalf("fallback detection: %v", err)
+	}
+	cluster, namespace := eventListScopes(wa.clientset.(*fake.Clientset).Actions())
+	if cluster != 1 || namespace != 2 {
+		t.Fatalf("fallback Event LISTs: cluster=%d namespace=%d, want 1/2", cluster, namespace)
+	}
+}
+
+func TestClusterEventFallbackPreservesPartialFindingsAndWarning(t *testing.T) {
+	goodEvent := probeFailureEvent("api.probe", "api", "good")
+	wa := newTestAuditor(1, crashLoopPod("api", "good"), crashLoopPod("api", "broken"), goodEvent)
+	wa.clientset.(*fake.Clientset).PrependReactor("list", "events", func(action ktesting.Action) (bool, runtime.Object, error) {
+		if action.GetNamespace() == "" || action.GetNamespace() == "broken" {
+			return true, nil, context.DeadlineExceeded
+		}
+		return false, nil, nil
+	})
+	audit, err := wa.AuditWaste("")
+	if err != nil {
+		t.Fatalf("AuditWaste: %v", err)
+	}
+	good, goodFound := findStalePod(audit.StalePods, "good", "api")
+	broken, brokenFound := findStalePod(audit.StalePods, "broken", "api")
+	if !goodFound || good.Status != "ProbeFailure" || !brokenFound || broken.Status != "CrashLoopBackOff" {
+		t.Fatalf("fallback partial findings changed: good=%+v broken=%+v", good, broken)
+	}
+	foundWarning := false
+	for _, warning := range audit.DetectorWarnings {
+		if warning.Category == "Zombie and idle/unmanaged pods" && strings.Contains(warning.Error, `namespace "broken"`) {
+			foundWarning = true
+		}
+	}
+	if !foundWarning {
+		t.Fatalf("fallback detector warning missing: %+v", audit.DetectorWarnings)
 	}
 }
 

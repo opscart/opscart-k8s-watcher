@@ -324,8 +324,29 @@ func investigationHints(issueType string, stateReason string, restarts int32, po
 	return hints
 }
 
-// resolveOwner walks Pod → ReplicaSet → Deployment (or returns the direct owner).
-func resolveOwner(clientset kubernetes.Interface, pod *corev1.Pod) (kind, name string) {
+type replicaSetOwnerKey struct {
+	namespace string
+	name      string
+}
+
+type ownerResolution struct {
+	kind string
+	name string
+}
+
+// ownerResolver caches successful ReplicaSet lookups for one Investigation
+// request. A resolver is never stored on server or shared across requests.
+type ownerResolver struct {
+	clientset   kubernetes.Interface
+	replicaSets map[replicaSetOwnerKey]ownerResolution
+}
+
+func newOwnerResolver(clientset kubernetes.Interface) *ownerResolver {
+	return &ownerResolver{clientset: clientset, replicaSets: make(map[replicaSetOwnerKey]ownerResolution)}
+}
+
+// resolve walks Pod → ReplicaSet → Deployment (or returns the direct owner).
+func (r *ownerResolver) resolve(pod *corev1.Pod) (kind, name string) {
 	if len(pod.OwnerReferences) == 0 {
 		return "", ""
 	}
@@ -334,14 +355,25 @@ func resolveOwner(clientset kubernetes.Interface, pod *corev1.Pod) (kind, name s
 
 	// If owned by a ReplicaSet, walk up to the Deployment
 	if ref.Kind == "ReplicaSet" {
-		rs, err := clientset.AppsV1().ReplicaSets(pod.Namespace).Get(
+		key := replicaSetOwnerKey{namespace: pod.Namespace, name: ref.Name}
+		if cached, ok := r.replicaSets[key]; ok {
+			return cached.kind, cached.name
+		}
+		rs, err := r.clientset.AppsV1().ReplicaSets(pod.Namespace).Get(
 			context.TODO(), ref.Name, metav1.GetOptions{})
 		if err == nil && len(rs.OwnerReferences) > 0 {
 			parent := rs.OwnerReferences[0]
 			kind, name = parent.Kind, parent.Name
 		}
+		if err == nil {
+			r.replicaSets[key] = ownerResolution{kind: kind, name: name}
+		}
 	}
 	return kind, name
+}
+
+func resolveOwner(clientset kubernetes.Interface, pod *corev1.Pod) (kind, name string) {
+	return newOwnerResolver(clientset).resolve(pod)
 }
 
 // podEvents returns the last n events for a specific pod, newest first.
@@ -443,16 +475,12 @@ func referencedResources(pod *corev1.Pod) (cms, secrets, pvcs []string) {
 }
 
 // blastRadiusSiblings returns all pods owned by the same workload.
-func blastRadiusSiblings(clientset kubernetes.Interface, namespace, ownerKind, ownerName string) (pods []blastRadiusPod, healthy, total int) {
+func blastRadiusSiblings(namespacePods []corev1.Pod, resolver *ownerResolver, ownerKind, ownerName string) (pods []blastRadiusPod, healthy, total int) {
 	if ownerName == "" {
 		return
 	}
-	list, err := clientset.CoreV1().Pods(namespace).List(context.TODO(), metav1.ListOptions{})
-	if err != nil {
-		return
-	}
-	for _, p := range list.Items {
-		kind, name := resolveOwner(clientset, &p)
+	for _, p := range namespacePods {
+		kind, name := resolver.resolve(&p)
 		if kind != ownerKind || name != ownerName {
 			continue
 		}
@@ -589,15 +617,11 @@ func blastIngresses(clientset kubernetes.Interface, namespace string, serviceNam
 
 // blastNamespaceHealth counts healthy vs total pods per workload in the namespace,
 // excluding the pod under investigation.
-func blastNamespaceHealth(clientset kubernetes.Interface, namespace, excludeOwnerName string) (workloads []blastNamespacePod, healthy, total int) {
-	list, err := clientset.CoreV1().Pods(namespace).List(context.TODO(), metav1.ListOptions{})
-	if err != nil {
-		return
-	}
+func blastNamespaceHealth(namespacePods []corev1.Pod, resolver *ownerResolver, excludeOwnerName string) (workloads []blastNamespacePod, healthy, total int) {
 	type counts struct{ h, t int }
 	tally := map[string]*counts{}
-	for _, p := range list.Items {
-		_, ownerName := resolveOwner(clientset, &p)
+	for _, p := range namespacePods {
+		_, ownerName := resolver.resolve(&p)
 		if ownerName == excludeOwnerName {
 			continue
 		}
@@ -926,17 +950,21 @@ func (srv *server) handleInvestigationPage(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	// Live cluster data — fresh client, not scan cache
-	clientset, err := srv.kubeClientFor(ctx)
-	if err != nil {
-		log.Printf("investigation: kube client: %v", err)
-		http.Error(w, "cluster connection failed", http.StatusBadGateway)
-		return
-	}
 	if idx := strings.Index(podName, "/"); idx != -1 {
 		data.PodName = podName[:idx]
 		data.ContainerName = podName[idx+1:]
 		podName = podName[:idx]
+	}
+	// Live cluster data — fresh client, not scan cache. The local recorder is
+	// unique to this HTML request, so concurrent API traffic cannot enter it.
+	investigationCounters := newAPICounters()
+	investigationStarted := time.Now()
+	defer srv.completeInvestigation(namespace, podName, investigationStarted, investigationCounters)
+	clientset, err := srv.kubeClientFor(ctx, investigationCounters)
+	if err != nil {
+		log.Printf("investigation: kube client: %v", err)
+		http.Error(w, "cluster connection failed", http.StatusBadGateway)
+		return
 	}
 	pod, err := clientset.CoreV1().Pods(namespace).Get(context.TODO(), podName, metav1.GetOptions{})
 	if err != nil {
@@ -992,7 +1020,8 @@ func (srv *server) handleInvestigationPage(w http.ResponseWriter, r *http.Reques
 		isActiveInvestigationTarget(scan, namespace, podName, issueType)
 
 	// Owner, events, related resources, hints
-	data.OwnerKind, data.OwnerName = resolveOwner(clientset, pod)
+	ownerResolver := newOwnerResolver(clientset)
+	data.OwnerKind, data.OwnerName = ownerResolver.resolve(pod)
 	if data.OwnerKind != "" {
 		data.WorkloadLabel = data.OwnerKind + "/" + data.OwnerName
 		if data.OwnerKind == "StatefulSet" {
@@ -1010,7 +1039,12 @@ func (srv *server) handleInvestigationPage(w http.ResponseWriter, r *http.Reques
 	data.Hints = investigationHints(issueType, data.StateReason, data.Restarts, pod, namespace)
 
 	// Blast radius
-	data.BlastSiblings, data.BlastHealthy, data.BlastTotal = blastRadiusSiblings(clientset, namespace, data.OwnerKind, data.OwnerName)
+	namespacePods, err := clientset.CoreV1().Pods(namespace).List(context.TODO(), metav1.ListOptions{})
+	if err != nil {
+		namespacePods = &corev1.PodList{}
+	}
+	podSnapshotAvailable := err == nil
+	data.BlastSiblings, data.BlastHealthy, data.BlastTotal = blastRadiusSiblings(namespacePods.Items, ownerResolver, data.OwnerKind, data.OwnerName)
 	data.BlastServices = blastRadiusServices(clientset, namespace, pod.Labels)
 	data.BlastSharedConf = blastRadiusSharedConfig(clientset, namespace, data.OwnerName, data.ConfigMaps, data.Secrets)
 
@@ -1019,7 +1053,14 @@ func (srv *server) handleInvestigationPage(w http.ResponseWriter, r *http.Reques
 		svcNames = append(svcNames, s.Name)
 	}
 	data.BlastIngresses = blastIngresses(clientset, namespace, svcNames)
-	data.BlastNamespacePods, data.BlastNsHealthy, data.BlastNsTotal = blastNamespaceHealth(clientset, namespace, data.OwnerName)
+	if !podSnapshotAvailable {
+		// Preserve the legacy partial-result behavior: the sibling lookup could
+		// fail while the later namespace-health lookup still succeeded.
+		if fallbackPods, fallbackErr := clientset.CoreV1().Pods(namespace).List(context.TODO(), metav1.ListOptions{}); fallbackErr == nil {
+			namespacePods = fallbackPods
+		}
+	}
+	data.BlastNamespacePods, data.BlastNsHealthy, data.BlastNsTotal = blastNamespaceHealth(namespacePods.Items, ownerResolver, data.OwnerName)
 	data.CustomerImpact = deriveCustomerImpact(data.BlastIngresses, data.BlastServices)
 
 	// ── First detected (from incidents table) ─────────────────────────────────

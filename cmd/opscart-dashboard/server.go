@@ -78,18 +78,20 @@ func (s *clusterScan) securityScore() int {
 // ── Server ────────────────────────────────────────────────────────────────────
 
 type server struct {
-	clusterList   []string
-	mu            sync.RWMutex
-	states        map[string]*dashboardState
-	db            store.Store
-	retentionDays int
-	dbPersistent  bool
-	auth          *authConfig
-	refreshState  func(*dashboardState, []string) error
-	backgroundWG  sync.WaitGroup
-	logsEnabled   bool
-	kubeClientFor kubeClientFactory
-	podLogReader  podLogReaderFunc
+	clusterList         []string
+	mu                  sync.RWMutex
+	states              map[string]*dashboardState
+	db                  store.Store
+	retentionDays       int
+	dbPersistent        bool
+	auth                *authConfig
+	refreshState        func(*dashboardState, []string) error
+	backgroundWG        sync.WaitGroup
+	logsEnabled         bool
+	kubeClientFor       kubeClientFactory
+	podLogReader        podLogReaderFunc
+	investigationMu     sync.RWMutex
+	latestInvestigation investigationObservation
 }
 
 func newServer(clusterList []string, db store.Store, retentionDays int, dbPersistent bool) *server {
@@ -106,8 +108,10 @@ func newServer(clusterList []string, db store.Store, retentionDays int, dbPersis
 		dbPersistent:  dbPersistent,
 		auth:          auth,
 		logsEnabled:   logPreviewEnabledFromEnv(),
-		kubeClientFor: func(ctx string) (kubernetes.Interface, error) { return kubeClient(ctx) },
-		podLogReader:  readPodLogs,
+		kubeClientFor: func(ctx string, localCounters *apiCounters) (kubernetes.Interface, error) {
+			return kubeClientWithCounters(ctx, localCounters)
+		},
+		podLogReader: readPodLogs,
 		refreshState: func(state *dashboardState, clusters []string) error {
 			return state.refresh(clusters)
 		},
@@ -246,7 +250,10 @@ func (srv *server) newMux() http.Handler {
 	mux.HandleFunc("/incidents", srv.handleIncidentsPage)
 	mux.HandleFunc("/security", srv.handleSecurityPage)
 	mux.HandleFunc("/waste", srv.handleWastePage)
-	mux.HandleFunc("/settings", srv.handleStubPage("settings", "Settings"))
+	mux.HandleFunc("/settings", srv.handleSettingsPage)
+	mux.HandleFunc("/settings/diagnostics", srv.handleDiagnostics)
+	mux.HandleFunc("/metrics", srv.handleMetrics)
+	mux.HandleFunc("/diagnostics", srv.handleDiagnosticsRedirect)
 
 	// /healthz is registered on the unwrapped top-level mux so kubelet
 	// liveness/readiness probes succeed without credentials; every other
@@ -1888,8 +1895,8 @@ func formatMoney(amount float64) string {
 // runFullScan runs all five analyzers against a cluster. The cost analysis is
 // required (returns error on failure). Security, waste, network, and CIS are
 // best-effort — failures are logged and leave the corresponding field nil.
-func runFullScan(ctx string) (*clusterScan, error) {
-	clientset, err := kubeClient(ctx)
+func runFullScan(ctx string, scanCounters *apiCounters) (*clusterScan, error) {
+	clientset, err := kubeClientWithCounters(ctx, scanCounters)
 	if err != nil {
 		return nil, err
 	}
@@ -2005,7 +2012,7 @@ func runFullScan(ctx string) (*clusterScan, error) {
 
 	// ── 2. Security audit (best effort) ──────────────────────────────
 	sa := analyzer.NewSecurityAuditor(clientset)
-	if secAudit, err := sa.AuditClusterSecurity(""); err == nil {
+	if secAudit, err := sa.AuditClusterSecurityWithPodSnapshot("", ra.PodSnapshot(), namespace == ""); err == nil {
 		scan.secAudit = secAudit
 	} else {
 		log.Printf("[%s] security audit skipped: %v", displayName(ctx), err)
@@ -2014,6 +2021,7 @@ func runFullScan(ctx string) (*clusterScan, error) {
 	// ── 3. Waste audit (best effort) ──────────────────────────────────
 	wasteAuditor, cancel := analyzer.NewWasteAuditor(clientset, dashboardWasteMinAgeDays)
 	defer cancel()
+	wasteAuditor.WithPodSnapshot(ra.PodSnapshot(), namespace == "")
 	if wasteAudit, err := wasteAuditor.AuditWaste(""); err == nil {
 		scan.wasteAudit = wasteAudit
 	} else {
@@ -2022,10 +2030,19 @@ func runFullScan(ctx string) (*clusterScan, error) {
 
 	// ── 4. Network policy audit (best effort) ─────────────────────────
 	netAuditor := analyzer.NewNetworkPolicyAuditor(clientset)
-	if netAudit, err := netAuditor.AuditNetworkPolicies(""); err == nil {
+	var netAudit *analyzer.NetworkPolicyAudit
+	var netErr error
+	if namespace == "" {
+		netAudit, netErr = netAuditor.AuditNetworkPoliciesWithPods("", ra.PodSnapshot())
+	} else {
+		// ResourceAnalyzer honored a namespace filter, so its snapshot is not
+		// cluster-wide and cannot preserve the network audit's all-namespace scope.
+		netAudit, netErr = netAuditor.AuditNetworkPolicies("")
+	}
+	if netErr == nil {
 		scan.netAudit = netAudit
 	} else {
-		log.Printf("[%s] network audit skipped: %v", displayName(ctx), err)
+		log.Printf("[%s] network audit skipped: %v", displayName(ctx), netErr)
 	}
 
 	// ── 5. CIS score (derived from security + network audits) ─────────
@@ -2066,6 +2083,10 @@ func pricingCoverageWarnings(warnings []string, matched, total int) []string {
 }
 
 func kubeClient(ctx string) (*kubernetes.Clientset, error) {
+	return kubeClientWithCounters(ctx, nil)
+}
+
+func kubeClientWithCounters(ctx string, scanCounters *apiCounters) (*kubernetes.Clientset, error) {
 	// In-cluster deployments have no context name and typically no
 	// kubeconfig file at all — authenticate via the mounted ServiceAccount
 	// instead of trying to resolve a named context.
@@ -2073,6 +2094,7 @@ func kubeClient(ctx string) (*kubernetes.Clientset, error) {
 		if cfg, err := rest.InClusterConfig(); err == nil {
 			cfg.QPS = 50
 			cfg.Burst = 100
+			wrapKubernetesTransport(cfg, scanCounters)
 			return kubernetes.NewForConfig(cfg)
 		}
 	}
@@ -2088,5 +2110,16 @@ func kubeClient(ctx string) (*kubernetes.Clientset, error) {
 	// skipped sub-scans ("context deadline exceeded") on large clusters.
 	cfg.QPS = 50
 	cfg.Burst = 100
+	wrapKubernetesTransport(cfg, scanCounters)
 	return kubernetes.NewForConfig(cfg)
+}
+
+func wrapKubernetesTransport(cfg *rest.Config, localCounters *apiCounters) {
+	previous := cfg.WrapTransport
+	cfg.WrapTransport = func(rt http.RoundTripper) http.RoundTripper {
+		if previous != nil {
+			rt = previous(rt)
+		}
+		return &measuringTransport{base: rt, cumulative: processAPICounters, local: localCounters}
+	}
 }

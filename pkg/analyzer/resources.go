@@ -17,6 +17,7 @@ import (
 type ResourceAnalyzer struct {
 	clientset *kubernetes.Clientset
 	ctx       context.Context
+	pods      []corev1.Pod
 }
 
 // NewResourceAnalyzer creates a new resource analyzer
@@ -46,6 +47,9 @@ func (ra *ResourceAnalyzer) AnalyzeClusterResources(namespace string) (*models.C
 	if err != nil {
 		return nil, fmt.Errorf("failed to list pods: %w", err)
 	}
+	// Retain the successful snapshot so later analyzers in the same full-scan
+	// pipeline can examine the identical Pods without another API request.
+	ra.pods = append(ra.pods[:0], podList.Items...)
 
 	// Roll the same pod list up to one entry per owning workload — no
 	// second cluster fetch, just a different view of data already in hand.
@@ -119,6 +123,12 @@ func (ra *ResourceAnalyzer) AnalyzeClusterResources(namespace string) (*models.C
 	analysis.Optimizations = ra.generateOptimizations(namespaces)
 
 	return analysis, nil
+}
+
+// PodSnapshot returns a copy of the Pod snapshot successfully retrieved by
+// the most recent AnalyzeClusterResources call.
+func (ra *ResourceAnalyzer) PodSnapshot() []corev1.Pod {
+	return append([]corev1.Pod(nil), ra.pods...)
 }
 
 // getClusterCapacity calculates total cluster capacity
