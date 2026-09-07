@@ -475,15 +475,11 @@ func referencedResources(pod *corev1.Pod) (cms, secrets, pvcs []string) {
 }
 
 // blastRadiusSiblings returns all pods owned by the same workload.
-func blastRadiusSiblings(clientset kubernetes.Interface, resolver *ownerResolver, namespace, ownerKind, ownerName string) (pods []blastRadiusPod, healthy, total int) {
+func blastRadiusSiblings(namespacePods []corev1.Pod, resolver *ownerResolver, ownerKind, ownerName string) (pods []blastRadiusPod, healthy, total int) {
 	if ownerName == "" {
 		return
 	}
-	list, err := clientset.CoreV1().Pods(namespace).List(context.TODO(), metav1.ListOptions{})
-	if err != nil {
-		return
-	}
-	for _, p := range list.Items {
+	for _, p := range namespacePods {
 		kind, name := resolver.resolve(&p)
 		if kind != ownerKind || name != ownerName {
 			continue
@@ -621,14 +617,10 @@ func blastIngresses(clientset kubernetes.Interface, namespace string, serviceNam
 
 // blastNamespaceHealth counts healthy vs total pods per workload in the namespace,
 // excluding the pod under investigation.
-func blastNamespaceHealth(clientset kubernetes.Interface, resolver *ownerResolver, namespace, excludeOwnerName string) (workloads []blastNamespacePod, healthy, total int) {
-	list, err := clientset.CoreV1().Pods(namespace).List(context.TODO(), metav1.ListOptions{})
-	if err != nil {
-		return
-	}
+func blastNamespaceHealth(namespacePods []corev1.Pod, resolver *ownerResolver, excludeOwnerName string) (workloads []blastNamespacePod, healthy, total int) {
 	type counts struct{ h, t int }
 	tally := map[string]*counts{}
-	for _, p := range list.Items {
+	for _, p := range namespacePods {
 		_, ownerName := resolver.resolve(&p)
 		if ownerName == excludeOwnerName {
 			continue
@@ -1047,7 +1039,12 @@ func (srv *server) handleInvestigationPage(w http.ResponseWriter, r *http.Reques
 	data.Hints = investigationHints(issueType, data.StateReason, data.Restarts, pod, namespace)
 
 	// Blast radius
-	data.BlastSiblings, data.BlastHealthy, data.BlastTotal = blastRadiusSiblings(clientset, ownerResolver, namespace, data.OwnerKind, data.OwnerName)
+	namespacePods, err := clientset.CoreV1().Pods(namespace).List(context.TODO(), metav1.ListOptions{})
+	if err != nil {
+		namespacePods = &corev1.PodList{}
+	}
+	podSnapshotAvailable := err == nil
+	data.BlastSiblings, data.BlastHealthy, data.BlastTotal = blastRadiusSiblings(namespacePods.Items, ownerResolver, data.OwnerKind, data.OwnerName)
 	data.BlastServices = blastRadiusServices(clientset, namespace, pod.Labels)
 	data.BlastSharedConf = blastRadiusSharedConfig(clientset, namespace, data.OwnerName, data.ConfigMaps, data.Secrets)
 
@@ -1056,7 +1053,14 @@ func (srv *server) handleInvestigationPage(w http.ResponseWriter, r *http.Reques
 		svcNames = append(svcNames, s.Name)
 	}
 	data.BlastIngresses = blastIngresses(clientset, namespace, svcNames)
-	data.BlastNamespacePods, data.BlastNsHealthy, data.BlastNsTotal = blastNamespaceHealth(clientset, ownerResolver, namespace, data.OwnerName)
+	if !podSnapshotAvailable {
+		// Preserve the legacy partial-result behavior: the sibling lookup could
+		// fail while the later namespace-health lookup still succeeded.
+		if fallbackPods, fallbackErr := clientset.CoreV1().Pods(namespace).List(context.TODO(), metav1.ListOptions{}); fallbackErr == nil {
+			namespacePods = fallbackPods
+		}
+	}
+	data.BlastNamespacePods, data.BlastNsHealthy, data.BlastNsTotal = blastNamespaceHealth(namespacePods.Items, ownerResolver, data.OwnerName)
 	data.CustomerImpact = deriveCustomerImpact(data.BlastIngresses, data.BlastServices)
 
 	// ── First detected (from incidents table) ─────────────────────────────────

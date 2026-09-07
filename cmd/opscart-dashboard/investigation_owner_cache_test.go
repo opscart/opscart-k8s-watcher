@@ -55,6 +55,16 @@ func replicaSetGETCount(client *fake.Clientset) int {
 	return count
 }
 
+func podLISTCount(client *fake.Clientset) int {
+	count := 0
+	for _, action := range client.Actions() {
+		if action.GetVerb() == "list" && action.GetResource().Resource == "pods" {
+			count++
+		}
+	}
+	return count
+}
+
 func requestPodInvestigation(t *testing.T, client *fake.Clientset, podName, namespace string) string {
 	t.Helper()
 	srv := newTestServer()
@@ -76,14 +86,47 @@ func TestInvestigationOwnerCacheFetchesReplicaSetOncePerRequest(t *testing.T) {
 		investigationOwnedPod(namespace, "api-1", "ReplicaSet", "api-abc123"),
 		investigationOwnedPod(namespace, "api-2", "ReplicaSet", "api-abc123"),
 		investigationOwnedPod(namespace, "api-3", "ReplicaSet", "api-abc123"),
+		investigationOwnedPod(namespace, "worker-0", "StatefulSet", "worker"),
 	)
 	body := requestPodInvestigation(t, client, "api-1", namespace)
+	if got := podLISTCount(client); got != 1 {
+		t.Fatalf("Pod LISTs = %d, want one shared namespace snapshot", got)
+	}
 	if got := replicaSetGETCount(client); got != 1 {
 		t.Fatalf("ReplicaSet GETs = %d, want 1", got)
 	}
-	for _, want := range []string{"Deployment/api", "api-1", "api-2", "api-3"} {
+	for _, want := range []string{"Deployment/api", "api-1", "api-2", "api-3", "Sibling Pods", "Other pods in namespace", "worker"} {
 		if !strings.Contains(body, want) {
 			t.Errorf("Investigation output missing %q", want)
+		}
+	}
+}
+
+func TestInvestigationSharedPodSnapshotFailurePreservesLegacyPartialResults(t *testing.T) {
+	const namespace = "payments"
+	client := fake.NewSimpleClientset(
+		investigationReplicaSet(namespace, "api-abc123", "api"),
+		investigationOwnedPod(namespace, "api-1", "ReplicaSet", "api-abc123"),
+		investigationOwnedPod(namespace, "worker-0", "StatefulSet", "worker"),
+	)
+	listCalls := 0
+	client.PrependReactor("list", "pods", func(ktesting.Action) (bool, runtime.Object, error) {
+		listCalls++
+		if listCalls == 1 {
+			return true, nil, errors.New("pods unavailable")
+		}
+		return false, nil, nil
+	})
+	body := requestPodInvestigation(t, client, "api-1", namespace)
+	if got := podLISTCount(client); got != 2 {
+		t.Fatalf("Pod LISTs after snapshot failure = %d, want legacy second attempt", got)
+	}
+	if strings.Contains(body, "Sibling Pods") {
+		t.Error("failed sibling snapshot unexpectedly rendered sibling results")
+	}
+	for _, want := range []string{"Other pods in namespace", "worker"} {
+		if !strings.Contains(body, want) {
+			t.Errorf("legacy namespace-health fallback missing %q", want)
 		}
 	}
 }
