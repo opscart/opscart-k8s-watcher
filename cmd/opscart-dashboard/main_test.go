@@ -1714,7 +1714,7 @@ func TestSecurityPageScanStatesAndClaims(t *testing.T) {
 func TestWastePageStatesCategoriesAndReconciliation(t *testing.T) {
 	t.Run("complete clean", func(t *testing.T) {
 		body := renderWasteForTest(t, &analyzer.WasteAudit{})
-		if !strings.Contains(body, "No resource review candidates were observed") || strings.Contains(body, "Scan incomplete") {
+		if !strings.Contains(body, "No resource review findings were reported") || strings.Contains(body, "Scan incomplete") {
 			t.Fatalf("unexpected clean state: %s", body)
 		}
 	})
@@ -1723,7 +1723,7 @@ func TestWastePageStatesCategoriesAndReconciliation(t *testing.T) {
 		body := renderWasteForTest(t, &analyzer.WasteAudit{
 			DetectorWarnings: []analyzer.WasteDetectorWarning{{Category: "Broken ingresses", Error: "forbidden"}},
 		})
-		for _, want := range []string{"Scan incomplete", "Unavailable Checks", "Broken ingresses"} {
+		for _, want := range []string{"Warnings reported", "Unavailable Checks", "Broken ingresses"} {
 			if !strings.Contains(body, want) {
 				t.Errorf("missing %q", want)
 			}
@@ -1748,13 +1748,12 @@ func TestWastePageStatesCategoriesAndReconciliation(t *testing.T) {
 		}
 		body := renderWasteForTest(t, audit)
 		for _, want := range []string{
-			"active failed-pod incident", "Idle / unmanaged pod",
-			"Unattached PVC candidate", "Stale job history", "Zero-replica workload",
-			"Abandoned namespace", "Orphaned Service candidate", "Broken ingress",
-			"Misconfigured HPA", "Housekeeping — excluded from resource-review total", ">8<",
-			"Unattached Storage Requested", "Active Incidents", "Scan Coverage",
-			"not presented as financial waste", "View active incidents",
-			"Ranked Resource Review", "Drift", "kubectl get pvc pvc",
+			"Pod failure finding", "Pod ownership review", "PVC state / reference review",
+			"Job / CronJob retention review", "Zero-replica workload", "Namespace activity review",
+			"Service selector review", "Ingress backend evidence", "HPA configuration review",
+			"ReplicaSet retention — included in finding count", ">10<", "Distinct Resource Count",
+			"Candidate PVC requests", "Operational Findings", "Reported Check Coverage",
+			"No financial-waste conclusion", "View active incidents", "Ranked Resource Review", "Drift", "kubectl get pvc pvc",
 		} {
 			if !strings.Contains(body, want) {
 				t.Errorf("missing category or total %q", want)
@@ -1768,8 +1767,13 @@ func TestWastePageStatesCategoriesAndReconciliation(t *testing.T) {
 		visibleCount := len(audit.AbandonedNamespaces) + len(audit.StalePods) + len(audit.OrphanedPVCs) +
 			len(audit.StaleJobs) + len(audit.ZeroReplicaWorkloads) + len(audit.OrphanedServices) +
 			len(audit.BrokenIngresses) + len(audit.MisconfiguredHPAs)
-		if visibleCount != audit.TotalWasteItems {
-			t.Fatalf("visible count = %d, total = %d", visibleCount, audit.TotalWasteItems)
+		counts := analyzer.BuildWastePresentation(audit).Counts
+		if visibleCount+len(audit.OldReplicaSets) != counts.Findings || counts.Findings != counts.Operational+counts.Retention+counts.Review {
+			t.Fatalf("counts do not reconcile: %+v", counts)
+		}
+		resource, drift, housekeeping := buildWasteReviewRows(audit, nil)
+		if len(resource)+len(drift)+len(housekeeping)+1 != counts.Findings {
+			t.Fatal("page sections and Pod banner do not reconcile")
 		}
 		if strings.Contains(body, "ns: ") && strings.Contains(body, "zombie") {
 			t.Fatal("active failed pod was duplicated as a large resource card")
@@ -1944,5 +1948,126 @@ func TestTallySnapshotCountsEmptyInputs(t *testing.T) {
 	critical, warnings := tallySnapshotCounts(nil, nil)
 	if critical != 0 || warnings != 0 {
 		t.Errorf("tallySnapshotCounts(nil, nil) = (%d, %d), want (0, 0)", critical, warnings)
+	}
+}
+
+func TestWastePhase1AuditTimestampAndUnknown(t *testing.T) {
+	scanned := time.Date(2024, 3, 4, 5, 6, 7, 0, time.UTC)
+	for _, tc := range []struct {
+		name      string
+		a         *analyzer.WasteAudit
+		timestamp int64
+		label     string
+	}{
+		{"audit timestamp", &analyzer.WasteAudit{ScannedAt: scanned}, scanned.UnixMilli(), "2024-03-04 05:06:07 UTC"},
+		{"zero timestamp", &analyzer.WasteAudit{}, 0, "Unknown"},
+		{"unavailable", nil, 0, "Unknown"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			body := renderWasteForTest(t, tc.a)
+			// Both the server-rendered label and the client-side elapsed-time source
+			// must come from the audit, never handler execution time.
+			if !strings.Contains(body, `id="waste-age">`+tc.label+`</strong>`) || !strings.Contains(body, fmt.Sprintf("var TS= %d", tc.timestamp)) && !strings.Contains(body, fmt.Sprintf("var TS=%d", tc.timestamp)) {
+				t.Fatalf("audit timestamp/Unknown source missing")
+			}
+			if tc.timestamp == 0 && !strings.Contains(body, "if(!TS){if(el)el.textContent='Unknown';return}") {
+				t.Fatal("zero timestamp would become an epoch age")
+			}
+		})
+	}
+}
+
+func TestWastePhase1CrossSurfaceCountsAndQuantities(t *testing.T) {
+	a := &analyzer.WasteAudit{
+		TotalWasteItems: 6, EstimatedMonthlyWaste: 98765, OrphanedPVCStorageGB: 500,
+		AbandonedNamespaces: []analyzer.AbandonedNamespace{{Name: "app"}},
+		StalePods:           []analyzer.StalePod{{Name: "pod", Namespace: "app", Kind: analyzer.StalePodZombie}},
+		OrphanedPVCs:        []analyzer.OrphanedPVC{{Name: "pvc", Namespace: "app", Status: analyzer.PVCBoundNoPod, RequestKnown: true, RequestedBytes: 500 << 20}},
+		StaleJobs:           []analyzer.StaleJob{{Name: "cron", Namespace: "app", IsCronJob: true, JobStatus: "NeverScheduled"}, {Name: "cron", Namespace: "app", IsCronJob: true, JobStatus: "NoHistoryLimit"}},
+		MisconfiguredHPAs:   []analyzer.MisconfiguredHPA{{Name: "hpa", Namespace: "app", IsActive: true}},
+		OldReplicaSets:      []analyzer.OldReplicaSet{{Name: "history", Namespace: "app"}},
+	}
+	scan := &clusterScan{wasteAudit: a, report: &models.CloudCostReport{}}
+	counts := analyzer.BuildWastePresentation(a).Counts
+	if counts.Findings != 7 || counts.DistinctResources != 6 || counts.Operational != 2 || counts.Retention != 3 || counts.Review != 2 {
+		t.Fatalf("counts=%+v", counts)
+	}
+	if got := wasteCountByNS(scan); len(got) != 1 || got["app"] != 7 {
+		t.Fatalf("namespace counts=%v", got)
+	}
+	overview := buildOverviewData(scan, "test-ctx", []string{"test-ctx"}, &store.NullStore{}, time.Time{})
+	if overview.WasteCount != 7 {
+		t.Fatalf("overview count=%d", overview.WasteCount)
+	}
+	srv := newServer([]string{"test-ctx"}, &store.NullStore{}, 90, false)
+	srv.getState("test-ctx").scan = scan
+	rec := httptest.NewRecorder()
+	srv.handleSummary(rec, httptest.NewRequest(http.MethodGet, "/api/summary?cluster=test-ctx", nil))
+	var summary struct {
+		Legacy     int                  `json:"waste_total"`
+		Definition string               `json:"waste_total_definition"`
+		Counts     analyzer.WasteCounts `json:"waste_counts"`
+		Available  bool                 `json:"waste_audit_available"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &summary); err != nil {
+		t.Fatal(err)
+	}
+	if summary.Legacy != 6 || summary.Counts != counts || !summary.Available || !strings.Contains(summary.Definition, "excludes ReplicaSets") && !strings.Contains(summary.Definition, "excluding ReplicaSets") {
+		t.Fatalf("summary contract=%+v", summary)
+	}
+	if strings.Contains(rec.Body.String(), "active_operational_findings") || !strings.Contains(rec.Body.String(), "operational_findings") {
+		t.Fatal("misleading operational JSON name")
+	}
+	for name, body := range map[string]string{"waste": renderWasteForTest(t, a), "optimizations": renderOptimizationsPage(scan, "test-ctx", []string{"test-ctx"})} {
+		if !strings.Contains(body, "500 MiB") {
+			t.Errorf("%s lost byte quantity", name)
+		}
+		for _, bad := range []string{"500GB", "500 GB", "98765", "98,765", "safe to delete", "unused for", "wasting money"} {
+			if strings.Contains(body, bad) {
+				t.Errorf("%s unsupported %q", name, bad)
+			}
+		}
+	}
+	body := renderWasteForTest(t, a)
+	for _, want := range []string{"7 findings across 6 distinct resources", "2 operational findings, 3 housekeeping/retention findings, and 2 other review findings", "kubectl get cronjob cron -n app -o yaml", "ReplicaSet retention — included in finding count (1)"} {
+		if !strings.Contains(body, want) {
+			t.Errorf("page missing %q", want)
+		}
+	}
+	scan.wasteAudit = nil
+	rec = httptest.NewRecorder()
+	srv.handleSummary(rec, httptest.NewRequest(http.MethodGet, "/api/summary?cluster=test-ctx", nil))
+	if err := json.Unmarshal(rec.Body.Bytes(), &summary); err != nil {
+		t.Fatal(err)
+	}
+	if summary.Available || summary.Legacy != -1 || summary.Counts != (analyzer.WasteCounts{}) {
+		t.Fatalf("unavailable confused with zero findings: %+v", summary)
+	}
+}
+
+func TestWastePhase1DashboardStableRanking(t *testing.T) {
+	a := &analyzer.WasteAudit{
+		AbandonedNamespaces:  []analyzer.AbandonedNamespace{{Name: "namespace", Score: 5}},
+		StalePods:            []analyzer.StalePod{{Name: "pod", Kind: analyzer.StalePodIdle, Score: 5}},
+		OrphanedPVCs:         []analyzer.OrphanedPVC{{Name: "pvc", Score: 10}},
+		OrphanedServices:     []analyzer.OrphanedService{{Name: "service", Score: 5}},
+		StaleJobs:            []analyzer.StaleJob{{Name: "job", Score: 5}},
+		ZeroReplicaWorkloads: []analyzer.ZeroReplicaWorkload{{Name: "zero", Score: 5}},
+		BrokenIngresses:      []analyzer.BrokenIngress{{Name: "ingress", Score: 10}},
+		MisconfiguredHPAs:    []analyzer.MisconfiguredHPA{{Name: "hpa", Score: 5}},
+		OldReplicaSets:       []analyzer.OldReplicaSet{{Name: "old-low", Score: 1}, {Name: "old-high", Score: 2}},
+	}
+	resource, drift, housekeeping := buildWasteReviewRows(a, nil)
+	for _, tc := range []struct {
+		rows []wasteReviewRow
+		want string
+	}{{resource, "pvc,namespace,pod,service"}, {drift, "ingress,job,zero,hpa"}, {housekeeping, "old-high,old-low"}} {
+		var names []string
+		for _, row := range tc.rows {
+			names = append(names, row.Resource)
+		}
+		if got := strings.Join(names, ","); got != tc.want {
+			t.Fatalf("stable score ranking=%s, want %s", got, tc.want)
+		}
 	}
 }

@@ -90,7 +90,7 @@ func TestAbandonedNamespacesSharedSnapshotIncludesOnlyNonRunningPods(t *testing.
 		*namespacePod("stopped", "pending", corev1.PodPending),
 	}, true)
 	got := runAbandonedNamespaceDetector(t, wa)
-	if len(got) != 1 || got[0].PodCount != 2 || !strings.Contains(got[0].Reason, "none are Running") {
+	if len(got) != 1 || got[0].PodCount != 2 || !strings.Contains(got[0].Reason, "none are in Running phase") {
 		t.Fatalf("non-running Pod classification changed: %+v", got)
 	}
 }

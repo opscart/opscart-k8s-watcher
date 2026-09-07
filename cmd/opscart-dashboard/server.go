@@ -61,6 +61,7 @@ func (s *clusterScan) monthlyPodCount() int {
 	return n
 }
 
+// wasteTotal preserves the legacy API definition (excludes ReplicaSets).
 func (s *clusterScan) wasteTotal() int {
 	if s == nil || s.wasteAudit == nil {
 		return -1 // -1 signals "data not available"
@@ -381,11 +382,14 @@ func (srv *server) handleSummary(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]any{
-		"monthly_cost":   scan.report.TotalMonthlyCost,
-		"waste_total":    scan.wasteTotal(),
-		"security_score": scan.securityScore(),
-		"cluster_count":  len(srv.clusterList),
-		"pod_count":      scan.monthlyPodCount(),
+		"monthly_cost":           scan.report.TotalMonthlyCost,
+		"waste_total":            scan.wasteTotal(),
+		"waste_total_definition": "legacy finding count excluding ReplicaSets; includes Pod failure findings",
+		"waste_counts":           analyzer.BuildWastePresentation(scan.wasteAudit).Counts,
+		"waste_audit_available":  scan.wasteAudit != nil,
+		"security_score":         scan.securityScore(),
+		"cluster_count":          len(srv.clusterList),
+		"pod_count":              scan.monthlyPodCount(),
 	})
 }
 
@@ -848,7 +852,7 @@ func buildOverviewData(scan *clusterScan, activeCtx string, clusterList []string
 		}
 
 		if scan.wasteAudit != nil {
-			wasteCount = scan.wasteAudit.TotalWasteItems
+			wasteCount = analyzer.BuildWastePresentation(scan.wasteAudit).Counts.Findings
 		}
 	}
 	incidentScore, incidentScoreColor, incidentScoreLabel := calcIncidentScore(scan)
@@ -1477,15 +1481,10 @@ func buildTopIssues(scan *clusterScan, wrIssues []warRoomIssue, activeCtx string
 	if scan != nil && scan.wasteAudit != nil && len(issues) < 5 {
 		wa := scan.wasteAudit
 		if len(wa.OrphanedPVCs) > 0 {
-			cost := ""
-			if wa.EstimatedMonthlyWaste > 0 {
-				cost = fmt.Sprintf("~$%.0f/mo", wa.EstimatedMonthlyWaste)
-			} else {
-				cost = fmt.Sprintf("%d items", len(wa.OrphanedPVCs))
-			}
+			cost := fmt.Sprintf("%d findings", len(wa.OrphanedPVCs))
 			issues = append(issues, topIssue{
-				Title:       fmt.Sprintf("%d orphaned PVCs wasting money", len(wa.OrphanedPVCs)),
-				Subtitle:    "Unused PVCs costing you money each month",
+				Title:       fmt.Sprintf("%d PVC state / reference findings", len(wa.OrphanedPVCs)),
+				Subtitle:    "Review PVC state, ownership, and data retention; billing is not established",
 				Severity:    "medium",
 				SeverityLbl: "MEDIUM",
 				CountText:   cost,
@@ -1513,8 +1512,8 @@ func buildTopIssues(scan *clusterScan, wrIssues []warRoomIssue, activeCtx string
 	if scan != nil && scan.wasteAudit != nil && len(scan.wasteAudit.ZeroReplicaWorkloads) > 0 && len(issues) < 5 {
 		count := len(scan.wasteAudit.ZeroReplicaWorkloads)
 		issues = append(issues, topIssue{
-			Title:       fmt.Sprintf("%d unused deployment%s scaled to zero", count, pluralS(count)),
-			Subtitle:    "Workloads with 0 replicas — clean up or restore",
+			Title:       fmt.Sprintf("%d workload%s requesting zero replicas", count, pluralS(count)),
+			Subtitle:    "Review whether zero desired replicas is intentional",
 			Severity:    "low",
 			SeverityLbl: "LOW",
 			CountText:   fmt.Sprintf("%d workload%s", count, pluralS(count)),

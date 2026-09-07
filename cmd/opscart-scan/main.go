@@ -608,19 +608,19 @@ Examples:
 	// ================================================================
 	wasteCmd := &cobra.Command{
 		Use:   "waste",
-		Short: "Detect drifted, idle, and orphaned resources",
-		Long: `Scan cluster for resources that are old, idle, or orphaned.
+		Short: "Review resource states and drift evidence",
+		Long: `Scan cluster for resource states and drift that warrant review.
 Shows data-driven findings and suggestions. Does not delete anything.
 
 Detects:
-  - Abandoned namespaces (no running pods, old creation date)
-  - Zombie pods (CrashLoopBackOff, OOMKilled for days)
-  - Idle pods (old, no restarts, no recent activity)
-  - Orphaned PVCs (unbound, released, or bound with no pod)
-  - Stale Jobs/CronJobs (completed, failed, or never ran)
+  - Namespace activity review (no Running Pods, old creation date)
+  - Pod health evidence (current states, restarts, and historical termination/events)
+  - Pod ownership review (age-gated, no recognized owner kind)
+  - PVC state/reference review (Pending, Lost, or Bound without listed Pod references)
+  - Job/CronJob status and retention review
   - Zero-replica Deployments and StatefulSets
-  - Old ReplicaSets (leftover from rollouts)
-  - Services with no endpoints
+  - ReplicaSet retention review (age and desired replica evidence)
+  - Services whose selectors match no currently listed Pods
   - Ingresses with missing backends
   - Misconfigured HPAs`,
 		Run: func(cmd *cobra.Command, args []string) {

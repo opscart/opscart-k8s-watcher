@@ -44,9 +44,10 @@ type WasteAudit struct {
 	MisconfiguredHPAs    []MisconfiguredHPA
 	DetectorWarnings     []WasteDetectorWarning
 
-	TotalWasteItems       int
-	OrphanedPVCStorageGB  int     // total GB across all orphaned PVCs
-	EstimatedMonthlyWaste float64 // 0 if monthly cost not provided
+	TotalWasteItems       int     // Legacy: excludes ReplicaSets, includes failed Pods; use BuildWastePresentation counts.
+	OrphanedPVCStorageGB  int     // Deprecated: whole GiB; presentation uses RequestedStorageBytes.
+	RequestedStorageBytes int64   // Sum of candidate PVC requests, not billable or idle storage.
+	EstimatedMonthlyWaste float64 // Legacy, unsupported estimate; never used by waste presentation.
 }
 
 type WasteDetectorWarning struct {
@@ -63,7 +64,7 @@ type AbandonedNamespace struct {
 	AgeDays     int
 	PodCount    int
 	AllPodsIdle bool
-	Reason      string // data-driven explanation
+	Reason      string // Evidence prose also flows into future namespace incident messages; identities are unchanged.
 	Score       float64
 }
 
@@ -74,8 +75,8 @@ type AbandonedNamespace struct {
 type StalePodKind string
 
 const (
-	StalePodIdle   StalePodKind = "IDLE"   // old + no recent activity
-	StalePodZombie StalePodKind = "ZOMBIE" // currently-active pod/container failure
+	StalePodIdle   StalePodKind = "IDLE"   // legacy subtype: age-gated Pod without a recognized owner kind
+	StalePodZombie StalePodKind = "ZOMBIE" // legacy subtype: current, historical, or inferred Pod failure evidence
 )
 
 type StalePod struct {
@@ -87,10 +88,11 @@ type StalePod struct {
 	LastActivityDays int // days since last restart (or age if never restarted)
 	RestartCount     int32
 	// For ZOMBIE pods:
-	Status   string // CrashLoopBackOff, OOMKilled, etc.
-	Severity string // shared pod classifier severity; empty means legacy critical
-	Reason   string // data-driven explanation
-	Score    float64
+	ObservedEvidence string // Snapshot evidence, separate from classifier inference.
+	Status           string // CrashLoopBackOff, OOMKilled, etc.
+	Severity         string // shared pod classifier severity; empty means legacy critical
+	Reason           string // data-driven explanation
+	Score            float64
 }
 
 // ----------------------------------------------------------------
@@ -100,19 +102,21 @@ type StalePod struct {
 type PVCStatus string
 
 const (
-	PVCNeverBound PVCStatus = "Never bound"               // Available - created but never used
-	PVCReleased   PVCStatus = "Released (pod deleted)"    // Released - pod gone
+	PVCNeverBound PVCStatus = "Never bound"               // Legacy label for current Pending phase; not binding history.
+	PVCReleased   PVCStatus = "Released (pod deleted)"    // Legacy label for current Lost phase; not Pod deletion evidence.
 	PVCBoundNoPod PVCStatus = "Bound but no pod using it" // Bound but no pod references it
 )
 
 type OrphanedPVC struct {
-	Name      string
-	Namespace string
-	SizeGB    int
-	Status    PVCStatus
-	AgeDays   int
-	Reason    string
-	Score     float64
+	Name           string
+	Namespace      string
+	SizeGB         int // Deprecated: whole GiB; do not use for presentation.
+	RequestedBytes int64
+	RequestKnown   bool
+	Status         PVCStatus
+	AgeDays        int
+	Reason         string
+	Score          float64
 }
 
 // ----------------------------------------------------------------
@@ -120,13 +124,18 @@ type OrphanedPVC struct {
 // ----------------------------------------------------------------
 
 type StaleJob struct {
-	Name      string
-	Namespace string
-	IsCronJob bool
-	JobStatus string // Completed, Failed, NeverRan, NoHistoryLimit
-	AgeDays   int
-	Reason    string
-	Score     float64
+	Name               string
+	Namespace          string
+	IsCronJob          bool
+	JobStatus          string // Legacy detector subtype, not a terminal-state assertion.
+	Schedule           string // Retained CronJob metadata; empty when unavailable.
+	Suspended          *bool  // nil means unspecified; Kubernetes defaults this to false.
+	AttemptCountsKnown bool
+	SucceededPods      int32
+	FailedPods         int32
+	AgeDays            int
+	Reason             string
+	Score              float64
 }
 
 // ----------------------------------------------------------------
@@ -143,7 +152,7 @@ type ZeroReplicaWorkload struct {
 }
 
 // ----------------------------------------------------------------
-// Old ReplicaSets (leftover from rollouts)
+// Old ReplicaSets (retention review)
 // ----------------------------------------------------------------
 
 type OldReplicaSet struct {
@@ -151,6 +160,7 @@ type OldReplicaSet struct {
 	Namespace       string
 	AgeDays         int
 	OwnerDeployment string
+	DesiredReplicas *int32 // Retained evidence; nil does not establish zero.
 	Reason          string
 	Score           float64
 }
@@ -165,6 +175,7 @@ type OrphanedService struct {
 	Type      string // ClusterIP, LoadBalancer, NodePort
 	AgeDays   int
 	IsLB      bool
+	Selector  map[string]string // Retained selector evidence, not endpoint state.
 	Reason    string
 	Score     float64
 }
@@ -399,10 +410,10 @@ func (w *WasteAuditor) detectAbandonedNamespaces(audit *WasteAudit, filterNamesp
 		var score float64
 
 		if podCount == 0 {
-			reason = fmt.Sprintf("No pods found. Namespace is %d days old with zero workloads", ageDays)
+			reason = fmt.Sprintf("No pods found. Namespace resource age: %d days", ageDays)
 			score = float64(ageDays) * 0.8
 		} else if runningCount == 0 {
-			reason = fmt.Sprintf("%d pod(s) exist but none are Running (all Pending/Failed/Completed). Namespace is %d days old", podCount, ageDays)
+			reason = fmt.Sprintf("%d pod(s) exist but none are in Running phase. Namespace is %d days old", podCount, ageDays)
 			score = float64(ageDays)*0.6 + float64(podCount)*2
 		} else {
 			continue // has running pods, not abandoned
@@ -529,7 +540,7 @@ func classifyStalePodFailure(pod corev1.Pod, ageDays int, hasProbeFailureEvent b
 		if terminated := cs.LastTerminationState.Terminated; terminated != nil && terminated.Reason == "OOMKilled" {
 			hasDirectFailure = true
 			issues = append(issues, newIssue(cs, "critical", "OOMKilled",
-				fmt.Sprintf("Container %s killed due to out of memory", cs.Name)))
+				fmt.Sprintf("Container %s last termination reports OOMKilled; current failure is not established by this historical state alone", cs.Name)))
 		}
 
 		if cs.RestartCount > 10 && pod.Status.Phase == corev1.PodRunning {
@@ -547,7 +558,7 @@ func classifyStalePodFailure(pod corev1.Pod, ageDays int, hasProbeFailureEvent b
 			Severity: "critical", Resource: "pod", Namespace: pod.Namespace, Name: pod.Name,
 			Reason: "ProbeFailure", Restarts: int(totalRestarts),
 			Message: fmt.Sprintf(
-				"%d/%d containers are not ready. Kubernetes events reported a startup or liveness probe failure and container restart (%d restarts observed).",
+				"%d/%d containers are not ready. A warning Event matched probe-failure text for this Pod name (%d restarts observed).",
 				notReady, len(pod.Status.ContainerStatuses), totalRestarts,
 			),
 		})
@@ -560,7 +571,7 @@ func classifyStalePodFailure(pod corev1.Pod, ageDays int, hasProbeFailureEvent b
 			Severity: "critical", Resource: "pod", Namespace: pod.Namespace, Name: pod.Name,
 			Reason: "ProbeFailure", Restarts: int(totalRestarts),
 			Message: fmt.Sprintf(
-				"%d/%d containers not ready after %d restarts — startup or liveness probe likely failing.",
+				"%d/%d containers not ready; %d restarts observed. Probe failure is a detector inference, not confirmed by Events.",
 				notReady, len(pod.Status.ContainerStatuses), totalRestarts,
 			),
 		})
@@ -571,16 +582,29 @@ func classifyStalePodFailure(pod corev1.Pod, ageDays int, hasProbeFailureEvent b
 		return StalePod{}, false
 	}
 
+	observations := []string{fmt.Sprintf("Pod phase: %s; %d containers not ready; %d restarts observed.", pod.Status.Phase, notReady, totalRestarts)}
+	for _, cs := range pod.Status.ContainerStatuses {
+		if cs.State.Waiting != nil {
+			observations = append(observations, fmt.Sprintf("Container %s waiting reason: %s.", cs.Name, cs.State.Waiting.Reason))
+		}
+		if cs.LastTerminationState.Terminated != nil {
+			observations = append(observations, fmt.Sprintf("Container %s last termination reason: %s.", cs.Name, cs.LastTerminationState.Terminated.Reason))
+		}
+	}
+	if hasProbeFailureEvent {
+		observations = append(observations, "A warning Event matched probe-failure text for this Pod name.")
+	}
 	return StalePod{
-		Name:         pod.Name,
-		Namespace:    pod.Namespace,
-		Kind:         StalePodZombie,
-		AgeDays:      ageDays,
-		RestartCount: totalRestarts,
-		Status:       dashboardPodStatus(classified.Reason),
-		Severity:     classified.Severity,
-		Reason:       classified.Message,
-		Score:        float64(ageDays)*0.4 + float64(totalRestarts)*0.3,
+		ObservedEvidence: strings.Join(observations, " "),
+		Name:             pod.Name,
+		Namespace:        pod.Namespace,
+		Kind:             StalePodZombie,
+		AgeDays:          ageDays,
+		RestartCount:     totalRestarts,
+		Status:           dashboardPodStatus(classified.Reason),
+		Severity:         classified.Severity,
+		Reason:           classified.Message,
+		Score:            float64(ageDays)*0.4 + float64(totalRestarts)*0.3,
 	}, true
 }
 
@@ -713,9 +737,8 @@ func (w *WasteAuditor) detectStalePodsWithClusterEvents(audit *WasteAudit, filte
 
 			if isBarePod && pod.Status.Phase == corev1.PodRunning {
 				explanation := fmt.Sprintf(
-					"Pod is %d days old and has no owning controller - it is not managed by any "+
-						"Deployment, DaemonSet, or StatefulSet. Manually-created pods are often "+
-						"used for debugging or testing and left running. Restart count: %d.",
+					"Running Pod is %d days old and has no owner reference of kind ReplicaSet, DaemonSet, "+
+						"StatefulSet, Job, or CronJob. Restart count: %d.",
 					ageDays, totalRestarts,
 				)
 
@@ -784,13 +807,13 @@ func (w *WasteAuditor) detectOrphanedPVCs(audit *WasteAudit, filterNamespace str
 			continue
 		}
 
-		// Get size
-		sizeGB := 0
-		if storage, ok := pvc.Spec.Resources.Requests[corev1.ResourceStorage]; ok {
-			sizeGB = int(storage.Value() / (1024 * 1024 * 1024))
-			if sizeGB == 0 {
-				sizeGB = int(storage.Value() / (1024 * 1024)) // check MB
-			}
+		storage, requestKnown := pvc.Spec.Resources.Requests[corev1.ResourceStorage]
+		requestedBytes := storage.Value()
+		// Keep the historical ranking input separate from accurate quantities.
+		sizeGB := legacyPVCScoreSize(requestedBytes)
+		requestedStorage := "Unknown"
+		if requestKnown {
+			requestedStorage = FormatWasteBytes(requestedBytes)
 		}
 
 		pvcKey := pvc.Namespace + "/" + pvc.Name
@@ -801,12 +824,11 @@ func (w *WasteAuditor) detectOrphanedPVCs(audit *WasteAudit, filterNamespace str
 
 		switch pvc.Status.Phase {
 		case corev1.ClaimPending:
-			// PVC pending for longer than minAgeDays = never successfully bound
-			// (normal PVCs bind within seconds/minutes)
+			// Resource age gates eligibility; current Pending phase does not establish binding history.
 			status = PVCNeverBound
 			reason = fmt.Sprintf(
-				"PVC has been in 'Pending' state for %d days - it was never successfully bound to a PV. "+
-					"This usually means no matching PersistentVolume exists or the StorageClass cannot provision one. "+
+				"PVC currently reports Pending. Resource age: %d days. "+
+					"Binding history and provisioner state were not checked. "+
 					"Storage may or may not be provisioned depending on the provisioner.",
 				ageDays,
 			)
@@ -815,7 +837,7 @@ func (w *WasteAuditor) detectOrphanedPVCs(audit *WasteAudit, filterNamespace str
 		case corev1.ClaimLost:
 			status = PVCReleased
 			reason = fmt.Sprintf(
-				"PVC is in 'Lost' state for %d days - the underlying PV no longer exists. "+
+				"PVC currently reports Lost. Resource age: %d days. PV existence was not independently checked. "+
 					"Review the PVC and storage-system state before making changes.",
 				ageDays,
 			)
@@ -827,9 +849,9 @@ func (w *WasteAuditor) detectOrphanedPVCs(audit *WasteAudit, filterNamespace str
 				status = PVCBoundNoPod
 				reason = fmt.Sprintf(
 					"PVC is Bound to a PV, and no currently listed pod in namespace %q references it. "+
-						"The PVC requests %dGB of storage and is %d days old. "+
+						"The PVC requests %s of storage and is %d days old. "+
 						"Retained data, a scaled-down StatefulSet, or an intentionally stopped workload may explain this state.",
-					pvc.Namespace, sizeGB, ageDays,
+					pvc.Namespace, requestedStorage, ageDays,
 				)
 				score = float64(ageDays)*0.5 + float64(sizeGB)*0.3
 			} else {
@@ -838,15 +860,18 @@ func (w *WasteAuditor) detectOrphanedPVCs(audit *WasteAudit, filterNamespace str
 		}
 
 		audit.OrphanedPVCs = append(audit.OrphanedPVCs, OrphanedPVC{
-			Name:      pvc.Name,
-			Namespace: pvc.Namespace,
-			SizeGB:    sizeGB,
-			Status:    status,
-			AgeDays:   ageDays,
-			Reason:    reason,
-			Score:     score,
+			Name:           pvc.Name,
+			Namespace:      pvc.Namespace,
+			SizeGB:         int(requestedBytes / (1 << 30)),
+			RequestedBytes: requestedBytes,
+			RequestKnown:   requestKnown,
+			Status:         status,
+			AgeDays:        ageDays,
+			Reason:         reason,
+			Score:          score,
 		})
-		audit.OrphanedPVCStorageGB += sizeGB
+		audit.RequestedStorageBytes += requestedBytes
+		audit.OrphanedPVCStorageGB = int(audit.RequestedStorageBytes / (1 << 30))
 	}
 
 	sort.Slice(audit.OrphanedPVCs, func(i, j int) bool {
@@ -897,9 +922,8 @@ func (w *WasteAuditor) detectStaleJobs(audit *WasteAudit, filterNamespace string
 		if job.Status.Succeeded > 0 {
 			jobStatus = "Completed"
 			reason = fmt.Sprintf(
-				"Job completed successfully %d days ago and has not been cleaned up. "+
-					"Completed jobs consume namespace quota and clutter `kubectl get jobs` output. "+
-					"Consider setting ttlSecondsAfterFinished on future jobs.",
+				"Job reports successful Pod attempts. Resource age: %d days. "+
+					"Successful attempts do not establish terminal Job completion. Review status and retention requirements.",
 				ageDays,
 			)
 			score = float64(ageDays) * 0.6
@@ -907,8 +931,8 @@ func (w *WasteAuditor) detectStaleJobs(audit *WasteAudit, filterNamespace string
 			jobStatus = "Failed"
 			reason = fmt.Sprintf(
 				"Job has %d failed attempt(s) and is %d days old. "+
-					"It is not retrying and will not succeed without intervention. "+
-					"Investigate the failure reason then remove.",
+					"Failed attempts do not establish terminal failure or stopped retries. "+
+					"Review current Job status and failure evidence.",
 				job.Status.Failed, ageDays,
 			)
 			score = float64(ageDays)*0.5 + float64(job.Status.Failed)*5
@@ -917,12 +941,15 @@ func (w *WasteAuditor) detectStaleJobs(audit *WasteAudit, filterNamespace string
 		}
 
 		audit.StaleJobs = append(audit.StaleJobs, StaleJob{
-			Name:      job.Name,
-			Namespace: job.Namespace,
-			JobStatus: jobStatus,
-			AgeDays:   ageDays,
-			Reason:    reason,
-			Score:     score,
+			Name:               job.Name,
+			Namespace:          job.Namespace,
+			JobStatus:          jobStatus,
+			AttemptCountsKnown: true,
+			SucceededPods:      job.Status.Succeeded,
+			FailedPods:         job.Status.Failed,
+			AgeDays:            ageDays,
+			Reason:             reason,
+			Score:              score,
 		})
 	}
 
@@ -939,11 +966,11 @@ func (w *WasteAuditor) detectStaleJobs(audit *WasteAudit, filterNamespace string
 				continue
 			}
 
-			// CronJob that has never run
+			// No lastScheduleTime was retained in the current status.
 			if cj.Status.LastScheduleTime == nil {
 				reason := fmt.Sprintf(
-					"CronJob is %d days old but has never been scheduled. "+
-						"This may indicate a misconfigured schedule, suspended state, or the CronJob controller cannot reach it. "+
+					"CronJob is %d days old and has no lastScheduleTime in the observed status. "+
+						"This does not establish execution history; review the schedule and suspension intent. "+
 						"Schedule: '%s', Suspended: %v",
 					ageDays, cj.Spec.Schedule, cj.Spec.Suspend != nil && *cj.Spec.Suspend,
 				)
@@ -951,6 +978,8 @@ func (w *WasteAuditor) detectStaleJobs(audit *WasteAudit, filterNamespace string
 					Name:      cj.Name,
 					Namespace: cj.Namespace,
 					IsCronJob: true,
+					Schedule:  cj.Spec.Schedule,
+					Suspended: cj.Spec.Suspend,
 					JobStatus: "NeverScheduled",
 					AgeDays:   ageDays,
 					Reason:    reason,
@@ -958,17 +987,19 @@ func (w *WasteAuditor) detectStaleJobs(audit *WasteAudit, filterNamespace string
 				})
 			}
 
-			// CronJob with no history limits (will pile up jobs forever)
+			// Explicitly omitted history limits; Kubernetes defaults still apply.
 			if cj.Spec.SuccessfulJobsHistoryLimit == nil && cj.Spec.FailedJobsHistoryLimit == nil {
 				reason := fmt.Sprintf(
 					"CronJob has no successfulJobsHistoryLimit or failedJobsHistoryLimit set. " +
-						"This means completed/failed jobs will accumulate indefinitely. " +
-						"Recommend setting successfulJobsHistoryLimit: 3 and failedJobsHistoryLimit: 1.",
+						"Omitted history limits use Kubernetes defaults (3 successful Jobs and 1 failed Job), not unlimited retention. " +
+						"Review effective retention settings and owner requirements.",
 				)
 				audit.StaleJobs = append(audit.StaleJobs, StaleJob{
 					Name:      cj.Name,
 					Namespace: cj.Namespace,
 					IsCronJob: true,
+					Schedule:  cj.Spec.Schedule,
+					Suspended: cj.Spec.Suspend,
 					JobStatus: "NoHistoryLimit",
 					AgeDays:   ageDays,
 					Reason:    reason,
@@ -1010,10 +1041,8 @@ func (w *WasteAuditor) detectZeroReplicaWorkloads(audit *WasteAudit, filterNames
 
 		if d.Spec.Replicas != nil && *d.Spec.Replicas == 0 {
 			reason := fmt.Sprintf(
-				"Deployment has been set to 0 replicas for %d days. "+
-					"It is not running any pods but still consumes a Deployment object, "+
-					"ConfigMaps, and namespace quota. "+
-					"If intentionally disabled, consider archiving it instead.",
+				"Deployment currently requests 0 replicas. Resource age: %d days. "+
+					"Scale-transition history and associated resources were not checked. Review workload intent.",
 				ageDays,
 			)
 			audit.ZeroReplicaWorkloads = append(audit.ZeroReplicaWorkloads, ZeroReplicaWorkload{
@@ -1042,9 +1071,8 @@ func (w *WasteAuditor) detectZeroReplicaWorkloads(audit *WasteAudit, filterNames
 
 			if s.Spec.Replicas != nil && *s.Spec.Replicas == 0 {
 				reason := fmt.Sprintf(
-					"StatefulSet has been set to 0 replicas for %d days. "+
-						"Its PVCs may still exist and incur storage costs even with no running pods. "+
-						"Check associated PVCs before removing.",
+					"StatefulSet currently requests 0 replicas. Resource age: %d days. "+
+						"Scale-transition history and associated PVCs were not checked. Review workload and data-retention intent.",
 					ageDays,
 				)
 				audit.ZeroReplicaWorkloads = append(audit.ZeroReplicaWorkloads, ZeroReplicaWorkload{
@@ -1067,7 +1095,7 @@ func (w *WasteAuditor) detectZeroReplicaWorkloads(audit *WasteAudit, filterNames
 }
 
 // ================================================================
-// 6. Old ReplicaSets (leftover from rollouts)
+// 6. Old ReplicaSets (retention review)
 // ================================================================
 
 func (w *WasteAuditor) detectOldReplicaSets(audit *WasteAudit, filterNamespace string) error {
@@ -1103,9 +1131,8 @@ func (w *WasteAuditor) detectOldReplicaSets(audit *WasteAudit, filterNamespace s
 		}
 
 		reason := fmt.Sprintf(
-			"ReplicaSet has 0 desired replicas and is %d days old. "+
-				"This is a leftover from a previous deployment rollout of '%s'. "+
-				"Kubernetes retains old ReplicaSets for rollback history but they accumulate over time.",
+			"ReplicaSet resource age: %d days. Deployment owner reference: %q. "+
+				"Review desired replicas and rollback retention; rollout revision was not checked.",
 			ageDays, ownerDeploy,
 		)
 
@@ -1114,6 +1141,7 @@ func (w *WasteAuditor) detectOldReplicaSets(audit *WasteAudit, filterNamespace s
 			Namespace:       rs.Namespace,
 			AgeDays:         ageDays,
 			OwnerDeployment: ownerDeploy,
+			DesiredReplicas: rs.Spec.Replicas,
 			Reason:          reason,
 			Score:           float64(ageDays) * 0.3,
 		})
@@ -1210,6 +1238,7 @@ func (w *WasteAuditor) detectOrphanedServices(audit *WasteAudit, filterNamespace
 				Type:      string(svc.Spec.Type),
 				AgeDays:   ageDays,
 				IsLB:      isLB,
+				Selector:  svc.Spec.Selector,
 				Reason:    reason,
 				Score:     score,
 			})
@@ -1386,7 +1415,7 @@ func (w *WasteAuditor) detectMisconfiguredHPAs(audit *WasteAudit, filterNamespac
 
 				reason := fmt.Sprintf(
 					"HPA targeting '%s' currently reports ScalingActive=False%s (reason: %s - %s). "+
-						"Autoscaling is not functioning while this condition persists.",
+						"Review the reported condition and target configuration; application impact was not measured.",
 					hpa.Spec.ScaleTargetRef.Name, durationClause,
 					cond.Reason, cond.Message,
 				)
@@ -1450,12 +1479,12 @@ func PrintWasteAudit(audit *WasteAudit, minAgeDays int) {
 	fmt.Println("╔════════════════════════════════════════════════════════════╗")
 	fmt.Println("║           CLUSTER WASTE & DRIFT ANALYSIS                  ║")
 	fmt.Println("╠════════════════════════════════════════════════════════════╣")
-	fmt.Printf("║  Resources older than %2d days  │  Suggestions only - no changes made  ║\n", minAgeDays)
+	fmt.Printf("║  Age-gated checks: %2d days  │  Suggestions only - no changes made  ║\n", minAgeDays)
 	fmt.Println("╚════════════════════════════════════════════════════════════╝")
 	fmt.Println()
 
-	if audit.TotalWasteItems == 0 {
-		fmt.Println("✅ No waste detected! Cluster looks clean.")
+	if audit == nil {
+		printExecutiveSummary(nil)
 		return
 	}
 
@@ -1496,101 +1525,28 @@ func splitMisconfiguredHPAs(hpas []MisconfiguredHPA) (active, tuning int) {
 }
 
 func printExecutiveSummary(audit *WasteAudit) {
-	zombieCount := 0
-	for _, p := range audit.StalePods {
-		if p.Kind == StalePodZombie {
-			zombieCount++
-		}
-	}
-
-	// BrokenIngress is only ever produced from a currently-broken backend
-	// (IsActive is always true for it — see the waste detector). Among
-	// MisconfiguredHPAs, only the ScalingActive=False ones are live
-	// failures; AlwaysAtMin is a tuning-review candidate, not an active
-	// break, and stays in the warning bucket below.
-	activeIngresses := len(audit.BrokenIngresses)
-	activeHPAs, tuningHPAs := splitMisconfiguredHPAs(audit.MisconfiguredHPAs)
-
-	criticalCount := len(audit.AbandonedNamespaces) + zombieCount + len(audit.OrphanedPVCs) + activeIngresses + activeHPAs
-	warningCount := len(audit.StaleJobs) + len(audit.ZeroReplicaWorkloads) +
-		len(audit.OrphanedServices) + tuningHPAs
-
+	p := BuildWastePresentation(audit)
 	fmt.Println("EXECUTIVE SUMMARY")
-	fmt.Println("═══════════════════════════════════════════════════════════")
-	fmt.Printf("  Total Waste Items:  %d   (%d critical  /  %d warning)\n",
-		audit.TotalWasteItems, criticalCount, warningCount)
-
-	if audit.OrphanedPVCStorageGB > 0 {
-		fmt.Printf("  Idle Storage:       %dGB across %d orphaned PVCs\n",
-			audit.OrphanedPVCStorageGB, len(audit.OrphanedPVCs))
+	fmt.Printf("Scanned: %s\n", p.ScanTimeLabel())
+	fmt.Printf("Finding count: %d | Distinct resource count: %d\n", p.Counts.Findings, p.Counts.DistinctResources)
+	fmt.Printf("Operational findings: %d | Housekeeping/retention findings: %d | Other review findings: %d\n",
+		p.Counts.Operational, p.Counts.Retention, p.Counts.Review)
+	fmt.Println("Operational counts are audit findings, not incident-store counts; historical and inferred evidence may be included.")
+	fmt.Printf("Candidate PVC requests: %s (%d quantities unknown)\n", FormatWasteBytes(p.RequestedStorageBytes), p.UnknownStorageRequests)
+	fmt.Printf("Coverage: %s\n", p.Coverage)
+	for _, warning := range p.Warnings {
+		fmt.Printf("Check warning: %s: %s\n", warning.Category, warning.Error)
 	}
-
-	fmt.Println()
-	fmt.Println("  🔴 Critical findings requiring action:")
-	if zombieCount > 0 {
-		// Find the worst zombie for context
-		maxRestarts := int32(0)
-		for _, p := range audit.StalePods {
-			if p.Kind == StalePodZombie && p.RestartCount > maxRestarts {
-				maxRestarts = p.RestartCount
-			}
-		}
-		fmt.Printf("     • %d zombie pod(s) — up to %d restarts, consuming scheduling resources\n",
-			zombieCount, maxRestarts)
+	if p.Counts.Findings == 0 {
+		fmt.Println("No findings were reported by the available checks; this does not establish a clean cluster.")
 	}
-	if len(audit.OrphanedPVCs) > 0 {
-		storageStr := ""
-		if audit.OrphanedPVCStorageGB > 0 {
-			storageStr = fmt.Sprintf(" (%dGB idle storage)", audit.OrphanedPVCStorageGB)
-		}
-		fmt.Printf("     • %d orphaned PVC(s)%s\n", len(audit.OrphanedPVCs), storageStr)
-	}
-	if len(audit.AbandonedNamespaces) > 0 {
-		fmt.Printf("     • %d abandoned namespace(s)\n", len(audit.AbandonedNamespaces))
-	}
-	if activeIngresses > 0 {
-		fmt.Printf("     • %d broken ingress(es) — active routing failure\n", activeIngresses)
-	}
-	if activeHPAs > 0 {
-		fmt.Printf("     • %d HPA(s) currently reporting ScalingActive=False\n", activeHPAs)
-	}
-	if criticalCount == 0 {
-		fmt.Println("     • None")
-	}
-
-	fmt.Println()
-	fmt.Println("  🟡 Warning findings to review:")
-	if len(audit.StaleJobs) > 0 {
-		fmt.Printf("     • %d stale job(s)/cronjob(s) not cleaned up\n", len(audit.StaleJobs))
-	}
-	if len(audit.OrphanedServices) > 0 {
-		fmt.Printf("     • %d service(s) with no endpoints\n", len(audit.OrphanedServices))
-	}
-	if len(audit.ZeroReplicaWorkloads) > 0 {
-		fmt.Printf("     • %d zero-replica workload(s)\n", len(audit.ZeroReplicaWorkloads))
-	}
-	if tuningHPAs > 0 {
-		fmt.Printf("     • %d HPA(s) at minReplicas — tuning review candidate\n", tuningHPAs)
-	}
-	if warningCount == 0 {
-		fmt.Println("     • None")
-	}
-
-	fmt.Println()
-	fmt.Println("  ℹ️  Housekeeping (not counted in total):")
-	if len(audit.OldReplicaSets) > 0 {
-		fmt.Printf("     • %d old ReplicaSet(s) from past rollouts\n", len(audit.OldReplicaSets))
-	} else {
-		fmt.Println("     • None")
-	}
-	fmt.Println()
 }
 
 func printWasteScorecard(audit *WasteAudit) {
 	fmt.Println("WASTE SCORECARD")
 	fmt.Println("═══════════════════════════════════════════════════════════")
 
-	printScoreRow("Abandoned Namespaces", len(audit.AbandonedNamespaces), "🔴")
+	printScoreRow("Namespace Activity Review", len(audit.AbandonedNamespaces), "🔴")
 	zombieCount := 0
 	bareCount := 0
 	for _, p := range audit.StalePods {
@@ -1600,22 +1556,22 @@ func printWasteScorecard(audit *WasteAudit) {
 			bareCount++
 		}
 	}
-	printScoreRow("Zombie Pods (CrashLoop/OOM)", zombieCount, "🔴")
-	printScoreRow("Unmanaged Pods (no controller)", bareCount, "🔴")
-	printScoreRow("Orphaned PVCs", len(audit.OrphanedPVCs), "🔴")
-	printScoreRow("Orphaned Services", len(audit.OrphanedServices), "🟡")
-	printScoreRow("Broken Ingresses", len(audit.BrokenIngresses), "🔴") // always an active routing failure when present
-	printScoreRow("Stale Jobs/CronJobs", len(audit.StaleJobs), "🟡")
+	printScoreRow("Pod Failure Evidence", zombieCount, "🔴")
+	printScoreRow("Pod Ownership Review", bareCount, "🔴")
+	printScoreRow("PVC State / Reference Review", len(audit.OrphanedPVCs), "🔴")
+	printScoreRow("Service Selector Review", len(audit.OrphanedServices), "🟡")
+	printScoreRow("Ingress Backend Evidence", len(audit.BrokenIngresses), "🔴")
+	printScoreRow("Job / CronJob Retention Review", len(audit.StaleJobs), "🟡")
 	printScoreRow("Zero-Replica Workloads", len(audit.ZeroReplicaWorkloads), "🟡")
-	printScoreRow("Old ReplicaSets", len(audit.OldReplicaSets), "🟢")
+	printScoreRow("ReplicaSet Retention Review", len(audit.OldReplicaSets), "🟢")
 	hpaEmoji := "🟢" // tuning candidates only (AlwaysAtMin)
 	if active, _ := splitMisconfiguredHPAs(audit.MisconfiguredHPAs); active > 0 {
 		hpaEmoji = "🔴" // at least one HPA currently reporting ScalingActive=False
 	}
-	printScoreRow("Misconfigured HPAs", len(audit.MisconfiguredHPAs), hpaEmoji)
+	printScoreRow("HPA Configuration Review", len(audit.MisconfiguredHPAs), hpaEmoji)
 
 	fmt.Println("───────────────────────────────────────────────────────────")
-	fmt.Printf("  Total waste items found:  %d\n", audit.TotalWasteItems)
+	fmt.Printf("  Finding count:  %d\n", BuildWastePresentation(audit).Counts.Findings)
 	fmt.Println()
 }
 
@@ -1628,19 +1584,18 @@ func printScoreRow(label string, count int, emoji string) {
 }
 
 func printAbandonedNamespaces(audit *WasteAudit) {
+	evidence := BuildWastePresentation(audit).FindingsInCategory("Namespace activity review")
 	if len(audit.AbandonedNamespaces) == 0 {
 		return
 	}
 	fmt.Println("═══════════════════════════════════════════════════════════")
-	fmt.Printf("🔴 ABANDONED NAMESPACES (%d)\n", len(audit.AbandonedNamespaces))
+	fmt.Printf("🔴 NAMESPACE ACTIVITY REVIEW (%d)\n", len(audit.AbandonedNamespaces))
 	fmt.Println("═══════════════════════════════════════════════════════════")
-	for _, ns := range audit.AbandonedNamespaces {
+	for i, ns := range audit.AbandonedNamespaces {
 		fmt.Printf("\n  📁 %s\n", ns.Name)
 		fmt.Printf("     Age:      %d days\n", ns.AgeDays)
 		fmt.Printf("     Pods:     %s\n", podLabel(ns.PodCount))
-		fmt.Printf("     Finding:  %s\n", ns.Reason)
-		fmt.Printf("     Suggest:  Confirm with team if namespace is still needed.\n")
-		fmt.Printf("               kubectl get all -n %s\n", ns.Name)
+		printWasteEvidence(evidence[i])
 	}
 	fmt.Println()
 }
@@ -1662,111 +1617,98 @@ func printStalePods(audit *WasteAudit) {
 	}
 
 	if len(zombies) > 0 {
+		evidence := BuildWastePresentation(audit).FindingsInCategory("Pod failure evidence")
 		fmt.Println("═══════════════════════════════════════════════════════════")
-		fmt.Printf("🔴 ZOMBIE PODS - not functioning (%d)\n", len(zombies))
+		fmt.Printf("🔴 POD FAILURE EVIDENCE (%d)\n", len(zombies))
 		fmt.Println("═══════════════════════════════════════════════════════════")
-		for _, p := range zombies {
+		for i, p := range zombies {
 			fmt.Printf("\n  💀 %s (namespace: %s)\n", p.Name, p.Namespace)
-			fmt.Printf("     Status:   %s\n", p.Status)
+			fmt.Printf("     Classification: %s\n", p.Status)
 			fmt.Printf("     Age:      %d days\n", p.AgeDays)
 			fmt.Printf("     Restarts: %d\n", p.RestartCount)
-			fmt.Printf("     Finding:  %s\n", p.Reason)
-			fmt.Printf("     Suggest:  Check logs: kubectl logs %s -n %s --previous\n", p.Name, p.Namespace)
+			printWasteEvidence(evidence[i])
 		}
 		fmt.Println()
 	}
 
 	if len(idle) > 0 {
+		evidence := BuildWastePresentation(audit).FindingsInCategory("Pod ownership review")
 		fmt.Println("═══════════════════════════════════════════════════════════")
-		fmt.Printf("🔴 UNMANAGED PODS - no owning controller (%d)\n", len(idle))
+		fmt.Printf("🔴 POD OWNERSHIP REVIEW (%d)\n", len(idle))
 		fmt.Println("═══════════════════════════════════════════════════════════")
-		for _, p := range idle {
+		for i, p := range idle {
 			fmt.Printf("\n  [BARE] %s (namespace: %s)\n", p.Name, p.Namespace)
 			fmt.Printf("     Age:           %d days\n", p.AgeDays)
 			fmt.Printf("     Restarts:      %d (total)\n", p.RestartCount)
-			fmt.Printf("     Finding:       %s\n", p.Reason)
-			fmt.Printf("     Suggest:       Verify with owner: kubectl describe pod %s -n %s\n", p.Name, p.Namespace)
+			printWasteEvidence(evidence[i])
 		}
 		fmt.Println()
 	}
 }
 
 func printOrphanedPVCs(audit *WasteAudit) {
+	evidence := BuildWastePresentation(audit).FindingsInCategory("PVC state / reference review")
 	if len(audit.OrphanedPVCs) == 0 {
 		return
 	}
 	fmt.Println("═══════════════════════════════════════════════════════════")
-	if audit.OrphanedPVCStorageGB > 0 {
-		fmt.Printf("🔴 ORPHANED PVCs - storage waste (%d)  |  Total idle: %dGB\n",
-			len(audit.OrphanedPVCs), audit.OrphanedPVCStorageGB)
-	} else {
-		fmt.Printf("🔴 ORPHANED PVCs - storage waste (%d)\n", len(audit.OrphanedPVCs))
-	}
+	fmt.Printf("🔴 PVC STATE / REFERENCE REVIEW (%d)\n", len(audit.OrphanedPVCs))
 	fmt.Println("═══════════════════════════════════════════════════════════")
-	for _, pvc := range audit.OrphanedPVCs {
-		sizeStr := "unknown size"
-		if pvc.SizeGB > 0 {
-			sizeStr = fmt.Sprintf("%dGB", pvc.SizeGB)
-		}
+	for i, pvc := range audit.OrphanedPVCs {
+		sizeStr := evidence[i].Storage
 		fmt.Printf("\n  💾 %s (namespace: %s)\n", pvc.Name, pvc.Namespace)
-		fmt.Printf("     Status:  %s\n", pvc.Status)
+		fmt.Printf("     State evidence: %s\n", evidence[i].Observed)
 		fmt.Printf("     Size:    %s\n", sizeStr)
 		fmt.Printf("     Age:     %d days\n", pvc.AgeDays)
-		fmt.Printf("     Finding: %s\n", pvc.Reason)
-		fmt.Printf("     Suggest: Verify data is backed up before removing.\n")
-		fmt.Printf("              kubectl get pvc %s -n %s -o yaml\n", pvc.Name, pvc.Namespace)
+		printWasteEvidence(evidence[i])
 	}
 	fmt.Println()
 }
 
 func printStaleJobs(audit *WasteAudit) {
+	evidence := BuildWastePresentation(audit).FindingsInCategory("Job / CronJob retention review")
 	if len(audit.StaleJobs) == 0 {
 		return
 	}
 	fmt.Println("═══════════════════════════════════════════════════════════")
-	fmt.Printf("🟡 STALE JOBS & CRONJOBS (%d)\n", len(audit.StaleJobs))
+	fmt.Printf("🟡 JOB / CRONJOB RETENTION REVIEW (%d)\n", len(audit.StaleJobs))
 	fmt.Println("═══════════════════════════════════════════════════════════")
-	for _, job := range audit.StaleJobs {
+	for i, job := range audit.StaleJobs {
 		kind := "Job"
 		if job.IsCronJob {
 			kind = "CronJob"
 		}
 		fmt.Printf("\n  ⏰ %s [%s] (namespace: %s)\n", job.Name, kind, job.Namespace)
-		fmt.Printf("     Status:  %s\n", job.JobStatus)
+		fmt.Printf("     Review category: %s\n", evidence[i].Category)
 		fmt.Printf("     Age:     %d days\n", job.AgeDays)
-		fmt.Printf("     Finding: %s\n", job.Reason)
-		if job.JobStatus == "Completed" {
-			fmt.Println("     Suggest: Review job history and retention requirements with the workload owner")
-		} else {
-			fmt.Printf("     Suggest: kubectl describe job %s -n %s\n", job.Name, job.Namespace)
-		}
+		printWasteEvidence(evidence[i])
 	}
 	fmt.Println()
 }
 
 func printZeroReplicaWorkloads(audit *WasteAudit) {
+	evidence := BuildWastePresentation(audit).FindingsInCategory("Zero-replica workload")
 	if len(audit.ZeroReplicaWorkloads) == 0 {
 		return
 	}
 	fmt.Println("═══════════════════════════════════════════════════════════")
 	fmt.Printf("🟡 ZERO-REPLICA WORKLOADS (%d)\n", len(audit.ZeroReplicaWorkloads))
 	fmt.Println("═══════════════════════════════════════════════════════════")
-	for _, w := range audit.ZeroReplicaWorkloads {
+	for i, w := range audit.ZeroReplicaWorkloads {
 		fmt.Printf("\n  📦 %s [%s] (namespace: %s)\n", w.Name, w.Kind, w.Namespace)
 		fmt.Printf("     Age:     %d days\n", w.AgeDays)
-		fmt.Printf("     Finding: %s\n", w.Reason)
-		fmt.Printf("     Suggest: kubectl get %s %s -n %s -o yaml\n",
-			strings.ToLower(w.Kind), w.Name, w.Namespace)
+		printWasteEvidence(evidence[i])
 	}
 	fmt.Println()
 }
 
 func printOldReplicaSets(audit *WasteAudit) {
+	evidence := BuildWastePresentation(audit).FindingsInCategory("ReplicaSet retention review")
 	if len(audit.OldReplicaSets) == 0 {
 		return
 	}
 	fmt.Println("═══════════════════════════════════════════════════════════")
-	fmt.Printf("🟢 OLD REPLICASETS - rollout leftovers (%d)\n", len(audit.OldReplicaSets))
+	fmt.Printf("🟢 REPLICASET RETENTION REVIEW (%d)\n", len(audit.OldReplicaSets))
 	fmt.Println("═══════════════════════════════════════════════════════════")
 	// Show top 10 only - these can be numerous
 	shown := audit.OldReplicaSets
@@ -1775,74 +1717,75 @@ func printOldReplicaSets(audit *WasteAudit) {
 		remaining = len(shown) - 10
 		shown = shown[:10]
 	}
-	for _, rs := range shown {
+	for i, rs := range shown {
 		fmt.Printf("  📋 %s (owner: %s, age: %d days)\n", rs.Name, rs.OwnerDeployment, rs.AgeDays)
+		printWasteEvidence(evidence[i])
 	}
 	if remaining > 0 {
 		fmt.Printf("  ... and %d more old ReplicaSets\n", remaining)
-		fmt.Printf("  Suggest: kubectl get rs -A | awk '$3==0 && $4==0'\n")
+		fmt.Println("  Inspect: kubectl get rs -A -o yaml; confirm rollback and retention requirements with owners.")
 	}
 	fmt.Println()
 }
 
 func printOrphanedServices(audit *WasteAudit) {
+	evidence := BuildWastePresentation(audit).FindingsInCategory("Service selector review")
 	if len(audit.OrphanedServices) == 0 {
 		return
 	}
 	fmt.Println("═══════════════════════════════════════════════════════════")
-	fmt.Printf("🟡 SERVICES WITH NO ENDPOINTS (%d)\n", len(audit.OrphanedServices))
+	fmt.Printf("🟡 SERVICE SELECTOR REVIEW (%d)\n", len(audit.OrphanedServices))
 	fmt.Println("═══════════════════════════════════════════════════════════")
-	for _, svc := range audit.OrphanedServices {
+	for i, svc := range audit.OrphanedServices {
 		lbNote := ""
 		if svc.IsLB {
-			lbNote = " ⚠️  LoadBalancer - incurring cloud cost!"
+			lbNote = " LoadBalancer — billing not checked"
 		}
 		fmt.Printf("\n  🔌 %s [%s]%s (namespace: %s)\n", svc.Name, svc.Type, lbNote, svc.Namespace)
 		fmt.Printf("     Age:     %d days\n", svc.AgeDays)
-		fmt.Printf("     Finding: %s\n", svc.Reason)
-		fmt.Printf("     Suggest: kubectl get endpoints %s -n %s\n", svc.Name, svc.Namespace)
+		printWasteEvidence(evidence[i])
 	}
 	fmt.Println()
 }
 
 func printBrokenIngresses(audit *WasteAudit) {
+	evidence := BuildWastePresentation(audit).FindingsInCategory("Ingress backend evidence")
 	if len(audit.BrokenIngresses) == 0 {
 		return
 	}
 	fmt.Println("═══════════════════════════════════════════════════════════")
-	fmt.Printf("🟡 INGRESSES WITH MISSING BACKENDS (%d)\n", len(audit.BrokenIngresses))
+	fmt.Printf("🟡 INGRESS BACKEND EVIDENCE (%d)\n", len(audit.BrokenIngresses))
 	fmt.Println("═══════════════════════════════════════════════════════════")
-	for _, ing := range audit.BrokenIngresses {
+	for i, ing := range audit.BrokenIngresses {
 		activeNote := ""
 		if ing.IsActive {
-			activeNote = " 🔴 ACTIVE NOW"
+			activeNote = " condition reported"
 		}
 		fmt.Printf("\n  🌐 %s (namespace: %s)%s\n", ing.Name, ing.Namespace, activeNote)
 		fmt.Printf("     Hosts:   %s\n", strings.Join(ing.Hosts, ", "))
 		fmt.Printf("     Age:     %d days\n", ing.AgeDays)
-		fmt.Printf("     Finding: %s\n", ing.Reason)
-		fmt.Printf("     Suggest: kubectl describe ingress %s -n %s\n", ing.Name, ing.Namespace)
+		printWasteEvidence(evidence[i])
 	}
 	fmt.Println()
 }
 
 func printMisconfiguredHPAs(audit *WasteAudit) {
+	evidence := BuildWastePresentation(audit).FindingsInCategory("HPA configuration review")
 	if len(audit.MisconfiguredHPAs) == 0 {
 		return
 	}
 	fmt.Println("═══════════════════════════════════════════════════════════")
-	fmt.Printf("🟢 MISCONFIGURED HPAs (%d)\n", len(audit.MisconfiguredHPAs))
+	fmt.Printf("🟢 HPA CONFIGURATION REVIEW (%d)\n", len(audit.MisconfiguredHPAs))
 	fmt.Println("═══════════════════════════════════════════════════════════")
-	for _, hpa := range audit.MisconfiguredHPAs {
+	for i, hpa := range audit.MisconfiguredHPAs {
 		activeNote := ""
 		if hpa.IsActive {
-			activeNote = " 🔴 ACTIVE NOW"
+			activeNote = " condition reported"
 		}
 		fmt.Printf("\n  📈 %s → %s (namespace: %s)%s\n", hpa.Name, hpa.TargetName, hpa.Namespace, activeNote)
 		fmt.Printf("     Replicas: min=%d max=%d  Condition: %s\n", hpa.MinReplicas, hpa.MaxReplicas, hpa.Condition)
 		fmt.Printf("     Age:      %d days\n", hpa.AgeDays)
-		fmt.Printf("     Finding:  %s\n", hpa.Reason)
-		fmt.Printf("     Suggest:  kubectl describe hpa %s -n %s\n", hpa.Name, hpa.Namespace)
+		printWasteEvidence(evidence[i])
 	}
 	fmt.Println()
 }
@@ -1850,42 +1793,15 @@ func printMisconfiguredHPAs(audit *WasteAudit) {
 func printWasteSummary(audit *WasteAudit) {
 	fmt.Println("═══════════════════════════════════════════════════════════")
 	fmt.Println("📋 NEXT STEPS")
-	fmt.Println("═══════════════════════════════════════════════════════════")
-	fmt.Println()
-	fmt.Println("  ⚠️  This report shows SUGGESTIONS based on observed data.")
-	fmt.Println("  Always verify with the owning team before removing resources.")
-	fmt.Println()
-
-	if len(audit.StaleJobs) > 0 {
-		// Count only completed jobs (safest to delete)
-		completed := 0
-		for _, j := range audit.StaleJobs {
-			if j.JobStatus == "Completed" {
-				completed++
-			}
-		}
-		if completed > 0 {
-			fmt.Printf("  ✅ SAFE TO DELETE: %d completed Jobs (no data loss risk)\n", completed)
-		}
-	}
-
-	if len(audit.OldReplicaSets) > 0 {
-		fmt.Printf("  ✅ SAFE TO DELETE: %d old ReplicaSets (Kubernetes manages these)\n", len(audit.OldReplicaSets))
-	}
-
-	if len(audit.AbandonedNamespaces) > 0 || len(audit.OrphanedPVCs) > 0 || len(audit.StalePods) > 0 {
-		fmt.Println("  🔍 VERIFY FIRST:   Namespaces, PVCs, and Pods - confirm with owners")
-	}
-
-	fmt.Println()
-	fmt.Println("  💡 Re-run with --min-age-days to adjust the age threshold.")
-	fmt.Println("  💡 Use --namespace to focus on a specific namespace.")
-	fmt.Println()
+	fmt.Println("Review observations, workload intent, and retention requirements with the owning team.")
+	fmt.Println("Priority is the legacy heuristic, not confidence, financial impact, or cleanup safety.")
+	fmt.Println("Use --min-age-days to adjust age-gated checks and --namespace to focus the scan.")
 }
 
-// ================================================================
-// Helpers
-// ================================================================
+func printWasteEvidence(f WasteFinding) {
+	fmt.Printf("     Observed: %s\n     Inference: %s\n     Limitations: %s\n     Review: %s\n", f.Observed, f.Inference, f.Limitations, f.Review)
+	fmt.Printf("     Priority score: %g (legacy heuristic) | Evidence confidence: %s — %s\n     %s\n", f.Priority, f.Confidence, f.ConfidenceReason, f.Command)
+}
 
 // isInfraPattern returns true for Kubernetes system/infrastructure namespaces
 // whose pods and resources should be excluded from waste and zombie detection.
