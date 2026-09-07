@@ -25,6 +25,7 @@ type WasteAuditor struct {
 	clientset       kubernetes.Interface
 	ctx             context.Context
 	minAgeDays      int
+	podSnapshot     []corev1.Pod
 	podsByNamespace map[string][]corev1.Pod
 }
 
@@ -223,14 +224,26 @@ func NewWasteAuditor(clientset kubernetes.Interface, minAgeDays int) (*WasteAudi
 // leaves detectors on their existing Kubernetes API retrieval paths.
 func (w *WasteAuditor) WithPodSnapshot(pods []corev1.Pod, clusterWide bool) *WasteAuditor {
 	if !clusterWide {
+		w.podSnapshot = nil
 		w.podsByNamespace = nil
 		return w
 	}
+	w.podSnapshot = append(w.podSnapshot[:0], pods...)
 	w.podsByNamespace = make(map[string][]corev1.Pod)
 	for _, pod := range pods {
 		w.podsByNamespace[pod.Namespace] = append(w.podsByNamespace[pod.Namespace], pod)
 	}
 	return w
+}
+
+func (w *WasteAuditor) sharedPods(filterNamespace string) ([]corev1.Pod, bool) {
+	if w.podsByNamespace == nil {
+		return nil, false
+	}
+	if filterNamespace != "" {
+		return w.podsByNamespace[filterNamespace], true
+	}
+	return w.podSnapshot, true
 }
 
 // ================================================================
@@ -590,9 +603,13 @@ func (w *WasteAuditor) detectStalePods(audit *WasteAudit, filterNamespace string
 }
 
 func (w *WasteAuditor) detectStalePodsWithClusterEvents(audit *WasteAudit, filterNamespace string, useClusterEvents bool) error {
-	pods, err := w.clientset.CoreV1().Pods(filterNamespace).List(w.ctx, metav1.ListOptions{TimeoutSeconds: int64Ptr(10)})
-	if err != nil {
-		return err
+	podItems, shared := w.sharedPods(filterNamespace)
+	if !shared {
+		pods, err := w.clientset.CoreV1().Pods(filterNamespace).List(w.ctx, metav1.ListOptions{TimeoutSeconds: int64Ptr(10)})
+		if err != nil {
+			return err
+		}
+		podItems = pods.Items
 	}
 
 	now := time.Now()
@@ -617,7 +634,7 @@ func (w *WasteAuditor) detectStalePodsWithClusterEvents(audit *WasteAudit, filte
 	probeFailurePods := make(map[string]map[string]bool)
 	var eventScanErr error
 
-	for _, pod := range pods.Items {
+	for _, pod := range podItems {
 		// Skip system namespaces
 		if isInfraPattern(pod.Namespace) {
 			continue
@@ -735,14 +752,18 @@ func (w *WasteAuditor) detectOrphanedPVCs(audit *WasteAudit, filterNamespace str
 		return err
 	}
 
-	// Build set of PVCs actively used by pods
-	pods, err := w.clientset.CoreV1().Pods(filterNamespace).List(w.ctx, metav1.ListOptions{TimeoutSeconds: int64Ptr(10)})
-	if err != nil {
-		return fmt.Errorf("list pods for PVC reference detection: %w", err)
+	// Build set of PVCs actively used by pods.
+	podItems, shared := w.sharedPods(filterNamespace)
+	if !shared {
+		pods, err := w.clientset.CoreV1().Pods(filterNamespace).List(w.ctx, metav1.ListOptions{TimeoutSeconds: int64Ptr(10)})
+		if err != nil {
+			return fmt.Errorf("list pods for PVC reference detection: %w", err)
+		}
+		podItems = pods.Items
 	}
 
 	usedPVCs := map[string]bool{}
-	for _, pod := range pods.Items {
+	for _, pod := range podItems {
 		for _, vol := range pod.Spec.Volumes {
 			if vol.PersistentVolumeClaim != nil {
 				key := pod.Namespace + "/" + vol.PersistentVolumeClaim.ClaimName
@@ -1114,9 +1135,13 @@ func (w *WasteAuditor) detectOrphanedServices(audit *WasteAudit, filterNamespace
 	if err != nil {
 		return err
 	}
-	pods, err := w.clientset.CoreV1().Pods(filterNamespace).List(w.ctx, metav1.ListOptions{TimeoutSeconds: int64Ptr(10)})
-	if err != nil {
-		return fmt.Errorf("list pods for Service selector matching: %w", err)
+	podItems, shared := w.sharedPods(filterNamespace)
+	if !shared {
+		pods, err := w.clientset.CoreV1().Pods(filterNamespace).List(w.ctx, metav1.ListOptions{TimeoutSeconds: int64Ptr(10)})
+		if err != nil {
+			return fmt.Errorf("list pods for Service selector matching: %w", err)
+		}
+		podItems = pods.Items
 	}
 
 	now := time.Now()
@@ -1151,7 +1176,7 @@ func (w *WasteAuditor) detectOrphanedServices(audit *WasteAudit, filterNamespace
 
 		selector := labels.SelectorFromSet(svc.Spec.Selector)
 		matchedPods := 0
-		for _, pod := range pods.Items {
+		for _, pod := range podItems {
 			if pod.Namespace == svc.Namespace && selector.Matches(labels.Set(pod.Labels)) {
 				matchedPods++
 			}

@@ -1,13 +1,106 @@
 package analyzer
 
 import (
+	"context"
+	"errors"
+	"reflect"
 	"strings"
 	"testing"
 
 	"github.com/opscart/opscart-k8s-watcher/pkg/models"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/client-go/kubernetes/fake"
+	ktesting "k8s.io/client-go/testing"
 )
+
+func securityTestPod(name, namespace string, privileged bool) *corev1.Pod {
+	return &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace},
+		Spec: corev1.PodSpec{Containers: []corev1.Container{{
+			Name: "app",
+			SecurityContext: &corev1.SecurityContext{
+				Privileged: &privileged,
+			},
+		}}},
+	}
+}
+
+func securityPodListCount(client *fake.Clientset) int {
+	count := 0
+	for _, action := range client.Actions() {
+		if action.GetVerb() == "list" && action.GetResource().Resource == "pods" {
+			count++
+		}
+	}
+	return count
+}
+
+func TestSecurityClusterWidePodSnapshotAvoidsListAndPreservesFindings(t *testing.T) {
+	pods := []corev1.Pod{
+		*securityTestPod("privileged", "app", true),
+		*securityTestPod("ordinary", "other", false),
+	}
+	legacyClient := fake.NewSimpleClientset(&pods[0], &pods[1])
+	legacy := &SecurityAuditor{clientset: legacyClient, ctx: context.Background()}
+	legacyAudit, err := legacy.AuditClusterSecurity("")
+	if err != nil {
+		t.Fatalf("legacy security audit: %v", err)
+	}
+
+	sharedClient := fake.NewSimpleClientset()
+	shared := &SecurityAuditor{clientset: sharedClient, ctx: context.Background()}
+	sharedAudit, err := shared.AuditClusterSecurityWithPodSnapshot("", pods, true)
+	if err != nil {
+		t.Fatalf("shared security audit: %v", err)
+	}
+	if got := securityPodListCount(sharedClient); got != 0 {
+		t.Fatalf("Pod LISTs with cluster-wide snapshot = %d, want 0", got)
+	}
+	if !reflect.DeepEqual(sharedAudit, legacyAudit) {
+		t.Fatalf("shared snapshot changed security findings:\nshared=%+v\nlegacy=%+v", sharedAudit, legacyAudit)
+	}
+}
+
+func TestSecurityNamespaceScopedSnapshotUsesLegacyClusterList(t *testing.T) {
+	apiPod := securityTestPod("cluster-pod", "other", false)
+	client := fake.NewSimpleClientset(apiPod)
+	sa := &SecurityAuditor{clientset: client, ctx: context.Background()}
+	snapshotPod := securityTestPod("namespace-only", "selected", true)
+	audit, err := sa.AuditClusterSecurityWithPodSnapshot("", []corev1.Pod{*snapshotPod}, false)
+	if err != nil {
+		t.Fatalf("security audit: %v", err)
+	}
+	if got := securityPodListCount(client); got != 1 {
+		t.Fatalf("legacy Pod LISTs = %d, want 1", got)
+	}
+	if audit.TotalPodsAudited != 1 || len(audit.Issues) == 0 {
+		t.Fatalf("unexpected legacy audit: %+v", audit)
+	}
+	for _, issue := range audit.Issues {
+		if issue.Name == "namespace-only" || strings.HasPrefix(issue.Name, "namespace-only/") {
+			t.Fatalf("namespace-scoped snapshot leaked into cluster audit: %+v", issue)
+		}
+	}
+}
+
+func TestSecuritySnapshotFallbackPreservesListError(t *testing.T) {
+	wantErr := errors.New("pods forbidden")
+	client := fake.NewSimpleClientset()
+	client.PrependReactor("list", "pods", func(ktesting.Action) (bool, runtime.Object, error) {
+		return true, nil, wantErr
+	})
+	sa := &SecurityAuditor{clientset: client, ctx: context.Background()}
+	audit, err := sa.AuditClusterSecurityWithPodSnapshot("", nil, false)
+	if audit != nil || !errors.Is(err, wantErr) || !strings.Contains(err.Error(), "failed to list pods") {
+		t.Fatalf("fallback result = audit:%+v err:%v", audit, err)
+	}
+	if got := securityPodListCount(client); got != 1 {
+		t.Fatalf("failed fallback Pod LISTs = %d, want 1", got)
+	}
+}
 
 func TestDetectEnvironment(t *testing.T) {
 	tests := []struct {

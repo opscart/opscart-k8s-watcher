@@ -13,7 +13,7 @@ import (
 
 // SecurityAuditor performs security analysis on cluster workloads
 type SecurityAuditor struct {
-	clientset *kubernetes.Clientset
+	clientset kubernetes.Interface
 	ctx       context.Context
 }
 
@@ -27,22 +27,31 @@ func NewSecurityAuditor(clientset *kubernetes.Clientset) *SecurityAuditor {
 
 // AuditClusterSecurity performs comprehensive security audit
 func (sa *SecurityAuditor) AuditClusterSecurity(namespace string) (*models.SecurityAudit, error) {
-	audit := &models.SecurityAudit{
-		TotalPodsAudited: 0,
-		Risks:            models.SecurityRisks{},
-		Issues:           []models.SecurityIssue{},
-	}
-
-	// Get all pods
 	podList, err := sa.clientset.CoreV1().Pods(namespace).List(sa.ctx, metav1.ListOptions{})
 	if err != nil {
 		return nil, fmt.Errorf("failed to list pods: %w", err)
 	}
+	return sa.auditPods(podList.Items), nil
+}
 
-	audit.TotalPodsAudited = len(podList.Items)
+// AuditClusterSecurityWithPodSnapshot reuses Pods only when the caller
+// explicitly confirms that the snapshot covers the entire cluster.
+func (sa *SecurityAuditor) AuditClusterSecurityWithPodSnapshot(namespace string, pods []corev1.Pod, clusterWide bool) (*models.SecurityAudit, error) {
+	if !clusterWide {
+		return sa.AuditClusterSecurity(namespace)
+	}
+	return sa.auditPods(pods), nil
+}
+
+func (sa *SecurityAuditor) auditPods(pods []corev1.Pod) *models.SecurityAudit {
+	audit := &models.SecurityAudit{
+		TotalPodsAudited: len(pods),
+		Risks:            models.SecurityRisks{},
+		Issues:           []models.SecurityIssue{},
+	}
 
 	// Audit each pod
-	for _, pod := range podList.Items {
+	for _, pod := range pods {
 		issues := sa.auditPod(pod)
 		audit.Issues = append(audit.Issues, issues...)
 
@@ -55,7 +64,7 @@ func (sa *SecurityAuditor) AuditClusterSecurity(namespace string) (*models.Secur
 	// Generate priority actions
 	audit.PriorityActions = sa.generatePriorityActions(audit)
 
-	return audit, nil
+	return audit
 }
 
 // auditPod checks a single pod for security issues

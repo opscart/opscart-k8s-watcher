@@ -2012,7 +2012,7 @@ func runFullScan(ctx string, scanCounters *apiCounters) (*clusterScan, error) {
 
 	// ── 2. Security audit (best effort) ──────────────────────────────
 	sa := analyzer.NewSecurityAuditor(clientset)
-	if secAudit, err := sa.AuditClusterSecurity(""); err == nil {
+	if secAudit, err := sa.AuditClusterSecurityWithPodSnapshot("", ra.PodSnapshot(), namespace == ""); err == nil {
 		scan.secAudit = secAudit
 	} else {
 		log.Printf("[%s] security audit skipped: %v", displayName(ctx), err)
