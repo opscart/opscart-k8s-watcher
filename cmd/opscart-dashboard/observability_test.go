@@ -51,7 +51,6 @@ func TestAPICountersConcurrent(t *testing.T) {
 			defer wg.Done()
 			for j := 0; j < 100; j++ {
 				counters.recordRequest("LIST", "pods", "200")
-				counters.recordObjects("pods", 1)
 			}
 		}()
 	}
@@ -59,9 +58,6 @@ func TestAPICountersConcurrent(t *testing.T) {
 	snapshot := counters.snapshot()
 	if got := snapshot.Requests[apiMetricKey{"LIST", "pods", "200"}]; got != 2000 {
 		t.Fatalf("requests = %d, want 2000", got)
-	}
-	if got := snapshot.Objects["pods"]; got != 2000 {
-		t.Fatalf("objects = %d, want 2000", got)
 	}
 }
 
@@ -98,20 +94,18 @@ func TestMeasuringTransportSeparatesScanAndCumulative(t *testing.T) {
 	if got, _ := scan.snapshot().totals(); got != 1 {
 		t.Fatalf("scan requests = %d, want 1", got)
 	}
-	if got := cumulative.snapshot().Objects["pods"]; got != 4 {
-		t.Fatalf("cumulative pods = %d, want 4", got)
-	}
-	if got := scan.snapshot().Objects["pods"]; got != 2 {
-		t.Fatalf("scan pods = %d, want 2", got)
-	}
 }
 
 func TestMeasuringTransportRecordsErrors(t *testing.T) {
 	counters := newAPICounters()
 	transport := &measuringTransport{base: roundTripperFunc(func(*http.Request) (*http.Response, error) { return nil, errors.New("boom") }), cumulative: counters}
 	_, _ = transport.RoundTrip(httptest.NewRequest("GET", "https://cluster/api/v1/nodes/node-a", nil))
-	if got := counters.snapshot().Requests[apiMetricKey{"GET", "nodes", "error"}]; got != 1 {
+	snapshot := counters.snapshot()
+	if got := snapshot.Requests[apiMetricKey{"GET", "nodes", "error"}]; got != 1 {
 		t.Fatalf("errors = %d, want 1", got)
+	}
+	if got := snapshot.RequestDuration[apiOperationKey{"GET", "nodes"}]; got <= 0 {
+		t.Fatalf("transport error duration = %s, want positive", got)
 	}
 }
 
@@ -136,12 +130,35 @@ func TestMeasuringTransportRecordsResponseCostAndThrottling(t *testing.T) {
 	if snapshot.RequestDuration[key] <= 0 || snapshot.MaxDuration[key] <= 0 {
 		t.Fatalf("request durations were not recorded: total=%s max=%s", snapshot.RequestDuration[key], snapshot.MaxDuration[key])
 	}
-	if got := snapshot.Objects["pods"]; got != 2 {
-		t.Fatalf("objects = %d, want 2", got)
-	}
 	_, _, _, throttles := snapshot.costTotals()
 	if throttles != 1 {
 		t.Fatalf("throttles = %d, want 1", throttles)
+	}
+}
+
+func TestMeasuringTransportRecordsPartialBodyOnClose(t *testing.T) {
+	counters := newAPICounters()
+	transport := &measuringTransport{base: roundTripperFunc(func(*http.Request) (*http.Response, error) {
+		return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader("abcdefghij")), Header: make(http.Header)}, nil
+	}), cumulative: counters}
+	resp, err := transport.RoundTrip(httptest.NewRequest(http.MethodGet, "https://cluster/api/v1/pods", nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	buf := make([]byte, 4)
+	if _, err := io.ReadFull(resp.Body, buf); err != nil {
+		t.Fatal(err)
+	}
+	if err := resp.Body.Close(); err != nil {
+		t.Fatal(err)
+	}
+	snapshot := counters.snapshot()
+	key := apiOperationKey{"LIST", "pods"}
+	if got := snapshot.ResponseBytes[key]; got != 4 {
+		t.Fatalf("partial response bytes = %d, want 4", got)
+	}
+	if snapshot.RequestDuration[key] <= 0 {
+		t.Fatalf("partial response duration = %s, want positive", snapshot.RequestDuration[key])
 	}
 }
 
@@ -150,7 +167,6 @@ func TestWritePrometheusMetrics(t *testing.T) {
 	cumulative.recordRequest("LIST", "pods", "200")
 	local := newAPICounters()
 	local.recordRequest("LIST", "events", "500")
-	local.recordObjects("events", 3)
 	local.recordResponseBytes("LIST", "events", 512)
 	local.recordRequestDuration("LIST", "events", 250*time.Millisecond)
 	var output strings.Builder
@@ -168,7 +184,6 @@ func TestWritePrometheusMetrics(t *testing.T) {
 		`opscart_scanner_last_scan_api_operation_requests{cluster="cluster-a",operation="LIST",resource="events"} 1`,
 		`opscart_scanner_last_scan_api_operation_response_bytes{cluster="cluster-a",operation="LIST",resource="events"} 512`,
 		`opscart_scanner_last_scan_api_operation_request_duration_seconds{cluster="cluster-a",operation="LIST",resource="events"} 0.25`,
-		`opscart_scanner_last_scan_objects_examined{cluster="cluster-a",resource="events"} 3`,
 	} {
 		if !strings.Contains(output.String(), want) {
 			t.Errorf("output missing %q\n%s", want, output.String())
@@ -323,7 +338,6 @@ func TestDiagnosticsRendersScannerAPICost(t *testing.T) {
 	srv := newTestServer()
 	counters := newAPICounters()
 	counters.recordRequest("LIST", "pods", "200")
-	counters.recordObjects("pods", 148)
 	counters.recordResponseBytes("LIST", "pods", 420*1024)
 	counters.recordRequestDuration("LIST", "pods", 84*time.Millisecond)
 	state := srv.getState(bogusClusterCtx)
@@ -336,7 +350,7 @@ func TestDiagnosticsRendersScannerAPICost(t *testing.T) {
 		"Response data: <strong>420.0 KB</strong>",
 		"Total API time: <strong>84ms</strong>",
 		"Slowest API request: <strong>84ms</strong>",
-		"LIST</strong> pods — 1 calls · 148 objects · 420.0 KB · 84ms total · 84ms average",
+		"LIST</strong> pods — 1 calls · 420.0 KB · 84ms total · 84ms average",
 	} {
 		if !strings.Contains(rec.Body.String(), want) {
 			t.Errorf("Diagnostics page missing %q", want)

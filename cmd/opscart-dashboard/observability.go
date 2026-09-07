@@ -1,8 +1,6 @@
 package main
 
 import (
-	"bytes"
-	"encoding/json"
 	"fmt"
 	"html/template"
 	"io"
@@ -31,7 +29,6 @@ type apiOperationKey struct {
 type apiCounters struct {
 	mu              sync.RWMutex
 	requests        map[apiMetricKey]uint64
-	objects         map[string]uint64
 	responseBytes   map[apiOperationKey]uint64
 	requestDuration map[apiOperationKey]time.Duration
 	maxDuration     map[apiOperationKey]time.Duration
@@ -40,7 +37,6 @@ type apiCounters struct {
 func newAPICounters() *apiCounters {
 	return &apiCounters{
 		requests:        make(map[apiMetricKey]uint64),
-		objects:         make(map[string]uint64),
 		responseBytes:   make(map[apiOperationKey]uint64),
 		requestDuration: make(map[apiOperationKey]time.Duration),
 		maxDuration:     make(map[apiOperationKey]time.Duration),
@@ -72,18 +68,8 @@ func (c *apiCounters) recordResponseBytes(operation, resource string, count uint
 	c.mu.Unlock()
 }
 
-func (c *apiCounters) recordObjects(resource string, count uint64) {
-	if count == 0 {
-		return
-	}
-	c.mu.Lock()
-	c.objects[resource] += count
-	c.mu.Unlock()
-}
-
 type apiCounterSnapshot struct {
 	Requests        map[apiMetricKey]uint64
-	Objects         map[string]uint64
 	ResponseBytes   map[apiOperationKey]uint64
 	RequestDuration map[apiOperationKey]time.Duration
 	MaxDuration     map[apiOperationKey]time.Duration
@@ -94,16 +80,12 @@ func (c *apiCounters) snapshot() apiCounterSnapshot {
 	defer c.mu.RUnlock()
 	s := apiCounterSnapshot{
 		Requests:        make(map[apiMetricKey]uint64, len(c.requests)),
-		Objects:         make(map[string]uint64, len(c.objects)),
 		ResponseBytes:   make(map[apiOperationKey]uint64, len(c.responseBytes)),
 		RequestDuration: make(map[apiOperationKey]time.Duration, len(c.requestDuration)),
 		MaxDuration:     make(map[apiOperationKey]time.Duration, len(c.maxDuration)),
 	}
 	for k, v := range c.requests {
 		s.Requests[k] = v
-	}
-	for k, v := range c.objects {
-		s.Objects[k] = v
 	}
 	for k, v := range c.responseBytes {
 		s.ResponseBytes[k] = v
@@ -168,7 +150,7 @@ func (t *measuringTransport) RoundTrip(req *http.Request) (*http.Response, error
 		t.local.recordRequest(operation, resource, result)
 	}
 	if err == nil && resp != nil && resp.Body != nil {
-		resp.Body = &countingResponseBody{ReadCloser: resp.Body, operation: operation, resource: resource, countObjects: operation == "LIST", started: started, counters: []*apiCounters{t.cumulative, t.local}}
+		resp.Body = &countingResponseBody{ReadCloser: resp.Body, operation: operation, resource: resource, started: started, counters: []*apiCounters{t.cumulative, t.local}}
 	} else {
 		for _, counters := range []*apiCounters{t.cumulative, t.local} {
 			if counters != nil {
@@ -181,23 +163,18 @@ func (t *measuringTransport) RoundTrip(req *http.Request) (*http.Response, error
 
 type countingResponseBody struct {
 	io.ReadCloser
-	operation    string
-	resource     string
-	countObjects bool
-	started      time.Time
-	counters     []*apiCounters
-	buf          bytes.Buffer
-	bytesRead    uint64
-	once         sync.Once
+	operation string
+	resource  string
+	started   time.Time
+	counters  []*apiCounters
+	bytesRead uint64
+	once      sync.Once
 }
 
 func (b *countingResponseBody) Read(p []byte) (int, error) {
 	n, err := b.ReadCloser.Read(p)
 	if n > 0 {
 		b.bytesRead += uint64(n)
-		if b.countObjects {
-			_, _ = b.buf.Write(p[:n])
-		}
 	}
 	if err == io.EOF {
 		b.count()
@@ -217,20 +194,6 @@ func (b *countingResponseBody) count() {
 			if counters != nil {
 				counters.recordResponseBytes(b.operation, b.resource, b.bytesRead)
 				counters.recordRequestDuration(b.operation, b.resource, time.Since(b.started))
-			}
-		}
-		if !b.countObjects {
-			return
-		}
-		var list struct {
-			Items []json.RawMessage `json:"items"`
-		}
-		if json.Unmarshal(b.buf.Bytes(), &list) != nil {
-			return
-		}
-		for _, counters := range b.counters {
-			if counters != nil {
-				counters.recordObjects(b.resource, uint64(len(list.Items)))
 			}
 		}
 	})
@@ -288,7 +251,6 @@ type diagnosticOperation struct {
 	Operation string
 	Resource  string
 	Count     uint64
-	Objects   uint64
 	Bytes     string
 	TotalTime string
 	Average   string
@@ -318,10 +280,6 @@ type diagnosticsPageData struct {
 	ResponseData  string
 	TotalAPITime  string
 	MaxAPITime    string
-	Pods          uint64
-	Nodes         uint64
-	Namespaces    uint64
-	Events        uint64
 	TopOperations []diagnosticOperation
 	Investigation investigationDiagnostics
 }
@@ -350,8 +308,7 @@ func (srv *server) handleDiagnostics(w http.ResponseWriter, r *http.Request) {
 		InfraHref: "/infrastructure" + q, NsHref: "/namespaces" + q, OptHref: "/optimizations" + q, WasteHref: "/waste" + q,
 		SecurityHref: "/security" + q, IncidentsHref: "/incidents" + q, ClusterName: displayName(ctx), CriticalCount: countCriticalIssues(scan),
 		Clusters: convertToSidebarClusters(srv.clusterList, ctx, "/settings/diagnostics"), Cluster: displayName(state.ctx), CompletedAt: "No completed scan", Interval: dashboardScanInterval.String(), Requests: requests, Errors: errors,
-		Throttles: throttles, ResponseData: formatByteCount(responseBytes), TotalAPITime: totalAPITime.Round(time.Millisecond).String(), MaxAPITime: maxAPITime.Round(time.Millisecond).String(),
-		Pods: obs.API.Objects["pods"], Nodes: obs.API.Objects["nodes"], Namespaces: obs.API.Objects["namespaces"], Events: obs.API.Objects["events"]}
+		Throttles: throttles, ResponseData: formatByteCount(responseBytes), TotalAPITime: totalAPITime.Round(time.Millisecond).String(), MaxAPITime: maxAPITime.Round(time.Millisecond).String()}
 	if !obs.CompletedAt.IsZero() {
 		data.CompletedAt = obs.CompletedAt.Format(time.RFC3339)
 		data.Duration = obs.Duration.Round(time.Millisecond).String()
@@ -388,12 +345,8 @@ func diagnosticOperations(snapshot apiCounterSnapshot) []diagnosticOperation {
 		if count != 0 {
 			average = snapshot.RequestDuration[key] / time.Duration(count)
 		}
-		objects := uint64(0)
-		if key.Operation == "LIST" {
-			objects = snapshot.Objects[key.Resource]
-		}
 		operations = append(operations, diagnosticOperation{
-			Operation: key.Operation, Resource: key.Resource, Count: count, Objects: objects,
+			Operation: key.Operation, Resource: key.Resource, Count: count,
 			Bytes: formatByteCount(snapshot.ResponseBytes[key]), TotalTime: snapshot.RequestDuration[key].Round(time.Millisecond).String(), Average: average.Round(time.Millisecond).String(),
 		})
 	}
@@ -527,8 +480,6 @@ func writePrometheusMetrics(w io.Writer, cumulative apiCounterSnapshot, observat
 	fmt.Fprintln(w, "# TYPE opscart_scanner_last_scan_api_operation_requests gauge")
 	fmt.Fprintln(w, "# HELP opscart_scanner_last_scan_api_operation_request_duration_seconds End-to-end Kubernetes API request time by operation and resource in the latest completed full scan.")
 	fmt.Fprintln(w, "# TYPE opscart_scanner_last_scan_api_operation_request_duration_seconds gauge")
-	fmt.Fprintln(w, "# HELP opscart_scanner_last_scan_objects_examined Kubernetes objects returned in LIST responses to the latest completed full scan.")
-	fmt.Fprintln(w, "# TYPE opscart_scanner_last_scan_objects_examined gauge")
 	clusters := make([]string, 0, len(observations))
 	for cluster := range observations {
 		clusters = append(clusters, cluster)
@@ -560,9 +511,6 @@ func writePrometheusMetrics(w io.Writer, cumulative apiCounterSnapshot, observat
 			fmt.Fprintf(w, "opscart_scanner_last_scan_api_operation_requests{cluster=%q,operation=%q,resource=%q} %d\n", cluster, key.Operation, key.Resource, operationRequests)
 			fmt.Fprintf(w, "opscart_scanner_last_scan_api_operation_response_bytes{cluster=%q,operation=%q,resource=%q} %d\n", cluster, key.Operation, key.Resource, obs.API.ResponseBytes[key])
 			fmt.Fprintf(w, "opscart_scanner_last_scan_api_operation_request_duration_seconds{cluster=%q,operation=%q,resource=%q} %g\n", cluster, key.Operation, key.Resource, obs.API.RequestDuration[key].Seconds())
-		}
-		for _, resource := range []string{"pods", "nodes", "namespaces", "events"} {
-			fmt.Fprintf(w, "opscart_scanner_last_scan_objects_examined{cluster=%q,resource=%q} %d\n", cluster, resource, obs.API.Objects[resource])
 		}
 	}
 }
