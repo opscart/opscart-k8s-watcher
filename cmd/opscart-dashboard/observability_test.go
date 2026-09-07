@@ -191,6 +191,40 @@ func TestWritePrometheusMetrics(t *testing.T) {
 	}
 }
 
+func TestScannerDiagnosticOperationsSortsByBytesThenDurationAndShowsAll(t *testing.T) {
+	counters := newAPICounters()
+	record := func(operation, resource string, responseBytes uint64, duration time.Duration) {
+		counters.recordRequest(operation, resource, "200")
+		counters.recordResponseBytes(operation, resource, responseBytes)
+		counters.recordRequestDuration(operation, resource, duration)
+	}
+	record("LIST", "pods", 1000, 10*time.Millisecond)
+	record("LIST", "jobs", 500, 30*time.Millisecond)
+	record("LIST", "events", 500, 20*time.Millisecond)
+	record("GET", "nodes", 250, 10*time.Millisecond)
+	record("LIST", "namespaces", 250, 10*time.Millisecond)
+	for i := 0; i < 7; i++ {
+		record("LIST", fmt.Sprintf("small-%d", i), uint64(100-i), time.Millisecond)
+	}
+
+	got := scannerDiagnosticOperations(counters.snapshot())
+	if len(got) != 12 {
+		t.Fatalf("scanner operations = %d, want all 12", len(got))
+	}
+	want := []apiOperationKey{
+		{"LIST", "pods"},
+		{"LIST", "jobs"},
+		{"LIST", "events"},
+		{"GET", "nodes"},
+		{"LIST", "namespaces"},
+	}
+	for i, key := range want {
+		if got[i].Operation != key.Operation || got[i].Resource != key.Resource {
+			t.Fatalf("operation %d = %s/%s, want %s/%s", i, got[i].Operation, got[i].Resource, key.Operation, key.Resource)
+		}
+	}
+}
+
 func TestDiagnosticsAndMetricsRequireAuthentication(t *testing.T) {
 	t.Setenv("OPSCART_AUTH_USER", "tester")
 	t.Setenv("OPSCART_AUTH_PASS", "secret")
@@ -354,6 +388,28 @@ func TestDiagnosticsRendersScannerAPICost(t *testing.T) {
 	} {
 		if !strings.Contains(rec.Body.String(), want) {
 			t.Errorf("Diagnostics page missing %q", want)
+		}
+	}
+}
+
+func TestDiagnosticsRendersEveryScannerOperation(t *testing.T) {
+	srv := newTestServer()
+	counters := newAPICounters()
+	for i := 0; i < 12; i++ {
+		resource := fmt.Sprintf("resource-%02d", i)
+		counters.recordRequest("LIST", resource, "200")
+		counters.recordResponseBytes("LIST", resource, uint64(i+1))
+		counters.recordRequestDuration("LIST", resource, time.Millisecond)
+	}
+	state := srv.getState(bogusClusterCtx)
+	state.observation = scanObservation{CompletedAt: time.Now(), API: counters.snapshot()}
+
+	rec := httptest.NewRecorder()
+	srv.handleDiagnostics(rec, httptest.NewRequest(http.MethodGet, "/settings/diagnostics?cluster="+bogusClusterCtx, nil))
+	for i := 0; i < 12; i++ {
+		resource := fmt.Sprintf("resource-%02d", i)
+		if !strings.Contains(rec.Body.String(), resource) {
+			t.Errorf("Diagnostics omitted scanner operation %q", resource)
 		}
 	}
 }

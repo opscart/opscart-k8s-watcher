@@ -313,7 +313,7 @@ func (srv *server) handleDiagnostics(w http.ResponseWriter, r *http.Request) {
 		data.CompletedAt = obs.CompletedAt.Format(time.RFC3339)
 		data.Duration = obs.Duration.Round(time.Millisecond).String()
 	}
-	data.TopOperations = diagnosticOperations(obs.API)
+	data.TopOperations = scannerDiagnosticOperations(obs.API)
 
 	srv.investigationMu.RLock()
 	investigation := srv.latestInvestigation
@@ -335,6 +335,42 @@ var getDiagnosticsTmpl = sync.OnceValue(func() *template.Template {
 })
 
 func diagnosticOperations(snapshot apiCounterSnapshot) []diagnosticOperation {
+	operations := buildDiagnosticOperations(snapshot)
+	sort.Slice(operations, func(i, j int) bool {
+		if operations[i].Count != operations[j].Count {
+			return operations[i].Count > operations[j].Count
+		}
+		if operations[i].Operation != operations[j].Operation {
+			return operations[i].Operation < operations[j].Operation
+		}
+		return operations[i].Resource < operations[j].Resource
+	})
+	if len(operations) > 10 {
+		operations = operations[:10]
+	}
+	return operations
+}
+
+func scannerDiagnosticOperations(snapshot apiCounterSnapshot) []diagnosticOperation {
+	operations := buildDiagnosticOperations(snapshot)
+	sort.Slice(operations, func(i, j int) bool {
+		left := apiOperationKey{operations[i].Operation, operations[i].Resource}
+		right := apiOperationKey{operations[j].Operation, operations[j].Resource}
+		if snapshot.ResponseBytes[left] != snapshot.ResponseBytes[right] {
+			return snapshot.ResponseBytes[left] > snapshot.ResponseBytes[right]
+		}
+		if snapshot.RequestDuration[left] != snapshot.RequestDuration[right] {
+			return snapshot.RequestDuration[left] > snapshot.RequestDuration[right]
+		}
+		if operations[i].Operation != operations[j].Operation {
+			return operations[i].Operation < operations[j].Operation
+		}
+		return operations[i].Resource < operations[j].Resource
+	})
+	return operations
+}
+
+func buildDiagnosticOperations(snapshot apiCounterSnapshot) []diagnosticOperation {
 	byOperation := make(map[apiOperationKey]uint64)
 	for key, count := range snapshot.Requests {
 		byOperation[apiOperationKey{key.Operation, key.Resource}] += count
@@ -349,18 +385,6 @@ func diagnosticOperations(snapshot apiCounterSnapshot) []diagnosticOperation {
 			Operation: key.Operation, Resource: key.Resource, Count: count,
 			Bytes: formatByteCount(snapshot.ResponseBytes[key]), TotalTime: snapshot.RequestDuration[key].Round(time.Millisecond).String(), Average: average.Round(time.Millisecond).String(),
 		})
-	}
-	sort.Slice(operations, func(i, j int) bool {
-		if operations[i].Count != operations[j].Count {
-			return operations[i].Count > operations[j].Count
-		}
-		if operations[i].Operation != operations[j].Operation {
-			return operations[i].Operation < operations[j].Operation
-		}
-		return operations[i].Resource < operations[j].Resource
-	})
-	if len(operations) > 10 {
-		operations = operations[:10]
 	}
 	return operations
 }
