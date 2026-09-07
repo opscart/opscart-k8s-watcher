@@ -1218,6 +1218,7 @@ type wastePageData struct {
 	ScanAvailable        bool
 	ScanComplete         bool
 	ScannedAtMs          int64
+	FindingRows          []wasteReviewRow
 	ResourceRows         []wasteReviewRow
 	DriftRows            []wasteReviewRow
 	HousekeepingRows     []wasteReviewRow
@@ -1225,9 +1226,68 @@ type wastePageData struct {
 }
 
 type wasteReviewRow struct {
-	Category, Resource, Namespace, Evidence, Age, Storage, ReviewStatus, Command string
-	Score                                                                        float64
-	Confidence, ConfidenceReason, Inference, Limitations                         string
+	ID, Category, CategoryKey, Kind, Subtype, GroupKey, GroupLabel     string
+	Resource, Namespace, Evidence, Age, Storage, ReviewStatus, Command string
+	Score                                                              float64
+	Confidence, ConfidenceReason, Inference, Limitations               string
+}
+
+func wasteCategoryKey(f analyzer.WasteFinding) string {
+	switch f.Kind {
+	case "Namespace":
+		return "namespace"
+	case "ReplicaSet":
+		return "replicaset"
+	case "Job", "CronJob":
+		return "job"
+	case "PersistentVolumeClaim":
+		return "storage"
+	case "Service":
+		return "network"
+	case "HorizontalPodAutoscaler":
+		return "scaling"
+	case "Ingress":
+		return "failure"
+	case "Pod":
+		if f.Group == analyzer.WasteOperational {
+			return "failure"
+		}
+		return "workload"
+	case "Deployment", "StatefulSet":
+		return "workload"
+	default:
+		return "info"
+	}
+}
+
+func wasteGroup(f analyzer.WasteFinding) (key, label string) {
+	if f.Group == analyzer.WasteOperational {
+		return "operational", "Operational"
+	}
+	switch f.Section {
+	case "incident":
+		return "operational", "Operational"
+	case "resource":
+		return "resource", "Resource Review"
+	case "drift":
+		return "drift", "Drift"
+	case "housekeeping":
+		return "housekeeping", "Housekeeping / Retention"
+	default:
+		return "resource", "Resource Review"
+	}
+}
+
+func wasteRowFromFinding(f analyzer.WasteFinding) wasteReviewRow {
+	groupKey, groupLabel := wasteGroup(f)
+	return wasteReviewRow{
+		Category: f.Category, CategoryKey: wasteCategoryKey(f), Kind: f.Kind, Subtype: f.Subtype,
+		GroupKey: groupKey, GroupLabel: groupLabel, Resource: f.Name, Namespace: f.Namespace,
+		Evidence: f.Observed, Age: fmt.Sprintf("%dd", f.AgeDays), Storage: f.Storage,
+		ReviewStatus: f.Review, Command: f.Command, Score: f.Priority,
+		Confidence: f.Confidence, ConfidenceReason: f.ConfidenceReason,
+		Inference: f.Inference, Limitations: f.Limitations,
+	}
 }
 
 func wasteCommand(kind, name, namespace string) string {
@@ -1242,10 +1302,7 @@ func wasteCommand(kind, name, namespace string) string {
 
 func buildWasteReviewRows(a *analyzer.WasteAudit, _ []analyzer.StalePod) (resource, drift, housekeeping []wasteReviewRow) {
 	for _, f := range analyzer.BuildWastePresentation(a).Findings {
-		row := wasteReviewRow{Category: f.Category, Resource: f.Name, Namespace: f.Namespace,
-			Evidence: f.Observed, Age: fmt.Sprintf("%dd", f.AgeDays), Storage: f.Storage,
-			ReviewStatus: f.Review, Command: f.Command, Score: f.Priority,
-			Confidence: f.Confidence, ConfidenceReason: f.ConfidenceReason, Inference: f.Inference, Limitations: f.Limitations}
+		row := wasteRowFromFinding(f)
 		switch f.Section {
 		case "resource":
 			resource = append(resource, row)
@@ -1260,6 +1317,32 @@ func buildWasteReviewRows(a *analyzer.WasteAudit, _ []analyzer.StalePod) (resour
 	sort.SliceStable(drift, func(i, j int) bool { return drift[i].Score > drift[j].Score })
 	sort.SliceStable(housekeeping, func(i, j int) bool { return housekeeping[i].Score > housekeeping[j].Score })
 	return
+}
+
+// buildWasteDashboardRows preserves the established group precedence and the
+// stable score-descending order within each group. The legacy score is not used
+// to reorder findings across groups.
+func buildWasteDashboardRows(a *analyzer.WasteAudit) []wasteReviewRow {
+	groups := map[string][]wasteReviewRow{
+		"operational":  nil,
+		"resource":     nil,
+		"drift":        nil,
+		"housekeeping": nil,
+	}
+	for _, f := range analyzer.BuildWastePresentation(a).Findings {
+		row := wasteRowFromFinding(f)
+		groups[row.GroupKey] = append(groups[row.GroupKey], row)
+	}
+	rows := make([]wasteReviewRow, 0)
+	for _, key := range []string{"operational", "resource", "drift", "housekeeping"} {
+		group := groups[key]
+		sort.SliceStable(group, func(i, j int) bool { return group[i].Score > group[j].Score })
+		for i := range group {
+			group[i].ID = fmt.Sprintf("waste-finding-%d", len(rows)+1)
+			rows = append(rows, group[i])
+		}
+	}
+	return rows
 }
 
 const dashboardWasteMinAgeDays = 7
@@ -1361,6 +1444,7 @@ func (srv *server) handleWastePage(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		data.ResourceRows, data.DriftRows, data.HousekeepingRows = buildWasteReviewRows(wa, data.IdlePods)
+		data.FindingRows = buildWasteDashboardRows(wa)
 		categoryCounts := []struct {
 			name  string
 			count int

@@ -1751,9 +1751,9 @@ func TestWastePageStatesCategoriesAndReconciliation(t *testing.T) {
 			"Pod failure finding", "Pod ownership review", "PVC state / reference review",
 			"Job / CronJob retention review", "Zero-replica workload", "Namespace activity review",
 			"Service selector review", "Ingress backend evidence", "HPA configuration review",
-			"ReplicaSet retention — included in finding count", ">10<", "Distinct Resource Count",
+			"Housekeeping / Retention", ">10<", "Distinct Resources",
 			"Candidate PVC requests", "Operational Findings", "Reported Check Coverage",
-			"No financial-waste conclusion", "View active incidents", "Ranked Resource Review", "Drift", "kubectl get pvc pvc",
+			"no financial-waste conclusion", "View active incidents", "Ranked Findings", "Drift", "kubectl get pvc pvc",
 		} {
 			if !strings.Contains(body, want) {
 				t.Errorf("missing category or total %q", want)
@@ -1771,12 +1771,8 @@ func TestWastePageStatesCategoriesAndReconciliation(t *testing.T) {
 		if visibleCount+len(audit.OldReplicaSets) != counts.Findings || counts.Findings != counts.Operational+counts.Retention+counts.Review {
 			t.Fatalf("counts do not reconcile: %+v", counts)
 		}
-		resource, drift, housekeeping := buildWasteReviewRows(audit, nil)
-		if len(resource)+len(drift)+len(housekeeping)+1 != counts.Findings {
-			t.Fatal("page sections and Pod banner do not reconcile")
-		}
-		if strings.Contains(body, "ns: ") && strings.Contains(body, "zombie") {
-			t.Fatal("active failed pod was duplicated as a large resource card")
+		if rows := buildWasteDashboardRows(audit); len(rows) != counts.Findings {
+			t.Fatal("unified finding rows do not reconcile")
 		}
 	})
 }
@@ -1787,7 +1783,7 @@ func TestDashboardWasteMinAgeDefault(t *testing.T) {
 	}
 }
 
-func TestSecurityAndWasteTemplatesUseSemanticResponsiveTablesWithoutEmoji(t *testing.T) {
+func TestSecurityAndWasteTemplatesUseSemanticResponsiveStructureWithoutEmoji(t *testing.T) {
 	for _, name := range []string{"templates/security.html", "templates/waste.html"} {
 		raw, err := templateFS.ReadFile(name)
 		if err != nil {
@@ -1799,7 +1795,13 @@ func TestSecurityAndWasteTemplatesUseSemanticResponsiveTablesWithoutEmoji(t *tes
 				t.Errorf("%s contains emoji status/section icon %q", name, forbidden)
 			}
 		}
-		for _, want := range []string{"<table", "<thead>", "<tbody>", "@media(max-width:", `stroke="currentColor"`} {
+		wants := []string{"@media(max-width:", `stroke="currentColor"`}
+		if name == "templates/security.html" {
+			wants = append(wants, "<table", "<thead>", "<tbody>")
+		} else {
+			wants = append(wants, `role="list"`, `role="listitem"`, `<details class="why">`)
+		}
+		for _, want := range wants {
 			if !strings.Contains(text, want) {
 				t.Errorf("%s missing semantic/responsive structure %q", name, want)
 			}
@@ -1970,7 +1972,7 @@ func TestWastePhase1AuditTimestampAndUnknown(t *testing.T) {
 			if !strings.Contains(body, `id="waste-age">`+tc.label+`</strong>`) || !strings.Contains(body, fmt.Sprintf("var TS= %d", tc.timestamp)) && !strings.Contains(body, fmt.Sprintf("var TS=%d", tc.timestamp)) {
 				t.Fatalf("audit timestamp/Unknown source missing")
 			}
-			if tc.timestamp == 0 && !strings.Contains(body, "if(!TS){if(el)el.textContent='Unknown';return}") {
+			if tc.timestamp == 0 && !strings.Contains(body, "if(!TS){if(age)age.textContent='Unknown';return}") {
 				t.Fatal("zero timestamp would become an epoch age")
 			}
 		})
@@ -2029,7 +2031,7 @@ func TestWastePhase1CrossSurfaceCountsAndQuantities(t *testing.T) {
 		}
 	}
 	body := renderWasteForTest(t, a)
-	for _, want := range []string{"7 findings across 6 distinct resources", "2 operational findings, 3 housekeeping/retention findings, and 2 other review findings", "kubectl get cronjob cron -n app -o yaml", "ReplicaSet retention — included in finding count (1)"} {
+	for _, want := range []string{"7 findings across 6 distinct resources", "2 operational findings, 3 housekeeping/retention findings, and 2 other review findings", "kubectl get cronjob cron -n app -o yaml", "Housekeeping / Retention"} {
 		if !strings.Contains(body, want) {
 			t.Errorf("page missing %q", want)
 		}
@@ -2069,5 +2071,131 @@ func TestWastePhase1DashboardStableRanking(t *testing.T) {
 		if got := strings.Join(names, ","); got != tc.want {
 			t.Fatalf("stable score ranking=%s, want %s", got, tc.want)
 		}
+	}
+}
+
+func TestWastePhase2UnifiedRowsPreserveGroupPrecedenceAndRanking(t *testing.T) {
+	a := &analyzer.WasteAudit{
+		AbandonedNamespaces: []analyzer.AbandonedNamespace{{Name: "namespace", Score: 30}},
+		StalePods: []analyzer.StalePod{
+			{Name: "bare-pod", Kind: analyzer.StalePodIdle, Score: 40},
+			{Name: "failure-pod", Kind: analyzer.StalePodZombie, Score: 70},
+		},
+		OrphanedPVCs:     []analyzer.OrphanedPVC{{Name: "pvc", Score: 50}},
+		OrphanedServices: []analyzer.OrphanedService{{Name: "service", Score: 60}},
+		StaleJobs: []analyzer.StaleJob{
+			{Name: "job", Score: 20},
+			{Name: "cronjob", IsCronJob: true, Score: 25},
+		},
+		ZeroReplicaWorkloads: []analyzer.ZeroReplicaWorkload{
+			{Name: "deployment", Kind: "Deployment", Score: 15},
+			{Name: "statefulset", Kind: "StatefulSet", Score: 10},
+		},
+		BrokenIngresses: []analyzer.BrokenIngress{{Name: "ingress", Score: 90}},
+		MisconfiguredHPAs: []analyzer.MisconfiguredHPA{
+			{Name: "active-hpa", IsActive: true, Score: 80},
+			{Name: "review-hpa", Score: 100},
+		},
+		OldReplicaSets: []analyzer.OldReplicaSet{{Name: "replicaset", Score: 200}},
+	}
+
+	rows := buildWasteDashboardRows(a)
+	var order []string
+	keys := make(map[string]string)
+	groups := make(map[string]string)
+	for _, row := range rows {
+		order = append(order, row.Resource)
+		keys[row.Resource] = row.CategoryKey
+		groups[row.Resource] = row.GroupKey
+	}
+	wantOrder := "ingress,active-hpa,failure-pod,service,pvc,bare-pod,namespace,review-hpa,cronjob,job,deployment,statefulset,replicaset"
+	if got := strings.Join(order, ","); got != wantOrder {
+		t.Fatalf("group precedence or stable within-group ranking changed:\ngot  %s\nwant %s", got, wantOrder)
+	}
+	for resource, want := range map[string]string{
+		"namespace": "namespace", "bare-pod": "workload", "failure-pod": "failure",
+		"pvc": "storage", "service": "network", "job": "job", "cronjob": "job",
+		"deployment": "workload", "statefulset": "workload", "ingress": "failure",
+		"active-hpa": "scaling", "review-hpa": "scaling", "replicaset": "replicaset",
+	} {
+		if keys[resource] != want {
+			t.Errorf("%s category key = %q, want %q", resource, keys[resource], want)
+		}
+	}
+	if groups["active-hpa"] != "operational" || groups["review-hpa"] != "drift" || groups["replicaset"] != "housekeeping" {
+		t.Fatalf("canonical groups lost: %v", groups)
+	}
+	if got := wasteCategoryKey(analyzer.WasteFinding{Kind: "Unknown"}); got != "info" {
+		t.Fatalf("fallback category key = %q", got)
+	}
+}
+
+func TestWastePhase2CompactRowsFiltersPaginationAndActions(t *testing.T) {
+	a := &analyzer.WasteAudit{
+		AbandonedNamespaces:  []analyzer.AbandonedNamespace{{Name: "namespace-marker"}},
+		StalePods:            []analyzer.StalePod{{Name: "failure-marker", Namespace: "app", Kind: analyzer.StalePodZombie}, {Name: "workload-marker", Namespace: "app", Kind: analyzer.StalePodIdle}},
+		OrphanedPVCs:         []analyzer.OrphanedPVC{{Name: "storage-marker", Namespace: "data", Status: analyzer.PVCBoundNoPod, RequestKnown: true, RequestedBytes: 500 << 20}},
+		StaleJobs:            []analyzer.StaleJob{{Name: "job-marker", Namespace: "batch"}},
+		ZeroReplicaWorkloads: []analyzer.ZeroReplicaWorkload{{Name: "zero-marker", Namespace: "app", Kind: "Deployment"}},
+		OrphanedServices:     []analyzer.OrphanedService{{Name: "network-marker", Namespace: "app"}},
+		BrokenIngresses:      []analyzer.BrokenIngress{{Name: "ingress-marker", Namespace: "app"}},
+		MisconfiguredHPAs:    []analyzer.MisconfiguredHPA{{Name: "scaling-marker", Namespace: "app"}},
+		OldReplicaSets:       []analyzer.OldReplicaSet{{Name: "replicaset-marker", Namespace: "app"}},
+	}
+	body := renderWasteForTest(t, a)
+	for _, want := range []string{
+		`id="waste-search"`, `id="waste-category"`, `id="waste-namespace"`, `id="waste-confidence"`,
+		`id="waste-page-size"`, "<option>25</option>", "<option>50</option>", "<option>100</option>",
+		`role="list"`, `role="listitem"`, `<details class="why">`, "Inspect · Why flagged?", "Copy kubectl",
+		"Observation", "Inference", "Limitation / caveat", "Recommended review action",
+		"Priority score (legacy heuristic)", "Category colors identify resource domains; they do not represent severity or confidence.",
+		"cat-namespace", "cat-workload", "cat-replicaset", "cat-job", "cat-storage", "cat-network", "cat-scaling", "cat-failure",
+		"500 MiB", "Operational", "Resource Review", "Drift", "Housekeeping / Retention",
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("compact dashboard missing %q", want)
+		}
+	}
+	if strings.Contains(body, `id="waste-score"`) {
+		t.Fatal("legacy score was promoted to a primary filter")
+	}
+
+	raw, err := templateFS.ReadFile("templates/waste.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	templateText := string(raw)
+	for _, forbidden := range []string{"fetch(", "XMLHttpRequest", "/api/"} {
+		if strings.Contains(templateText, forbidden) {
+			t.Errorf("Waste page filtering/action script introduces backend access %q", forbidden)
+		}
+	}
+	why := strings.Index(templateText, `<details class="why">`)
+	inference := strings.Index(templateText, "{{$row.Inference}}")
+	if why < 0 || inference < why {
+		t.Fatal("inference is visible outside the collapsed Why flagged details")
+	}
+}
+
+func TestWastePhase2BoundsInitialRenderingAt25Rows(t *testing.T) {
+	a := &analyzer.WasteAudit{}
+	for i := 0; i < 26; i++ {
+		a.OldReplicaSets = append(a.OldReplicaSets, analyzer.OldReplicaSet{Name: fmt.Sprintf("history-%02d", i), Score: float64(26 - i)})
+	}
+	body := renderWasteForTest(t, a)
+	for _, id := range []string{"waste-finding-1", "waste-finding-25", "waste-finding-26"} {
+		if !strings.Contains(body, `id="`+id+`"`) {
+			t.Fatalf("missing paginated row %s", id)
+		}
+	}
+	start := strings.Index(body, `id="waste-finding-26"`)
+	end := strings.Index(body[start:], ">")
+	if start < 0 || end < 0 || !strings.Contains(body[start:start+end], " hidden") {
+		t.Fatal("row 26 is initially visible; default page must be bounded to 25")
+	}
+	start = strings.Index(body, `id="waste-finding-25"`)
+	end = strings.Index(body[start:], ">")
+	if start < 0 || end < 0 || strings.Contains(body[start:start+end], " hidden") {
+		t.Fatal("row 25 should remain initially visible")
 	}
 }
