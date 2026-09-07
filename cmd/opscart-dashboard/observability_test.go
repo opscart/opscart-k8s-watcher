@@ -115,12 +115,44 @@ func TestMeasuringTransportRecordsErrors(t *testing.T) {
 	}
 }
 
+func TestMeasuringTransportRecordsResponseCostAndThrottling(t *testing.T) {
+	const body = `{"kind":"PodList","items":[{},{}]}`
+	counters := newAPICounters()
+	transport := &measuringTransport{base: roundTripperFunc(func(*http.Request) (*http.Response, error) {
+		return &http.Response{StatusCode: http.StatusTooManyRequests, Body: io.NopCloser(strings.NewReader(body)), Header: make(http.Header)}, nil
+	}), cumulative: counters}
+	resp, err := transport.RoundTrip(httptest.NewRequest(http.MethodGet, "https://cluster/api/v1/pods", nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _ = io.ReadAll(resp.Body)
+	_ = resp.Body.Close()
+
+	snapshot := counters.snapshot()
+	key := apiOperationKey{"LIST", "pods"}
+	if got := snapshot.ResponseBytes[key]; got != uint64(len(body)) {
+		t.Fatalf("response bytes = %d, want %d", got, len(body))
+	}
+	if snapshot.RequestDuration[key] <= 0 || snapshot.MaxDuration[key] <= 0 {
+		t.Fatalf("request durations were not recorded: total=%s max=%s", snapshot.RequestDuration[key], snapshot.MaxDuration[key])
+	}
+	if got := snapshot.Objects["pods"]; got != 2 {
+		t.Fatalf("objects = %d, want 2", got)
+	}
+	_, _, _, throttles := snapshot.costTotals()
+	if throttles != 1 {
+		t.Fatalf("throttles = %d, want 1", throttles)
+	}
+}
+
 func TestWritePrometheusMetrics(t *testing.T) {
 	cumulative := newAPICounters()
 	cumulative.recordRequest("LIST", "pods", "200")
 	local := newAPICounters()
 	local.recordRequest("LIST", "events", "500")
 	local.recordObjects("events", 3)
+	local.recordResponseBytes("LIST", "events", 512)
+	local.recordRequestDuration("LIST", "events", 250*time.Millisecond)
 	var output strings.Builder
 	writePrometheusMetrics(&output, cumulative.snapshot(), map[string]scanObservation{"cluster-a": {CompletedAt: time.Unix(123, 0), Duration: 1500 * time.Millisecond, API: local.snapshot()}})
 	for _, want := range []string{
@@ -129,6 +161,13 @@ func TestWritePrometheusMetrics(t *testing.T) {
 		`opscart_scanner_last_scan_timestamp_seconds{cluster="cluster-a"} 123`,
 		`opscart_scanner_last_scan_api_requests{cluster="cluster-a"} 1`,
 		`opscart_scanner_last_scan_api_errors{cluster="cluster-a"} 1`,
+		`opscart_scanner_last_scan_api_throttles{cluster="cluster-a"} 0`,
+		`opscart_scanner_last_scan_api_response_bytes{cluster="cluster-a"} 512`,
+		`opscart_scanner_last_scan_api_request_duration_seconds{cluster="cluster-a"} 0.25`,
+		`opscart_scanner_last_scan_api_request_max_duration_seconds{cluster="cluster-a"} 0.25`,
+		`opscart_scanner_last_scan_api_operation_requests{cluster="cluster-a",operation="LIST",resource="events"} 1`,
+		`opscart_scanner_last_scan_api_operation_response_bytes{cluster="cluster-a",operation="LIST",resource="events"} 512`,
+		`opscart_scanner_last_scan_api_operation_request_duration_seconds{cluster="cluster-a",operation="LIST",resource="events"} 0.25`,
 		`opscart_scanner_last_scan_objects_examined{cluster="cluster-a",resource="events"} 3`,
 	} {
 		if !strings.Contains(output.String(), want) {
@@ -215,10 +254,10 @@ func TestInvestigationObservationIsRequestScopedAndReplaced(t *testing.T) {
 		t.Fatalf("first totals = %d requests/%d errors, want 3/1", got, errors)
 	}
 	operations := diagnosticOperations(first.API)
-	for _, want := range []diagnosticOperation{{"GET", "pods", 1}, {"GET", "replicasets", 1}, {"LIST", "events", 1}} {
+	for _, want := range []diagnosticOperation{{Operation: "GET", Resource: "pods", Count: 1}, {Operation: "GET", Resource: "replicasets", Count: 1}, {Operation: "LIST", Resource: "events", Count: 1}} {
 		found := false
 		for _, got := range operations {
-			found = found || got == want
+			found = found || (got.Operation == want.Operation && got.Resource == want.Resource && got.Count == want.Count)
 		}
 		if !found {
 			t.Errorf("operation breakdown missing %+v: %+v", want, operations)
@@ -236,7 +275,7 @@ func TestInvestigationObservationIsRequestScopedAndReplaced(t *testing.T) {
 	if got, errors := second.API.totals(); got != 1 || errors != 0 {
 		t.Fatalf("replacement totals = %d requests/%d errors, want 1/0", got, errors)
 	}
-	if got := diagnosticOperations(second.API); len(got) != 1 || got[0] != (diagnosticOperation{"LIST", "services", 1}) {
+	if got := diagnosticOperations(second.API); len(got) != 1 || got[0].Operation != "LIST" || got[0].Resource != "services" || got[0].Count != 1 {
 		t.Fatalf("replacement operations = %+v", got)
 	}
 }
@@ -275,6 +314,31 @@ func TestSettingsDiscoversDiagnosticsAndDiagnosticsHasEmptyInvestigationState(t 
 	srv.handleDiagnostics(diagnostics, httptest.NewRequest(http.MethodGet, "/settings/diagnostics?cluster="+bogusClusterCtx, nil))
 	for _, want := range []string{"Diagnostics", "Scanner Diagnostics", "Investigation Diagnostics", "No Pod Investigation request has completed yet", "<aside class=\"sidebar\">"} {
 		if !strings.Contains(diagnostics.Body.String(), want) {
+			t.Errorf("Diagnostics page missing %q", want)
+		}
+	}
+}
+
+func TestDiagnosticsRendersScannerAPICost(t *testing.T) {
+	srv := newTestServer()
+	counters := newAPICounters()
+	counters.recordRequest("LIST", "pods", "200")
+	counters.recordObjects("pods", 148)
+	counters.recordResponseBytes("LIST", "pods", 420*1024)
+	counters.recordRequestDuration("LIST", "pods", 84*time.Millisecond)
+	state := srv.getState(bogusClusterCtx)
+	state.observation = scanObservation{CompletedAt: time.Now(), API: counters.snapshot()}
+
+	rec := httptest.NewRecorder()
+	srv.handleDiagnostics(rec, httptest.NewRequest(http.MethodGet, "/settings/diagnostics?cluster="+bogusClusterCtx, nil))
+	for _, want := range []string{
+		"API throttles: <strong>0</strong>",
+		"Response data: <strong>420.0 KB</strong>",
+		"Total API time: <strong>84ms</strong>",
+		"Slowest API request: <strong>84ms</strong>",
+		"LIST</strong> pods — 1 calls · 148 objects · 420.0 KB · 84ms total · 84ms average",
+	} {
+		if !strings.Contains(rec.Body.String(), want) {
 			t.Errorf("Diagnostics page missing %q", want)
 		}
 	}

@@ -5,9 +5,10 @@
   <section class="section" style="border-left:4px solid var(--accent)"><h2 class="section-title">Scanner Diagnostics</h2>
     <p>Cluster: <strong>{{.Cluster}}</strong></p>
     <p>Last completed scan: <strong>{{.CompletedAt}}</strong> · Scan duration: <strong>{{if .Duration}}{{.Duration}}{{else}}—{{end}}</strong> · Current scan interval: <strong>{{.Interval}}</strong></p>
-    <p>Kubernetes API calls: <strong>{{.Requests}}</strong> · API errors: <strong>{{.Errors}}</strong></p>
+    <p>Kubernetes API calls: <strong>{{.Requests}}</strong> · API errors: <strong>{{.Errors}}</strong> · API throttles: <strong>{{.Throttles}}</strong></p>
+    <p>Response data: <strong>{{.ResponseData}}</strong> · Total API time: <strong>{{.TotalAPITime}}</strong> · Slowest API request: <strong>{{.MaxAPITime}}</strong></p>
     <p>Objects examined — Pods: <strong>{{.Pods}}</strong> · Nodes: <strong>{{.Nodes}}</strong> · Namespaces: <strong>{{.Namespaces}}</strong> · Events: <strong>{{.Events}}</strong></p>
-    <h3>Top API operations</h3>{{range .TopOperations}}<p><strong>{{.Operation}}</strong> {{.Resource}} — {{.Count}}</p>{{else}}<p class="muted">No completed scan data.</p>{{end}}
+    <h3>Top API operations</h3>{{range .TopOperations}}<p><strong>{{.Operation}}</strong> {{.Resource}} — {{.Count}} calls{{if .Objects}} · {{.Objects}} objects{{end}} · {{.Bytes}} · {{.TotalTime}} total · {{.Average}} average</p>{{else}}<p class="muted">No completed scan data.</p>{{end}}
   </section>
   <section class="section" style="border-left:4px solid var(--warning)"><h2 class="section-title">Investigation Diagnostics</h2>
     {{if .Investigation.HasData}}

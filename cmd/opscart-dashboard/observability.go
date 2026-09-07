@@ -29,18 +29,46 @@ type apiOperationKey struct {
 }
 
 type apiCounters struct {
-	mu       sync.RWMutex
-	requests map[apiMetricKey]uint64
-	objects  map[string]uint64
+	mu              sync.RWMutex
+	requests        map[apiMetricKey]uint64
+	objects         map[string]uint64
+	responseBytes   map[apiOperationKey]uint64
+	requestDuration map[apiOperationKey]time.Duration
+	maxDuration     map[apiOperationKey]time.Duration
 }
 
 func newAPICounters() *apiCounters {
-	return &apiCounters{requests: make(map[apiMetricKey]uint64), objects: make(map[string]uint64)}
+	return &apiCounters{
+		requests:        make(map[apiMetricKey]uint64),
+		objects:         make(map[string]uint64),
+		responseBytes:   make(map[apiOperationKey]uint64),
+		requestDuration: make(map[apiOperationKey]time.Duration),
+		maxDuration:     make(map[apiOperationKey]time.Duration),
+	}
 }
 
 func (c *apiCounters) recordRequest(operation, resource, result string) {
 	c.mu.Lock()
 	c.requests[apiMetricKey{operation, resource, result}]++
+	c.mu.Unlock()
+}
+
+func (c *apiCounters) recordRequestDuration(operation, resource string, duration time.Duration) {
+	key := apiOperationKey{operation, resource}
+	c.mu.Lock()
+	c.requestDuration[key] += duration
+	if duration > c.maxDuration[key] {
+		c.maxDuration[key] = duration
+	}
+	c.mu.Unlock()
+}
+
+func (c *apiCounters) recordResponseBytes(operation, resource string, count uint64) {
+	if count == 0 {
+		return
+	}
+	c.mu.Lock()
+	c.responseBytes[apiOperationKey{operation, resource}] += count
 	c.mu.Unlock()
 }
 
@@ -54,19 +82,37 @@ func (c *apiCounters) recordObjects(resource string, count uint64) {
 }
 
 type apiCounterSnapshot struct {
-	Requests map[apiMetricKey]uint64
-	Objects  map[string]uint64
+	Requests        map[apiMetricKey]uint64
+	Objects         map[string]uint64
+	ResponseBytes   map[apiOperationKey]uint64
+	RequestDuration map[apiOperationKey]time.Duration
+	MaxDuration     map[apiOperationKey]time.Duration
 }
 
 func (c *apiCounters) snapshot() apiCounterSnapshot {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
-	s := apiCounterSnapshot{Requests: make(map[apiMetricKey]uint64, len(c.requests)), Objects: make(map[string]uint64, len(c.objects))}
+	s := apiCounterSnapshot{
+		Requests:        make(map[apiMetricKey]uint64, len(c.requests)),
+		Objects:         make(map[string]uint64, len(c.objects)),
+		ResponseBytes:   make(map[apiOperationKey]uint64, len(c.responseBytes)),
+		RequestDuration: make(map[apiOperationKey]time.Duration, len(c.requestDuration)),
+		MaxDuration:     make(map[apiOperationKey]time.Duration, len(c.maxDuration)),
+	}
 	for k, v := range c.requests {
 		s.Requests[k] = v
 	}
 	for k, v := range c.objects {
 		s.Objects[k] = v
+	}
+	for k, v := range c.responseBytes {
+		s.ResponseBytes[k] = v
+	}
+	for k, v := range c.requestDuration {
+		s.RequestDuration[k] = v
+	}
+	for k, v := range c.maxDuration {
+		s.MaxDuration[k] = v
 	}
 	return s
 }
@@ -76,6 +122,26 @@ func (s apiCounterSnapshot) totals() (requests, errors uint64) {
 		requests += count
 		if key.Result == "error" || strings.HasPrefix(key.Result, "4") || strings.HasPrefix(key.Result, "5") {
 			errors += count
+		}
+	}
+	return
+}
+
+func (s apiCounterSnapshot) costTotals() (responseBytes uint64, totalDuration, maxDuration time.Duration, throttles uint64) {
+	for key, count := range s.Requests {
+		if key.Result == "429" {
+			throttles += count
+		}
+	}
+	for _, count := range s.ResponseBytes {
+		responseBytes += count
+	}
+	for _, duration := range s.RequestDuration {
+		totalDuration += duration
+	}
+	for _, duration := range s.MaxDuration {
+		if duration > maxDuration {
+			maxDuration = duration
 		}
 	}
 	return
@@ -91,6 +157,7 @@ type measuringTransport struct {
 
 func (t *measuringTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	operation, resource := classifyKubernetesRequest(req.Method, req.URL)
+	started := time.Now()
 	resp, err := t.base.RoundTrip(req)
 	result := "error"
 	if err == nil && resp != nil {
@@ -100,24 +167,37 @@ func (t *measuringTransport) RoundTrip(req *http.Request) (*http.Response, error
 	if t.local != nil {
 		t.local.recordRequest(operation, resource, result)
 	}
-	if err == nil && resp != nil && resp.Body != nil && operation == "LIST" {
-		resp.Body = &countingResponseBody{ReadCloser: resp.Body, resource: resource, counters: []*apiCounters{t.cumulative, t.local}}
+	if err == nil && resp != nil && resp.Body != nil {
+		resp.Body = &countingResponseBody{ReadCloser: resp.Body, operation: operation, resource: resource, countObjects: operation == "LIST", started: started, counters: []*apiCounters{t.cumulative, t.local}}
+	} else {
+		for _, counters := range []*apiCounters{t.cumulative, t.local} {
+			if counters != nil {
+				counters.recordRequestDuration(operation, resource, time.Since(started))
+			}
+		}
 	}
 	return resp, err
 }
 
 type countingResponseBody struct {
 	io.ReadCloser
-	resource string
-	counters []*apiCounters
-	buf      bytes.Buffer
-	once     sync.Once
+	operation    string
+	resource     string
+	countObjects bool
+	started      time.Time
+	counters     []*apiCounters
+	buf          bytes.Buffer
+	bytesRead    uint64
+	once         sync.Once
 }
 
 func (b *countingResponseBody) Read(p []byte) (int, error) {
 	n, err := b.ReadCloser.Read(p)
 	if n > 0 {
-		_, _ = b.buf.Write(p[:n])
+		b.bytesRead += uint64(n)
+		if b.countObjects {
+			_, _ = b.buf.Write(p[:n])
+		}
 	}
 	if err == io.EOF {
 		b.count()
@@ -133,6 +213,15 @@ func (b *countingResponseBody) Close() error {
 
 func (b *countingResponseBody) count() {
 	b.once.Do(func() {
+		for _, counters := range b.counters {
+			if counters != nil {
+				counters.recordResponseBytes(b.operation, b.resource, b.bytesRead)
+				counters.recordRequestDuration(b.operation, b.resource, time.Since(b.started))
+			}
+		}
+		if !b.countObjects {
+			return
+		}
 		var list struct {
 			Items []json.RawMessage `json:"items"`
 		}
@@ -199,6 +288,10 @@ type diagnosticOperation struct {
 	Operation string
 	Resource  string
 	Count     uint64
+	Objects   uint64
+	Bytes     string
+	TotalTime string
+	Average   string
 }
 
 type diagnosticsPageData struct {
@@ -221,6 +314,10 @@ type diagnosticsPageData struct {
 	Interval      string
 	Requests      uint64
 	Errors        uint64
+	Throttles     uint64
+	ResponseData  string
+	TotalAPITime  string
+	MaxAPITime    string
 	Pods          uint64
 	Nodes         uint64
 	Namespaces    uint64
@@ -247,11 +344,13 @@ func (srv *server) handleDiagnostics(w http.ResponseWriter, r *http.Request) {
 	scan := state.scan
 	state.mu.RUnlock()
 	requests, errors := obs.API.totals()
+	responseBytes, totalAPITime, maxAPITime, throttles := obs.API.costTotals()
 	q := "?cluster=" + url.QueryEscape(ctx)
 	data := diagnosticsPageData{ActivePage: "settings", DashHref: "/" + q, WrHref: "/warroom" + q, CostsHref: "/costs" + q,
 		InfraHref: "/infrastructure" + q, NsHref: "/namespaces" + q, OptHref: "/optimizations" + q, WasteHref: "/waste" + q,
 		SecurityHref: "/security" + q, IncidentsHref: "/incidents" + q, ClusterName: displayName(ctx), CriticalCount: countCriticalIssues(scan),
 		Clusters: convertToSidebarClusters(srv.clusterList, ctx, "/settings/diagnostics"), Cluster: displayName(state.ctx), CompletedAt: "No completed scan", Interval: dashboardScanInterval.String(), Requests: requests, Errors: errors,
+		Throttles: throttles, ResponseData: formatByteCount(responseBytes), TotalAPITime: totalAPITime.Round(time.Millisecond).String(), MaxAPITime: maxAPITime.Round(time.Millisecond).String(),
 		Pods: obs.API.Objects["pods"], Nodes: obs.API.Objects["nodes"], Namespaces: obs.API.Objects["namespaces"], Events: obs.API.Objects["events"]}
 	if !obs.CompletedAt.IsZero() {
 		data.CompletedAt = obs.CompletedAt.Format(time.RFC3339)
@@ -285,7 +384,18 @@ func diagnosticOperations(snapshot apiCounterSnapshot) []diagnosticOperation {
 	}
 	operations := make([]diagnosticOperation, 0, len(byOperation))
 	for key, count := range byOperation {
-		operations = append(operations, diagnosticOperation{key.Operation, key.Resource, count})
+		average := time.Duration(0)
+		if count != 0 {
+			average = snapshot.RequestDuration[key] / time.Duration(count)
+		}
+		objects := uint64(0)
+		if key.Operation == "LIST" {
+			objects = snapshot.Objects[key.Resource]
+		}
+		operations = append(operations, diagnosticOperation{
+			Operation: key.Operation, Resource: key.Resource, Count: count, Objects: objects,
+			Bytes: formatByteCount(snapshot.ResponseBytes[key]), TotalTime: snapshot.RequestDuration[key].Round(time.Millisecond).String(), Average: average.Round(time.Millisecond).String(),
+		})
 	}
 	sort.Slice(operations, func(i, j int) bool {
 		if operations[i].Count != operations[j].Count {
@@ -300,6 +410,22 @@ func diagnosticOperations(snapshot apiCounterSnapshot) []diagnosticOperation {
 		operations = operations[:10]
 	}
 	return operations
+}
+
+func formatByteCount(count uint64) string {
+	const unit = 1024
+	if count < unit {
+		return fmt.Sprintf("%d B", count)
+	}
+	value := float64(count)
+	units := []string{"KB", "MB", "GB"}
+	for _, suffix := range units {
+		value /= unit
+		if value < unit || suffix == units[len(units)-1] {
+			return fmt.Sprintf("%.1f %s", value, suffix)
+		}
+	}
+	return fmt.Sprintf("%d B", count)
 }
 
 func (srv *server) completeInvestigation(namespace, pod string, started time.Time, counters *apiCounters) {
@@ -359,6 +485,26 @@ func writePrometheusMetrics(w io.Writer, cumulative apiCounterSnapshot, observat
 	for _, key := range keys {
 		fmt.Fprintf(w, "opscart_kubernetes_api_requests_total{operation=%q,resource=%q,status=%q} %d\n", key.Operation, key.Resource, key.Result, cumulative.Requests[key])
 	}
+	fmt.Fprintln(w, "# HELP opscart_kubernetes_api_response_bytes_total Kubernetes API response body bytes read by this process.")
+	fmt.Fprintln(w, "# TYPE opscart_kubernetes_api_response_bytes_total counter")
+	fmt.Fprintln(w, "# HELP opscart_kubernetes_api_request_duration_seconds_total End-to-end Kubernetes API request time observed by this process.")
+	fmt.Fprintln(w, "# TYPE opscart_kubernetes_api_request_duration_seconds_total counter")
+	fmt.Fprintln(w, "# HELP opscart_kubernetes_api_request_duration_seconds_max Maximum end-to-end Kubernetes API request time observed by this process.")
+	fmt.Fprintln(w, "# TYPE opscart_kubernetes_api_request_duration_seconds_max gauge")
+	fmt.Fprintln(w, "# HELP opscart_kubernetes_api_throttles_total Kubernetes API HTTP 429 responses received by this process.")
+	fmt.Fprintln(w, "# TYPE opscart_kubernetes_api_throttles_total counter")
+	for _, key := range operationKeys(cumulative) {
+		fmt.Fprintf(w, "opscart_kubernetes_api_response_bytes_total{operation=%q,resource=%q} %d\n", key.Operation, key.Resource, cumulative.ResponseBytes[key])
+		fmt.Fprintf(w, "opscart_kubernetes_api_request_duration_seconds_total{operation=%q,resource=%q} %g\n", key.Operation, key.Resource, cumulative.RequestDuration[key].Seconds())
+		fmt.Fprintf(w, "opscart_kubernetes_api_request_duration_seconds_max{operation=%q,resource=%q} %g\n", key.Operation, key.Resource, cumulative.MaxDuration[key].Seconds())
+		var throttles uint64
+		for metric, count := range cumulative.Requests {
+			if metric.Operation == key.Operation && metric.Resource == key.Resource && metric.Result == "429" {
+				throttles += count
+			}
+		}
+		fmt.Fprintf(w, "opscart_kubernetes_api_throttles_total{operation=%q,resource=%q} %d\n", key.Operation, key.Resource, throttles)
+	}
 	fmt.Fprintln(w, "# HELP opscart_scanner_last_scan_duration_seconds Wall-clock duration of the latest completed full scan.")
 	fmt.Fprintln(w, "# TYPE opscart_scanner_last_scan_duration_seconds gauge")
 	fmt.Fprintln(w, "# HELP opscart_scanner_last_scan_timestamp_seconds Unix timestamp of the latest completed full scan.")
@@ -367,6 +513,20 @@ func writePrometheusMetrics(w io.Writer, cumulative apiCounterSnapshot, observat
 	fmt.Fprintln(w, "# TYPE opscart_scanner_last_scan_api_requests gauge")
 	fmt.Fprintln(w, "# HELP opscart_scanner_last_scan_api_errors Kubernetes API transport errors and HTTP 4xx/5xx responses in the latest completed full scan.")
 	fmt.Fprintln(w, "# TYPE opscart_scanner_last_scan_api_errors gauge")
+	fmt.Fprintln(w, "# HELP opscart_scanner_last_scan_api_throttles Kubernetes API HTTP 429 responses in the latest completed full scan.")
+	fmt.Fprintln(w, "# TYPE opscart_scanner_last_scan_api_throttles gauge")
+	fmt.Fprintln(w, "# HELP opscart_scanner_last_scan_api_response_bytes Kubernetes API response body bytes read in the latest completed full scan.")
+	fmt.Fprintln(w, "# TYPE opscart_scanner_last_scan_api_response_bytes gauge")
+	fmt.Fprintln(w, "# HELP opscart_scanner_last_scan_api_request_duration_seconds End-to-end Kubernetes API request time in the latest completed full scan.")
+	fmt.Fprintln(w, "# TYPE opscart_scanner_last_scan_api_request_duration_seconds gauge")
+	fmt.Fprintln(w, "# HELP opscart_scanner_last_scan_api_request_max_duration_seconds Maximum end-to-end Kubernetes API request time in the latest completed full scan.")
+	fmt.Fprintln(w, "# TYPE opscart_scanner_last_scan_api_request_max_duration_seconds gauge")
+	fmt.Fprintln(w, "# HELP opscart_scanner_last_scan_api_operation_response_bytes Kubernetes API response body bytes read by operation and resource in the latest completed full scan.")
+	fmt.Fprintln(w, "# TYPE opscart_scanner_last_scan_api_operation_response_bytes gauge")
+	fmt.Fprintln(w, "# HELP opscart_scanner_last_scan_api_operation_requests Kubernetes API requests by operation and resource in the latest completed full scan.")
+	fmt.Fprintln(w, "# TYPE opscart_scanner_last_scan_api_operation_requests gauge")
+	fmt.Fprintln(w, "# HELP opscart_scanner_last_scan_api_operation_request_duration_seconds End-to-end Kubernetes API request time by operation and resource in the latest completed full scan.")
+	fmt.Fprintln(w, "# TYPE opscart_scanner_last_scan_api_operation_request_duration_seconds gauge")
 	fmt.Fprintln(w, "# HELP opscart_scanner_last_scan_objects_examined Kubernetes objects returned in LIST responses to the latest completed full scan.")
 	fmt.Fprintln(w, "# TYPE opscart_scanner_last_scan_objects_examined gauge")
 	clusters := make([]string, 0, len(observations))
@@ -377,6 +537,7 @@ func writePrometheusMetrics(w io.Writer, cumulative apiCounterSnapshot, observat
 	for _, cluster := range clusters {
 		obs := observations[cluster]
 		requests, errors := obs.API.totals()
+		responseBytes, totalDuration, maxDuration, throttles := obs.API.costTotals()
 		fmt.Fprintf(w, "opscart_scanner_last_scan_duration_seconds{cluster=%q} %g\n", cluster, obs.Duration.Seconds())
 		timestamp := int64(0)
 		if !obs.CompletedAt.IsZero() {
@@ -385,8 +546,44 @@ func writePrometheusMetrics(w io.Writer, cumulative apiCounterSnapshot, observat
 		fmt.Fprintf(w, "opscart_scanner_last_scan_timestamp_seconds{cluster=%q} %d\n", cluster, timestamp)
 		fmt.Fprintf(w, "opscart_scanner_last_scan_api_requests{cluster=%q} %d\n", cluster, requests)
 		fmt.Fprintf(w, "opscart_scanner_last_scan_api_errors{cluster=%q} %d\n", cluster, errors)
+		fmt.Fprintf(w, "opscart_scanner_last_scan_api_throttles{cluster=%q} %d\n", cluster, throttles)
+		fmt.Fprintf(w, "opscart_scanner_last_scan_api_response_bytes{cluster=%q} %d\n", cluster, responseBytes)
+		fmt.Fprintf(w, "opscart_scanner_last_scan_api_request_duration_seconds{cluster=%q} %g\n", cluster, totalDuration.Seconds())
+		fmt.Fprintf(w, "opscart_scanner_last_scan_api_request_max_duration_seconds{cluster=%q} %g\n", cluster, maxDuration.Seconds())
+		for _, key := range operationKeys(obs.API) {
+			var operationRequests uint64
+			for metric, count := range obs.API.Requests {
+				if metric.Operation == key.Operation && metric.Resource == key.Resource {
+					operationRequests += count
+				}
+			}
+			fmt.Fprintf(w, "opscart_scanner_last_scan_api_operation_requests{cluster=%q,operation=%q,resource=%q} %d\n", cluster, key.Operation, key.Resource, operationRequests)
+			fmt.Fprintf(w, "opscart_scanner_last_scan_api_operation_response_bytes{cluster=%q,operation=%q,resource=%q} %d\n", cluster, key.Operation, key.Resource, obs.API.ResponseBytes[key])
+			fmt.Fprintf(w, "opscart_scanner_last_scan_api_operation_request_duration_seconds{cluster=%q,operation=%q,resource=%q} %g\n", cluster, key.Operation, key.Resource, obs.API.RequestDuration[key].Seconds())
+		}
 		for _, resource := range []string{"pods", "nodes", "namespaces", "events"} {
 			fmt.Fprintf(w, "opscart_scanner_last_scan_objects_examined{cluster=%q,resource=%q} %d\n", cluster, resource, obs.API.Objects[resource])
 		}
 	}
+}
+
+func operationKeys(snapshot apiCounterSnapshot) []apiOperationKey {
+	set := make(map[apiOperationKey]struct{})
+	for key := range snapshot.ResponseBytes {
+		set[key] = struct{}{}
+	}
+	for key := range snapshot.RequestDuration {
+		set[key] = struct{}{}
+	}
+	keys := make([]apiOperationKey, 0, len(set))
+	for key := range set {
+		keys = append(keys, key)
+	}
+	sort.Slice(keys, func(i, j int) bool {
+		if keys[i].Operation != keys[j].Operation {
+			return keys[i].Operation < keys[j].Operation
+		}
+		return keys[i].Resource < keys[j].Resource
+	})
+	return keys
 }
