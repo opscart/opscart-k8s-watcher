@@ -1752,7 +1752,7 @@ func TestWastePageStatesCategoriesAndReconciliation(t *testing.T) {
 			"Job / CronJob retention review", "Zero-replica workload", "Namespace activity review",
 			"Service selector review", "Ingress backend evidence", "HPA configuration review",
 			"Housekeeping / Retention", ">10<", "Distinct Resources",
-			"Candidate PVC requests", "Operational Findings", "Reported Check Coverage",
+			"PVC request volume", "Operational Findings", "Reported Check Coverage",
 			"no financial-waste conclusion", "View active incidents", "Ranked Findings", "Drift", "kubectl get pvc pvc",
 		} {
 			if !strings.Contains(body, want) {
