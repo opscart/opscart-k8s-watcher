@@ -432,19 +432,24 @@ func (w *WasteAuditor) detectAbandonedNamespaces(audit *WasteAudit, filterNamesp
 // An event-list failure returns an empty map for classification and an error
 // so the audit can preserve that the pod detector was incomplete.
 func (w *WasteAuditor) probeFailurePodsByNamespace(namespace string) (map[string]bool, error) {
-	result := make(map[string]bool)
-
 	events, err := w.clientset.CoreV1().Events(namespace).List(w.ctx, metav1.ListOptions{
 		FieldSelector:  "involvedObject.kind=Pod",
 		TimeoutSeconds: int64Ptr(10),
 	})
 	if err != nil {
 		fmt.Printf("⚠️  Could not list events in namespace %q for probe-failure detection: %v\n", namespace, err)
-		return result, err
+		return map[string]bool{}, err
 	}
+	return probeFailurePodsFromEvents(events.Items), nil
+}
 
-	for _, ev := range events.Items {
+func probeFailurePodsFromEvents(events []corev1.Event) map[string]bool {
+	result := make(map[string]bool)
+	for _, ev := range events {
 		if ev.InvolvedObject.Kind != "" && ev.InvolvedObject.Kind != "Pod" {
+			continue
+		}
+		if ev.Type != corev1.EventTypeWarning {
 			continue
 		}
 		lower := strings.ToLower(ev.Message)
@@ -452,8 +457,7 @@ func (w *WasteAuditor) probeFailurePodsByNamespace(namespace string) (map[string
 			result[ev.InvolvedObject.Name] = true
 		}
 	}
-
-	return result, nil
+	return result
 }
 
 // classifyStalePodFailure translates one Kubernetes Pod snapshot into the
@@ -582,12 +586,30 @@ func dashboardPodStatus(classifiedReason string) string {
 }
 
 func (w *WasteAuditor) detectStalePods(audit *WasteAudit, filterNamespace string) error {
+	return w.detectStalePodsWithClusterEvents(audit, filterNamespace, true)
+}
+
+func (w *WasteAuditor) detectStalePodsWithClusterEvents(audit *WasteAudit, filterNamespace string, useClusterEvents bool) error {
 	pods, err := w.clientset.CoreV1().Pods(filterNamespace).List(w.ctx, metav1.ListOptions{TimeoutSeconds: int64Ptr(10)})
 	if err != nil {
 		return err
 	}
 
 	now := time.Now()
+
+	var eventsByNamespace map[string][]corev1.Event
+	if useClusterEvents {
+		events, listErr := w.clientset.CoreV1().Events("").List(w.ctx, metav1.ListOptions{
+			FieldSelector:  "involvedObject.kind=Pod,type=Warning",
+			TimeoutSeconds: int64Ptr(10),
+		})
+		if listErr == nil {
+			eventsByNamespace = make(map[string][]corev1.Event)
+			for _, event := range events.Items {
+				eventsByNamespace[event.Namespace] = append(eventsByNamespace[event.Namespace], event)
+			}
+		}
+	}
 
 	// Namespace event cache: fetched at most once per namespace encountered,
 	// not once per pod (a 350-pod cluster must not turn into hundreds of
@@ -604,10 +626,14 @@ func (w *WasteAuditor) detectStalePods(audit *WasteAudit, filterNamespace string
 		ageDays := int(now.Sub(pod.CreationTimestamp.Time).Hours() / 24)
 
 		if _, ok := probeFailurePods[pod.Namespace]; !ok {
-			var err error
-			probeFailurePods[pod.Namespace], err = w.probeFailurePodsByNamespace(pod.Namespace)
-			if err != nil && eventScanErr == nil {
-				eventScanErr = fmt.Errorf("list pod events in namespace %q: %w", pod.Namespace, err)
+			if eventsByNamespace != nil {
+				probeFailurePods[pod.Namespace] = probeFailurePodsFromEvents(eventsByNamespace[pod.Namespace])
+			} else {
+				var err error
+				probeFailurePods[pod.Namespace], err = w.probeFailurePodsByNamespace(pod.Namespace)
+				if err != nil && eventScanErr == nil {
+					eventScanErr = fmt.Errorf("list pod events in namespace %q: %w", pod.Namespace, err)
+				}
 			}
 		}
 		hasProbeFailureEvent := probeFailurePods[pod.Namespace][pod.Name]

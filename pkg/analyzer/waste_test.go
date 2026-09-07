@@ -691,6 +691,182 @@ func TestEventsFetchedOncePerNamespaceNotPerPod(t *testing.T) {
 	}
 }
 
+func eventListScopes(actions []ktesting.Action) (cluster, namespace int) {
+	for _, action := range actions {
+		if action.GetVerb() != "list" || action.GetResource().Resource != "events" {
+			continue
+		}
+		if action.GetNamespace() == "" {
+			cluster++
+		} else {
+			namespace++
+		}
+	}
+	return
+}
+
+func TestClusterEventSnapshotUsesOneRequestWithRequiredSelector(t *testing.T) {
+	wa := newTestAuditor(1, crashLoopPod("pod-a", "app"), crashLoopPod("pod-b", "other"))
+	audit := &WasteAudit{}
+	if err := wa.detectStalePods(audit, ""); err != nil {
+		t.Fatalf("detectStalePods: %v", err)
+	}
+	client := wa.clientset.(*fake.Clientset)
+	cluster, namespace := eventListScopes(client.Actions())
+	if cluster != 1 || namespace != 0 {
+		t.Fatalf("Event LISTs: cluster=%d namespace=%d, want 1/0", cluster, namespace)
+	}
+	for _, action := range client.Actions() {
+		if action.GetVerb() == "list" && action.GetResource().Resource == "events" {
+			selector := action.(ktesting.ListAction).GetListRestrictions().Fields.String()
+			if selector != "involvedObject.kind=Pod,type=Warning" {
+				t.Fatalf("aggregate Event selector = %q", selector)
+			}
+		}
+	}
+}
+
+func TestClusterEventSnapshotMatchesLegacyResults(t *testing.T) {
+	podA := crashLoopPod("api", "payments")
+	podB := crashLoopPod("worker", "workers")
+	eventA := probeFailureEvent("api.probe", "api", "payments")
+	objects := []interface{}{podA, podB, eventA}
+	legacyAudit := &WasteAudit{}
+	if err := newTestAuditor(1, objects...).detectStalePodsWithClusterEvents(legacyAudit, "", false); err != nil {
+		t.Fatalf("legacy detection: %v", err)
+	}
+	aggregateAudit := &WasteAudit{}
+	if err := newTestAuditor(1, objects...).detectStalePodsWithClusterEvents(aggregateAudit, "", true); err != nil {
+		t.Fatalf("aggregate detection: %v", err)
+	}
+	if !reflect.DeepEqual(aggregateAudit.StalePods, legacyAudit.StalePods) {
+		t.Fatalf("aggregate Events changed findings:\naggregate=%+v\nlegacy=%+v", aggregateAudit.StalePods, legacyAudit.StalePods)
+	}
+}
+
+func TestClusterEventSnapshotKeepsPodNamesNamespaceIsolated(t *testing.T) {
+	wa := newTestAuditor(1,
+		crashLoopPod("api", "with-probe"), crashLoopPod("api", "without-probe"),
+		probeFailureEvent("api.probe", "api", "with-probe"),
+	)
+	audit := &WasteAudit{}
+	if err := wa.detectStalePods(audit, ""); err != nil {
+		t.Fatalf("detectStalePods: %v", err)
+	}
+	withProbe, _ := findStalePod(audit.StalePods, "with-probe", "api")
+	withoutProbe, _ := findStalePod(audit.StalePods, "without-probe", "api")
+	if withProbe.Status != "ProbeFailure" || withoutProbe.Status != "CrashLoopBackOff" {
+		t.Fatalf("cross-namespace evidence contamination: with=%+v without=%+v", withProbe, withoutProbe)
+	}
+}
+
+func TestClusterEventSnapshotExcludesInfraNamespaces(t *testing.T) {
+	wa := newTestAuditor(1,
+		crashLoopPod("api", "kube-system"),
+		probeFailureEvent("api.probe", "api", "kube-system"),
+	)
+	audit := &WasteAudit{}
+	if err := wa.detectStalePods(audit, ""); err != nil {
+		t.Fatalf("detectStalePods: %v", err)
+	}
+	if len(audit.StalePods) != 0 {
+		t.Fatalf("infrastructure Pod was analyzed: %+v", audit.StalePods)
+	}
+}
+
+func TestProbeFailureEvidenceFiltersEventKindTypeAndMessage(t *testing.T) {
+	matching := probeFailureEvent("matching", "matching", "app")
+	secondSignature := probeFailureEvent("second", "second", "app")
+	secondSignature.Message = "Startup probe, will be restarted after failure"
+	normal := probeFailureEvent("normal", "normal", "app")
+	normal.Type = corev1.EventTypeNormal
+	nonPod := probeFailureEvent("node", "node", "app")
+	nonPod.InvolvedObject.Kind = "Node"
+	nonMatching := probeFailureEvent("other", "other", "app")
+	nonMatching.Message = "Container image pull failed"
+	got := probeFailurePodsFromEvents([]corev1.Event{*matching, *secondSignature, *normal, *nonPod, *nonMatching})
+	if !got["matching"] || !got["second"] {
+		t.Fatalf("probe signatures not recognized: %+v", got)
+	}
+	for _, excluded := range []string{"normal", "node", "other"} {
+		if got[excluded] {
+			t.Fatalf("Event %q incorrectly supplied probe evidence: %+v", excluded, got)
+		}
+	}
+}
+
+func TestClusterEventSnapshotNoMatchingEventsLeavesEvidenceEmpty(t *testing.T) {
+	wa := newTestAuditor(1, crashLoopPod("api", "app"))
+	audit := &WasteAudit{}
+	if err := wa.detectStalePods(audit, ""); err != nil {
+		t.Fatalf("detectStalePods: %v", err)
+	}
+	finding, ok := findStalePod(audit.StalePods, "app", "api")
+	if !ok || finding.Status != "CrashLoopBackOff" {
+		t.Fatalf("empty Event evidence changed classification: %+v", audit.StalePods)
+	}
+}
+
+func TestProbeFailureEvidenceIgnoresDuplicatesCountOrderAndSeries(t *testing.T) {
+	event := probeFailureEvent("api.probe", "api", "app")
+	event.Count = 37
+	event.Series = &corev1.EventSeries{Count: 91, LastObservedTime: metav1.MicroTime{Time: time.Now()}}
+	duplicate := event.DeepCopy()
+	duplicate.Name = "api.probe.duplicate"
+	forward := probeFailurePodsFromEvents([]corev1.Event{*event, *duplicate})
+	reverse := probeFailurePodsFromEvents([]corev1.Event{*duplicate, *event})
+	if !reflect.DeepEqual(forward, map[string]bool{"api": true}) || !reflect.DeepEqual(reverse, forward) {
+		t.Fatalf("count/order/series affected boolean evidence: forward=%+v reverse=%+v", forward, reverse)
+	}
+}
+
+func TestClusterEventListFailureFallsBackToNamespaceLists(t *testing.T) {
+	wa := newTestAuditor(1, crashLoopPod("api", "one"), crashLoopPod("worker", "two"))
+	wa.clientset.(*fake.Clientset).PrependReactor("list", "events", func(action ktesting.Action) (bool, runtime.Object, error) {
+		if action.GetNamespace() == "" {
+			return true, nil, context.DeadlineExceeded
+		}
+		return false, nil, nil
+	})
+	audit := &WasteAudit{}
+	if err := wa.detectStalePods(audit, ""); err != nil {
+		t.Fatalf("fallback detection: %v", err)
+	}
+	cluster, namespace := eventListScopes(wa.clientset.(*fake.Clientset).Actions())
+	if cluster != 1 || namespace != 2 {
+		t.Fatalf("fallback Event LISTs: cluster=%d namespace=%d, want 1/2", cluster, namespace)
+	}
+}
+
+func TestClusterEventFallbackPreservesPartialFindingsAndWarning(t *testing.T) {
+	goodEvent := probeFailureEvent("api.probe", "api", "good")
+	wa := newTestAuditor(1, crashLoopPod("api", "good"), crashLoopPod("api", "broken"), goodEvent)
+	wa.clientset.(*fake.Clientset).PrependReactor("list", "events", func(action ktesting.Action) (bool, runtime.Object, error) {
+		if action.GetNamespace() == "" || action.GetNamespace() == "broken" {
+			return true, nil, context.DeadlineExceeded
+		}
+		return false, nil, nil
+	})
+	audit, err := wa.AuditWaste("")
+	if err != nil {
+		t.Fatalf("AuditWaste: %v", err)
+	}
+	good, goodFound := findStalePod(audit.StalePods, "good", "api")
+	broken, brokenFound := findStalePod(audit.StalePods, "broken", "api")
+	if !goodFound || good.Status != "ProbeFailure" || !brokenFound || broken.Status != "CrashLoopBackOff" {
+		t.Fatalf("fallback partial findings changed: good=%+v broken=%+v", good, broken)
+	}
+	foundWarning := false
+	for _, warning := range audit.DetectorWarnings {
+		if warning.Category == "Zombie and idle/unmanaged pods" && strings.Contains(warning.Error, `namespace "broken"`) {
+			foundWarning = true
+		}
+	}
+	if !foundWarning {
+		t.Fatalf("fallback detector warning missing: %+v", audit.DetectorWarnings)
+	}
+}
+
 // ── Active-vs-age-gated malfunction detection ──────────────────────────────
 //
 // Currently-broken resources (Ingress backends with no ready endpoints,
