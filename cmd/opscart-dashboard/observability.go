@@ -86,7 +86,7 @@ var processAPICounters = newAPICounters()
 type measuringTransport struct {
 	base       http.RoundTripper
 	cumulative *apiCounters
-	scan       *apiCounters
+	local      *apiCounters
 }
 
 func (t *measuringTransport) RoundTrip(req *http.Request) (*http.Response, error) {
@@ -97,11 +97,11 @@ func (t *measuringTransport) RoundTrip(req *http.Request) (*http.Response, error
 		result = strconv.Itoa(resp.StatusCode)
 	}
 	t.cumulative.recordRequest(operation, resource, result)
-	if t.scan != nil {
-		t.scan.recordRequest(operation, resource, result)
+	if t.local != nil {
+		t.local.recordRequest(operation, resource, result)
 	}
 	if err == nil && resp != nil && resp.Body != nil && operation == "LIST" {
-		resp.Body = &countingResponseBody{ReadCloser: resp.Body, resource: resource, counters: []*apiCounters{t.cumulative, t.scan}}
+		resp.Body = &countingResponseBody{ReadCloser: resp.Body, resource: resource, counters: []*apiCounters{t.cumulative, t.local}}
 	}
 	return resp, err
 }
@@ -187,6 +187,14 @@ type scanObservation struct {
 	API         apiCounterSnapshot
 }
 
+type investigationObservation struct {
+	Namespace   string
+	Pod         string
+	CompletedAt time.Time
+	Duration    time.Duration
+	API         apiCounterSnapshot
+}
+
 type diagnosticOperation struct {
 	Operation string
 	Resource  string
@@ -194,6 +202,19 @@ type diagnosticOperation struct {
 }
 
 type diagnosticsPageData struct {
+	ActivePage    string
+	DashHref      string
+	WrHref        string
+	CostsHref     string
+	InfraHref     string
+	NsHref        string
+	OptHref       string
+	WasteHref     string
+	SecurityHref  string
+	IncidentsHref string
+	ClusterName   string
+	CriticalCount int
+	Clusters      []sidebarCluster
 	Cluster       string
 	CompletedAt   string
 	Duration      string
@@ -205,30 +226,47 @@ type diagnosticsPageData struct {
 	Namespaces    uint64
 	Events        uint64
 	TopOperations []diagnosticOperation
+	Investigation investigationDiagnostics
+}
+
+type investigationDiagnostics struct {
+	HasData       bool
+	Target        string
+	CompletedAt   string
+	Duration      string
+	Requests      uint64
+	Errors        uint64
+	TopOperations []diagnosticOperation
 }
 
 func (srv *server) handleDiagnostics(w http.ResponseWriter, r *http.Request) {
-	state := srv.getState(srv.activeCtx(r))
+	ctx := srv.activeCtx(r)
+	state := srv.getState(ctx)
 	state.mu.RLock()
 	obs := state.observation
+	scan := state.scan
 	state.mu.RUnlock()
 	requests, errors := obs.API.totals()
-	data := diagnosticsPageData{Cluster: displayName(state.ctx), CompletedAt: "No completed scan", Interval: dashboardScanInterval.String(), Requests: requests, Errors: errors,
+	q := "?cluster=" + url.QueryEscape(ctx)
+	data := diagnosticsPageData{ActivePage: "settings", DashHref: "/" + q, WrHref: "/warroom" + q, CostsHref: "/costs" + q,
+		InfraHref: "/infrastructure" + q, NsHref: "/namespaces" + q, OptHref: "/optimizations" + q, WasteHref: "/waste" + q,
+		SecurityHref: "/security" + q, IncidentsHref: "/incidents" + q, ClusterName: displayName(ctx), CriticalCount: countCriticalIssues(scan),
+		Clusters: convertToSidebarClusters(srv.clusterList, ctx, "/settings/diagnostics"), Cluster: displayName(state.ctx), CompletedAt: "No completed scan", Interval: dashboardScanInterval.String(), Requests: requests, Errors: errors,
 		Pods: obs.API.Objects["pods"], Nodes: obs.API.Objects["nodes"], Namespaces: obs.API.Objects["namespaces"], Events: obs.API.Objects["events"]}
 	if !obs.CompletedAt.IsZero() {
 		data.CompletedAt = obs.CompletedAt.Format(time.RFC3339)
 		data.Duration = obs.Duration.Round(time.Millisecond).String()
 	}
-	byOperation := make(map[apiOperationKey]uint64)
-	for key, count := range obs.API.Requests {
-		byOperation[apiOperationKey{key.Operation, key.Resource}] += count
-	}
-	for key, count := range byOperation {
-		data.TopOperations = append(data.TopOperations, diagnosticOperation{key.Operation, key.Resource, count})
-	}
-	sort.Slice(data.TopOperations, func(i, j int) bool { return data.TopOperations[i].Count > data.TopOperations[j].Count })
-	if len(data.TopOperations) > 10 {
-		data.TopOperations = data.TopOperations[:10]
+	data.TopOperations = diagnosticOperations(obs.API)
+
+	srv.investigationMu.RLock()
+	investigation := srv.latestInvestigation
+	srv.investigationMu.RUnlock()
+	if !investigation.CompletedAt.IsZero() {
+		invRequests, invErrors := investigation.API.totals()
+		data.Investigation = investigationDiagnostics{HasData: true, Target: investigation.Namespace + "/" + investigation.Pod,
+			CompletedAt: investigation.CompletedAt.Format(time.RFC3339), Duration: investigation.Duration.Round(time.Millisecond).String(),
+			Requests: invRequests, Errors: invErrors, TopOperations: diagnosticOperations(investigation.API)}
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	if err := getDiagnosticsTmpl().Execute(w, data); err != nil {
@@ -237,8 +275,53 @@ func (srv *server) handleDiagnostics(w http.ResponseWriter, r *http.Request) {
 }
 
 var getDiagnosticsTmpl = sync.OnceValue(func() *template.Template {
-	return template.Must(template.New("diagnostics.html").ParseFS(templateFS, "templates/base.html", "templates/diagnostics.html"))
+	return template.Must(template.New("diagnostics.html").ParseFS(templateFS, "templates/base.html", "templates/sidebar.html", "templates/diagnostics.html"))
 })
+
+func diagnosticOperations(snapshot apiCounterSnapshot) []diagnosticOperation {
+	byOperation := make(map[apiOperationKey]uint64)
+	for key, count := range snapshot.Requests {
+		byOperation[apiOperationKey{key.Operation, key.Resource}] += count
+	}
+	operations := make([]diagnosticOperation, 0, len(byOperation))
+	for key, count := range byOperation {
+		operations = append(operations, diagnosticOperation{key.Operation, key.Resource, count})
+	}
+	sort.Slice(operations, func(i, j int) bool {
+		if operations[i].Count != operations[j].Count {
+			return operations[i].Count > operations[j].Count
+		}
+		if operations[i].Operation != operations[j].Operation {
+			return operations[i].Operation < operations[j].Operation
+		}
+		return operations[i].Resource < operations[j].Resource
+	})
+	if len(operations) > 10 {
+		operations = operations[:10]
+	}
+	return operations
+}
+
+func (srv *server) completeInvestigation(namespace, pod string, started time.Time, counters *apiCounters) {
+	observation := investigationObservation{Namespace: namespace, Pod: pod, CompletedAt: time.Now(), Duration: time.Since(started), API: counters.snapshot()}
+	srv.investigationMu.Lock()
+	srv.latestInvestigation = observation
+	srv.investigationMu.Unlock()
+}
+
+func (srv *server) investigationSnapshot() investigationObservation {
+	srv.investigationMu.RLock()
+	defer srv.investigationMu.RUnlock()
+	return srv.latestInvestigation
+}
+
+func (srv *server) handleDiagnosticsRedirect(w http.ResponseWriter, r *http.Request) {
+	target := "/settings/diagnostics"
+	if r.URL.RawQuery != "" {
+		target += "?" + r.URL.RawQuery
+	}
+	http.Redirect(w, r, target, http.StatusPermanentRedirect)
+}
 
 func (srv *server) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")

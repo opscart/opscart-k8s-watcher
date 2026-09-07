@@ -59,7 +59,7 @@ func requestPodInvestigation(t *testing.T, client *fake.Clientset, podName, name
 	t.Helper()
 	srv := newTestServer()
 	srv.logsEnabled = false
-	srv.kubeClientFor = func(string) (kubernetes.Interface, error) { return client, nil }
+	srv.kubeClientFor = func(string, *apiCounters) (kubernetes.Interface, error) { return client, nil }
 	req := httptest.NewRequest(http.MethodGet, "/investigate?cluster="+bogusClusterCtx+"&ns="+namespace+"&pod="+podName+"&type=crash_loop", nil)
 	rec := httptest.NewRecorder()
 	srv.handleInvestigationPage(rec, req)

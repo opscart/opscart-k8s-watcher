@@ -958,17 +958,21 @@ func (srv *server) handleInvestigationPage(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	// Live cluster data — fresh client, not scan cache
-	clientset, err := srv.kubeClientFor(ctx)
-	if err != nil {
-		log.Printf("investigation: kube client: %v", err)
-		http.Error(w, "cluster connection failed", http.StatusBadGateway)
-		return
-	}
 	if idx := strings.Index(podName, "/"); idx != -1 {
 		data.PodName = podName[:idx]
 		data.ContainerName = podName[idx+1:]
 		podName = podName[:idx]
+	}
+	// Live cluster data — fresh client, not scan cache. The local recorder is
+	// unique to this HTML request, so concurrent API traffic cannot enter it.
+	investigationCounters := newAPICounters()
+	investigationStarted := time.Now()
+	defer srv.completeInvestigation(namespace, podName, investigationStarted, investigationCounters)
+	clientset, err := srv.kubeClientFor(ctx, investigationCounters)
+	if err != nil {
+		log.Printf("investigation: kube client: %v", err)
+		http.Error(w, "cluster connection failed", http.StatusBadGateway)
+		return
 	}
 	pod, err := clientset.CoreV1().Pods(namespace).Get(context.TODO(), podName, metav1.GetOptions{})
 	if err != nil {

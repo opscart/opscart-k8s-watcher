@@ -1,0 +1,22 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1.0">
+<title>Settings — OpsCart</title>
+{{template "base" .}}
+</head>
+<body>
+<div class="layout">
+{{template "sidebar.html" .}}
+<main class="main">
+  <div class="page-hdr"><div><h1>Settings</h1><p>Operator and administrative capabilities.</p></div></div>
+  <section class="section">
+    <h2 class="section-title">Diagnostics</h2>
+    <p class="muted">Inspect the latest background scanner and interactive Pod Investigation API measurements.</p>
+    <p><a class="back-link" href="{{.DiagnosticsHref}}">Open Diagnostics →</a></p>
+  </section>
+</main>
+</div>
+</body>
+</html>

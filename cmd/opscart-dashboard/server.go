@@ -78,18 +78,20 @@ func (s *clusterScan) securityScore() int {
 // ── Server ────────────────────────────────────────────────────────────────────
 
 type server struct {
-	clusterList   []string
-	mu            sync.RWMutex
-	states        map[string]*dashboardState
-	db            store.Store
-	retentionDays int
-	dbPersistent  bool
-	auth          *authConfig
-	refreshState  func(*dashboardState, []string) error
-	backgroundWG  sync.WaitGroup
-	logsEnabled   bool
-	kubeClientFor kubeClientFactory
-	podLogReader  podLogReaderFunc
+	clusterList         []string
+	mu                  sync.RWMutex
+	states              map[string]*dashboardState
+	db                  store.Store
+	retentionDays       int
+	dbPersistent        bool
+	auth                *authConfig
+	refreshState        func(*dashboardState, []string) error
+	backgroundWG        sync.WaitGroup
+	logsEnabled         bool
+	kubeClientFor       kubeClientFactory
+	podLogReader        podLogReaderFunc
+	investigationMu     sync.RWMutex
+	latestInvestigation investigationObservation
 }
 
 func newServer(clusterList []string, db store.Store, retentionDays int, dbPersistent bool) *server {
@@ -106,8 +108,10 @@ func newServer(clusterList []string, db store.Store, retentionDays int, dbPersis
 		dbPersistent:  dbPersistent,
 		auth:          auth,
 		logsEnabled:   logPreviewEnabledFromEnv(),
-		kubeClientFor: func(ctx string) (kubernetes.Interface, error) { return kubeClient(ctx) },
-		podLogReader:  readPodLogs,
+		kubeClientFor: func(ctx string, localCounters *apiCounters) (kubernetes.Interface, error) {
+			return kubeClientWithCounters(ctx, localCounters)
+		},
+		podLogReader: readPodLogs,
 		refreshState: func(state *dashboardState, clusters []string) error {
 			return state.refresh(clusters)
 		},
@@ -246,9 +250,10 @@ func (srv *server) newMux() http.Handler {
 	mux.HandleFunc("/incidents", srv.handleIncidentsPage)
 	mux.HandleFunc("/security", srv.handleSecurityPage)
 	mux.HandleFunc("/waste", srv.handleWastePage)
-	mux.HandleFunc("/settings", srv.handleStubPage("settings", "Settings"))
+	mux.HandleFunc("/settings", srv.handleSettingsPage)
+	mux.HandleFunc("/settings/diagnostics", srv.handleDiagnostics)
 	mux.HandleFunc("/metrics", srv.handleMetrics)
-	mux.HandleFunc("/diagnostics", srv.handleDiagnostics)
+	mux.HandleFunc("/diagnostics", srv.handleDiagnosticsRedirect)
 
 	// /healthz is registered on the unwrapped top-level mux so kubelet
 	// liveness/readiness probes succeed without credentials; every other
@@ -2109,12 +2114,12 @@ func kubeClientWithCounters(ctx string, scanCounters *apiCounters) (*kubernetes.
 	return kubernetes.NewForConfig(cfg)
 }
 
-func wrapKubernetesTransport(cfg *rest.Config, scanCounters *apiCounters) {
+func wrapKubernetesTransport(cfg *rest.Config, localCounters *apiCounters) {
 	previous := cfg.WrapTransport
 	cfg.WrapTransport = func(rt http.RoundTripper) http.RoundTripper {
 		if previous != nil {
 			rt = previous(rt)
 		}
-		return &measuringTransport{base: rt, cumulative: processAPICounters, scan: scanCounters}
+		return &measuringTransport{base: rt, cumulative: processAPICounters, local: localCounters}
 	}
 }

@@ -2,6 +2,7 @@ package main
 
 import (
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -10,6 +11,9 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/kubernetes/fake"
 )
 
 func TestClassifyKubernetesRequest(t *testing.T) {
@@ -71,7 +75,7 @@ func TestMeasuringTransportSeparatesScanAndCumulative(t *testing.T) {
 	base := roundTripperFunc(func(*http.Request) (*http.Response, error) {
 		return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader(body)), Header: make(http.Header)}, nil
 	})
-	transport := &measuringTransport{base: base, cumulative: cumulative, scan: scan}
+	transport := &measuringTransport{base: base, cumulative: cumulative, local: scan}
 	req := httptest.NewRequest("GET", "https://cluster/api/v1/pods", nil)
 	resp, err := transport.RoundTrip(req)
 	if err != nil {
@@ -138,7 +142,7 @@ func TestDiagnosticsAndMetricsRequireAuthentication(t *testing.T) {
 	t.Setenv("OPSCART_AUTH_PASS", "secret")
 	srv := newServer([]string{"cluster-a"}, nil, 90, false)
 	handler := srv.newMux()
-	for _, path := range []string{"/metrics", "/diagnostics"} {
+	for _, path := range []string{"/metrics", "/settings/diagnostics"} {
 		t.Run(path, func(t *testing.T) {
 			unauthorized := httptest.NewRecorder()
 			handler.ServeHTTP(unauthorized, httptest.NewRequest("GET", path, nil))
@@ -153,5 +157,159 @@ func TestDiagnosticsAndMetricsRequireAuthentication(t *testing.T) {
 				t.Fatalf("authorized status = %d: %s", authorized.Code, authorized.Body.String())
 			}
 		})
+	}
+
+	unauthorized := httptest.NewRecorder()
+	handler.ServeHTTP(unauthorized, httptest.NewRequest("GET", "/diagnostics", nil))
+	if unauthorized.Code != http.StatusUnauthorized {
+		t.Fatalf("unauthorized legacy diagnostics status = %d", unauthorized.Code)
+	}
+	authorizedReq := httptest.NewRequest("GET", "/diagnostics?cluster=cluster-a", nil)
+	authorizedReq.SetBasicAuth("tester", "secret")
+	authorized := httptest.NewRecorder()
+	handler.ServeHTTP(authorized, authorizedReq)
+	if authorized.Code != http.StatusPermanentRedirect {
+		t.Fatalf("legacy diagnostics status = %d, want %d", authorized.Code, http.StatusPermanentRedirect)
+	}
+	if got := authorized.Header().Get("Location"); got != "/settings/diagnostics?cluster=cluster-a" {
+		t.Fatalf("legacy diagnostics redirect = %q", got)
+	}
+}
+
+func TestInvestigationObservationIsRequestScopedAndReplaced(t *testing.T) {
+	srv := newTestServer()
+	srv.logsEnabled = false
+	state := srv.getState(bogusClusterCtx)
+	scanCounters := newAPICounters()
+	scanCounters.recordRequest("LIST", "nodes", "200")
+	state.observation = scanObservation{CompletedAt: time.Now(), API: scanCounters.snapshot()}
+
+	requestNumber := 0
+	srv.kubeClientFor = func(_ string, local *apiCounters) (kubernetes.Interface, error) {
+		requestNumber++
+		if local == nil {
+			t.Fatal("Pod Investigation HTML request received no local counters")
+		}
+		if requestNumber == 1 {
+			local.recordRequest("GET", "pods", "200")
+			local.recordRequest("GET", "replicasets", "200")
+			local.recordRequest("LIST", "events", "500")
+		} else {
+			local.recordRequest("LIST", "services", "200")
+		}
+		return fake.NewSimpleClientset(investigationOwnedPod("payments", fmt.Sprintf("api-%d", requestNumber), "StatefulSet", "api")), nil
+	}
+
+	requestInvestigation := func(pod string) {
+		req := httptest.NewRequest(http.MethodGet, "/investigate?cluster="+bogusClusterCtx+"&ns=payments&pod="+pod+"&type=crash_loop", nil)
+		rec := httptest.NewRecorder()
+		srv.handleInvestigationPage(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("investigation status = %d: %s", rec.Code, rec.Body.String())
+		}
+	}
+
+	requestInvestigation("api-1")
+	first := srv.investigationSnapshot()
+	if got, errors := first.API.totals(); got != 3 || errors != 1 {
+		t.Fatalf("first totals = %d requests/%d errors, want 3/1", got, errors)
+	}
+	operations := diagnosticOperations(first.API)
+	for _, want := range []diagnosticOperation{{"GET", "pods", 1}, {"GET", "replicasets", 1}, {"LIST", "events", 1}} {
+		found := false
+		for _, got := range operations {
+			found = found || got == want
+		}
+		if !found {
+			t.Errorf("operation breakdown missing %+v: %+v", want, operations)
+		}
+	}
+	if got, _ := state.observation.API.totals(); got != 1 {
+		t.Fatalf("Investigation changed scan requests to %d", got)
+	}
+
+	requestInvestigation("api-2")
+	second := srv.investigationSnapshot()
+	if second.Pod != "api-2" {
+		t.Fatalf("latest target pod = %q, want api-2", second.Pod)
+	}
+	if got, errors := second.API.totals(); got != 1 || errors != 0 {
+		t.Fatalf("replacement totals = %d requests/%d errors, want 1/0", got, errors)
+	}
+	if got := diagnosticOperations(second.API); len(got) != 1 || got[0] != (diagnosticOperation{"LIST", "services", 1}) {
+		t.Fatalf("replacement operations = %+v", got)
+	}
+}
+
+func TestNonInvestigationTrafficDoesNotReplaceObservation(t *testing.T) {
+	srv := newTestServer()
+	local := newAPICounters()
+	local.recordRequest("GET", "pods", "200")
+	srv.completeInvestigation("payments", "api", time.Now().Add(-time.Second), local)
+	want := srv.investigationSnapshot()
+
+	scan := newAPICounters()
+	scan.recordRequest("LIST", "nodes", "200")
+	state := srv.getState(bogusClusterCtx)
+	state.observation = scanObservation{CompletedAt: time.Now(), API: scan.snapshot()}
+	rec := httptest.NewRecorder()
+	srv.handleSettingsPage(rec, httptest.NewRequest(http.MethodGet, "/settings", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("settings status = %d", rec.Code)
+	}
+	got := srv.investigationSnapshot()
+	if got.CompletedAt != want.CompletedAt || got.Pod != want.Pod {
+		t.Fatalf("non-Investigation traffic replaced observation: got %+v, want %+v", got, want)
+	}
+}
+
+func TestSettingsDiscoversDiagnosticsAndDiagnosticsHasEmptyInvestigationState(t *testing.T) {
+	srv := newTestServer()
+	settings := httptest.NewRecorder()
+	srv.handleSettingsPage(settings, httptest.NewRequest(http.MethodGet, "/settings?cluster="+bogusClusterCtx, nil))
+	if settings.Code != http.StatusOK || !strings.Contains(settings.Body.String(), `/settings/diagnostics?cluster=`) {
+		t.Fatalf("Settings does not link to cluster-aware Diagnostics: status=%d body=%s", settings.Code, settings.Body.String())
+	}
+
+	diagnostics := httptest.NewRecorder()
+	srv.handleDiagnostics(diagnostics, httptest.NewRequest(http.MethodGet, "/settings/diagnostics?cluster="+bogusClusterCtx, nil))
+	for _, want := range []string{"Diagnostics", "Scanner Diagnostics", "Investigation Diagnostics", "No Pod Investigation request has completed yet", "<aside class=\"sidebar\">"} {
+		if !strings.Contains(diagnostics.Body.String(), want) {
+			t.Errorf("Diagnostics page missing %q", want)
+		}
+	}
+}
+
+func TestConcurrentTransportTrafficCannotEnterInvestigationCounters(t *testing.T) {
+	cumulative := newAPICounters()
+	investigation := newAPICounters()
+	base := roundTripperFunc(func(*http.Request) (*http.Response, error) {
+		return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(`{"items":[]}`)), Header: make(http.Header)}, nil
+	})
+	measured := &measuringTransport{base: base, cumulative: cumulative, local: investigation}
+	unrelated := &measuringTransport{base: base, cumulative: cumulative}
+	var wg sync.WaitGroup
+	for i := 0; i < 50; i++ {
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			resp, _ := measured.RoundTrip(httptest.NewRequest("GET", "https://cluster/api/v1/namespaces/x/pods/p", nil))
+			_ = resp.Body.Close()
+		}()
+		go func() {
+			defer wg.Done()
+			resp, _ := unrelated.RoundTrip(httptest.NewRequest("GET", "https://cluster/api/v1/events", nil))
+			_ = resp.Body.Close()
+		}()
+	}
+	wg.Wait()
+	if got, _ := investigation.snapshot().totals(); got != 50 {
+		t.Fatalf("Investigation requests = %d, want 50", got)
+	}
+	if got := investigation.snapshot().Requests[apiMetricKey{"LIST", "events", "200"}]; got != 0 {
+		t.Fatalf("unrelated Event requests attributed to Investigation: %d", got)
+	}
+	if got, _ := cumulative.snapshot().totals(); got != 100 {
+		t.Fatalf("cumulative requests = %d, want 100", got)
 	}
 }

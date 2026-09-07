@@ -1,13 +1,20 @@
 <!DOCTYPE html>
-<html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0"><title>Scanner Diagnostics — OpsCart</title>{{template "base" .}}</head><body>
-<main class="main">
-  <div class="page-hdr"><div><h1>Scanner Diagnostics</h1><p>Measurement from the latest completed background-compatible full scan.</p></div></div>
-  <section class="section"><h2 class="section-title">{{.Cluster}}</h2>
-    <p>Last completed scan: <strong>{{.CompletedAt}}</strong></p><p>Scan duration: <strong>{{.Duration}}</strong></p><p>Current scan interval: <strong>{{.Interval}}</strong></p>
-  </section>
-  <section class="section"><h2 class="section-title">Latest scan measurements</h2>
+<html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0"><title>Diagnostics — OpsCart</title>{{template "base" .}}</head><body>
+<div class="layout">{{template "sidebar.html" .}}<main class="main">
+  <div class="page-hdr"><div><h1>Diagnostics</h1><p>Request-scoped Kubernetes API measurements for scanner and interactive activity.</p></div></div>
+  <section class="section" style="border-left:4px solid var(--accent)"><h2 class="section-title">Scanner Diagnostics</h2>
+    <p>Cluster: <strong>{{.Cluster}}</strong></p>
+    <p>Last completed scan: <strong>{{.CompletedAt}}</strong> · Scan duration: <strong>{{if .Duration}}{{.Duration}}{{else}}—{{end}}</strong> · Current scan interval: <strong>{{.Interval}}</strong></p>
     <p>Kubernetes API calls: <strong>{{.Requests}}</strong> · API errors: <strong>{{.Errors}}</strong></p>
-    <p>Pods examined: <strong>{{.Pods}}</strong> · Nodes: <strong>{{.Nodes}}</strong> · Namespaces: <strong>{{.Namespaces}}</strong> · Events: <strong>{{.Events}}</strong></p>
+    <p>Objects examined — Pods: <strong>{{.Pods}}</strong> · Nodes: <strong>{{.Nodes}}</strong> · Namespaces: <strong>{{.Namespaces}}</strong> · Events: <strong>{{.Events}}</strong></p>
+    <h3>Top API operations</h3>{{range .TopOperations}}<p><strong>{{.Operation}}</strong> {{.Resource}} — {{.Count}}</p>{{else}}<p class="muted">No completed scan data.</p>{{end}}
   </section>
-  <section class="section"><h2 class="section-title">Top API operations</h2>{{range .TopOperations}}<p><strong>{{.Operation}}</strong> {{.Resource}} — {{.Count}}</p>{{else}}<p class="muted">No completed scan data.</p>{{end}}</section>
-</main></body></html>
+  <section class="section" style="border-left:4px solid var(--warning)"><h2 class="section-title">Investigation Diagnostics</h2>
+    {{if .Investigation.HasData}}
+    <p>Target namespace/pod: <strong>{{.Investigation.Target}}</strong></p>
+    <p>Completed: <strong>{{.Investigation.CompletedAt}}</strong> · Request duration: <strong>{{.Investigation.Duration}}</strong></p>
+    <p>Kubernetes API calls: <strong>{{.Investigation.Requests}}</strong> · API errors: <strong>{{.Investigation.Errors}}</strong></p>
+    <h3>Top API operations</h3>{{range .Investigation.TopOperations}}<p><strong>{{.Operation}}</strong> {{.Resource}} — {{.Count}}</p>{{else}}<p class="muted">No Kubernetes API calls were made.</p>{{end}}
+    {{else}}<p class="muted">No Pod Investigation request has completed yet.</p>{{end}}
+  </section>
+</main></div></body></html>

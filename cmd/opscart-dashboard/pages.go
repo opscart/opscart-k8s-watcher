@@ -18,20 +18,21 @@ import (
 // ── Stub pages ────────────────────────────────────────────────────────────────
 
 type stubPageData struct {
-	Title         string
-	ActivePage    string
-	DashHref      string
-	WrHref        string
-	CostsHref     string
-	InfraHref     string
-	NsHref        string
-	OptHref       string
-	WasteHref     string
-	SecurityHref  string
-	IncidentsHref string
-	ClusterName   string
-	CriticalCount int
-	Clusters      []sidebarCluster
+	Title           string
+	ActivePage      string
+	DashHref        string
+	WrHref          string
+	CostsHref       string
+	InfraHref       string
+	NsHref          string
+	OptHref         string
+	WasteHref       string
+	SecurityHref    string
+	IncidentsHref   string
+	ClusterName     string
+	CriticalCount   int
+	Clusters        []sidebarCluster
+	DiagnosticsHref string
 }
 
 var getStubTmpl = sync.OnceValue(func() *template.Template {
@@ -75,6 +76,36 @@ func (srv *server) handleStubPage(page, title string) http.HandlerFunc {
 			return
 		}
 		w.Write([]byte(buf.String()))
+	}
+}
+
+var getSettingsTmpl = sync.OnceValue(func() *template.Template {
+	return template.Must(
+		template.New("settings.html").
+			ParseFS(templateFS, "templates/base.html", "templates/sidebar.html", "templates/settings.html"),
+	)
+})
+
+func (srv *server) handleSettingsPage(w http.ResponseWriter, r *http.Request) {
+	ctx := srv.activeCtx(r)
+	state := srv.getState(ctx)
+	state.mu.RLock()
+	scan := state.scan
+	state.mu.RUnlock()
+	q := "?cluster=" + url.QueryEscape(ctx)
+	data := stubPageData{
+		Title: "Settings", ActivePage: "settings", DashHref: "/" + q, WrHref: "/warroom" + q,
+		CostsHref: "/costs" + q, InfraHref: "/infrastructure" + q, NsHref: "/namespaces" + q,
+		OptHref: "/optimizations" + q, WasteHref: "/waste" + q, SecurityHref: "/security" + q,
+		IncidentsHref: "/incidents" + q, ClusterName: displayName(ctx), CriticalCount: countCriticalIssues(scan),
+		Clusters:        convertToSidebarClusters(srv.clusterList, ctx, "/settings"),
+		DiagnosticsHref: "/settings/diagnostics" + q,
+	}
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-cache, no-store, must-revalidate")
+	if err := getSettingsTmpl().Execute(w, data); err != nil {
+		log.Printf("settings template: %v", err)
+		http.Error(w, "template error", http.StatusInternalServerError)
 	}
 }
 
