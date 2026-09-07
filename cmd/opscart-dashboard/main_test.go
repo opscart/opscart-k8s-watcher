@@ -2146,7 +2146,7 @@ func TestWastePhase2CompactRowsFiltersPaginationAndActions(t *testing.T) {
 	for _, want := range []string{
 		`id="waste-search"`, `id="waste-category"`, `id="waste-namespace"`, `id="waste-confidence"`,
 		`id="waste-page-size"`, "<option>25</option>", "<option>50</option>", "<option>100</option>",
-		`role="list"`, `role="listitem"`, `<details class="why">`, "Inspect · Why flagged?", "Copy kubectl",
+		`role="list"`, `role="listitem"`, `<details class="why">`, "Inspect</summary>", "Why flagged?", "Copy kubectl",
 		"Observation", "Inference", "Limitation / caveat", "Recommended review action",
 		"Priority score (legacy heuristic)", "Category colors identify resource domains; they do not represent severity or confidence.",
 		"cat-namespace", "cat-workload", "cat-replicaset", "cat-job", "cat-storage", "cat-network", "cat-scaling", "cat-failure",
