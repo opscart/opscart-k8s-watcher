@@ -299,6 +299,16 @@ func TestAllocateCanonicalCostsMultiplePoolsReconcileIndependently(t *testing.T)
 	}
 }
 
+func TestNormalizeAllocationNoiseRemovesNegativeZero(t *testing.T) {
+	got := normalizeAllocationNoise(-1e-12)
+	if got != 0 {
+		t.Fatalf("normalizeAllocationNoise(-1e-12)=%v, want 0", got)
+	}
+	if math.Signbit(got) {
+		t.Fatal("normalized monetary zero must not retain a negative sign bit")
+	}
+}
+
 func TestAllocateCanonicalCostsZeroRequestsLeavesPoolIdle(t *testing.T) {
 	key := testPoolKey("idle")
 	pod := eligiblePod("ns", "zero", key, 0, 0, "Deployment", "zero")

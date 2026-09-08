@@ -230,6 +230,9 @@ func AllocateCanonicalCosts(pools []CostPoolAllocationInput, pods []PodCostInput
 	for _, workload := range workloadMap {
 		result.Workloads = append(result.Workloads, *workload)
 	}
+	result.AllocatedMonthly = normalizeAllocationNoise(result.AllocatedMonthly)
+	result.IdleMonthly = normalizeAllocationNoise(result.IdleMonthly)
+	result.UnallocatedMonthly = normalizeAllocationNoise(result.UnallocatedMonthly)
 	sort.Slice(result.Workloads, func(i, j int) bool {
 		a, b := result.Workloads[i], result.Workloads[j]
 		if a.Namespace != b.Namespace {
@@ -314,15 +317,29 @@ func allocatePool(pool CostPoolAllocationInput, pods []PodCostInput) CostPoolAll
 		result.Pods = append(result.Pods, podAllocation)
 	}
 
-	// Floating point arithmetic may introduce sub-cent binary noise. Define the
-	// residual as unallocated so the invariant remains exact at result level.
+	// Floating point arithmetic may introduce tiny binary residuals. Reconcile
+	// first, then canonicalize sub-nanodollar noise to positive zero so every
+	// production surface (JSON, HTML, CSV/XLSX later) sees the same monetary
+	// value instead of "-0".
 	residual := result.ResolvedMonthlyCost -
 		(result.AllocatedMonthly + result.IdleMonthly + result.UnallocatedMonthly)
 	if residual != 0 {
 		result.UnallocatedMonthly += residual
 	}
+	result.AllocatedMonthly = normalizeAllocationNoise(result.AllocatedMonthly)
+	result.IdleMonthly = normalizeAllocationNoise(result.IdleMonthly)
+	result.UnallocatedMonthly = normalizeAllocationNoise(result.UnallocatedMonthly)
 
 	return result
+}
+
+const allocationNoiseEpsilon = 1e-9
+
+func normalizeAllocationNoise(value float64) float64 {
+	if value > -allocationNoiseEpsilon && value < allocationNoiseEpsilon {
+		return 0
+	}
+	return value
 }
 
 func dimensionBudget(monthlyBudget float64, requested, capacity int64) (allocated, idle, unallocated float64) {

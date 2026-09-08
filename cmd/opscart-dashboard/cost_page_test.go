@@ -41,8 +41,13 @@ func TestCostPageNeedsOnlyCostReportData(t *testing.T) {
 		TotalMonthlyCost: 100,
 	}}
 	html := renderCostPage(scan, "", []string{""})
-	if html == "" || !strings.Contains(html, "Cost Situation Briefing") {
+	if html == "" {
 		t.Fatal("cost-only report did not render")
+	}
+	for _, expected := range []string{"Cost Intelligence", "ESTIMATED", "Cost composition", "Methodology &amp; pricing source"} {
+		if !strings.Contains(html, expected) {
+			t.Fatalf("cost-only report missing %q", expected)
+		}
 	}
 	if strings.Contains(html, `<div class="section-title">War Room</div>`) {
 		t.Fatal("War Room panel remains")
