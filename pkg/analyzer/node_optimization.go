@@ -1,0 +1,275 @@
+package analyzer
+
+import (
+	"fmt"
+	"sort"
+)
+
+// NodeOptimizationStatus describes the outcome of a same-shape placement
+// simulation. The simulator is intentionally narrower than the Kubernetes
+// scheduler: it models CPU and memory requests only in this first slice.
+type NodeOptimizationStatus string
+
+const (
+	NodeOptimizationFit               NodeOptimizationStatus = "fit"
+	NodeOptimizationBlockedAggregate  NodeOptimizationStatus = "blocked_aggregate"
+	NodeOptimizationBlockedPodSize    NodeOptimizationStatus = "blocked_pod_exceeds_node"
+	NodeOptimizationPlacementNotFound NodeOptimizationStatus = "placement_not_found"
+	NodeOptimizationInvalidInput      NodeOptimizationStatus = "invalid_input"
+)
+
+// NodeOptimizationPodInput is the scheduler-independent Pod demand consumed by
+// the pure simulator. It deliberately contains no Kubernetes client or API
+// object dependency.
+type NodeOptimizationPodInput struct {
+	Namespace          string
+	Name               string
+	CPURequestMilli    int64
+	MemoryRequestBytes int64
+}
+
+// NodeOptimizationInput describes a same-SKU node-count scenario.
+//
+// PoolKey is identity/evidence only. Pricing and Kubernetes acquisition remain
+// outside this pure placement engine.
+type NodeOptimizationInput struct {
+	PoolKey CostPoolKey
+
+	CurrentNodes   int
+	CandidateNodes int
+
+	NodeCPUCapacityMilli    int64
+	NodeMemoryCapacityBytes int64
+
+	Pods []NodeOptimizationPodInput
+}
+
+// NodeOptimizationBlocker is an explicit reason a scenario could not be
+// established by the modeled checks.
+type NodeOptimizationBlocker struct {
+	Reason  string
+	Pod     string
+	Message string
+}
+
+// NodeOptimizationResult is the deterministic result of a same-shape
+// CPU/memory placement simulation.
+//
+// PlacementFound means this simulator found a placement under the modeled
+// constraints. It must not be presented as equivalent to Kubernetes scheduler
+// feasibility until scheduler constraints are modeled separately.
+type NodeOptimizationResult struct {
+	Status         NodeOptimizationStatus
+	PlacementFound bool
+
+	CurrentNodes   int
+	CandidateNodes int
+
+	TotalCPURequestMilli    int64
+	TotalMemoryRequestBytes int64
+
+	CandidateCPUCapacityMilli    int64
+	CandidateMemoryCapacityBytes int64
+
+	CPUHeadroomMilli    int64
+	MemoryHeadroomBytes int64
+
+	PlacedPodCount int
+	TotalPodCount  int
+
+	Blockers []NodeOptimizationBlocker
+	Caveats  []string
+}
+
+// SimulateSameShapeNodeCount evaluates whether the provided Pod requests can be
+// placed onto CandidateNodes identical nodes.
+//
+// The implementation is intentionally pure:
+//   - no Kubernetes API calls
+//   - no cloud API calls
+//   - no persistence
+//
+// It performs hard aggregate checks first, then deterministic multi-dimensional
+// best-fit-decreasing placement using CPU and memory requests.
+//
+// A placement failure from the heuristic is reported as placement_not_found,
+// not as proof that no valid Kubernetes placement exists.
+func SimulateSameShapeNodeCount(input NodeOptimizationInput) NodeOptimizationResult {
+	result := NodeOptimizationResult{
+		CurrentNodes:   input.CurrentNodes,
+		CandidateNodes: input.CandidateNodes,
+		TotalPodCount:  len(input.Pods),
+		Caveats: []string{
+			"models CPU and memory requests only",
+			"does not yet model Kubernetes scheduling constraints",
+		},
+	}
+
+	if input.CurrentNodes <= 0 {
+		return invalidNodeOptimizationResult(result, "current_nodes", "current node count must be greater than zero")
+	}
+	if input.CandidateNodes <= 0 {
+		return invalidNodeOptimizationResult(result, "candidate_nodes", "candidate node count must be greater than zero")
+	}
+	if input.NodeCPUCapacityMilli <= 0 {
+		return invalidNodeOptimizationResult(result, "node_cpu_capacity", "node CPU capacity must be greater than zero")
+	}
+	if input.NodeMemoryCapacityBytes <= 0 {
+		return invalidNodeOptimizationResult(result, "node_memory_capacity", "node memory capacity must be greater than zero")
+	}
+
+	for _, pod := range input.Pods {
+		if pod.CPURequestMilli < 0 || pod.MemoryRequestBytes < 0 {
+			return invalidNodeOptimizationResult(
+				result,
+				"negative_pod_request",
+				fmt.Sprintf("pod %s has a negative resource request", podDisplayName(pod)),
+			)
+		}
+
+		result.TotalCPURequestMilli += pod.CPURequestMilli
+		result.TotalMemoryRequestBytes += pod.MemoryRequestBytes
+
+		if pod.CPURequestMilli > input.NodeCPUCapacityMilli || pod.MemoryRequestBytes > input.NodeMemoryCapacityBytes {
+			result.Status = NodeOptimizationBlockedPodSize
+			result.Blockers = append(result.Blockers, NodeOptimizationBlocker{
+				Reason: "pod_exceeds_single_node",
+				Pod:    podDisplayName(pod),
+				Message: fmt.Sprintf(
+					"pod requires %dm CPU and %d bytes memory; one candidate node provides %dm CPU and %d bytes memory",
+					pod.CPURequestMilli,
+					pod.MemoryRequestBytes,
+					input.NodeCPUCapacityMilli,
+					input.NodeMemoryCapacityBytes,
+				),
+			})
+			return finalizeNodeOptimizationCapacity(result, input)
+		}
+	}
+
+	result = finalizeNodeOptimizationCapacity(result, input)
+
+	if result.TotalCPURequestMilli > result.CandidateCPUCapacityMilli {
+		result.Status = NodeOptimizationBlockedAggregate
+		result.Blockers = append(result.Blockers, NodeOptimizationBlocker{
+			Reason: "aggregate_cpu_capacity",
+			Message: fmt.Sprintf(
+				"pod CPU requests total %dm but candidate capacity is %dm",
+				result.TotalCPURequestMilli,
+				result.CandidateCPUCapacityMilli,
+			),
+		})
+	}
+	if result.TotalMemoryRequestBytes > result.CandidateMemoryCapacityBytes {
+		result.Status = NodeOptimizationBlockedAggregate
+		result.Blockers = append(result.Blockers, NodeOptimizationBlocker{
+			Reason: "aggregate_memory_capacity",
+			Message: fmt.Sprintf(
+				"pod memory requests total %d bytes but candidate capacity is %d bytes",
+				result.TotalMemoryRequestBytes,
+				result.CandidateMemoryCapacityBytes,
+			),
+		})
+	}
+	if len(result.Blockers) > 0 {
+		return result
+	}
+
+	pods := append([]NodeOptimizationPodInput(nil), input.Pods...)
+	sort.Slice(pods, func(i, j int) bool {
+		di := dominantRequestFraction(pods[i], input.NodeCPUCapacityMilli, input.NodeMemoryCapacityBytes)
+		dj := dominantRequestFraction(pods[j], input.NodeCPUCapacityMilli, input.NodeMemoryCapacityBytes)
+		if di != dj {
+			return di > dj
+		}
+		if pods[i].CPURequestMilli != pods[j].CPURequestMilli {
+			return pods[i].CPURequestMilli > pods[j].CPURequestMilli
+		}
+		if pods[i].MemoryRequestBytes != pods[j].MemoryRequestBytes {
+			return pods[i].MemoryRequestBytes > pods[j].MemoryRequestBytes
+		}
+		if pods[i].Namespace != pods[j].Namespace {
+			return pods[i].Namespace < pods[j].Namespace
+		}
+		return pods[i].Name < pods[j].Name
+	})
+
+	type nodeBin struct {
+		cpuUsed int64
+		memUsed int64
+	}
+	bins := make([]nodeBin, input.CandidateNodes)
+
+	for _, pod := range pods {
+		bestIndex := -1
+		bestScore := 0.0
+
+		for i := range bins {
+			nextCPU := bins[i].cpuUsed + pod.CPURequestMilli
+			nextMem := bins[i].memUsed + pod.MemoryRequestBytes
+			if nextCPU > input.NodeCPUCapacityMilli || nextMem > input.NodeMemoryCapacityBytes {
+				continue
+			}
+
+			remainingCPU := float64(input.NodeCPUCapacityMilli-nextCPU) / float64(input.NodeCPUCapacityMilli)
+			remainingMem := float64(input.NodeMemoryCapacityBytes-nextMem) / float64(input.NodeMemoryCapacityBytes)
+			score := remainingCPU + remainingMem
+
+			if bestIndex == -1 || score < bestScore || (score == bestScore && i < bestIndex) {
+				bestIndex = i
+				bestScore = score
+			}
+		}
+
+		if bestIndex == -1 {
+			result.Status = NodeOptimizationPlacementNotFound
+			result.Blockers = append(result.Blockers, NodeOptimizationBlocker{
+				Reason:  "heuristic_placement_failed",
+				Pod:     podDisplayName(pod),
+				Message: "deterministic CPU/memory best-fit placement could not place this pod; this does not prove that no valid Kubernetes placement exists",
+			})
+			return result
+		}
+
+		bins[bestIndex].cpuUsed += pod.CPURequestMilli
+		bins[bestIndex].memUsed += pod.MemoryRequestBytes
+		result.PlacedPodCount++
+	}
+
+	result.Status = NodeOptimizationFit
+	result.PlacementFound = true
+	return result
+}
+
+func invalidNodeOptimizationResult(result NodeOptimizationResult, reason, message string) NodeOptimizationResult {
+	result.Status = NodeOptimizationInvalidInput
+	result.Blockers = append(result.Blockers, NodeOptimizationBlocker{
+		Reason:  reason,
+		Message: message,
+	})
+	return result
+}
+
+func finalizeNodeOptimizationCapacity(result NodeOptimizationResult, input NodeOptimizationInput) NodeOptimizationResult {
+	result.CandidateCPUCapacityMilli = int64(input.CandidateNodes) * input.NodeCPUCapacityMilli
+	result.CandidateMemoryCapacityBytes = int64(input.CandidateNodes) * input.NodeMemoryCapacityBytes
+	result.CPUHeadroomMilli = result.CandidateCPUCapacityMilli - result.TotalCPURequestMilli
+	result.MemoryHeadroomBytes = result.CandidateMemoryCapacityBytes - result.TotalMemoryRequestBytes
+	return result
+}
+
+func dominantRequestFraction(pod NodeOptimizationPodInput, nodeCPUMilli, nodeMemoryBytes int64) float64 {
+	cpu := float64(pod.CPURequestMilli) / float64(nodeCPUMilli)
+	mem := float64(pod.MemoryRequestBytes) / float64(nodeMemoryBytes)
+	if cpu > mem {
+		return cpu
+	}
+	return mem
+}
+
+func podDisplayName(pod NodeOptimizationPodInput) string {
+	if pod.Namespace == "" {
+		return pod.Name
+	}
+	return pod.Namespace + "/" + pod.Name
+}
