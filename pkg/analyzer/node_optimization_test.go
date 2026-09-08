@@ -2,7 +2,13 @@ package analyzer
 
 import (
 	"reflect"
+	"strings"
 	"testing"
+
+	"github.com/opscart/opscart-k8s-watcher/pkg/models"
+	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
 func TestSimulateSameShapeNodeCountFits(t *testing.T) {
@@ -236,5 +242,100 @@ func TestSimulateSameShapeNodeCountRejectsInvalidInput(t *testing.T) {
 				t.Fatal("expected explicit blocker")
 			}
 		})
+	}
+}
+
+func TestBuildNMinusOneNodeOptimizationScenariosFromSnapshots(t *testing.T) {
+	nodeInfos := []models.NodeInfo{
+		{Name: "user-0", NodePool: "userpool", VMSize: "Standard_D4s_v3", Region: "centralus", OS: "linux", Priority: "Regular", Provider: "azure", Architecture: "amd64", CPUCapacity: 4, MemGBCapacity: 8},
+		{Name: "user-1", NodePool: "userpool", VMSize: "Standard_D4s_v3", Region: "centralus", OS: "linux", Priority: "Regular", Provider: "azure", Architecture: "amd64", CPUCapacity: 4, MemGBCapacity: 8},
+		{Name: "user-2", NodePool: "userpool", VMSize: "Standard_D4s_v3", Region: "centralus", OS: "linux", Priority: "Regular", Provider: "azure", Architecture: "amd64", CPUCapacity: 4, MemGBCapacity: 8},
+		{Name: "system-0", NodePool: "systempool", VMSize: "Standard_D4s_v3", Region: "centralus", OS: "linux", Priority: "Regular", Provider: "azure", Architecture: "amd64", CPUCapacity: 4, MemGBCapacity: 8},
+	}
+
+	pods := []corev1.Pod{
+		optimizationTestPod("apps", "api-a", "user-0", corev1.PodRunning, "1500m", "2Gi"),
+		optimizationTestPod("apps", "api-b", "user-1", corev1.PodRunning, "1500m", "2Gi"),
+		optimizationTestPod("apps", "worker", "user-2", corev1.PodPending, "1000m", "1Gi"),
+		optimizationTestPod("jobs", "complete", "user-0", corev1.PodSucceeded, "500m", "1Gi"),
+		optimizationTestPod("apps", "unbound", "", corev1.PodPending, "500m", "1Gi"),
+	}
+
+	got := BuildNMinusOneNodeOptimizationScenariosFromSnapshots(nodeInfos, pods)
+
+	if len(got.Scenarios) != 1 {
+		t.Fatalf("scenario count = %d, want 1; warnings=%v", len(got.Scenarios), got.Warnings)
+	}
+	if got.ExcludedPodCount != 1 {
+		t.Fatalf("ExcludedPodCount = %d, want 1", got.ExcludedPodCount)
+	}
+	if got.UnresolvedPodCount != 1 {
+		t.Fatalf("UnresolvedPodCount = %d, want 1", got.UnresolvedPodCount)
+	}
+	if got.UnresolvedNodeCount != 0 {
+		t.Fatalf("UnresolvedNodeCount = %d, want 0", got.UnresolvedNodeCount)
+	}
+	if got.SkippedPoolCount != 0 {
+		t.Fatalf("SkippedPoolCount = %d, want 0", got.SkippedPoolCount)
+	}
+
+	scenario := got.Scenarios[0]
+	if scenario.PoolKey.PoolName != "userpool" {
+		t.Fatalf("pool = %q, want userpool", scenario.PoolKey.PoolName)
+	}
+	if scenario.Simulation.CurrentNodes != 3 || scenario.Simulation.CandidateNodes != 2 {
+		t.Fatalf("node counts = %d -> %d, want 3 -> 2", scenario.Simulation.CurrentNodes, scenario.Simulation.CandidateNodes)
+	}
+	if scenario.EligiblePodCount != 3 {
+		t.Fatalf("EligiblePodCount = %d, want 3", scenario.EligiblePodCount)
+	}
+	if scenario.Simulation.TotalCPURequestMilli != 4000 {
+		t.Fatalf("TotalCPURequestMilli = %d, want 4000", scenario.Simulation.TotalCPURequestMilli)
+	}
+	if scenario.Simulation.Status != NodeOptimizationFit {
+		t.Fatalf("status = %q, want %q; blockers=%v", scenario.Simulation.Status, NodeOptimizationFit, scenario.Simulation.Blockers)
+	}
+}
+
+func TestBuildNMinusOneNodeOptimizationScenariosSkipsInconsistentPoolCapacity(t *testing.T) {
+	nodeInfos := []models.NodeInfo{
+		{Name: "node-a", NodePool: "userpool", VMSize: "Standard_D4s_v3", Region: "centralus", OS: "linux", Priority: "Regular", Provider: "azure", Architecture: "amd64", CPUCapacity: 4, MemGBCapacity: 8},
+		{Name: "node-b", NodePool: "userpool", VMSize: "Standard_D4s_v3", Region: "centralus", OS: "linux", Priority: "Regular", Provider: "azure", Architecture: "amd64", CPUCapacity: 3.5, MemGBCapacity: 8},
+	}
+
+	got := BuildNMinusOneNodeOptimizationScenariosFromSnapshots(nodeInfos, nil)
+
+	if len(got.Scenarios) != 0 {
+		t.Fatalf("scenario count = %d, want 0", len(got.Scenarios))
+	}
+	if got.SkippedPoolCount != 1 {
+		t.Fatalf("SkippedPoolCount = %d, want 1", got.SkippedPoolCount)
+	}
+	if len(got.Warnings) != 1 || !strings.Contains(got.Warnings[0], "inconsistent CPU or memory capacity") {
+		t.Fatalf("warnings = %#v, want inconsistent-capacity warning", got.Warnings)
+	}
+}
+
+func optimizationTestPod(namespace, name, nodeName string, phase corev1.PodPhase, cpu, memory string) corev1.Pod {
+	return corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: namespace,
+			Name:      name,
+		},
+		Spec: corev1.PodSpec{
+			NodeName: nodeName,
+			Containers: []corev1.Container{
+				{
+					Name: "app",
+					Resources: corev1.ResourceRequirements{
+						Requests: corev1.ResourceList{
+							corev1.ResourceCPU:    resource.MustParse(cpu),
+							corev1.ResourceMemory: resource.MustParse(memory),
+						},
+					},
+				},
+			},
+		},
+		Status: corev1.PodStatus{Phase: phase},
 	}
 }

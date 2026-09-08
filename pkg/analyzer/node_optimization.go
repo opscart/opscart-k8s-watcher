@@ -2,7 +2,12 @@ package analyzer
 
 import (
 	"fmt"
+	"math"
 	"sort"
+	"strings"
+
+	"github.com/opscart/opscart-k8s-watcher/pkg/models"
+	corev1 "k8s.io/api/core/v1"
 )
 
 // NodeOptimizationStatus describes the outcome of a same-shape placement
@@ -272,4 +277,195 @@ func podDisplayName(pod NodeOptimizationPodInput) string {
 		return pod.Name
 	}
 	return pod.Namespace + "/" + pod.Name
+}
+
+// NodeOptimizationSnapshotSummary bridges already-acquired Kubernetes snapshots
+// into the pure placement simulator. It performs no Kubernetes or cloud API calls.
+type NodeOptimizationSnapshotSummary struct {
+	Scenarios           []NodeOptimizationScenario
+	ExcludedPodCount    int
+	UnresolvedPodCount  int
+	UnresolvedNodeCount int
+	SkippedPoolCount    int
+	Warnings            []string
+}
+
+// NodeOptimizationScenario is one N-1 same-shape pool simulation derived from
+// an already-observed cluster snapshot.
+type NodeOptimizationScenario struct {
+	PoolKey          CostPoolKey
+	EligiblePodCount int
+	Simulation       NodeOptimizationResult
+}
+
+// BuildNMinusOneNodeOptimizationScenariosFromSnapshots constructs one same-shape
+// N-1 scenario for each canonical pool with at least two observed nodes.
+//
+// Pod request and eligibility semantics reuse BuildPodCostInput so Cost and Node
+// Optimization do not invent competing definitions of workload demand.
+func BuildNMinusOneNodeOptimizationScenariosFromSnapshots(
+	nodeInfos []models.NodeInfo,
+	pods []corev1.Pod,
+) NodeOptimizationSnapshotSummary {
+	type poolSnapshot struct {
+		key       CostPoolKey
+		nodeCount int
+		cpuMilli  int64
+		memBytes  int64
+		invalid   bool
+	}
+
+	summary := NodeOptimizationSnapshotSummary{}
+	knownNodes := make(map[string]struct{}, len(nodeInfos))
+	nodeKeys := make(map[string]*CostPoolKey, len(nodeInfos))
+	pools := make(map[CostPoolKey]*poolSnapshot)
+
+	for _, info := range nodeInfos {
+		knownNodes[info.Name] = struct{}{}
+
+		key := CostPoolKey{
+			Provider:     strings.TrimSpace(info.Provider),
+			PoolName:     strings.TrimSpace(info.NodePool),
+			InstanceType: strings.TrimSpace(info.VMSize),
+			CapacityType: strings.TrimSpace(info.Priority),
+			Region:       strings.TrimSpace(info.Region),
+			OS:           strings.TrimSpace(info.OS),
+			Architecture: strings.TrimSpace(info.Architecture),
+		}
+		if key.PoolName == "" {
+			key.PoolName = "default"
+		}
+
+		if missing := missingCostPoolKeyFields(key); len(missing) > 0 {
+			summary.UnresolvedNodeCount++
+			summary.Warnings = append(summary.Warnings, fmt.Sprintf(
+				"node %s excluded from node optimization because canonical pool identity is missing: %s",
+				info.Name,
+				strings.Join(missing, ", "),
+			))
+			continue
+		}
+
+		cpuMilli := int64(math.Round(info.CPUCapacity * 1000))
+		memBytes := int64(math.Round(info.MemGBCapacity * 1024 * 1024 * 1024))
+		if cpuMilli <= 0 || memBytes <= 0 {
+			summary.UnresolvedNodeCount++
+			summary.Warnings = append(summary.Warnings, fmt.Sprintf(
+				"node %s excluded from node optimization because observed CPU or memory capacity is unavailable",
+				info.Name,
+			))
+			continue
+		}
+
+		copied := key
+		nodeKeys[info.Name] = &copied
+
+		pool := pools[key]
+		if pool == nil {
+			pool = &poolSnapshot{
+				key:      key,
+				cpuMilli: cpuMilli,
+				memBytes: memBytes,
+			}
+			pools[key] = pool
+		}
+		pool.nodeCount++
+		if pool.cpuMilli != cpuMilli || pool.memBytes != memBytes {
+			pool.invalid = true
+		}
+	}
+
+	podsByPool := make(map[CostPoolKey][]NodeOptimizationPodInput)
+
+	for _, pod := range pods {
+		input := BuildPodCostInput(pod, knownNodes, nodeKeys, ControllerIndexes{})
+
+		switch input.Eligibility {
+		case PodCostExcluded:
+			summary.ExcludedPodCount++
+			continue
+		case PodCostUnresolved:
+			summary.UnresolvedPodCount++
+			continue
+		case PodCostEligible:
+			if input.PoolKey == nil {
+				summary.UnresolvedPodCount++
+				summary.Warnings = append(summary.Warnings, fmt.Sprintf(
+					"pod %s/%s is eligible but has no canonical pool identity",
+					input.Namespace,
+					input.PodName,
+				))
+				continue
+			}
+		default:
+			summary.UnresolvedPodCount++
+			summary.Warnings = append(summary.Warnings, fmt.Sprintf(
+				"pod %s/%s has unknown optimization eligibility %q",
+				input.Namespace,
+				input.PodName,
+				input.Eligibility,
+			))
+			continue
+		}
+
+		key := *input.PoolKey
+		podsByPool[key] = append(podsByPool[key], NodeOptimizationPodInput{
+			Namespace:          input.Namespace,
+			Name:               input.PodName,
+			CPURequestMilli:    input.CPURequestMilli,
+			MemoryRequestBytes: input.MemoryRequestBytes,
+		})
+	}
+
+	keys := make([]CostPoolKey, 0, len(pools))
+	for key := range pools {
+		keys = append(keys, key)
+	}
+	sort.Slice(keys, func(i, j int) bool {
+		return costPoolKeySortValue(keys[i]) < costPoolKeySortValue(keys[j])
+	})
+
+	for _, key := range keys {
+		pool := pools[key]
+		if pool.invalid {
+			summary.SkippedPoolCount++
+			summary.Warnings = append(summary.Warnings, fmt.Sprintf(
+				"pool %s skipped because nodes with the same canonical identity expose inconsistent CPU or memory capacity",
+				key.PoolName,
+			))
+			continue
+		}
+		if pool.nodeCount < 2 {
+			continue
+		}
+
+		scenarioInput := NodeOptimizationInput{
+			PoolKey:                 key,
+			CurrentNodes:            pool.nodeCount,
+			CandidateNodes:          pool.nodeCount - 1,
+			NodeCPUCapacityMilli:    pool.cpuMilli,
+			NodeMemoryCapacityBytes: pool.memBytes,
+			Pods:                    append([]NodeOptimizationPodInput(nil), podsByPool[key]...),
+		}
+
+		summary.Scenarios = append(summary.Scenarios, NodeOptimizationScenario{
+			PoolKey:          key,
+			EligiblePodCount: len(scenarioInput.Pods),
+			Simulation:       SimulateSameShapeNodeCount(scenarioInput),
+		})
+	}
+
+	return summary
+}
+
+func costPoolKeySortValue(key CostPoolKey) string {
+	return strings.Join([]string{
+		key.Provider,
+		key.PoolName,
+		key.InstanceType,
+		key.CapacityType,
+		key.Region,
+		key.OS,
+		key.Architecture,
+	}, "\x00")
 }
