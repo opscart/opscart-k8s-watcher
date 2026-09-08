@@ -3,6 +3,7 @@ package analyzer
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -66,6 +67,27 @@ func (f *fakeProductsClient) GetProducts(_ context.Context, input *pricing.GetPr
 	f.inputs = append(f.inputs, input)
 	return f.output, f.err
 }
+
+type fixedPricingProvider struct {
+	provider CloudProvider
+	price    float64
+	err      error
+}
+
+func (f fixedPricingProvider) Provider() CloudProvider { return f.provider }
+func (f fixedPricingProvider) LookupOnDemandPrice(_ context.Context, request PriceRequest) (PriceResult, error) {
+	if f.err != nil {
+		return PriceResult{}, f.err
+	}
+	if request.InstanceType == "" || request.Region == "" {
+		return PriceResult{}, fmt.Errorf("instance type and region are required")
+	}
+	return PriceResult{HourlyPrice: f.price, Currency: "USD", Provenance: PriceProvenanceProviderAPIExact, Source: "test provider"}, nil
+}
+func (f fixedPricingProvider) Capabilities() PricingCapabilities {
+	return PricingCapabilities{OnDemand: true, CapacityTypes: []string{"Regular", "ON_DEMAND"}}
+}
+func (f fixedPricingProvider) SourceDescription() string { return "test provider" }
 
 func awsProduct(price string) string {
 	return `{"terms":{"OnDemand":{"term":{"priceDimensions":{"dim":{"unit":"Hrs","pricePerUnit":{"USD":"` + price + `"}}}}}}}`
@@ -197,15 +219,19 @@ func TestMinikubeAutoRemainsUnknownAndUnpriced(t *testing.T) {
 	}
 }
 
-func TestManualAzureRequiresCompatibleSKU(t *testing.T) {
-	analyzer := &NodePoolCostAnalyzer{ctx: context.Background(), providerOverride: CloudProviderAzure, providers: map[CloudProvider]PricingProvider{CloudProviderAzure: NewAzurePricingProvider()}}
-	unsupported := (&nodePoolBuilder{provider: CloudProviderAzure, vmSize: "minikube", nodes: []models.NodeInfo{{CPUCapacity: 4, MemGBCapacity: 16}}}).build(analyzer)
-	if unsupported.PricingAvailable {
-		t.Fatalf("unsupported Minikube instance type was priced: %+v", unsupported)
+func TestManualAzureRequiresProviderPrice(t *testing.T) {
+	provider := fixedPricingProvider{provider: CloudProviderAzure, price: 0.25}
+	analyzer := &NodePoolCostAnalyzer{ctx: context.Background(), providerOverride: CloudProviderAzure, providers: map[CloudProvider]PricingProvider{CloudProviderAzure: provider}}
+	compatible := (&nodePoolBuilder{provider: CloudProviderAzure, vmSize: "Standard_D4s_v3", region: "eastus2", priority: "Regular", nodes: []models.NodeInfo{{CPUCapacity: 4, MemGBCapacity: 16}}}).build(analyzer)
+	if !compatible.PricingAvailable || compatible.TotalMonthly != 0.25*730 {
+		t.Fatalf("explicit Azure provider result was not used: %+v", compatible)
 	}
-	compatible := (&nodePoolBuilder{provider: CloudProviderAzure, vmSize: "Standard_D4s_v3", priority: "Regular", nodes: []models.NodeInfo{{CPUCapacity: 4, MemGBCapacity: 16}}}).build(analyzer)
-	if !compatible.PricingAvailable || compatible.TotalMonthly <= 0 {
-		t.Fatalf("explicit compatible Azure SKU was not priced: %+v", compatible)
+
+	failed := fixedPricingProvider{provider: CloudProviderAzure, err: errors.New("no exact provider price")}
+	analyzer.providers[CloudProviderAzure] = failed
+	unavailable := (&nodePoolBuilder{provider: CloudProviderAzure, vmSize: "Standard_D4s_v3", region: "eastus2", priority: "Regular", nodes: []models.NodeInfo{{CPUCapacity: 4, MemGBCapacity: 16}}}).build(analyzer)
+	if unavailable.PricingAvailable || unavailable.TotalMonthly != 0 {
+		t.Fatalf("Azure provider failure was replaced by fallback pricing: %+v", unavailable)
 	}
 }
 
