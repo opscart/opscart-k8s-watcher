@@ -7,7 +7,9 @@ import (
 	"testing"
 	"time"
 
+	appsv1 "k8s.io/api/apps/v1"
 	autoscalingv2 "k8s.io/api/autoscaling/v2"
+	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -282,6 +284,96 @@ func TestAuditWastePreservesDetectorWarnings(t *testing.T) {
 		}
 	}
 	t.Fatalf("PVC detector warning not preserved: %+v", audit.DetectorWarnings)
+}
+
+func TestStaleJobsSurfacesCronJobListFailureWithoutLosingJobFindings(t *testing.T) {
+	age := metav1.NewTime(time.Now().Add(-40*24*time.Hour - time.Hour))
+	job := &batchv1.Job{
+		ObjectMeta: metav1.ObjectMeta{Name: "finished", Namespace: "app", CreationTimestamp: age},
+		Status:     batchv1.JobStatus{Succeeded: 1},
+	}
+	wa := newTestAuditor(7, job)
+	wa.clientset.(*fake.Clientset).PrependReactor("list", "cronjobs", func(ktesting.Action) (bool, runtime.Object, error) {
+		return true, nil, context.DeadlineExceeded
+	})
+	audit := &WasteAudit{}
+	if err := wa.detectStaleJobs(audit, ""); err != nil {
+		t.Fatalf("detectStaleJobs: %v", err)
+	}
+	if len(audit.StaleJobs) != 1 || audit.StaleJobs[0].Name != "finished" {
+		t.Fatalf("plain Job finding was discarded by a CronJob LIST failure: %+v", audit.StaleJobs)
+	}
+	var found bool
+	for _, warning := range audit.DetectorWarnings {
+		if warning.Category == "Stale jobs" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("CronJob LIST failure was not surfaced as a detector warning: %+v", audit.DetectorWarnings)
+	}
+}
+
+func TestZeroReplicaWorkloadsSurfacesStatefulSetListFailureWithoutLosingDeploymentFindings(t *testing.T) {
+	age := metav1.NewTime(time.Now().Add(-40*24*time.Hour - time.Hour))
+	zero := int32(0)
+	deployment := &appsv1.Deployment{
+		ObjectMeta: metav1.ObjectMeta{Name: "scaled-down", Namespace: "app", CreationTimestamp: age},
+		Spec:       appsv1.DeploymentSpec{Replicas: &zero},
+	}
+	wa := newTestAuditor(7, deployment)
+	wa.clientset.(*fake.Clientset).PrependReactor("list", "statefulsets", func(ktesting.Action) (bool, runtime.Object, error) {
+		return true, nil, context.DeadlineExceeded
+	})
+	audit := &WasteAudit{}
+	if err := wa.detectZeroReplicaWorkloads(audit, ""); err != nil {
+		t.Fatalf("detectZeroReplicaWorkloads: %v", err)
+	}
+	if len(audit.ZeroReplicaWorkloads) != 1 || audit.ZeroReplicaWorkloads[0].Name != "scaled-down" {
+		t.Fatalf("Deployment finding was discarded by a StatefulSet LIST failure: %+v", audit.ZeroReplicaWorkloads)
+	}
+	var found bool
+	for _, warning := range audit.DetectorWarnings {
+		if warning.Category == "Zero-replica workloads" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("StatefulSet LIST failure was not surfaced as a detector warning: %+v", audit.DetectorWarnings)
+	}
+}
+
+func TestOrphanedPVCsUnrecognizedPhaseIsExplicit(t *testing.T) {
+	age := metav1.NewTime(time.Now().Add(-40*24*time.Hour - time.Hour))
+	pvc := &corev1.PersistentVolumeClaim{
+		ObjectMeta: metav1.ObjectMeta{Name: "odd-phase", Namespace: "app", CreationTimestamp: age},
+		// Phase intentionally left unset: the zero value is neither Pending,
+		// Bound, nor Lost, and must not be silently treated as any of them.
+		Status: corev1.PersistentVolumeClaimStatus{},
+	}
+	wa := newTestAuditor(7, pvc)
+	audit := &WasteAudit{}
+	if err := wa.detectOrphanedPVCs(audit, ""); err != nil {
+		t.Fatalf("detectOrphanedPVCs: %v", err)
+	}
+	if len(audit.OrphanedPVCs) != 1 {
+		t.Fatalf("unrecognized-phase PVC was not reported: %+v", audit.OrphanedPVCs)
+	}
+	got := audit.OrphanedPVCs[0]
+	if got.Status != PVCUnrecognizedPhase {
+		t.Fatalf("Status = %q, want %q", got.Status, PVCUnrecognizedPhase)
+	}
+	if got.Reason == "" {
+		t.Fatal("unrecognized-phase PVC has an empty Reason")
+	}
+	for _, bad := range []string{"Pending", "Bound", "Lost"} {
+		if strings.Contains(got.Reason, bad) && !strings.Contains(got.Reason, "not classify as Pending, Bound, or Lost") {
+			t.Fatalf("reason mischaracterizes the unrecognized phase as %q: %q", bad, got.Reason)
+		}
+	}
+	if got.Score <= 0 {
+		t.Fatalf("unrecognized-phase PVC has a non-positive score: %g", got.Score)
+	}
 }
 
 func oldService(name, namespace string, selector map[string]string, serviceType corev1.ServiceType) *corev1.Service {
@@ -1164,6 +1256,12 @@ func TestHPAAlwaysAtMinStaysAgeGatedAndDoesNotOverclaimHistory(t *testing.T) {
 	}
 	if strings.Contains(got.Reason, "never scaled up") {
 		t.Errorf("reason overclaims history the detector never observed: %q", got.Reason)
+	}
+	if !strings.Contains(got.Reason, "created 35 days ago") || !strings.Contains(got.Reason, "how long it has remained at this state was not established") {
+		t.Errorf("reason does not explicitly separate HPA creation age from duration at minReplicas: %q", got.Reason)
+	}
+	if strings.Contains(got.Reason, "at min for") || strings.Contains(got.Reason, "for 35 days") {
+		t.Errorf("reason implies a sustained duration at minReplicas that was never observed: %q", got.Reason)
 	}
 }
 

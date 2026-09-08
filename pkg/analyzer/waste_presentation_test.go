@@ -109,7 +109,54 @@ func TestWastePresentationSemanticContracts(t *testing.T) {
 		if f.Confidence != "Not assessed" {
 			t.Fatal("unknown phase has fabricated confidence")
 		}
+		if f.Name == "zero" && !strings.Contains(f.Observed, "Resource age reflects when this workload was created, not how long it has been at zero replicas") {
+			t.Errorf("zero-replica observation does not separate creation age from duration at zero replicas: %q", f.Observed)
+		}
+		if f.Name == "min" && !strings.Contains(f.Observed, "Resource age reflects when this HPA was created, not how long it has remained at minReplicas") {
+			t.Errorf("AlwaysAtMin observation does not separate creation age from duration at minReplicas: %q", f.Observed)
+		}
 	}
+}
+
+// TestWasteCountContractFindingsMayExceedDistinctResources locks in the count
+// contract audited in Phase 3: Findings counts add() calls, DistinctResources
+// counts unique Kind+Namespace+Name keys, and a single Kubernetes object (a
+// CronJob triggering both NeverScheduled and NoHistoryLimit) can legitimately
+// own more than one finding. This is not deduplicated.
+func TestWasteCountContractFindingsMayExceedDistinctResources(t *testing.T) {
+	t.Run("general invariant", func(t *testing.T) {
+		a := &WasteAudit{
+			AbandonedNamespaces: []AbandonedNamespace{{Name: "ns"}},
+			StalePods:           []StalePod{{Name: "pod", Namespace: "a", Kind: StalePodIdle}},
+			OrphanedPVCs:        []OrphanedPVC{{Name: "pvc", Namespace: "a", Status: PVCBoundNoPod}},
+		}
+		counts := BuildWastePresentation(a).Counts
+		if counts.Findings < counts.DistinctResources {
+			t.Fatalf("Findings (%d) must never be less than DistinctResources (%d)", counts.Findings, counts.DistinctResources)
+		}
+		if counts.Findings != 3 || counts.DistinctResources != 3 {
+			t.Fatalf("counts=%+v, want 3 findings across 3 distinct resources for this fixture", counts)
+		}
+	})
+
+	t.Run("one CronJob legitimately emits two findings for one ResourceKey", func(t *testing.T) {
+		a := &WasteAudit{
+			StaleJobs: []StaleJob{
+				{Name: "annual", Namespace: "batch", IsCronJob: true, JobStatus: "NeverScheduled"},
+				{Name: "annual", Namespace: "batch", IsCronJob: true, JobStatus: "NoHistoryLimit"},
+			},
+		}
+		counts := BuildWastePresentation(a).Counts
+		if counts.Findings != 2 {
+			t.Fatalf("Findings = %d, want 2 (one per legitimate observation about the same CronJob)", counts.Findings)
+		}
+		if counts.DistinctResources != 1 {
+			t.Fatalf("DistinctResources = %d, want 1 (both findings share Kind+Namespace+Name)", counts.DistinctResources)
+		}
+		if counts.Findings < counts.DistinctResources {
+			t.Fatalf("Findings (%d) must never be less than DistinctResources (%d)", counts.Findings, counts.DistinctResources)
+		}
+	})
 }
 
 func TestWastePresentationEmptyWarningsAndLegacyQuantities(t *testing.T) {
@@ -161,7 +208,7 @@ func TestPVCBytesAggregationAndLegacyScores(t *testing.T) {
 		{"fractional", "1536Mi", corev1.ClaimBound, 20.3, "1.5 GiB"},
 		{"pending", "512Mi", corev1.ClaimPending, 228.8, "512 MiB"},
 		{"lost", "1Gi", corev1.ClaimLost, 28, "1 GiB"},
-		{"unknown", "1Ki", "", 0, "1 KiB"},
+		{"unknown", "1Ki", "", 12, "1 KiB"}, // unrecognized phase: explicit PVCUnrecognizedPhase fallback, score = ageDays*0.3 (40*0.3), not a fabricated 0.
 		{"missing", "", corev1.ClaimBound, 20, "Unknown"},
 	}
 	var objects []interface{}
@@ -269,6 +316,9 @@ func TestWasteDetectorMembershipPreservedForMisleadingStates(t *testing.T) {
 		}
 		if strings.Contains(x.Reason, "for 40 days") {
 			t.Fatal(x.Reason)
+		}
+		if !strings.Contains(x.Reason, "created 40 days ago") || !strings.Contains(x.Reason, "how long it has been at zero replicas was not established") {
+			t.Fatalf("reason does not explicitly separate creation age from duration at zero replicas: %q", x.Reason)
 		}
 	}
 	for _, x := range a.OldReplicaSets {

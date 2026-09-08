@@ -223,7 +223,7 @@ func BuildWastePresentation(a *WasteAudit) WastePresentation {
 			kind = "Deployment"
 		}
 		add(WasteFinding{Kind: kind, Name: x.Name, Namespace: x.Namespace, Subtype: "zero-desired", Category: "Zero-replica workload", Group: WasteReview, Section: "drift", AgeDays: x.AgeDays, Priority: x.Score,
-			Observed: "Desired replicas are currently set to zero.", Inference: "Workload intent may warrant review.", Limitations: "Scale-transition history, actual Pod count, associated PVCs/ConfigMaps, quota, and costs were not established by this check.", Review: "Confirm whether scale-to-zero is intentional and review associated resources with the owner."})
+			Observed: "Desired replicas are currently set to zero. Resource age reflects when this workload was created, not how long it has been at zero replicas.", Inference: "Workload intent may warrant review.", Limitations: "Scale-transition history, actual Pod count, associated PVCs/ConfigMaps, quota, and costs were not established by this check.", Review: "Confirm whether scale-to-zero is intentional and review associated resources with the owner."})
 	}
 	for _, x := range a.BrokenIngresses {
 		add(WasteFinding{Kind: "Ingress", Name: x.Name, Namespace: x.Namespace, Subtype: "endpoints", Category: "Ingress backend evidence", Group: WasteOperational, Section: "drift", AgeDays: x.AgeDays, Priority: x.Score,
@@ -231,7 +231,7 @@ func BuildWastePresentation(a *WasteAudit) WastePresentation {
 	}
 	for _, x := range a.MisconfiguredHPAs {
 		f := WasteFinding{Kind: "HorizontalPodAutoscaler", Name: x.Name, Namespace: x.Namespace, Subtype: x.Condition, Category: "HPA configuration review", Group: WasteReview, Section: "drift", AgeDays: x.AgeDays, Priority: x.Score,
-			Observed: fmt.Sprintf("Current and desired replicas equal minReplicas (%d) at this scan.", x.MinReplicas), Inference: "Scaling configuration may warrant review.", Limitations: "One snapshot does not establish scaling history or demand. v1 fallback does not retain v2 condition coverage.", Review: "Review scaling history and demand before changing configuration."}
+			Observed: fmt.Sprintf("Current and desired replicas equal minReplicas (%d) at this scan. Resource age reflects when this HPA was created, not how long it has remained at minReplicas.", x.MinReplicas), Inference: "Scaling configuration may warrant review.", Limitations: "One snapshot does not establish scaling history or demand. v1 fallback does not retain v2 condition coverage.", Review: "Review scaling history and demand before changing configuration."}
 		if x.IsActive {
 			f.Group = WasteOperational
 			f.Observed = strings.TrimSuffix(x.Reason, " Review the reported condition and target configuration; application impact was not measured.")

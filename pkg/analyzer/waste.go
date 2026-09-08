@@ -102,9 +102,10 @@ type StalePod struct {
 type PVCStatus string
 
 const (
-	PVCNeverBound PVCStatus = "Never bound"               // Legacy label for current Pending phase; not binding history.
-	PVCReleased   PVCStatus = "Released (pod deleted)"    // Legacy label for current Lost phase; not Pod deletion evidence.
-	PVCBoundNoPod PVCStatus = "Bound but no pod using it" // Bound but no pod references it
+	PVCNeverBound        PVCStatus = "Never bound"               // Legacy label for current Pending phase; not binding history.
+	PVCReleased          PVCStatus = "Released (pod deleted)"    // Legacy label for current Lost phase; not Pod deletion evidence.
+	PVCBoundNoPod        PVCStatus = "Bound but no pod using it" // Bound but no pod references it
+	PVCUnrecognizedPhase PVCStatus = "Unrecognized phase"        // Phase other than Pending/Bound/Lost; not characterized as any of those.
 )
 
 type OrphanedPVC struct {
@@ -857,6 +858,18 @@ func (w *WasteAuditor) detectOrphanedPVCs(audit *WasteAudit, filterNamespace str
 			} else {
 				continue // actively used
 			}
+
+		default:
+			// An unrecognized phase must never be silently treated as Pending,
+			// Lost, or Bound. Report it honestly instead of leaving an empty
+			// Status/Reason on the emitted finding.
+			status = PVCUnrecognizedPhase
+			reason = fmt.Sprintf(
+				"PVC reports phase %q, which this detector does not classify as Pending, Bound, or Lost. "+
+					"Resource age: %d days. Binding state and workload references were not evaluated for this phase.",
+				pvc.Status.Phase, ageDays,
+			)
+			score = float64(ageDays) * 0.3
 		}
 
 		audit.OrphanedPVCs = append(audit.OrphanedPVCs, OrphanedPVC{
@@ -955,7 +968,11 @@ func (w *WasteAuditor) detectStaleJobs(audit *WasteAudit, filterNamespace string
 
 	// CronJobs - detect misconfigured ones
 	cronJobs, err := w.clientset.BatchV1().CronJobs(filterNamespace).List(w.ctx, metav1.ListOptions{TimeoutSeconds: int64Ptr(10)})
-	if err == nil {
+	if err != nil {
+		// A CronJob LIST failure must not discard the plain-Job findings
+		// already collected above, and must not be silently swallowed.
+		audit.addDetectorWarning("Stale jobs", fmt.Errorf("list cronjobs: %w", err))
+	} else {
 		for _, cj := range cronJobs.Items {
 			if isInfraPattern(cj.Namespace) {
 				continue
@@ -1041,7 +1058,8 @@ func (w *WasteAuditor) detectZeroReplicaWorkloads(audit *WasteAudit, filterNames
 
 		if d.Spec.Replicas != nil && *d.Spec.Replicas == 0 {
 			reason := fmt.Sprintf(
-				"Deployment currently requests 0 replicas. Resource age: %d days. "+
+				"Deployment currently requests 0 replicas. This Deployment was created %d days ago; "+
+					"how long it has been at zero replicas was not established by this check. "+
 					"Scale-transition history and associated resources were not checked. Review workload intent.",
 				ageDays,
 			)
@@ -1058,7 +1076,11 @@ func (w *WasteAuditor) detectZeroReplicaWorkloads(audit *WasteAudit, filterNames
 
 	// StatefulSets
 	statefulsets, err := w.clientset.AppsV1().StatefulSets(filterNamespace).List(w.ctx, metav1.ListOptions{TimeoutSeconds: int64Ptr(10)})
-	if err == nil {
+	if err != nil {
+		// A StatefulSet LIST failure must not discard the Deployment findings
+		// already collected above, and must not be silently swallowed.
+		audit.addDetectorWarning("Zero-replica workloads", fmt.Errorf("list statefulsets: %w", err))
+	} else {
 		for _, s := range statefulsets.Items {
 			if isInfraPattern(s.Namespace) {
 				continue
@@ -1071,7 +1093,8 @@ func (w *WasteAuditor) detectZeroReplicaWorkloads(audit *WasteAudit, filterNames
 
 			if s.Spec.Replicas != nil && *s.Spec.Replicas == 0 {
 				reason := fmt.Sprintf(
-					"StatefulSet currently requests 0 replicas. Resource age: %d days. "+
+					"StatefulSet currently requests 0 replicas. This StatefulSet was created %d days ago; "+
+						"how long it has been at zero replicas was not established by this check. "+
 						"Scale-transition history and associated PVCs were not checked. Review workload and data-retention intent.",
 					ageDays,
 				)
@@ -1447,9 +1470,9 @@ func (w *WasteAuditor) detectMisconfiguredHPAs(audit *WasteAudit, filterNamespac
 			hpa.Status.DesiredReplicas == minReplicas &&
 			ageDays > 30 {
 			reason := fmt.Sprintf(
-				"HPA is %d days old and currently has both current and desired replicas "+
-					"equal to minReplicas (%d) at this scan. Review scaling history and demand "+
-					"before changing configuration.",
+				"This HPA was created %d days ago. At this single scan, current and desired replicas "+
+					"both equal minReplicas (%d); how long it has remained at this state was not "+
+					"established by this check. Review scaling history and demand before changing configuration.",
 				ageDays, minReplicas,
 			)
 			audit.MisconfiguredHPAs = append(audit.MisconfiguredHPAs, MisconfiguredHPA{
