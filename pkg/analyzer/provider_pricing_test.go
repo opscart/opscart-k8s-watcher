@@ -89,6 +89,67 @@ func (f fixedPricingProvider) Capabilities() PricingCapabilities {
 }
 func (f fixedPricingProvider) SourceDescription() string { return "test provider" }
 
+func TestPricingCapabilitiesAreProviderDriven(t *testing.T) {
+	azure := NewAzurePricingProvider().Capabilities()
+	if !azure.OnDemand || azure.Spot || azure.Reservations || azure.SavingsData {
+		t.Fatalf("unexpected Azure capabilities: %+v", azure)
+	}
+	if got := FormatPricingCapacityTypes(azure); got != "Regular / On-Demand" {
+		t.Fatalf("Azure capacity label = %q, want Regular / On-Demand", got)
+	}
+
+	awsProvider := NewAWSPricingProvider(&fakeProductsClient{}, time.Hour)
+	aws := awsProvider.Capabilities()
+	if got := FormatPricingCapacityTypes(aws); got != "On-Demand" {
+		t.Fatalf("AWS capacity label = %q, want On-Demand", got)
+	}
+
+	stale := PricingCapabilities{OnDemand: true, Spot: false, CapacityTypes: []string{"Regular", "Spot"}}
+	if got := FormatPricingCapacityTypes(stale); got != "Regular / On-Demand" {
+		t.Fatalf("unsupported Spot leaked from capacity type metadata: %q", got)
+	}
+	if got := FormatPricingCapacityTypes(PricingCapabilities{}); got != "Not available" {
+		t.Fatalf("unknown capabilities label = %q", got)
+	}
+}
+
+func TestNodePoolCostAnalyzerExposesEffectiveProviderMetadata(t *testing.T) {
+	provider := fixedPricingProvider{provider: CloudProviderAzure, price: 1}
+	npa := &NodePoolCostAnalyzer{
+		providers:         map[CloudProvider]PricingProvider{CloudProviderAzure: provider},
+		effectiveProvider: CloudProviderAzure,
+	}
+	got := npa.PricingCapabilities()
+	if !got.OnDemand || got.Spot {
+		t.Fatalf("effective provider metadata = %+v", got)
+	}
+	got.CapacityTypes[0] = "mutated"
+	if npa.PricingCapabilities().CapacityTypes[0] == "mutated" {
+		t.Fatal("pricing capabilities exposed provider-owned slice")
+	}
+
+	npa.effectiveProvider = CloudProviderMixed
+	if got := npa.PricingCapabilities(); got.OnDemand || got.Spot || got.Reservations || got.SavingsData || len(got.CapacityTypes) != 0 {
+		t.Fatalf("mixed provider inferred capabilities: %+v", got)
+	}
+}
+
+func TestCloudCostHTMLUsesAdvertisedCapabilities(t *testing.T) {
+	report := &models.CloudCostReport{
+		ClusterName: "aks", Provider: "azure", PricingSource: "Azure Retail Prices API public/list pricing",
+		PricingCapabilities: NewAzurePricingProvider().Capabilities(),
+		NodePoolCosts: []models.NodePoolCost{{
+			Name: "system", Priority: "Regular", PricePerNodeMonth: 100, TotalMonthly: 100, RISavings: 25,
+		}},
+	}
+	html := GenerateCloudCostHTML(report)
+	for _, forbidden := range []string{"<th>Reservation Savings</th>", "RI Savings Potential"} {
+		if strings.Contains(html, forbidden) {
+			t.Errorf("HTML report claimed unsupported or obsolete behavior %q", forbidden)
+		}
+	}
+}
+
 func awsProduct(price string) string {
 	return `{"terms":{"OnDemand":{"term":{"priceDimensions":{"dim":{"unit":"Hrs","pricePerUnit":{"USD":"` + price + `"}}}}}}}`
 }

@@ -1635,15 +1635,8 @@ func buildCostPageData(scan *clusterScan, activeCtx string, clusterList []string
 		// rows. Preserve provider pricing and visible RI savings, but hide the
 		// unsupported aggregate.
 		data.ShowSavings = false
-		data.ShowRI = r.Provider == "azure"
-		switch r.Provider {
-		case "azure":
-			data.CapacityTypes = "Regular and Spot"
-		case "aws":
-			data.CapacityTypes = "EC2 On-Demand; Spot detected but not priced"
-		case "mixed":
-			data.CapacityTypes = "Varies by provider"
-		}
+		data.ShowRI = r.PricingCapabilities.Reservations && r.PricingCapabilities.SavingsData
+		data.CapacityTypes = analyzer.FormatPricingCapacityTypes(r.PricingCapabilities)
 		data.Timestamp = r.Timestamp
 		data.ScannedAtMS = r.Timestamp.UnixMilli()
 
@@ -1690,7 +1683,7 @@ func buildCostPageData(scan *clusterScan, activeCtx string, clusterList []string
 				Provider:       titleProvider(p.Provider),
 				Region:         p.Region,
 				PriceAvailable: p.PricingAvailable,
-				ShowRI:         p.Provider == "azure",
+				ShowRI:         data.ShowRI,
 			}
 			if strings.EqualFold(p.Priority, "spot") {
 				row.TagClass, row.TagLabel = "tag-spot", "Spot"

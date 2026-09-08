@@ -69,6 +69,19 @@ func (npa *NodePoolCostAnalyzer) PricingWarnings() []string {
 }
 func (npa *NodePoolCostAnalyzer) LastPriceRefresh() time.Time { return npa.lastPriceRefresh }
 
+// PricingCapabilities returns the capabilities advertised by the effective
+// provider implementation. Unknown and mixed providers remain unsupported
+// rather than having capabilities inferred from their names.
+func (npa *NodePoolCostAnalyzer) PricingCapabilities() PricingCapabilities {
+	provider, ok := npa.providers[npa.effectiveProvider]
+	if !ok {
+		return PricingCapabilities{}
+	}
+	capabilities := provider.Capabilities()
+	capabilities.CapacityTypes = append([]string(nil), capabilities.CapacityTypes...)
+	return capabilities
+}
+
 // AnalyzeNodePoolCosts discovers node pools and computes costs from VM SKU pricing
 func (npa *NodePoolCostAnalyzer) AnalyzeNodePoolCosts() ([]models.NodePoolCost, []models.NodeInfo, error) {
 	nodeList, err := npa.clientset.CoreV1().Nodes().List(npa.ctx, metav1.ListOptions{})

@@ -65,7 +65,7 @@ func printCloudCostCLI(report *models.CloudCostReport) error {
 			strings.Repeat(" ", maxInt(1, 22-len(fmt.Sprintf("%.1f/%.1f cores, %.1f/%.1f GB",
 				pool.CPURequested, pool.TotalCPUCapacity, pool.MemoryRequested, pool.TotalMemoryCapacity)))),
 		)
-		if pool.RISavings > 0 {
+		if report.PricingCapabilities.Reservations && report.PricingCapabilities.SavingsData && pool.RISavings > 0 {
 			fmt.Printf("│    └─ 💡 RI Savings Potential: $%.2f/mo with 1-year reserved%s│\n",
 				pool.RISavings,
 				strings.Repeat(" ", maxInt(1, 20-len(fmt.Sprintf("%.2f", pool.RISavings)))),
@@ -229,6 +229,7 @@ func generateCloudCostHTML(report *models.CloudCostReport) string {
 
 	totalNodes := 0
 	totalRISavings := 0.0
+	showRI := report.PricingCapabilities.Reservations && report.PricingCapabilities.SavingsData
 	for _, p := range report.NodePoolCosts {
 		totalNodes += p.NodeCount
 		totalRISavings += p.RISavings
@@ -515,7 +516,11 @@ tbody tr{transition:background 0.1s}
 	sb.WriteString(`<div class="section">
 		<div class="section-header"><div class="section-title">🖥️ Node Pool Infrastructure</div></div>
 		<div class="table-wrap"><table>
-		<thead><tr><th>Pool Name</th><th>VM Size</th><th>Nodes</th><th>Type</th><th>CPU Utilization</th><th>Memory Utilization</th><th>$/Node/Mo</th><th>Pool Total</th><th>RI Savings</th></tr></thead><tbody>`)
+		<thead><tr><th>Pool Name</th><th>VM Size</th><th>Nodes</th><th>Type</th><th>CPU Utilization</th><th>Memory Utilization</th><th>$/Node/Mo</th><th>Pool Total</th>`)
+	if showRI {
+		sb.WriteString(`<th>Reservation Savings</th>`)
+	}
+	sb.WriteString(`</tr></thead><tbody>`)
 	for _, pool := range report.NodePoolCosts {
 		tagClass := "tag-regular"
 		tagLabel := "On-Demand"
@@ -545,21 +550,22 @@ tbody tr{transition:background 0.1s}
 			<td class="util-cell"><div class="util-row"><div class="util-track"><div class="util-fill %s" style="width:%.0f%%"></div></div><span class="util-pct">%.0f%%</span></div></td>
 			<td class="util-cell"><div class="util-row"><div class="util-track"><div class="util-fill %s" style="width:%.0f%%"></div></div><span class="util-pct">%.0f%%</span></div></td>
 			<td class="money red">$%s</td>
-			<td class="money red">$%s</td>
-			<td class="money green">%s</td>
-		</tr>`,
+			<td class="money red">$%s</td>`,
 			pool.Name, pool.VMSize, pool.NodeCount, tagClass, tagLabel,
 			cpuColor, pool.CPUUtilizationPct, pool.CPUUtilizationPct,
 			memColor, pool.MemoryUtilizationPct, pool.MemoryUtilizationPct,
-			formatMoney(pool.PricePerNodeMonth), formatMoney(pool.TotalMonthly),
-			func() string {
+			formatMoney(pool.PricePerNodeMonth), formatMoney(pool.TotalMonthly)))
+		if showRI {
+			sb.WriteString(fmt.Sprintf(`<td class="money green">%s</td>`, func() string {
 				if pool.RISavings > 0 {
 					return fmt.Sprintf("$%s", formatMoney(pool.RISavings))
 				}
 				return "—"
 			}()))
+		}
+		sb.WriteString(`</tr>`)
 	}
-	if totalRISavings > 0 {
+	if showRI && totalRISavings > 0 {
 		sb.WriteString(fmt.Sprintf(`<tr style="background:rgba(16,185,129,0.05)">
 			<td colspan="7" style="text-align:right;font-weight:600;color:var(--text-secondary)">Total RI Savings Potential (1-year):</td>
 			<td></td><td class="money green" style="font-size:1rem">$%s/mo</td></tr>`, formatMoney(totalRISavings)))

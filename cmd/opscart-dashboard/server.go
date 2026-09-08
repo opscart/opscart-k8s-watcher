@@ -2002,6 +2002,7 @@ func runFullScan(ctx string, scanCounters *apiCounters) (*clusterScan, error) {
 		PricingSource:         source,
 		PricingCoverage:       coverage,
 		PricingWarnings:       pricingCoverageWarnings(npCostAnalyzer.PricingWarnings(), matchedNodes, totalNodes),
+		PricingCapabilities:   npCostAnalyzer.PricingCapabilities(),
 		Currency:              "USD",
 		ScopeExclusions:       exclusions,
 		LastPriceRefresh:      npCostAnalyzer.LastPriceRefresh(),
@@ -2063,7 +2064,7 @@ func providerScopeExclusions(provider analyzer.CloudProvider) []string {
 		}
 	case analyzer.CloudProviderAzure:
 		return []string{
-			"Includes worker-node VM compute from the embedded Azure public pricing catalog.",
+			"Includes matched worker-node VM compute from the Azure Retail Prices API at public/list prices.",
 			"Excludes storage, network egress, monitoring, security services, taxes, and negotiated account pricing.",
 		}
 	case analyzer.CloudProviderMixed:

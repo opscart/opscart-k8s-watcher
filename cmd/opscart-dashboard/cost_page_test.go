@@ -11,8 +11,9 @@ import (
 func TestAWSCostPageIsProviderHonest(t *testing.T) {
 	scan := &clusterScan{report: &models.CloudCostReport{
 		Timestamp: time.Now(), ClusterName: "eks-prod", Provider: "aws", Region: "us-east-1",
-		PricingSource:   "AWS Price List Query API public EC2 On-Demand pricing",
-		PricingCoverage: "0 of 1 nodes priced", Currency: "USD",
+		PricingCapabilities: models.PricingCapabilities{OnDemand: true, CapacityTypes: []string{"ON_DEMAND"}},
+		PricingSource:       "AWS Price List Query API public EC2 On-Demand pricing",
+		PricingCoverage:     "0 of 1 nodes priced", Currency: "USD",
 		PricingWarnings: []string{"spot: EC2 Spot pricing is not integrated"},
 		NodePoolCosts:   []models.NodePoolCost{{Name: "spot", Provider: "aws", Region: "us-east-1", VMSize: "m7i.large", NodeCount: 1, Priority: "SPOT"}},
 		NamespaceCosts:  []models.NamespaceCostInfo{{Name: "default", PodCount: 1}},
@@ -23,7 +24,7 @@ func TestAWSCostPageIsProviderHonest(t *testing.T) {
 			t.Errorf("AWS cost page contains %q", forbidden)
 		}
 	}
-	if !strings.Contains(html, "Not calculated") || !strings.Contains(html, "Spot") {
+	if !strings.Contains(html, "Not calculated") || !strings.Contains(html, "Spot") || !strings.Contains(html, "Supported capacity types</dt><dd>On-Demand") {
 		t.Fatalf("AWS unavailable Spot state missing from page")
 	}
 	if !strings.Contains(html, "cluster=named%2Fcontext") {
@@ -34,7 +35,8 @@ func TestAWSCostPageIsProviderHonest(t *testing.T) {
 func TestCostPageNeedsOnlyCostReportData(t *testing.T) {
 	scan := &clusterScan{report: &models.CloudCostReport{
 		Timestamp: time.Now(), ClusterName: "aks", Provider: "azure", Region: "eastus2",
-		PricingSource: "Embedded Azure public retail pricing catalog", PricingCoverage: "1 of 1 nodes priced", Currency: "USD",
+		PricingCapabilities: models.PricingCapabilities{OnDemand: true, CapacityTypes: []string{"Regular"}},
+		PricingSource:       "Azure Retail Prices API public/list pricing", PricingCoverage: "1 of 1 nodes priced", Currency: "USD",
 		NodePoolCosts:    []models.NodePoolCost{{Name: "system", Provider: "azure", Region: "eastus2", NodeCount: 1, PricingAvailable: true, PricePerNodeMonth: 100, TotalMonthly: 100}},
 		TotalMonthlyCost: 100,
 	}}
@@ -44,6 +46,14 @@ func TestCostPageNeedsOnlyCostReportData(t *testing.T) {
 	}
 	if strings.Contains(html, `<div class="section-title">War Room</div>`) {
 		t.Fatal("War Room panel remains")
+	}
+	if !strings.Contains(html, "Supported capacity types</dt><dd>Regular / On-Demand") {
+		t.Fatal("Azure provider capability was not rendered")
+	}
+	for _, forbidden := range []string{"Regular and Spot", "Azure RI savings", "Reservation savings"} {
+		if strings.Contains(html, forbidden) {
+			t.Errorf("cost page contains stale capability disclosure %q", forbidden)
+		}
 	}
 }
 
@@ -58,5 +68,25 @@ func TestManualAzureOverrideIsProminent(t *testing.T) {
 	html := renderCostPage(&clusterScan{report: report}, "", []string{""})
 	if !strings.Contains(html, report.ProviderWarning) || !strings.Contains(html, "Manual provider override") {
 		t.Fatalf("manual override warning is not prominent")
+	}
+}
+
+func TestCostPageDoesNotInferCapabilitiesFromAzureName(t *testing.T) {
+	report := &models.CloudCostReport{
+		Timestamp: time.Now(), ClusterName: "aks", Provider: "azure", Region: "eastus2",
+		PricingSource: "unavailable",
+		NodePoolCosts: []models.NodePoolCost{{
+			Name: "system", Provider: "azure", Priority: "Regular", RISavings: 50,
+		}},
+	}
+	scan := &clusterScan{report: report}
+	html := renderCostPage(scan, "", []string{""})
+	if !strings.Contains(html, "Supported capacity types</dt><dd>Not available") {
+		t.Fatal("unknown capabilities were inferred from the Azure provider name")
+	}
+	for _, forbidden := range []string{"Regular and Spot", "Reservation savings", "Azure RI savings"} {
+		if strings.Contains(html, forbidden) {
+			t.Errorf("cost page inferred unsupported capability %q", forbidden)
+		}
 	}
 }

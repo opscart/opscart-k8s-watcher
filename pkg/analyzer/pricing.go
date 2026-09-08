@@ -6,6 +6,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/opscart/opscart-k8s-watcher/pkg/models"
 	corev1 "k8s.io/api/core/v1"
 )
 
@@ -55,13 +56,9 @@ type PriceResult struct {
 	Source      string
 }
 
-type PricingCapabilities struct {
-	OnDemand      bool
-	Spot          bool
-	Reservations  bool
-	SavingsData   bool
-	CapacityTypes []string
-}
+// PricingCapabilities remains available from analyzer for provider
+// implementations while the report model carries the same canonical metadata.
+type PricingCapabilities = models.PricingCapabilities
 
 type PricingProvider interface {
 	Provider() CloudProvider
@@ -81,6 +78,30 @@ func (p *azurePricingProvider) Capabilities() PricingCapabilities {
 	// Spot, reservation and savings-plan pricing need their own exact API
 	// resolution paths. Do not advertise them until those paths are wired.
 	return PricingCapabilities{OnDemand: true, CapacityTypes: []string{"Regular"}}
+}
+
+// FormatPricingCapacityTypes returns a provider-neutral display label derived
+// only from advertised capability metadata. It does not infer support from the
+// provider name.
+func FormatPricingCapacityTypes(capabilities PricingCapabilities) string {
+	labels := make([]string, 0, 2)
+	if capabilities.OnDemand {
+		onDemandLabel := "On-Demand"
+		for _, capacityType := range capabilities.CapacityTypes {
+			if strings.EqualFold(strings.TrimSpace(capacityType), "regular") {
+				onDemandLabel = "Regular / On-Demand"
+				break
+			}
+		}
+		labels = append(labels, onDemandLabel)
+	}
+	if capabilities.Spot {
+		labels = append(labels, "Spot")
+	}
+	if len(labels) == 0 {
+		return "Not available"
+	}
+	return strings.Join(labels, ", ")
 }
 func (p *azurePricingProvider) LookupOnDemandPrice(ctx context.Context, r PriceRequest) (PriceResult, error) {
 	return p.lookupRetailPrice(ctx, r)
