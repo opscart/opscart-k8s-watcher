@@ -6,6 +6,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/opscart/opscart-k8s-watcher/pkg/models"
 	corev1 "k8s.io/api/core/v1"
 )
 
@@ -16,6 +17,15 @@ const (
 	CloudProviderAWS     CloudProvider = "aws"
 	CloudProviderUnknown CloudProvider = "unknown"
 	CloudProviderMixed   CloudProvider = "mixed"
+)
+
+type PriceProvenance string
+
+const (
+	PriceProvenanceProviderAPIExact     PriceProvenance = "provider_api_exact"
+	PriceProvenanceProviderAPIEstimated PriceProvenance = "provider_api_estimated"
+	PriceProvenanceUserSupplied         PriceProvenance = "user_supplied"
+	PriceProvenanceUnavailable          PriceProvenance = "unavailable"
 )
 
 func ParseCloudProviderOverride(value string) (CloudProvider, error) {
@@ -42,15 +52,13 @@ type PriceResult struct {
 	HourlyPrice float64
 	Currency    string
 	RefreshedAt time.Time
+	Provenance  PriceProvenance
+	Source      string
 }
 
-type PricingCapabilities struct {
-	OnDemand      bool
-	Spot          bool
-	Reservations  bool
-	SavingsData   bool
-	CapacityTypes []string
-}
+// PricingCapabilities remains available from analyzer for provider
+// implementations while the report model carries the same canonical metadata.
+type PricingCapabilities = models.PricingCapabilities
 
 type PricingProvider interface {
 	Provider() CloudProvider
@@ -64,24 +72,39 @@ func NewAzurePricingProvider() PricingProvider {
 }
 func (p *azurePricingProvider) Provider() CloudProvider { return CloudProviderAzure }
 func (p *azurePricingProvider) SourceDescription() string {
-	return "Embedded Azure public retail pricing catalog with Azure Retail Prices API fallback"
+	return "Azure Retail Prices API public/list pricing"
 }
 func (p *azurePricingProvider) Capabilities() PricingCapabilities {
-	return PricingCapabilities{OnDemand: true, Spot: true, Reservations: true, SavingsData: true, CapacityTypes: []string{"Regular", "Spot"}}
+	// Spot, reservation and savings-plan pricing need their own exact API
+	// resolution paths. Do not advertise them until those paths are wired.
+	return PricingCapabilities{OnDemand: true, CapacityTypes: []string{"Regular"}}
+}
+
+// FormatPricingCapacityTypes returns a provider-neutral display label derived
+// only from advertised capability metadata. It does not infer support from the
+// provider name.
+func FormatPricingCapacityTypes(capabilities PricingCapabilities) string {
+	labels := make([]string, 0, 2)
+	if capabilities.OnDemand {
+		onDemandLabel := "On-Demand"
+		for _, capacityType := range capabilities.CapacityTypes {
+			if strings.EqualFold(strings.TrimSpace(capacityType), "regular") {
+				onDemandLabel = "Regular / On-Demand"
+				break
+			}
+		}
+		labels = append(labels, onDemandLabel)
+	}
+	if capabilities.Spot {
+		labels = append(labels, "Spot")
+	}
+	if len(labels) == 0 {
+		return "Not available"
+	}
+	return strings.Join(labels, ", ")
 }
 func (p *azurePricingProvider) LookupOnDemandPrice(ctx context.Context, r PriceRequest) (PriceResult, error) {
-	pricing, ok := LookupVMPrice(r.InstanceType, r.Region)
-	if !ok {
-		return p.lookupRetailPrice(ctx, r)
-	}
-	hourly := pricing.PayAsYouGoHour
-	if strings.EqualFold(r.CapacityType, "spot") {
-		hourly = pricing.SpotHour
-	}
-	if hourly <= 0 {
-		return PriceResult{}, fmt.Errorf("no %s price for %q", r.CapacityType, r.InstanceType)
-	}
-	return PriceResult{HourlyPrice: hourly, Currency: "USD"}, nil
+	return p.lookupRetailPrice(ctx, r)
 }
 
 func DetectNodeProvider(node corev1.Node) CloudProvider {

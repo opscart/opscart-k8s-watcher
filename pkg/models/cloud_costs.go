@@ -2,6 +2,16 @@ package models
 
 import "time"
 
+// PricingCapabilities describes only the pricing modes that the active
+// provider implementation can resolve. False or absent values are unsupported.
+type PricingCapabilities struct {
+	OnDemand      bool     `json:"on_demand"`
+	Spot          bool     `json:"spot"`
+	Reservations  bool     `json:"reservations"`
+	SavingsData   bool     `json:"savings_data"`
+	CapacityTypes []string `json:"capacity_types,omitempty"`
+}
+
 // CloudCostReport is the top-level structure for comprehensive cloud cost analysis
 type CloudCostReport struct {
 	Timestamp             time.Time `json:"timestamp"`
@@ -18,12 +28,22 @@ type CloudCostReport struct {
 	ScopeExclusions       []string  `json:"scope_exclusions,omitempty"`
 	LastPriceRefresh      time.Time `json:"last_price_refresh,omitempty"`
 
+	PricingCapabilities PricingCapabilities `json:"pricing_capabilities"`
+
 	// Infrastructure costs (computed from actual node/VM pricing)
 	NodePoolCosts []NodePoolCost `json:"node_pool_costs"`
 	TotalNodeCost float64        `json:"total_node_cost"` // sum of all node pools $/month
 
 	// Namespace-level allocation (split by real infra cost)
 	NamespaceCosts []NamespaceCostInfo `json:"namespace_costs"`
+
+	// Canonical allocation reconciliation. These values describe only resolved
+	// worker-node compute and never substitute unavailable pricing with zero.
+	AllocatedNodeCost        float64 `json:"allocated_node_cost"`
+	IdleNodeCost             float64 `json:"idle_node_cost"`
+	UnallocatedNodeCost      float64 `json:"unallocated_node_cost"`
+	AllocationExcludedPods   int     `json:"allocation_excluded_pods"`
+	AllocationUnresolvedPods int     `json:"allocation_unresolved_pods"`
 
 	// Summary
 	TotalMonthlyCost      float64                `json:"total_monthly_cost"`
@@ -97,6 +117,7 @@ type NodeInfo struct {
 	CPURequested   float64 `json:"cpu_requested"`
 	MemGBRequested float64 `json:"mem_gb_requested"`
 	Provider       string  `json:"provider"`
+	Architecture   string  `json:"architecture"`
 }
 
 // VMPricing holds pricing info for a VM SKU

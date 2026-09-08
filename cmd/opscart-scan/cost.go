@@ -169,6 +169,7 @@ func runCloudCostsScan(clusterContext string) error {
 		PricingSource:         pricingSource,
 		PricingCoverage:       fmt.Sprintf("%d of %d nodes priced", matchedNodes, totalNodes),
 		PricingWarnings:       npa.PricingWarnings(),
+		PricingCapabilities:   npa.PricingCapabilities(),
 		Currency:              "USD",
 		LastPriceRefresh:      npa.LastPriceRefresh(),
 		Assumptions:           []string{"Cost allocation uses a weighted average of CPU and memory requests."},

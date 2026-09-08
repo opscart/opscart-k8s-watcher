@@ -52,13 +52,16 @@ type azureRetailPrice struct {
 
 func (p *azurePricingProvider) lookupRetailPrice(ctx context.Context, request PriceRequest) (PriceResult, error) {
 	if strings.EqualFold(request.CapacityType, "spot") {
-		return PriceResult{}, fmt.Errorf("instance type %q is not in the embedded Azure catalog; Azure Retail Prices API fallback does not provide Spot estimates", request.InstanceType)
+		return PriceResult{}, fmt.Errorf("Azure Retail Prices API Spot pricing is not integrated for instance type %q", request.InstanceType)
 	}
 	if request.Region == "" {
-		return PriceResult{}, fmt.Errorf("instance type %q is not in the embedded Azure catalog; Azure Retail Prices API fallback requires a region", request.InstanceType)
+		return PriceResult{}, fmt.Errorf("Azure Retail Prices API requires a region for instance type %q", request.InstanceType)
+	}
+	if request.OS != "" && !strings.EqualFold(request.OS, "linux") {
+		return PriceResult{}, fmt.Errorf("Azure Retail Prices API pricing is not integrated for OS %q", request.OS)
 	}
 
-	key := strings.ToLower(request.InstanceType) + "\x00" + strings.ToLower(request.Region)
+	key := strings.ToLower(request.InstanceType) + "\x00" + strings.ToLower(request.Region) + "\x00" + strings.ToLower(request.OS) + "\x00" + strings.ToLower(request.CapacityType)
 	now := time.Now()
 	p.mu.Lock()
 	if cached, ok := p.cache[key]; ok && now.Before(cached.expiresAt) {
@@ -91,13 +94,19 @@ func (p *azurePricingProvider) lookupRetailPrice(ctx context.Context, request Pr
 		if !validAzureLinuxConsumptionMeter(item, request) {
 			continue
 		}
-		result := PriceResult{HourlyPrice: item.RetailPrice, Currency: item.CurrencyCode, RefreshedAt: now}
+		result := PriceResult{
+			HourlyPrice: item.RetailPrice,
+			Currency:    item.CurrencyCode,
+			RefreshedAt: now,
+			Provenance:  PriceProvenanceProviderAPIExact,
+			Source:      "Azure Retail Prices API",
+		}
 		p.mu.Lock()
 		p.cache[key] = azureRetailCacheEntry{result: result, expiresAt: now.Add(p.ttl)}
 		p.mu.Unlock()
 		return result, nil
 	}
-	return PriceResult{}, fmt.Errorf("instance type %q is not in the embedded Azure catalog and no exact Linux Consumption hourly price was found in region %q", request.InstanceType, request.Region)
+	return PriceResult{}, fmt.Errorf("Azure Retail Prices API found no exact Linux Consumption hourly price for instance type %q in region %q", request.InstanceType, request.Region)
 }
 
 func validAzureLinuxConsumptionMeter(item azureRetailPrice, request PriceRequest) bool {

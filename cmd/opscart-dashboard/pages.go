@@ -1492,24 +1492,36 @@ type costPageData struct {
 	ScannedAtMS int64
 	Timestamp   time.Time
 
-	MonthlyCost           float64
-	SavingsPotential      float64
-	ClusterCount          int
-	Provider              string
-	DetectedProvider      string
-	ProviderDetectionMode string
-	ProviderWarning       string
-	Region                string
-	PricingCoverage       string
-	PricingWarnings       []string
-	Currency              string
-	ScopeExclusions       []string
-	LastPriceRefresh      time.Time
-	MatchedNodes          int
-	TotalNodes            int
-	ShowSavings           bool
-	ShowRI                bool
-	CapacityTypes         string
+	MonthlyCost              float64
+	SavingsPotential         float64
+	ClusterCount             int
+	Provider                 string
+	DetectedProvider         string
+	ProviderDetectionMode    string
+	ProviderWarning          string
+	Region                   string
+	PricingCoverage          string
+	PricingWarnings          []string
+	Currency                 string
+	ScopeExclusions          []string
+	LastPriceRefresh         time.Time
+	MatchedNodes             int
+	TotalNodes               int
+	ShowSavings              bool
+	AllocatedCost            float64
+	IdleCost                 float64
+	UnallocatedCost          float64
+	AllocationExcludedPods   int
+	AllocationUnresolvedPods int
+	AllocatedPct             float64
+	IdlePct                  float64
+	UnallocatedPct           float64
+	AllocatedWidthStyle      template.CSS
+	IdleWidthStyle           template.CSS
+	UnallocatedWidthStyle    template.CSS
+	ShowRI                   bool
+	CapacityTypes            string
+	OptimizationSignals      []costOptimizationSignal
 
 	AccuracyPct     int
 	KnownVMs        int
@@ -1555,17 +1567,20 @@ type costPoolRow struct {
 	Region         string
 	PriceAvailable bool
 	ShowRI         bool
+	CostSharePct   float64
+	CostShareStyle template.CSS
 }
 
 type costNSRow struct {
-	Name     string
-	PodCount int
-	CPUCores float64
-	MemoryGB float64
-	NSShare  float64
-	CostFmt  string
-	GroupID  string
-	Deps     []costDepRow
+	Name       string
+	PodCount   int
+	CPUCores   float64
+	MemoryGB   float64
+	NSShare    float64
+	CostFmt    string
+	GroupID    string
+	ShareStyle template.CSS
+	Deps       []costDepRow
 }
 
 type costDepRow struct {
@@ -1588,6 +1603,108 @@ type costWRIssue struct {
 	AgeLbl     string
 	ShortName  string
 	ShortMsg   string
+}
+
+type costOptimizationSignal struct {
+	BadgeClass string
+	BadgeLabel string
+	Title      string
+	Evidence   string
+	Action     string
+}
+
+func costPercent(part, total float64) float64 {
+	if part <= 0 || total <= 0 {
+		return 0
+	}
+	pct := part / total * 100
+	if pct > 100 {
+		return 100
+	}
+	return pct
+}
+
+func pctWidthStyle(pct float64) template.CSS {
+	if pct < 0 {
+		pct = 0
+	}
+	if pct > 100 {
+		pct = 100
+	}
+	return template.CSS(fmt.Sprintf("width:%.2f%%", pct))
+}
+
+// buildCostOptimizationSignals emits evidence-based optimization observations.
+// These are deliberately not scheduling decisions. A future bin-packing
+// simulator must validate selectors, affinity, taints/tolerations, topology,
+// DaemonSets, storage and disruption constraints before a node-removal
+// candidate can become actionable.
+func buildCostOptimizationSignals(r *models.CloudCostReport) []costOptimizationSignal {
+	if r == nil || r.TotalMonthlyCost <= 0 {
+		return nil
+	}
+
+	var signals []costOptimizationSignal
+	idlePct := costPercent(r.IdleNodeCost, r.TotalMonthlyCost)
+	if r.IdleNodeCost > 0 && idlePct >= 20 {
+		signals = append(signals, costOptimizationSignal{
+			BadgeClass: "signal-candidate",
+			BadgeLabel: "CANDIDATE",
+			Title:      "Material request-based idle capacity",
+			Evidence:   fmt.Sprintf("$%s/month (%.1f%%) of resolved compute is not attributed to current Pod requests.", formatMoney(r.IdleNodeCost), idlePct),
+			Action:     "Prioritize consolidation simulation. Do not remove nodes until schedulability constraints are evaluated.",
+		})
+	}
+
+	for _, p := range r.NodePoolCosts {
+		if !p.PricingAvailable || p.TotalMonthly <= 0 {
+			continue
+		}
+		share := costPercent(p.TotalMonthly, r.TotalMonthlyCost)
+		if share >= 70 {
+			signals = append(signals, costOptimizationSignal{
+				BadgeClass: "signal-observation",
+				BadgeLabel: "OBSERVATION",
+				Title:      fmt.Sprintf("%s dominates compute spend", p.Name),
+				Evidence:   fmt.Sprintf("$%s/month · %.1f%% of worker-node compute.", formatMoney(p.TotalMonthly), share),
+				Action:     "Focus optimization analysis on this pool first; small changes here have the largest economic effect.",
+			})
+		}
+
+		diff := p.CPUUtilizationPct - p.MemoryUtilizationPct
+		if diff < 0 {
+			diff = -diff
+		}
+		if diff >= 25 {
+			signals = append(signals, costOptimizationSignal{
+				BadgeClass: "signal-candidate",
+				BadgeLabel: "CANDIDATE",
+				Title:      fmt.Sprintf("CPU / memory request imbalance in %s", p.Name),
+				Evidence:   fmt.Sprintf("CPU requests %.0f%% · memory requests %.0f%% of allocatable capacity.", p.CPUUtilizationPct, p.MemoryUtilizationPct),
+				Action:     "Evaluate VM shape fit. A replacement SKU recommendation requires provider-priced scenario analysis plus schedulability simulation.",
+			})
+		}
+
+		// N-1 is only an aggregate capacity pre-check, never a recommendation.
+		// Restrict it to user pools; system pools have additional availability
+		// responsibilities that cannot be inferred from aggregate requests.
+		if strings.EqualFold(p.Mode, "User") && p.NodeCount > 1 && p.PricePerNodeMonth > 0 {
+			nMinusOneCapacityPct := float64(p.NodeCount-1) / float64(p.NodeCount) * 100
+			if p.CPUUtilizationPct <= nMinusOneCapacityPct && p.MemoryUtilizationPct <= nMinusOneCapacityPct {
+				signals = append(signals, costOptimizationSignal{
+					BadgeClass: "signal-simulation",
+					BadgeLabel: "SIMULATION REQUIRED",
+					Title:      fmt.Sprintf("%s passes the aggregate N-1 capacity pre-check", p.Name),
+					Evidence:   fmt.Sprintf("Current request envelope fits within %.1f%% of pool capacity; one equivalent node is $%s/month at the resolved public/list rate.", nMinusOneCapacityPct, formatMoney(p.PricePerNodeMonth)),
+					Action:     "Run bin-packing and scheduling-constraint simulation before treating this as a consolidation opportunity.",
+				})
+			}
+		}
+		if len(signals) >= 5 {
+			break
+		}
+	}
+	return signals
 }
 
 var getCostTmpl = sync.OnceValue(func() *template.Template {
@@ -1631,19 +1748,24 @@ func buildCostPageData(scan *clusterScan, activeCtx string, clusterList []string
 		data.Currency = r.Currency
 		data.ScopeExclusions = r.ScopeExclusions
 		data.LastPriceRefresh = r.LastPriceRefresh
+		data.AllocatedCost = r.AllocatedNodeCost
+		data.IdleCost = r.IdleNodeCost
+		data.UnallocatedCost = r.UnallocatedNodeCost
+		data.AllocationExcludedPods = r.AllocationExcludedPods
+		data.AllocationUnresolvedPods = r.AllocationUnresolvedPods
+		data.AllocatedPct = costPercent(r.AllocatedNodeCost, r.TotalMonthlyCost)
+		data.IdlePct = costPercent(r.IdleNodeCost, r.TotalMonthlyCost)
+		data.UnallocatedPct = costPercent(r.UnallocatedNodeCost, r.TotalMonthlyCost)
+		data.AllocatedWidthStyle = pctWidthStyle(data.AllocatedPct)
+		data.IdleWidthStyle = pctWidthStyle(data.IdlePct)
+		data.UnallocatedWidthStyle = pctWidthStyle(data.UnallocatedPct)
+		data.OptimizationSignals = buildCostOptimizationSignals(r)
 		// Scenario savings are not reproducible from the visible priced-node
 		// rows. Preserve provider pricing and visible RI savings, but hide the
 		// unsupported aggregate.
 		data.ShowSavings = false
-		data.ShowRI = r.Provider == "azure"
-		switch r.Provider {
-		case "azure":
-			data.CapacityTypes = "Regular and Spot"
-		case "aws":
-			data.CapacityTypes = "EC2 On-Demand; Spot detected but not priced"
-		case "mixed":
-			data.CapacityTypes = "Varies by provider"
-		}
+		data.ShowRI = r.PricingCapabilities.Reservations && r.PricingCapabilities.SavingsData
+		data.CapacityTypes = analyzer.FormatPricingCapacityTypes(r.PricingCapabilities)
 		data.Timestamp = r.Timestamp
 		data.ScannedAtMS = r.Timestamp.UnixMilli()
 
@@ -1690,7 +1812,9 @@ func buildCostPageData(scan *clusterScan, activeCtx string, clusterList []string
 				Provider:       titleProvider(p.Provider),
 				Region:         p.Region,
 				PriceAvailable: p.PricingAvailable,
-				ShowRI:         p.Provider == "azure",
+				ShowRI:         data.ShowRI,
+				CostSharePct:   costPercent(p.TotalMonthly, r.TotalMonthlyCost),
+				CostShareStyle: pctWidthStyle(costPercent(p.TotalMonthly, r.TotalMonthlyCost)),
 			}
 			if strings.EqualFold(p.Priority, "spot") {
 				row.TagClass, row.TagLabel = "tag-spot", "Spot"
@@ -1709,13 +1833,14 @@ func buildCostPageData(scan *clusterScan, activeCtx string, clusterList []string
 
 		for i, ns := range r.NamespaceCosts {
 			row := costNSRow{
-				Name:     ns.Name,
-				PodCount: ns.PodCount,
-				CPUCores: ns.CPUCores,
-				MemoryGB: ns.MemoryGB,
-				NSShare:  ns.WeightedShare * 100,
-				CostFmt:  fmtCostRange(ns.EstimatedCost),
-				GroupID:  fmt.Sprintf("ns-%d", i),
+				Name:       ns.Name,
+				PodCount:   ns.PodCount,
+				CPUCores:   ns.CPUCores,
+				MemoryGB:   ns.MemoryGB,
+				NSShare:    ns.WeightedShare * 100,
+				CostFmt:    fmtCostRange(ns.EstimatedCost),
+				GroupID:    fmt.Sprintf("ns-%d", i),
+				ShareStyle: pctWidthStyle(ns.WeightedShare * 100),
 			}
 			for _, dep := range ns.Deployments {
 				kindTag := "tag-deploy"
