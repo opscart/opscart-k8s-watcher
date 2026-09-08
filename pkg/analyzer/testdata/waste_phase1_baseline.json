@@ -3,7 +3,7 @@
     "Findings": [
       {"Category": "namespace","Namespace": "","Name": "empty","Subtype": "","Score": 32},
       {"Category": "pod","Namespace": "app","Name": "bare","Subtype": "IDLE//","Score": 20},
-      {"Category": "pod","Namespace": "app","Name": "crashing","Subtype": "ZOMBIE/CrashLoopBackOff/critical","Score": 6.3999999999999995},
+      {"Category": "pod","Namespace": "app","Name": "crashing","Subtype": "ZOMBIE/CrashLoopBackOff/critical","Score": 6.4},
       {"Category": "pvc","Namespace": "app","Name": "pending","Subtype": "Never bound","Score": 228.8},
       {"Category": "pvc","Namespace": "app","Name": "small","Subtype": "Bound but no pod using it","Score": 170},
       {"Category": "pvc","Namespace": "app","Name": "lost","Subtype": "Released (pod deleted)","Score": 28},
@@ -44,7 +44,7 @@
     "Findings": [
       {"Category": "namespace","Namespace": "","Name": "empty","Subtype": "","Score": 32},
       {"Category": "pod","Namespace": "app","Name": "bare","Subtype": "IDLE//","Score": 20},
-      {"Category": "pod","Namespace": "app","Name": "crashing","Subtype": "ZOMBIE/CrashLoopBackOff/critical","Score": 6.3999999999999995},
+      {"Category": "pod","Namespace": "app","Name": "crashing","Subtype": "ZOMBIE/CrashLoopBackOff/critical","Score": 6.4},
       {"Category": "pvc","Namespace": "app","Name": "pending","Subtype": "Never bound","Score": 228.8},
       {"Category": "pvc","Namespace": "app","Name": "small","Subtype": "Bound but no pod using it","Score": 170},
       {"Category": "pvc","Namespace": "app","Name": "lost","Subtype": "Released (pod deleted)","Score": 28},
@@ -86,7 +86,7 @@
     "Findings": [
       {"Category": "namespace","Namespace": "","Name": "empty","Subtype": "","Score": 32},
       {"Category": "pod","Namespace": "app","Name": "bare","Subtype": "IDLE//","Score": 20},
-      {"Category": "pod","Namespace": "app","Name": "crashing","Subtype": "ZOMBIE/CrashLoopBackOff/critical","Score": 6.3999999999999995},
+      {"Category": "pod","Namespace": "app","Name": "crashing","Subtype": "ZOMBIE/CrashLoopBackOff/critical","Score": 6.4},
       {"Category": "pvc","Namespace": "app","Name": "pending","Subtype": "Never bound","Score": 228.8},
       {"Category": "pvc","Namespace": "app","Name": "small","Subtype": "Bound but no pod using it","Score": 170},
       {"Category": "pvc","Namespace": "app","Name": "lost","Subtype": "Released (pod deleted)","Score": 28},
@@ -128,7 +128,7 @@
   "scoped": {
     "Findings": [
       {"Category": "pod","Namespace": "app","Name": "bare","Subtype": "IDLE//","Score": 20},
-      {"Category": "pod","Namespace": "app","Name": "crashing","Subtype": "ZOMBIE/CrashLoopBackOff/critical","Score": 6.3999999999999995},
+      {"Category": "pod","Namespace": "app","Name": "crashing","Subtype": "ZOMBIE/CrashLoopBackOff/critical","Score": 6.4},
       {"Category": "pvc","Namespace": "app","Name": "pending","Subtype": "Never bound","Score": 228.8},
       {"Category": "pvc","Namespace": "app","Name": "small","Subtype": "Bound but no pod using it","Score": 170},
       {"Category": "pvc","Namespace": "app","Name": "lost","Subtype": "Released (pod deleted)","Score": 28},
@@ -167,7 +167,7 @@
     "Findings": [
       {"Category": "namespace","Namespace": "","Name": "empty","Subtype": "","Score": 32},
       {"Category": "pod","Namespace": "app","Name": "bare","Subtype": "IDLE//","Score": 20},
-      {"Category": "pod","Namespace": "app","Name": "crashing","Subtype": "ZOMBIE/CrashLoopBackOff/critical","Score": 6.3999999999999995},
+      {"Category": "pod","Namespace": "app","Name": "crashing","Subtype": "ZOMBIE/CrashLoopBackOff/critical","Score": 6.4},
       {"Category": "pvc","Namespace": "app","Name": "pending","Subtype": "Never bound","Score": 228.8},
       {"Category": "pvc","Namespace": "app","Name": "small","Subtype": "Bound but no pod using it","Score": 170},
       {"Category": "pvc","Namespace": "app","Name": "lost","Subtype": "Released (pod deleted)","Score": 28},

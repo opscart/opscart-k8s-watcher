@@ -3,6 +3,7 @@ package analyzer
 import (
 	"context"
 	"encoding/json"
+	"math"
 	"os"
 	"reflect"
 	"testing"
@@ -127,6 +128,15 @@ func captureWasteInvariant(t *testing.T, mode string) wasteInvariantResult {
 	}
 	result := wasteInvariantResult{LegacyCount: a.TotalWasteItems}
 	add := func(category, ns, name, subtype string, score float64) {
+		// Rounded to 6 decimal places: this baseline locks in detector
+		// identity, slice order, and API actions, not bit-exact float64
+		// reproducibility. Some Score expressions (e.g. ageDays*0.4 +
+		// restarts*0.3) can land on adjacent float64 values a single ULP
+		// apart depending on the compiler's multiply-add fusion decisions,
+		// which differ across architectures (observed: darwin/arm64 vs a
+		// linux/amd64 CI runner). Rounding is far coarser than that noise
+		// and far finer than any real score difference that should matter.
+		score = math.Round(score*1e6) / 1e6
 		result.Findings = append(result.Findings, wasteInvariantFinding{category, ns, name, subtype, score})
 	}
 	for _, x := range a.AbandonedNamespaces {
