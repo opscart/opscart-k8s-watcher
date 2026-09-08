@@ -158,7 +158,7 @@ func (npa *NodePoolCostAnalyzer) AnalyzeNodePoolCosts() ([]models.NodePoolCost, 
 			poolName = "default"
 		}
 
-		poolKey := info.Provider + "\x00" + poolName + "\x00" + info.VMSize + "\x00" + info.Priority + "\x00" + info.Region
+		poolKey := info.Provider + "\x00" + poolName + "\x00" + info.VMSize + "\x00" + info.Priority + "\x00" + info.Region + "\x00" + info.OS
 		if _, exists := poolMap[poolKey]; !exists {
 			poolMap[poolKey] = &nodePoolBuilder{
 				name:     poolName,
@@ -410,6 +410,14 @@ func (npa *NodePoolCostAnalyzer) extractNodeInfo(node corev1.Node) models.NodeIn
 		info.OS = os
 	} else {
 		info.OS = "linux"
+	}
+
+	// Architecture is part of canonical cost-pool identity. Preserve only
+	// observed node metadata; do not infer a default architecture.
+	if arch, ok := labels["kubernetes.io/arch"]; ok {
+		info.Architecture = arch
+	} else {
+		info.Architecture = node.Status.NodeInfo.Architecture
 	}
 
 	// Capacity type / priority.

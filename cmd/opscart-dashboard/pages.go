@@ -1492,24 +1492,29 @@ type costPageData struct {
 	ScannedAtMS int64
 	Timestamp   time.Time
 
-	MonthlyCost           float64
-	SavingsPotential      float64
-	ClusterCount          int
-	Provider              string
-	DetectedProvider      string
-	ProviderDetectionMode string
-	ProviderWarning       string
-	Region                string
-	PricingCoverage       string
-	PricingWarnings       []string
-	Currency              string
-	ScopeExclusions       []string
-	LastPriceRefresh      time.Time
-	MatchedNodes          int
-	TotalNodes            int
-	ShowSavings           bool
-	ShowRI                bool
-	CapacityTypes         string
+	MonthlyCost              float64
+	SavingsPotential         float64
+	ClusterCount             int
+	Provider                 string
+	DetectedProvider         string
+	ProviderDetectionMode    string
+	ProviderWarning          string
+	Region                   string
+	PricingCoverage          string
+	PricingWarnings          []string
+	Currency                 string
+	ScopeExclusions          []string
+	LastPriceRefresh         time.Time
+	MatchedNodes             int
+	TotalNodes               int
+	ShowSavings              bool
+	AllocatedCost            float64
+	IdleCost                 float64
+	UnallocatedCost          float64
+	AllocationExcludedPods   int
+	AllocationUnresolvedPods int
+	ShowRI                   bool
+	CapacityTypes            string
 
 	AccuracyPct     int
 	KnownVMs        int
@@ -1631,6 +1636,11 @@ func buildCostPageData(scan *clusterScan, activeCtx string, clusterList []string
 		data.Currency = r.Currency
 		data.ScopeExclusions = r.ScopeExclusions
 		data.LastPriceRefresh = r.LastPriceRefresh
+		data.AllocatedCost = r.AllocatedNodeCost
+		data.IdleCost = r.IdleNodeCost
+		data.UnallocatedCost = r.UnallocatedNodeCost
+		data.AllocationExcludedPods = r.AllocationExcludedPods
+		data.AllocationUnresolvedPods = r.AllocationUnresolvedPods
 		// Scenario savings are not reproducible from the visible priced-node
 		// rows. Preserve provider pricing and visible RI savings, but hide the
 		// unsupported aggregate.

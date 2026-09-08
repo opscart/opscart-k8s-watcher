@@ -1915,7 +1915,7 @@ func runFullScan(ctx string, scanCounters *apiCounters) (*clusterScan, error) {
 	if pricingSource == "aws-api" {
 		npCostAnalyzer.SetPricingProvider(getAWSPricingProvider())
 	}
-	poolCosts, _, err := npCostAnalyzer.AnalyzeNodePoolCosts()
+	poolCosts, nodeInfos, err := npCostAnalyzer.AnalyzeNodePoolCosts()
 	if err != nil {
 		return nil, fmt.Errorf("node pool analysis: %w", err)
 	}
@@ -1931,17 +1931,12 @@ func runFullScan(ctx string, scanCounters *apiCounters) (*clusterScan, error) {
 	scan.AllWorkloads = resourceAnalysis.Workloads
 	scan.PodWorkloads = resourceAnalysis.PodWorkloads
 
-	nsCosts := npCostAnalyzer.AllocateNamespaceCosts(
-		poolCosts, resourceAnalysis.Namespaces,
-		resourceAnalysis.TotalCPUCores, resourceAnalysis.TotalMemoryGB,
+	canonicalAllocation := analyzer.BuildCanonicalAllocationFromSnapshots(
+		poolCosts,
+		nodeInfos,
+		ra.PodSnapshot(),
 	)
-
-	if breakdown == "deployment" {
-		da := analyzer.NewDeploymentCostAnalyzer(clientset)
-		if enriched, err := da.EnrichWithDeployments(nsCosts); err == nil {
-			nsCosts = enriched
-		}
-	}
+	nsCosts := canonicalAllocation.Namespaces
 
 	ca := analyzer.NewCostAnalyzer(resourceAnalysis)
 	costEstimate, _ := ca.AnalyzeCosts(totalNodeCost)
@@ -1983,31 +1978,38 @@ func runFullScan(ctx string, scanCounters *apiCounters) (*clusterScan, error) {
 	exclusions := providerScopeExclusions(npCostAnalyzer.Provider())
 
 	scan.report = &models.CloudCostReport{
-		Timestamp:             time.Now(),
-		ClusterName:           displayName(ctx),
-		Region:                detectedRegion,
-		Provider:              provider,
-		DetectedProvider:      string(npCostAnalyzer.DetectedProvider()),
-		EffectiveProvider:     provider,
-		ProviderDetectionMode: npCostAnalyzer.ProviderDetectionMode(),
-		ProviderWarning:       npCostAnalyzer.ProviderWarning(),
-		NodePoolCosts:         poolCosts,
-		TotalNodeCost:         totalNodeCost,
-		NamespaceCosts:        nsCosts,
-		TotalMonthlyCost:      totalNodeCost,
-		TotalAnnualCost:       totalNodeCost * 12,
-		CostBreakdown:         models.CostBreakdown{Compute: totalNodeCost},
-		OptimizationScenarios: costEstimate.OptimizationScenarios,
-		TotalSavingsPotential: costEstimate.TotalSavingsPotential,
-		PricingSource:         source,
-		PricingCoverage:       coverage,
-		PricingWarnings:       pricingCoverageWarnings(npCostAnalyzer.PricingWarnings(), matchedNodes, totalNodes),
-		PricingCapabilities:   npCostAnalyzer.PricingCapabilities(),
-		Currency:              "USD",
-		ScopeExclusions:       exclusions,
-		LastPriceRefresh:      npCostAnalyzer.LastPriceRefresh(),
-		Assumptions:           []string{"Cost allocation uses a weighted average of CPU and memory requests."},
-		Disclaimers:           []string{"Public/list pricing estimates are not invoice values."},
+		Timestamp:                time.Now(),
+		ClusterName:              displayName(ctx),
+		Region:                   detectedRegion,
+		Provider:                 provider,
+		DetectedProvider:         string(npCostAnalyzer.DetectedProvider()),
+		EffectiveProvider:        provider,
+		ProviderDetectionMode:    npCostAnalyzer.ProviderDetectionMode(),
+		ProviderWarning:          npCostAnalyzer.ProviderWarning(),
+		NodePoolCosts:            poolCosts,
+		TotalNodeCost:            totalNodeCost,
+		NamespaceCosts:           nsCosts,
+		AllocatedNodeCost:        canonicalAllocation.AllocatedMonthly,
+		IdleNodeCost:             canonicalAllocation.IdleMonthly,
+		UnallocatedNodeCost:      canonicalAllocation.UnallocatedMonthly,
+		AllocationExcludedPods:   canonicalAllocation.ExcludedPodCount,
+		AllocationUnresolvedPods: canonicalAllocation.UnresolvedPodCount,
+		TotalMonthlyCost:         totalNodeCost,
+		TotalAnnualCost:          totalNodeCost * 12,
+		CostBreakdown:            models.CostBreakdown{Compute: totalNodeCost},
+		OptimizationScenarios:    costEstimate.OptimizationScenarios,
+		TotalSavingsPotential:    costEstimate.TotalSavingsPotential,
+		PricingSource:            source,
+		PricingCoverage:          coverage,
+		PricingWarnings: pricingCoverageWarnings(
+			append(npCostAnalyzer.PricingWarnings(), canonicalAllocation.Warnings...),
+			matchedNodes, totalNodes),
+		PricingCapabilities: npCostAnalyzer.PricingCapabilities(),
+		Currency:            "USD",
+		ScopeExclusions:     exclusions,
+		LastPriceRefresh:    npCostAnalyzer.LastPriceRefresh(),
+		Assumptions:         []string{"Resolved worker-node compute is allocated from observed Pod CPU/memory requests; unused capacity remains explicit idle cost."},
+		Disclaimers:         []string{"Public/list pricing estimates are not invoice values."},
 	}
 
 	// ── 2. Security audit (best effort) ──────────────────────────────
