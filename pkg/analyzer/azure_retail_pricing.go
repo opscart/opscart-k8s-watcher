@@ -52,13 +52,13 @@ type azureRetailPrice struct {
 
 func (p *azurePricingProvider) lookupRetailPrice(ctx context.Context, request PriceRequest) (PriceResult, error) {
 	if strings.EqualFold(request.CapacityType, "spot") {
-		return PriceResult{}, fmt.Errorf("Azure Retail Prices API Spot price resolution is not integrated for instance type %q", request.InstanceType)
+		return PriceResult{}, fmt.Errorf("Azure Retail Prices API Spot pricing is not integrated for instance type %q", request.InstanceType)
 	}
 	if request.Region == "" {
 		return PriceResult{}, fmt.Errorf("Azure Retail Prices API requires a region for instance type %q", request.InstanceType)
 	}
 	if request.OS != "" && !strings.EqualFold(request.OS, "linux") {
-		return PriceResult{}, fmt.Errorf("Azure Retail Prices API pricing for OS %q is not integrated for instance type %q", request.OS, request.InstanceType)
+		return PriceResult{}, fmt.Errorf("Azure Retail Prices API pricing is not integrated for OS %q", request.OS)
 	}
 
 	key := strings.ToLower(request.InstanceType) + "\x00" + strings.ToLower(request.Region) + "\x00" + strings.ToLower(request.OS) + "\x00" + strings.ToLower(request.CapacityType)
@@ -96,17 +96,17 @@ func (p *azurePricingProvider) lookupRetailPrice(ctx context.Context, request Pr
 		}
 		result := PriceResult{
 			HourlyPrice: item.RetailPrice,
-			Currency: item.CurrencyCode,
+			Currency:    item.CurrencyCode,
 			RefreshedAt: now,
-			Provenance: PriceProvenanceProviderAPIExact,
-			Source: "Azure Retail Prices API",
+			Provenance:  PriceProvenanceProviderAPIExact,
+			Source:      "Azure Retail Prices API",
 		}
 		p.mu.Lock()
 		p.cache[key] = azureRetailCacheEntry{result: result, expiresAt: now.Add(p.ttl)}
 		p.mu.Unlock()
 		return result, nil
 	}
-	return PriceResult{}, fmt.Errorf("no exact Linux Consumption hourly price found in Azure Retail Prices API for instance type %q in region %q", request.InstanceType, request.Region)
+	return PriceResult{}, fmt.Errorf("Azure Retail Prices API found no exact Linux Consumption hourly price for instance type %q in region %q", request.InstanceType, request.Region)
 }
 
 func validAzureLinuxConsumptionMeter(item azureRetailPrice, request PriceRequest) bool {
