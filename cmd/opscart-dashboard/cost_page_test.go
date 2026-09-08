@@ -38,13 +38,14 @@ func TestCostPageNeedsOnlyCostReportData(t *testing.T) {
 		PricingCapabilities: models.PricingCapabilities{OnDemand: true, CapacityTypes: []string{"Regular"}},
 		PricingSource:       "Azure Retail Prices API public/list pricing", PricingCoverage: "1 of 1 nodes priced", Currency: "USD",
 		NodePoolCosts:    []models.NodePoolCost{{Name: "system", Provider: "azure", Region: "eastus2", NodeCount: 1, PricingAvailable: true, PricePerNodeMonth: 100, TotalMonthly: 100}},
+		NamespaceCosts:   []models.NamespaceCostInfo{{Name: "payments", PodCount: 2, WeightedShare: 0.25, EstimatedCost: models.CostRange{Low: 25, Best: 25, High: 25}}},
 		TotalMonthlyCost: 100,
 	}}
 	html := renderCostPage(scan, "", []string{""})
 	if html == "" {
 		t.Fatal("cost-only report did not render")
 	}
-	for _, expected := range []string{"Cost Intelligence", "ESTIMATED", "Cost composition", "Methodology &amp; pricing source"} {
+	for _, expected := range []string{"Cost Intelligence", "ESTIMATED", "Cost composition", "Methodology &amp; pricing source", `id="namespaceFilter"`, `data-namespace="payments"`, `class="metric-sep">|</span>`} {
 		if !strings.Contains(html, expected) {
 			t.Fatalf("cost-only report missing %q", expected)
 		}
