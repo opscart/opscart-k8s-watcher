@@ -18,6 +18,15 @@ const (
 	CloudProviderMixed   CloudProvider = "mixed"
 )
 
+type PriceProvenance string
+
+const (
+	PriceProvenanceProviderAPIExact     PriceProvenance = "provider_api_exact"
+	PriceProvenanceProviderAPIEstimated PriceProvenance = "provider_api_estimated"
+	PriceProvenanceUserSupplied         PriceProvenance = "user_supplied"
+	PriceProvenanceUnavailable          PriceProvenance = "unavailable"
+)
+
 func ParseCloudProviderOverride(value string) (CloudProvider, error) {
 	switch strings.ToLower(strings.TrimSpace(value)) {
 	case "", "auto":
@@ -42,6 +51,8 @@ type PriceResult struct {
 	HourlyPrice float64
 	Currency    string
 	RefreshedAt time.Time
+	Provenance  PriceProvenance
+	Source      string
 }
 
 type PricingCapabilities struct {
@@ -64,24 +75,15 @@ func NewAzurePricingProvider() PricingProvider {
 }
 func (p *azurePricingProvider) Provider() CloudProvider { return CloudProviderAzure }
 func (p *azurePricingProvider) SourceDescription() string {
-	return "Embedded Azure public retail pricing catalog with Azure Retail Prices API fallback"
+	return "Azure Retail Prices API public/list pricing"
 }
 func (p *azurePricingProvider) Capabilities() PricingCapabilities {
-	return PricingCapabilities{OnDemand: true, Spot: true, Reservations: true, SavingsData: true, CapacityTypes: []string{"Regular", "Spot"}}
+	// Spot, reservation and savings-plan pricing need their own exact API
+	// resolution paths. Do not advertise them until those paths are wired.
+	return PricingCapabilities{OnDemand: true, CapacityTypes: []string{"Regular"}}
 }
 func (p *azurePricingProvider) LookupOnDemandPrice(ctx context.Context, r PriceRequest) (PriceResult, error) {
-	pricing, ok := LookupVMPrice(r.InstanceType, r.Region)
-	if !ok {
-		return p.lookupRetailPrice(ctx, r)
-	}
-	hourly := pricing.PayAsYouGoHour
-	if strings.EqualFold(r.CapacityType, "spot") {
-		hourly = pricing.SpotHour
-	}
-	if hourly <= 0 {
-		return PriceResult{}, fmt.Errorf("no %s price for %q", r.CapacityType, r.InstanceType)
-	}
-	return PriceResult{HourlyPrice: hourly, Currency: "USD"}, nil
+	return p.lookupRetailPrice(ctx, r)
 }
 
 func DetectNodeProvider(node corev1.Node) CloudProvider {
