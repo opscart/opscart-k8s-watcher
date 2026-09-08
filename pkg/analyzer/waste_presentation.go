@@ -189,33 +189,50 @@ func BuildWastePresentation(a *WasteAudit) WastePresentation {
 			Observed: fmt.Sprintf("Service type %s has a nonempty selector matching zero currently listed Pods in its namespace.", x.Type) + selector, Inference: "Selector or workload intent may warrant review.", Limitations: "Endpoint state and cloud billing were not checked. Scale-to-zero and rollout gaps may explain this observation.", Review: "Inspect the selector and confirm workload intent; consult billing separately if relevant."})
 	}
 	for _, x := range a.StaleJobs {
-		kind, observed := "Job", "The detector reported Job history for review."
+		kind := "Job"
+		var observed, limitations string
 		if x.IsCronJob {
 			kind = "CronJob"
-		}
-		switch x.JobStatus {
-		case "Completed":
-			observed = "Job status reports successful Pod attempts; terminal completion was not established."
-		case "Failed":
-			observed = "Job status reports failed Pod attempts; terminal failure and stopped retries were not established."
-		case "NeverScheduled":
-			observed = "CronJob status has no lastScheduleTime."
-		case "NoHistoryLimit":
-			observed = "Both CronJob history-limit fields were absent in the observed object."
-		}
-		if x.AttemptCountsKnown {
-			observed = fmt.Sprintf("Job status reports %d successful and %d failed Pod attempts.", x.SucceededPods, x.FailedPods)
-		}
-		if x.IsCronJob && x.Schedule != "" {
-			observed += fmt.Sprintf(" Schedule: %q.", x.Schedule)
-			if x.Suspended == nil {
-				observed += " Suspend is unspecified (defaults to false)."
-			} else {
-				observed += fmt.Sprintf(" Suspended: %t.", *x.Suspended)
+			observed = "The detector reported Job history for review."
+			switch x.JobStatus {
+			case "NeverScheduled":
+				observed = "CronJob status has no lastScheduleTime."
+			case "NoHistoryLimit":
+				observed = "Both CronJob history-limit fields were absent in the observed object."
+			}
+			if x.Schedule != "" {
+				observed += fmt.Sprintf(" Schedule: %q.", x.Schedule)
+				if x.Suspended == nil {
+					observed += " Suspend is unspecified (defaults to false)."
+				} else {
+					observed += fmt.Sprintf(" Suspended: %t.", *x.Suspended)
+				}
+			}
+			limitations = "Creation age is not completion age. Attempt counters do not establish terminal status. Missing schedule status is not full execution history. Omitted CronJob history limits default to 3 successful Jobs and 1 failed Job; they do not imply unlimited retention."
+		} else {
+			// Plain-Job subtypes now require an authoritative Kubernetes
+			// terminal Condition (Complete=True/Failed=True), not attempt
+			// counters, so "attempt counters do not establish terminal
+			// status" no longer applies here — the check DOES establish it.
+			switch {
+			case x.JobStatus == "Completed" && x.CompletionTimeKnown:
+				observed = fmt.Sprintf("Job reached the Kubernetes Complete condition. Completed %d days ago.", x.AgeDays)
+				limitations = "Retention policy, downstream artifact cleanup, and rollback requirements were not checked."
+			case x.JobStatus == "Completed":
+				observed = fmt.Sprintf("Job reached the Kubernetes Complete condition, but no completionTime was reported. Resource created %d days ago; completion age could not be established, so creation age is shown instead.", x.AgeDays)
+				limitations = "Age reflects when this Job was created, not when it completed. Retention policy and downstream artifact cleanup were not checked."
+			case x.JobStatus == "Failed":
+				observed = fmt.Sprintf("Job currently reports the Kubernetes Failed terminal condition. Resource created %d days ago; this check does not establish when terminal failure occurred.", x.AgeDays)
+				limitations = "Age reflects when this Job was created, not when it failed. Retry/backoff history and failure root cause were not checked."
+			default:
+				observed = "The detector reported Job history for review."
+			}
+			if x.AttemptCountsKnown {
+				observed += fmt.Sprintf(" %d successful and %d failed Pod attempts were also reported.", x.SucceededPods, x.FailedPods)
 			}
 		}
 		add(WasteFinding{Kind: kind, Name: x.Name, Namespace: x.Namespace, Subtype: x.JobStatus, Category: "Job / CronJob retention review", Group: WasteRetention, Section: "drift", AgeDays: x.AgeDays, Priority: x.Score,
-			Observed: observed, Inference: "Status, scheduling intent, or retention may warrant review.", Limitations: "Creation age is not completion age. Attempt counters do not establish terminal status. Missing schedule status is not full execution history. Omitted CronJob history limits default to 3 successful Jobs and 1 failed Job; they do not imply unlimited retention.", Review: "Inspect current status, schedule/suspension where applicable, and owner retention requirements."})
+			Observed: observed, Inference: "Status, scheduling intent, or retention may warrant review.", Limitations: limitations, Review: "Inspect current status, schedule/suspension where applicable, and owner retention requirements."})
 	}
 	for _, x := range a.ZeroReplicaWorkloads {
 		kind := x.Kind

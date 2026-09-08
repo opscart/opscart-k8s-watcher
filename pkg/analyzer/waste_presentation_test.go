@@ -83,13 +83,13 @@ func TestWastePresentationSemanticContracts(t *testing.T) {
 		StalePods:            []StalePod{{Name: "pod", Kind: StalePodIdle}, {Name: "failure", Kind: StalePodZombie, Status: "ProbeFailure"}},
 		OrphanedPVCs:         []OrphanedPVC{{Name: "pending", Status: PVCNeverBound}, {Name: "lost", Status: PVCReleased}, {Name: "bound", Status: PVCBoundNoPod}, {Name: "unknown"}},
 		OrphanedServices:     []OrphanedService{{Name: "svc", Type: "LoadBalancer"}},
-		StaleJobs:            []StaleJob{{Name: "succeeded", JobStatus: "Completed", AttemptCountsKnown: true, SucceededPods: 1, FailedPods: 2}, {Name: "failed", JobStatus: "Failed"}, {Name: "schedule", IsCronJob: true, JobStatus: "NeverScheduled"}, {Name: "retention", IsCronJob: true, JobStatus: "NoHistoryLimit"}},
+		StaleJobs:            []StaleJob{{Name: "succeeded", JobStatus: "Completed", CompletionTimeKnown: true, AttemptCountsKnown: true, SucceededPods: 1, FailedPods: 2}, {Name: "failed", JobStatus: "Failed"}, {Name: "schedule", IsCronJob: true, JobStatus: "NeverScheduled"}, {Name: "retention", IsCronJob: true, JobStatus: "NoHistoryLimit"}},
 		ZeroReplicaWorkloads: []ZeroReplicaWorkload{{Name: "zero", Kind: "Deployment"}},
 		BrokenIngresses:      []BrokenIngress{{Name: "ing", Reason: "Ingress backend currently has no ready endpoints."}},
 		MisconfiguredHPAs:    []MisconfiguredHPA{{Name: "min", Condition: "AlwaysAtMin", MinReplicas: 2}, {Name: "inactive", IsActive: true, Reason: "HPA currently reports ScalingActive=False. Review the reported condition and target configuration; application impact was not measured."}},
 		OldReplicaSets:       []OldReplicaSet{{Name: "nil"}, {Name: "rs", DesiredReplicas: &zero}},
 	}
-	expected := map[string]string{"ns": "none were in Running", "pod": "no owner reference matches", "failure": "Detector classification", "pending": "currently reports Pending", "lost": "currently reports Lost", "bound": "no currently listed Pod", "unknown": "without a recognized phase", "svc": "selector matching zero", "succeeded": "1 successful and 2 failed", "failed": "terminal failure and stopped retries were not established", "schedule": "no lastScheduleTime", "retention": "fields were absent", "zero": "currently set to zero", "ing": "no ready endpoints", "min": "at this scan", "inactive": "ScalingActive=False", "nil": "unspecified", "rs": "Desired replicas: 0"}
+	expected := map[string]string{"ns": "none were in Running", "pod": "no owner reference matches", "failure": "Detector classification", "pending": "currently reports Pending", "lost": "currently reports Lost", "bound": "no currently listed Pod", "unknown": "without a recognized phase", "svc": "selector matching zero", "succeeded": "reached the Kubernetes Complete condition", "failed": "does not establish when terminal failure occurred", "schedule": "no lastScheduleTime", "retention": "fields were absent", "zero": "currently set to zero", "ing": "no ready endpoints", "min": "at this scan", "inactive": "ScalingActive=False", "nil": "unspecified", "rs": "Desired replicas: 0"}
 	for _, f := range BuildWastePresentation(a).Findings {
 		if !strings.Contains(f.Observed, expected[f.Name]) {
 			t.Errorf("%s observation %q missing %q", f.Name, f.Observed, expected[f.Name])
@@ -114,6 +114,22 @@ func TestWastePresentationSemanticContracts(t *testing.T) {
 		}
 		if f.Name == "min" && !strings.Contains(f.Observed, "Resource age reflects when this HPA was created, not how long it has remained at minReplicas") {
 			t.Errorf("AlwaysAtMin observation does not separate creation age from duration at minReplicas: %q", f.Observed)
+		}
+		if f.Name == "succeeded" && strings.Contains(f.Limitations, "Attempt counters do not establish terminal status") {
+			t.Errorf("obsolete wording survived now that a terminal Condition is required: %q", f.Limitations)
+		}
+		if f.Name == "failed" {
+			if strings.Contains(f.Limitations, "Attempt counters do not establish terminal status") {
+				t.Errorf("obsolete wording survived now that a terminal Condition is required: %q", f.Limitations)
+			}
+			for _, bad := range []string{"failure age", "time since failure"} {
+				if strings.Contains(f.Observed, bad) || strings.Contains(f.Limitations, bad) {
+					t.Errorf("Failed Job evidence claims a failure timestamp Kubernetes does not provide: %q / %q", f.Observed, f.Limitations)
+				}
+			}
+		}
+		if f.Name == "retention" && !strings.Contains(f.Limitations, "Attempt counters do not establish terminal status") {
+			t.Fatal("CronJob Limitations wording must remain unchanged by the plain-Job fix")
 		}
 	}
 }
@@ -264,7 +280,14 @@ func TestPVCBytesAggregationAndLegacyScores(t *testing.T) {
 	}
 }
 
-func TestWasteDetectorMembershipPreservedForMisleadingStates(t *testing.T) {
+// TestWasteDetectorMembershipExcludesNonTerminalJobStates replaces the
+// pre-Phase-3B TestWasteDetectorMembershipPreservedForMisleadingStates, which
+// locked in the bug this phase fixes: a Job with Active>0 and nonzero
+// Succeeded/Failed counters but no Kubernetes terminal Condition used to be
+// misclassified as Completed/Failed. It is now correctly excluded. CronJob
+// membership/scoring and the unrelated ZeroReplicaWorkloads/OldReplicaSets
+// assertions are preserved unchanged.
+func TestWasteDetectorMembershipExcludesNonTerminalJobStates(t *testing.T) {
 	age := metav1.NewTime(time.Now().Add(-40*24*time.Hour - time.Hour))
 	zero := int32(0)
 	suspended := true
@@ -290,20 +313,22 @@ func TestWasteDetectorMembershipPreservedForMisleadingStates(t *testing.T) {
 	if err := w.detectOldReplicaSets(a, ""); err != nil {
 		t.Fatal(err)
 	}
-	if len(a.StaleJobs) != 4 || len(a.ZeroReplicaWorkloads) != 2 || len(a.OldReplicaSets) != 2 {
+	// Only the CronJob's two findings (NeverScheduled, NoHistoryLimit)
+	// survive: "partial" and "retrying" have Active>0 and no terminal
+	// Complete/Failed Condition, so they are no longer misclassified.
+	if len(a.StaleJobs) != 2 || len(a.ZeroReplicaWorkloads) != 2 || len(a.OldReplicaSets) != 2 {
 		t.Fatalf("membership changed: %+v", a)
 	}
-	scores := map[string]float64{"partial": 24, "retrying": 30, "annual/NeverScheduled": 16, "annual/NoHistoryLimit": 8}
+	scores := map[string]float64{"NeverScheduled": 16, "NoHistoryLimit": 8}
 	for _, x := range a.StaleJobs {
-		if x.IsCronJob && (x.Schedule != "0 0 1 1 *" || x.Suspended == nil || !*x.Suspended) {
+		if !x.IsCronJob {
+			t.Fatalf("a non-terminal plain Job was incorrectly flagged: %+v", x)
+		}
+		if x.Schedule != "0 0 1 1 *" || x.Suspended == nil || !*x.Suspended {
 			t.Fatalf("CronJob metadata lost: %+v", x)
 		}
-		key := x.Name
-		if x.IsCronJob {
-			key += "/" + x.JobStatus
-		}
-		if x.Score != scores[key] {
-			t.Errorf("%s score %g", key, x.Score)
+		if x.Score != scores[x.JobStatus] {
+			t.Errorf("%s score %g, want %g", x.JobStatus, x.Score, scores[x.JobStatus])
 		}
 	}
 	for _, x := range a.ZeroReplicaWorkloads {
@@ -327,8 +352,8 @@ func TestWasteDetectorMembershipPreservedForMisleadingStates(t *testing.T) {
 		}
 	}
 	assertWasteListActions(t, w, []string{"jobs", "cronjobs", "deployments", "statefulsets", "replicasets"})
-	if got := []string{a.StaleJobs[0].Name, a.StaleJobs[1].Name, a.StaleJobs[2].JobStatus, a.StaleJobs[3].JobStatus}; !reflect.DeepEqual(got, []string{"retrying", "partial", "NeverScheduled", "NoHistoryLimit"}) {
-		t.Fatalf("Job ranking changed: %v", got)
+	if a.StaleJobs[0].JobStatus != "NeverScheduled" || a.StaleJobs[1].JobStatus != "NoHistoryLimit" {
+		t.Fatalf("CronJob finding order changed: %v", a.StaleJobs)
 	}
 	if a.ZeroReplicaWorkloads[0].Kind != "StatefulSet" {
 		t.Fatal("zero-replica ranking changed")

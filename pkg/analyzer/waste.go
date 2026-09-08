@@ -11,6 +11,7 @@ import (
 	"github.com/opscart/opscart-k8s-watcher/pkg/kube"
 	"github.com/opscart/opscart-k8s-watcher/pkg/models"
 	autoscalingv2 "k8s.io/api/autoscaling/v2"
+	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
@@ -128,15 +129,23 @@ type StaleJob struct {
 	Name               string
 	Namespace          string
 	IsCronJob          bool
-	JobStatus          string // Legacy detector subtype, not a terminal-state assertion.
+	JobStatus          string // Plain-Job values ("Completed"/"Failed") require an authoritative Kubernetes terminal Condition; CronJob values do not.
 	Schedule           string // Retained CronJob metadata; empty when unavailable.
 	Suspended          *bool  // nil means unspecified; Kubernetes defaults this to false.
 	AttemptCountsKnown bool
 	SucceededPods      int32
 	FailedPods         int32
-	AgeDays            int
-	Reason             string
-	Score              float64
+	// AgeDays means completion age when JobStatus=="Completed" and
+	// CompletionTimeKnown is true; otherwise it is resource/object creation
+	// age (never failure age — Kubernetes records no such timestamp).
+	AgeDays int
+	// CompletionTimeKnown is only meaningful when JobStatus=="Completed". It
+	// is true when Kubernetes reported Status.CompletionTime, and false when
+	// Complete=True was observed without one (an honest fallback to creation
+	// age, not a fabricated completion time).
+	CompletionTimeKnown bool
+	Reason              string
+	Score               float64
 }
 
 // ----------------------------------------------------------------
@@ -911,11 +920,6 @@ func (w *WasteAuditor) detectStaleJobs(audit *WasteAudit, filterNamespace string
 			continue
 		}
 
-		ageDays := int(now.Sub(job.CreationTimestamp.Time).Hours() / 24)
-		if ageDays < w.minAgeDays {
-			continue
-		}
-
 		// Skip jobs owned by a CronJob (handled separately)
 		ownedByCronJob := false
 		for _, ref := range job.OwnerReferences {
@@ -928,41 +932,95 @@ func (w *WasteAuditor) detectStaleJobs(audit *WasteAudit, filterNamespace string
 			continue
 		}
 
-		var jobStatus string
-		var reason string
-		var score float64
+		createdAgeDays := int(now.Sub(job.CreationTimestamp.Time).Hours() / 24)
 
-		if job.Status.Succeeded > 0 {
-			jobStatus = "Completed"
+		// Terminal state is established only by the Kubernetes Job Conditions
+		// Kubernetes itself uses to mean "done" (batchv1.JobComplete/JobFailed
+		// with Status=True). Succeeded/Failed Pod-attempt counters are live
+		// counters that can be nonzero on an active, retrying, or suspended
+		// Job; they are never used to decide terminal state here.
+		//
+		// If a malformed/unusual Job reports both Complete=True and
+		// Failed=True at once, Failed wins deterministically (checked first,
+		// independent of Conditions slice order), so an ambiguous Job is
+		// never treated as if it had finished cleanly, and never produces
+		// more than one finding.
+		hasFailed, hasComplete := false, false
+		for _, cond := range job.Status.Conditions {
+			switch {
+			case cond.Type == batchv1.JobFailed && cond.Status == corev1.ConditionTrue:
+				hasFailed = true
+			case cond.Type == batchv1.JobComplete && cond.Status == corev1.ConditionTrue:
+				hasComplete = true
+			}
+		}
+
+		var jobStatus, reason string
+		var ageDays int
+		var score float64
+		completionTimeKnown := false
+
+		switch {
+		case hasFailed:
+			// Kubernetes does not record a failure timestamp on Job status;
+			// creation age is the only available signal, and must be
+			// identified as such, never as "failure age".
+			jobStatus = "Failed"
+			ageDays = createdAgeDays
+			if ageDays < w.minAgeDays {
+				continue
+			}
 			reason = fmt.Sprintf(
-				"Job reports successful Pod attempts. Resource age: %d days. "+
-					"Successful attempts do not establish terminal Job completion. Review status and retention requirements.",
+				"Job currently reports the Kubernetes Failed terminal condition. "+
+					"Resource created %d days ago; this check does not establish when terminal failure occurred. "+
+					"Review current Job status and failure evidence.",
 				ageDays,
 			)
-			score = float64(ageDays) * 0.6
-		} else if job.Status.Failed > 0 {
-			jobStatus = "Failed"
-			reason = fmt.Sprintf(
-				"Job has %d failed attempt(s) and is %d days old. "+
-					"Failed attempts do not establish terminal failure or stopped retries. "+
-					"Review current Job status and failure evidence.",
-				job.Status.Failed, ageDays,
-			)
 			score = float64(ageDays)*0.5 + float64(job.Status.Failed)*5
-		} else {
+
+		case hasComplete:
+			jobStatus = "Completed"
+			if job.Status.CompletionTime != nil {
+				completionTimeKnown = true
+				ageDays = int(now.Sub(job.Status.CompletionTime.Time).Hours() / 24)
+			} else {
+				// Complete=True without a completionTime is unexpected, but
+				// must not invent a completion timestamp. Fall back to
+				// creation age and say so explicitly.
+				ageDays = createdAgeDays
+			}
+			if ageDays < w.minAgeDays {
+				continue
+			}
+			if completionTimeKnown {
+				reason = fmt.Sprintf("Job reached the Kubernetes Complete condition. Completed %d days ago.", ageDays)
+			} else {
+				reason = fmt.Sprintf(
+					"Job reached the Kubernetes Complete condition, but no completionTime was reported. "+
+						"Resource created %d days ago; completion age could not be established, so creation age is shown instead.",
+					ageDays,
+				)
+			}
+			score = float64(ageDays) * 0.6
+
+		default:
+			// Active, retrying, suspended, or Active=0-with-no-terminal-
+			// condition Jobs are not retention-review candidates: nonzero
+			// Succeeded/Failed counters alone never establish terminal state.
 			continue
 		}
 
 		audit.StaleJobs = append(audit.StaleJobs, StaleJob{
-			Name:               job.Name,
-			Namespace:          job.Namespace,
-			JobStatus:          jobStatus,
-			AttemptCountsKnown: true,
-			SucceededPods:      job.Status.Succeeded,
-			FailedPods:         job.Status.Failed,
-			AgeDays:            ageDays,
-			Reason:             reason,
-			Score:              score,
+			Name:                job.Name,
+			Namespace:           job.Namespace,
+			JobStatus:           jobStatus,
+			AttemptCountsKnown:  true,
+			SucceededPods:       job.Status.Succeeded,
+			FailedPods:          job.Status.Failed,
+			AgeDays:             ageDays,
+			CompletionTimeKnown: completionTimeKnown,
+			Reason:              reason,
+			Score:               score,
 		})
 	}
 

@@ -8,8 +8,6 @@
       {"Category": "pvc","Namespace": "app","Name": "small","Subtype": "Bound but no pod using it","Score": 170},
       {"Category": "pvc","Namespace": "app","Name": "lost","Subtype": "Released (pod deleted)","Score": 28},
       {"Category": "pvc","Namespace": "app","Name": "fractional","Subtype": "Bound but no pod using it","Score": 20.3},
-      {"Category": "job","Namespace": "app","Name": "retrying","Subtype": "Failed","Score": 30},
-      {"Category": "job","Namespace": "app","Name": "partial","Subtype": "Completed","Score": 24},
       {"Category": "job","Namespace": "app","Name": "annual","Subtype": "NeverScheduled","Score": 16},
       {"Category": "job","Namespace": "app","Name": "annual","Subtype": "NoHistoryLimit","Score": 8},
       {"Category": "zero","Namespace": "app","Name": "zero-stateful","Subtype": "StatefulSet","Score": 30},
@@ -40,7 +38,7 @@
       {"Verb": "list","Group": "autoscaling","Version": "v1","Resource": "horizontalpodautoscalers","Namespace": "","Name": "","Labels": "","Fields": ""}
     ],
     "WarningCategories": null,
-    "LegacyCount": 15
+    "LegacyCount": 13
   },
   "legacy": {
     "Findings": [
@@ -51,8 +49,6 @@
       {"Category": "pvc","Namespace": "app","Name": "small","Subtype": "Bound but no pod using it","Score": 170},
       {"Category": "pvc","Namespace": "app","Name": "lost","Subtype": "Released (pod deleted)","Score": 28},
       {"Category": "pvc","Namespace": "app","Name": "fractional","Subtype": "Bound but no pod using it","Score": 20.3},
-      {"Category": "job","Namespace": "app","Name": "retrying","Subtype": "Failed","Score": 30},
-      {"Category": "job","Namespace": "app","Name": "partial","Subtype": "Completed","Score": 24},
       {"Category": "job","Namespace": "app","Name": "annual","Subtype": "NeverScheduled","Score": 16},
       {"Category": "job","Namespace": "app","Name": "annual","Subtype": "NoHistoryLimit","Score": 8},
       {"Category": "zero","Namespace": "app","Name": "zero-stateful","Subtype": "StatefulSet","Score": 30},
@@ -84,7 +80,7 @@
       {"Verb": "list","Group": "autoscaling","Version": "v2","Resource": "horizontalpodautoscalers","Namespace": "","Name": "","Labels": "","Fields": ""}
     ],
     "WarningCategories": null,
-    "LegacyCount": 17
+    "LegacyCount": 15
   },
   "partial": {
     "Findings": [
@@ -95,8 +91,6 @@
       {"Category": "pvc","Namespace": "app","Name": "small","Subtype": "Bound but no pod using it","Score": 170},
       {"Category": "pvc","Namespace": "app","Name": "lost","Subtype": "Released (pod deleted)","Score": 28},
       {"Category": "pvc","Namespace": "app","Name": "fractional","Subtype": "Bound but no pod using it","Score": 20.3},
-      {"Category": "job","Namespace": "app","Name": "retrying","Subtype": "Failed","Score": 30},
-      {"Category": "job","Namespace": "app","Name": "partial","Subtype": "Completed","Score": 24},
       {"Category": "job","Namespace": "app","Name": "annual","Subtype": "NeverScheduled","Score": 16},
       {"Category": "job","Namespace": "app","Name": "annual","Subtype": "NoHistoryLimit","Score": 8},
       {"Category": "zero","Namespace": "app","Name": "zero-stateful","Subtype": "StatefulSet","Score": 30},
@@ -129,7 +123,7 @@
     "WarningCategories": [
       "Broken ingresses"
     ],
-    "LegacyCount": 16
+    "LegacyCount": 14
   },
   "scoped": {
     "Findings": [
@@ -139,8 +133,6 @@
       {"Category": "pvc","Namespace": "app","Name": "small","Subtype": "Bound but no pod using it","Score": 170},
       {"Category": "pvc","Namespace": "app","Name": "lost","Subtype": "Released (pod deleted)","Score": 28},
       {"Category": "pvc","Namespace": "app","Name": "fractional","Subtype": "Bound but no pod using it","Score": 20.3},
-      {"Category": "job","Namespace": "app","Name": "retrying","Subtype": "Failed","Score": 30},
-      {"Category": "job","Namespace": "app","Name": "partial","Subtype": "Completed","Score": 24},
       {"Category": "job","Namespace": "app","Name": "annual","Subtype": "NeverScheduled","Score": 16},
       {"Category": "job","Namespace": "app","Name": "annual","Subtype": "NoHistoryLimit","Score": 8},
       {"Category": "zero","Namespace": "app","Name": "zero-stateful","Subtype": "StatefulSet","Score": 30},
@@ -169,7 +161,7 @@
       {"Verb": "list","Group": "autoscaling","Version": "v2","Resource": "horizontalpodautoscalers","Namespace": "app","Name": "","Labels": "","Fields": ""}
     ],
     "WarningCategories": null,
-    "LegacyCount": 16
+    "LegacyCount": 14
   },
   "shared": {
     "Findings": [
@@ -180,8 +172,6 @@
       {"Category": "pvc","Namespace": "app","Name": "small","Subtype": "Bound but no pod using it","Score": 170},
       {"Category": "pvc","Namespace": "app","Name": "lost","Subtype": "Released (pod deleted)","Score": 28},
       {"Category": "pvc","Namespace": "app","Name": "fractional","Subtype": "Bound but no pod using it","Score": 20.3},
-      {"Category": "job","Namespace": "app","Name": "retrying","Subtype": "Failed","Score": 30},
-      {"Category": "job","Namespace": "app","Name": "partial","Subtype": "Completed","Score": 24},
       {"Category": "job","Namespace": "app","Name": "annual","Subtype": "NeverScheduled","Score": 16},
       {"Category": "job","Namespace": "app","Name": "annual","Subtype": "NoHistoryLimit","Score": 8},
       {"Category": "zero","Namespace": "app","Name": "zero-stateful","Subtype": "StatefulSet","Score": 30},
@@ -208,6 +198,6 @@
       {"Verb": "list","Group": "autoscaling","Version": "v2","Resource": "horizontalpodautoscalers","Namespace": "","Name": "","Labels": "","Fields": ""}
     ],
     "WarningCategories": null,
-    "LegacyCount": 17
+    "LegacyCount": 15
   }
 }
