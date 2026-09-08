@@ -48,7 +48,7 @@
 
   <div class="summary-bar">
     {{if .PVCCostCell}}<div class="kpi-chip"><div class="kpi-chip-val warn">{{.PVCCostCell}}</div><div class="kpi-chip-lbl">PVC Waste/mo</div></div>{{end}}
-    <div class="kpi-chip"><div class="kpi-chip-val">{{.WasteTotal}}</div><div class="kpi-chip-lbl">Total Waste Items</div></div>
+    <div class="kpi-chip"><div class="kpi-chip-val">{{.WasteTotal}}</div><div class="kpi-chip-lbl">Waste &amp; Drift Findings</div></div>
   </div>
 
   <!-- RI Opportunities -->
@@ -86,8 +86,8 @@
   <!-- Waste by Category -->
   <div class="section">
     <div class="section-hdr">
-      <div class="section-title">Waste Items by Category</div>
-      <div class="section-sub">Resources consuming cost or capacity without business value</div>
+      <div class="section-title">Waste &amp; Drift Findings by Category</div>
+      <div class="section-sub">Selected detector categories shown below; the total includes all findings, including operational and retention findings.</div>
     </div>
     <div class="opt-wrap"><table class="opt-table">
       <thead><tr>
@@ -95,14 +95,14 @@
         <th style="text-align:right">Est. $/mo</th><th>Notes</th>
       </tr></thead>
       <tbody>
-        <tr><td><strong>Orphaned PVCs</strong></td><td style="text-align:center">{{.PVCCount}}</td><td style="text-align:right">{{if .PVCCostCell}}<span class="save">{{.PVCCostCell}}</span>{{else}}<span class="muted">—</span>{{end}}</td><td class="muted">{{.PVCNote}}</td></tr>
+        <tr><td><strong>PVC State / Reference Review</strong></td><td style="text-align:center">{{.PVCCount}}</td><td style="text-align:right">{{if .PVCCostCell}}<span class="save">{{.PVCCostCell}}</span>{{else}}<span class="muted">—</span>{{end}}</td><td class="muted">{{.PVCNote}}</td></tr>
         <tr><td><strong>Zero-Replica Workloads</strong></td><td style="text-align:center">{{.ZeroReplicaCount}}</td><td style="text-align:right"><span class="muted">—</span></td><td class="muted">Deployments/StatefulSets scaled to 0</td></tr>
-        <tr><td><strong>Abandoned Namespaces</strong></td><td style="text-align:center">{{.AbandonedCount}}</td><td style="text-align:right"><span class="muted">—</span></td><td class="muted">All pods idle, no recent activity</td></tr>
-        <tr><td><strong>Zombie Pods</strong></td><td style="text-align:center">{{.ZombieCount}}</td><td style="text-align:right"><span class="muted">—</span></td><td class="muted">CrashLoopBackOff / OOMKilled consuming node capacity</td></tr>
-        <tr><td><strong>Idle Pods</strong></td><td style="text-align:center">{{.IdleCount}}</td><td style="text-align:right"><span class="muted">—</span></td><td class="muted">Running but no activity for extended period</td></tr>
+        <tr><td><strong>Namespace Activity Review</strong></td><td style="text-align:center">{{.AbandonedCount}}</td><td style="text-align:right"><span class="muted">—</span></td><td class="muted">No Running Pods observed; intent unverified</td></tr>
+        <tr><td><strong>Pod Failure Findings</strong></td><td style="text-align:center">{{.ZombieCount}}</td><td style="text-align:right"><span class="muted">—</span></td><td class="muted">Current, historical, or inferred failure evidence</td></tr>
+        <tr><td><strong>Pod Ownership Review</strong></td><td style="text-align:center">{{.IdleCount}}</td><td style="text-align:right"><span class="muted">—</span></td><td class="muted">No recognized owner kind; usage not measured</td></tr>
       </tbody>
       <tfoot><tr>
-        <td colspan="2" style="color:var(--text-muted);font-size:0.75rem;text-transform:uppercase;letter-spacing:0.5px">Total potential savings</td>
+        <td colspan="2" style="color:var(--text-muted);font-size:0.75rem;text-transform:uppercase;letter-spacing:0.5px">PVC billing not established</td>
         <td style="text-align:right">{{if .TotalWasteCost}}<span class="save">{{.TotalWasteCost}}</span>{{else}}<span class="muted">—</span>{{end}}</td>
         <td></td>
       </tr></tfoot>

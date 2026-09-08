@@ -7,7 +7,9 @@ import (
 	"testing"
 	"time"
 
+	appsv1 "k8s.io/api/apps/v1"
 	autoscalingv2 "k8s.io/api/autoscaling/v2"
+	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -90,7 +92,7 @@ func TestAbandonedNamespacesSharedSnapshotIncludesOnlyNonRunningPods(t *testing.
 		*namespacePod("stopped", "pending", corev1.PodPending),
 	}, true)
 	got := runAbandonedNamespaceDetector(t, wa)
-	if len(got) != 1 || got[0].PodCount != 2 || !strings.Contains(got[0].Reason, "none are Running") {
+	if len(got) != 1 || got[0].PodCount != 2 || !strings.Contains(got[0].Reason, "none are in Running phase") {
 		t.Fatalf("non-running Pod classification changed: %+v", got)
 	}
 }
@@ -282,6 +284,337 @@ func TestAuditWastePreservesDetectorWarnings(t *testing.T) {
 		}
 	}
 	t.Fatalf("PVC detector warning not preserved: %+v", audit.DetectorWarnings)
+}
+
+func TestStaleJobsSurfacesCronJobListFailureWithoutLosingJobFindings(t *testing.T) {
+	completedAt := metav1.NewTime(time.Now().Add(-40*24*time.Hour - time.Hour))
+	job := jobWithConditions("finished", 40, 0, 1, 0, &completedAt, jobCondition(batchv1.JobComplete, corev1.ConditionTrue))
+	wa := newTestAuditor(7, job)
+	wa.clientset.(*fake.Clientset).PrependReactor("list", "cronjobs", func(ktesting.Action) (bool, runtime.Object, error) {
+		return true, nil, context.DeadlineExceeded
+	})
+	audit := &WasteAudit{}
+	if err := wa.detectStaleJobs(audit, ""); err != nil {
+		t.Fatalf("detectStaleJobs: %v", err)
+	}
+	if len(audit.StaleJobs) != 1 || audit.StaleJobs[0].Name != "finished" {
+		t.Fatalf("plain Job finding was discarded by a CronJob LIST failure: %+v", audit.StaleJobs)
+	}
+	var found bool
+	for _, warning := range audit.DetectorWarnings {
+		if warning.Category == "Stale jobs" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("CronJob LIST failure was not surfaced as a detector warning: %+v", audit.DetectorWarnings)
+	}
+}
+
+func TestZeroReplicaWorkloadsSurfacesStatefulSetListFailureWithoutLosingDeploymentFindings(t *testing.T) {
+	age := metav1.NewTime(time.Now().Add(-40*24*time.Hour - time.Hour))
+	zero := int32(0)
+	deployment := &appsv1.Deployment{
+		ObjectMeta: metav1.ObjectMeta{Name: "scaled-down", Namespace: "app", CreationTimestamp: age},
+		Spec:       appsv1.DeploymentSpec{Replicas: &zero},
+	}
+	wa := newTestAuditor(7, deployment)
+	wa.clientset.(*fake.Clientset).PrependReactor("list", "statefulsets", func(ktesting.Action) (bool, runtime.Object, error) {
+		return true, nil, context.DeadlineExceeded
+	})
+	audit := &WasteAudit{}
+	if err := wa.detectZeroReplicaWorkloads(audit, ""); err != nil {
+		t.Fatalf("detectZeroReplicaWorkloads: %v", err)
+	}
+	if len(audit.ZeroReplicaWorkloads) != 1 || audit.ZeroReplicaWorkloads[0].Name != "scaled-down" {
+		t.Fatalf("Deployment finding was discarded by a StatefulSet LIST failure: %+v", audit.ZeroReplicaWorkloads)
+	}
+	var found bool
+	for _, warning := range audit.DetectorWarnings {
+		if warning.Category == "Zero-replica workloads" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("StatefulSet LIST failure was not surfaced as a detector warning: %+v", audit.DetectorWarnings)
+	}
+}
+
+func TestOrphanedPVCsUnrecognizedPhaseIsExplicit(t *testing.T) {
+	age := metav1.NewTime(time.Now().Add(-40*24*time.Hour - time.Hour))
+	pvc := &corev1.PersistentVolumeClaim{
+		ObjectMeta: metav1.ObjectMeta{Name: "odd-phase", Namespace: "app", CreationTimestamp: age},
+		// Phase intentionally left unset: the zero value is neither Pending,
+		// Bound, nor Lost, and must not be silently treated as any of them.
+		Status: corev1.PersistentVolumeClaimStatus{},
+	}
+	wa := newTestAuditor(7, pvc)
+	audit := &WasteAudit{}
+	if err := wa.detectOrphanedPVCs(audit, ""); err != nil {
+		t.Fatalf("detectOrphanedPVCs: %v", err)
+	}
+	if len(audit.OrphanedPVCs) != 1 {
+		t.Fatalf("unrecognized-phase PVC was not reported: %+v", audit.OrphanedPVCs)
+	}
+	got := audit.OrphanedPVCs[0]
+	if got.Status != PVCUnrecognizedPhase {
+		t.Fatalf("Status = %q, want %q", got.Status, PVCUnrecognizedPhase)
+	}
+	if got.Reason == "" {
+		t.Fatal("unrecognized-phase PVC has an empty Reason")
+	}
+	for _, bad := range []string{"Pending", "Bound", "Lost"} {
+		if strings.Contains(got.Reason, bad) && !strings.Contains(got.Reason, "not classify as Pending, Bound, or Lost") {
+			t.Fatalf("reason mischaracterizes the unrecognized phase as %q: %q", bad, got.Reason)
+		}
+	}
+	if got.Score <= 0 {
+		t.Fatalf("unrecognized-phase PVC has a non-positive score: %g", got.Score)
+	}
+}
+
+// jobWithConditions builds a plain Job fixture for Phase 3B terminal-state
+// tests. ageDays drives CreationTimestamp; completionTime is nil unless the
+// caller supplies one.
+func jobWithConditions(name string, ageDays int, active, succeeded, failed int32, completionTime *metav1.Time, conditions ...batchv1.JobCondition) *batchv1.Job {
+	return &batchv1.Job{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: name, Namespace: "app",
+			CreationTimestamp: metav1.NewTime(time.Now().Add(-time.Duration(ageDays)*24*time.Hour - time.Hour)),
+		},
+		Status: batchv1.JobStatus{
+			Active: active, Succeeded: succeeded, Failed: failed,
+			CompletionTime: completionTime,
+			Conditions:     conditions,
+		},
+	}
+}
+
+func jobCondition(t batchv1.JobConditionType, status corev1.ConditionStatus) batchv1.JobCondition {
+	return batchv1.JobCondition{Type: t, Status: status}
+}
+
+// TestStaleJobsCompletedUsesCompletionAgeNotCreationAge covers scenario A:
+// Complete=True with a CompletionTime old enough to clear minAgeDays produces
+// exactly one Completed finding, and its age is completion age, not the
+// (much older) creation age.
+func TestStaleJobsCompletedUsesCompletionAgeNotCreationAge(t *testing.T) {
+	completedAt := metav1.NewTime(time.Now().Add(-10*24*time.Hour - time.Hour))
+	job := jobWithConditions("finished", 100, 0, 3, 0, &completedAt, jobCondition(batchv1.JobComplete, corev1.ConditionTrue))
+	wa := newTestAuditor(7, job)
+	audit := &WasteAudit{}
+	if err := wa.detectStaleJobs(audit, ""); err != nil {
+		t.Fatalf("detectStaleJobs: %v", err)
+	}
+	if len(audit.StaleJobs) != 1 {
+		t.Fatalf("StaleJobs = %+v, want exactly 1 Completed finding", audit.StaleJobs)
+	}
+	got := audit.StaleJobs[0]
+	if got.JobStatus != "Completed" || !got.CompletionTimeKnown {
+		t.Fatalf("expected a Completed finding with a known completion time: %+v", got)
+	}
+	if got.AgeDays != 10 {
+		t.Fatalf("AgeDays = %d, want 10 (completion age), not the 100-day creation age", got.AgeDays)
+	}
+}
+
+// TestStaleJobsCompletedGatesOnCompletionAgeNotCreationAge covers scenario B:
+// a Job created 100 days ago but completed only 2 days ago must NOT be a
+// stale-retention candidate under minAgeDays=7, even though its creation age
+// alone would clear that threshold.
+func TestStaleJobsCompletedGatesOnCompletionAgeNotCreationAge(t *testing.T) {
+	completedAt := metav1.NewTime(time.Now().Add(-2*24*time.Hour - time.Hour))
+	job := jobWithConditions("recently-finished", 100, 0, 1, 0, &completedAt, jobCondition(batchv1.JobComplete, corev1.ConditionTrue))
+	wa := newTestAuditor(7, job)
+	audit := &WasteAudit{}
+	if err := wa.detectStaleJobs(audit, ""); err != nil {
+		t.Fatalf("detectStaleJobs: %v", err)
+	}
+	if len(audit.StaleJobs) != 0 {
+		t.Fatalf("a Job completed 2 days ago must not clear minAgeDays=7 just because it was created 100 days ago: %+v", audit.StaleJobs)
+	}
+}
+
+// TestStaleJobsCompletedWithoutCompletionTimeFallsBackHonestly covers
+// scenario C: Complete=True with CompletionTime nil must not invent a
+// completion timestamp; it falls back to creation age and says so.
+func TestStaleJobsCompletedWithoutCompletionTimeFallsBackHonestly(t *testing.T) {
+	job := jobWithConditions("no-completion-time", 40, 0, 1, 0, nil, jobCondition(batchv1.JobComplete, corev1.ConditionTrue))
+	wa := newTestAuditor(7, job)
+	audit := &WasteAudit{}
+	if err := wa.detectStaleJobs(audit, ""); err != nil {
+		t.Fatalf("detectStaleJobs: %v", err)
+	}
+	if len(audit.StaleJobs) != 1 {
+		t.Fatalf("StaleJobs = %+v, want exactly 1 Completed finding", audit.StaleJobs)
+	}
+	got := audit.StaleJobs[0]
+	if got.CompletionTimeKnown {
+		t.Fatal("CompletionTimeKnown must be false when Kubernetes reported no completionTime")
+	}
+	if got.AgeDays != 40 {
+		t.Fatalf("AgeDays = %d, want 40 (creation-age fallback)", got.AgeDays)
+	}
+	if !strings.Contains(got.Reason, "no completionTime was reported") || strings.Contains(got.Reason, "Completed 40 days ago") {
+		t.Fatalf("fallback reason must be honest about the missing completion timestamp: %q", got.Reason)
+	}
+}
+
+// TestStaleJobsFailedDoesNotClaimFailureAge covers scenario D: Failed=True
+// produces exactly one Failed finding, and the evidence must identify its age
+// as resource/object creation age, never failure age.
+func TestStaleJobsFailedDoesNotClaimFailureAge(t *testing.T) {
+	job := jobWithConditions("broken", 40, 0, 0, 3, nil, jobCondition(batchv1.JobFailed, corev1.ConditionTrue))
+	wa := newTestAuditor(7, job)
+	audit := &WasteAudit{}
+	if err := wa.detectStaleJobs(audit, ""); err != nil {
+		t.Fatalf("detectStaleJobs: %v", err)
+	}
+	if len(audit.StaleJobs) != 1 || audit.StaleJobs[0].JobStatus != "Failed" {
+		t.Fatalf("StaleJobs = %+v, want exactly 1 Failed finding", audit.StaleJobs)
+	}
+	got := audit.StaleJobs[0]
+	if got.AgeDays != 40 {
+		t.Fatalf("AgeDays = %d, want 40 (creation age, the only signal available for Failed Jobs)", got.AgeDays)
+	}
+	for _, bad := range []string{"failure age", "time since failure", "Failed 40 days ago", "failed 40 days ago"} {
+		if strings.Contains(got.Reason, bad) {
+			t.Fatalf("reason claims a failure timestamp Kubernetes does not provide: %q", got.Reason)
+		}
+	}
+	if !strings.Contains(got.Reason, "created") {
+		t.Fatalf("reason does not identify the age signal as resource/object creation age: %q", got.Reason)
+	}
+}
+
+// TestStaleJobsActiveWithSucceededCountersIsNotFlagged covers scenario E: an
+// active parallel Job with successful attempts but no terminal condition.
+func TestStaleJobsActiveWithSucceededCountersIsNotFlagged(t *testing.T) {
+	job := jobWithConditions("parallel-in-progress", 40, 3, 2, 0, nil)
+	wa := newTestAuditor(7, job)
+	audit := &WasteAudit{}
+	if err := wa.detectStaleJobs(audit, ""); err != nil {
+		t.Fatalf("detectStaleJobs: %v", err)
+	}
+	if len(audit.StaleJobs) != 0 {
+		t.Fatalf("an active parallel Job with successful attempts must not be a retention finding: %+v", audit.StaleJobs)
+	}
+}
+
+// TestStaleJobsRetryingWithFailedCountersIsNotFlagged covers scenario F: an
+// actively retrying Job with failed attempts but no terminal condition.
+func TestStaleJobsRetryingWithFailedCountersIsNotFlagged(t *testing.T) {
+	job := jobWithConditions("retrying", 40, 2, 0, 3, nil)
+	wa := newTestAuditor(7, job)
+	audit := &WasteAudit{}
+	if err := wa.detectStaleJobs(audit, ""); err != nil {
+		t.Fatalf("detectStaleJobs: %v", err)
+	}
+	if len(audit.StaleJobs) != 0 {
+		t.Fatalf("an actively-retrying Job with failed attempts must not be a retention finding: %+v", audit.StaleJobs)
+	}
+}
+
+// TestStaleJobsSuspendedWithHistoricalCountersIsNotFlagged covers scenario G:
+// a suspended Job with historical Succeeded/Failed counters but no terminal
+// Complete/Failed condition.
+func TestStaleJobsSuspendedWithHistoricalCountersIsNotFlagged(t *testing.T) {
+	job := jobWithConditions("paused", 40, 0, 1, 1, nil, jobCondition(batchv1.JobSuspended, corev1.ConditionTrue))
+	wa := newTestAuditor(7, job)
+	audit := &WasteAudit{}
+	if err := wa.detectStaleJobs(audit, ""); err != nil {
+		t.Fatalf("detectStaleJobs: %v", err)
+	}
+	if len(audit.StaleJobs) != 0 {
+		t.Fatalf("a suspended Job must not become a Completed/Failed finding merely because of historical counters: %+v", audit.StaleJobs)
+	}
+}
+
+// TestStaleJobsInactiveWithoutTerminalConditionIsNotFlagged covers scenario
+// H: Active=0 with nonzero counters but no terminal condition is
+// intentionally ambiguous and deferred, not emitted, in this phase.
+func TestStaleJobsInactiveWithoutTerminalConditionIsNotFlagged(t *testing.T) {
+	job := jobWithConditions("ambiguous", 40, 0, 1, 1, nil)
+	wa := newTestAuditor(7, job)
+	audit := &WasteAudit{}
+	if err := wa.detectStaleJobs(audit, ""); err != nil {
+		t.Fatalf("detectStaleJobs: %v", err)
+	}
+	if len(audit.StaleJobs) != 0 {
+		t.Fatalf("Active=0 with no terminal condition is intentionally deferred and must not be flagged in this phase: %+v", audit.StaleJobs)
+	}
+}
+
+// TestStaleJobsMalformedBothTerminalConditionsResolvesToFailedDeterministically
+// covers scenario I: a malformed Job reporting both Complete=True and
+// Failed=True must resolve deterministically (documented choice: Failed wins,
+// so an ambiguous Job is never silently treated as finished cleanly), must
+// never depend on Conditions slice order, and must never produce two
+// findings for one Job.
+func TestStaleJobsMalformedBothTerminalConditionsResolvesToFailedDeterministically(t *testing.T) {
+	job := jobWithConditions("contradictory", 40, 0, 1, 1, nil,
+		jobCondition(batchv1.JobComplete, corev1.ConditionTrue),
+		jobCondition(batchv1.JobFailed, corev1.ConditionTrue),
+	)
+	wa := newTestAuditor(7, job)
+	audit := &WasteAudit{}
+	if err := wa.detectStaleJobs(audit, ""); err != nil {
+		t.Fatalf("detectStaleJobs: %v", err)
+	}
+	if len(audit.StaleJobs) != 1 {
+		t.Fatalf("a malformed Job with both terminal conditions must produce exactly one finding, never two: %+v", audit.StaleJobs)
+	}
+	if audit.StaleJobs[0].JobStatus != "Failed" {
+		t.Fatalf("JobStatus = %q, want the documented conservative resolution %q", audit.StaleJobs[0].JobStatus, "Failed")
+	}
+
+	reordered := jobWithConditions("contradictory-reordered", 40, 0, 1, 1, nil,
+		jobCondition(batchv1.JobFailed, corev1.ConditionTrue),
+		jobCondition(batchv1.JobComplete, corev1.ConditionTrue),
+	)
+	wa2 := newTestAuditor(7, reordered)
+	audit2 := &WasteAudit{}
+	if err := wa2.detectStaleJobs(audit2, ""); err != nil {
+		t.Fatalf("detectStaleJobs: %v", err)
+	}
+	if len(audit2.StaleJobs) != 1 || audit2.StaleJobs[0].JobStatus != "Failed" {
+		t.Fatalf("Conditions slice order must not affect the deterministic resolution: %+v", audit2.StaleJobs)
+	}
+}
+
+// TestStaleJobsCronJobBehaviorUnchangedByPlainJobFix covers scenario J: the
+// CronJob NeverScheduled/NoHistoryLimit path, its multi-finding behavior, and
+// its scoring must be byte-for-byte unaffected by the plain-Job fix.
+func TestStaleJobsCronJobBehaviorUnchangedByPlainJobFix(t *testing.T) {
+	age := metav1.NewTime(time.Now().Add(-40*24*time.Hour - time.Hour))
+	suspended := true
+	cron := &batchv1.CronJob{
+		ObjectMeta: metav1.ObjectMeta{Name: "annual", Namespace: "app", CreationTimestamp: age},
+		Spec:       batchv1.CronJobSpec{Schedule: "0 0 1 1 *", Suspend: &suspended},
+	}
+	wa := newTestAuditor(7, cron)
+	audit := &WasteAudit{}
+	if err := wa.detectStaleJobs(audit, ""); err != nil {
+		t.Fatalf("detectStaleJobs: %v", err)
+	}
+	if len(audit.StaleJobs) != 2 {
+		t.Fatalf("CronJob NeverScheduled+NoHistoryLimit membership changed: %+v", audit.StaleJobs)
+	}
+	scores := map[string]float64{"NeverScheduled": 16, "NoHistoryLimit": 8}
+	for _, x := range audit.StaleJobs {
+		if !x.IsCronJob {
+			t.Fatalf("unexpected non-CronJob finding: %+v", x)
+		}
+		if x.Score != scores[x.JobStatus] {
+			t.Errorf("%s score = %g, want %g (CronJob scoring must be untouched)", x.JobStatus, x.Score, scores[x.JobStatus])
+		}
+		if x.Schedule != "0 0 1 1 *" || x.Suspended == nil || !*x.Suspended {
+			t.Fatalf("CronJob metadata lost: %+v", x)
+		}
+	}
+	if audit.StaleJobs[0].JobStatus != "NeverScheduled" || audit.StaleJobs[1].JobStatus != "NoHistoryLimit" {
+		t.Fatalf("CronJob finding order changed: %v / %v", audit.StaleJobs[0].JobStatus, audit.StaleJobs[1].JobStatus)
+	}
 }
 
 func oldService(name, namespace string, selector map[string]string, serviceType corev1.ServiceType) *corev1.Service {
@@ -1164,6 +1497,12 @@ func TestHPAAlwaysAtMinStaysAgeGatedAndDoesNotOverclaimHistory(t *testing.T) {
 	}
 	if strings.Contains(got.Reason, "never scaled up") {
 		t.Errorf("reason overclaims history the detector never observed: %q", got.Reason)
+	}
+	if !strings.Contains(got.Reason, "created 35 days ago") || !strings.Contains(got.Reason, "how long it has remained at this state was not established") {
+		t.Errorf("reason does not explicitly separate HPA creation age from duration at minReplicas: %q", got.Reason)
+	}
+	if strings.Contains(got.Reason, "at min for") || strings.Contains(got.Reason, "for 35 days") {
+		t.Errorf("reason implies a sustained duration at minReplicas that was never observed: %q", got.Reason)
 	}
 }
 

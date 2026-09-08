@@ -669,32 +669,19 @@ func nsNetPolicySets(scan *clusterScan) (protected, unprotected map[string]bool)
 }
 
 // wasteCountByNS counts all waste audit items per namespace.
+// Namespace badges count every finding attributed to the namespace, including
+// namespace-resource findings, operational findings, and retention findings.
 func wasteCountByNS(scan *clusterScan) map[string]int {
 	counts := make(map[string]int)
-	if scan == nil || scan.wasteAudit == nil {
+	if scan == nil {
 		return counts
 	}
-	wa := scan.wasteAudit
-	for _, p := range wa.StalePods {
-		counts[p.Namespace]++
-	}
-	for _, pvc := range wa.OrphanedPVCs {
-		counts[pvc.Namespace]++
-	}
-	for _, w := range wa.ZeroReplicaWorkloads {
-		counts[w.Namespace]++
-	}
-	for _, j := range wa.StaleJobs {
-		counts[j.Namespace]++
-	}
-	for _, s := range wa.OrphanedServices {
-		counts[s.Namespace]++
-	}
-	for _, ing := range wa.BrokenIngresses {
-		counts[ing.Namespace]++
-	}
-	for _, hpa := range wa.MisconfiguredHPAs {
-		counts[hpa.Namespace]++
+	for _, f := range analyzer.BuildWastePresentation(scan.wasteAudit).Findings {
+		ns := f.Namespace
+		if f.Kind == "Namespace" {
+			ns = f.Name
+		}
+		counts[ns]++
 	}
 	return counts
 }
@@ -797,8 +784,8 @@ func renderOptimizationsPage(scan *clusterScan, activeCtx string, clusterList []
 	sort.Slice(riPoolRows, func(i, j int) bool { return riPoolRows[i].RI1yr > riPoolRows[j].RI1yr })
 
 	// Waste counts
-	var zombieCount, idleCount, zeroReplicaCount, abandonedCount, pvcCount, pvcStorageGB int
-	var pvcCostEst float64
+	var zombieCount, idleCount, zeroReplicaCount, abandonedCount, pvcCount int
+	var pvcPresentation analyzer.WastePresentation
 	var wasteTotal int
 	if scan != nil && scan.wasteAudit != nil {
 		wa := scan.wasteAudit
@@ -813,27 +800,11 @@ func renderOptimizationsPage(scan *clusterScan, activeCtx string, clusterList []
 		zeroReplicaCount = len(wa.ZeroReplicaWorkloads)
 		abandonedCount = len(wa.AbandonedNamespaces)
 		pvcCount = len(wa.OrphanedPVCs)
-		pvcStorageGB = wa.OrphanedPVCStorageGB
-		if wa.EstimatedMonthlyWaste > 0 {
-			pvcCostEst = wa.EstimatedMonthlyWaste
-		} else if pvcStorageGB > 0 {
-			pvcCostEst = float64(pvcStorageGB) * 0.10
-		}
-		wasteTotal = wa.TotalWasteItems
+		pvcPresentation = analyzer.BuildWastePresentation(wa)
+		wasteTotal = pvcPresentation.Counts.Findings
 	}
-
-	pvcNote := fmt.Sprintf("%d GB unattached storage", pvcStorageGB)
-	if pvcStorageGB == 0 {
-		pvcNote = "no size data"
-	}
-	pvcCostCell := ""
-	if pvcCostEst > 0 {
-		pvcCostCell = "$" + formatMoney(pvcCostEst)
-	}
-	totalWasteCost := ""
-	if pvcCostEst > 0 {
-		totalWasteCost = "$" + formatMoney(pvcCostEst)
-	}
+	pvcNote := fmt.Sprintf("%s requested across PVC candidates (%d quantities unknown); billing not established", analyzer.FormatWasteBytes(pvcPresentation.RequestedStorageBytes), pvcPresentation.UnknownStorageRequests)
+	pvcCostCell, totalWasteCost := "", "" // No PVC billing evidence is acquired.
 
 	// Right-sizing
 	var rsRows []rsCandidateRow
@@ -1210,17 +1181,19 @@ func (srv *server) handleSecurityPage(w http.ResponseWriter, r *http.Request) {
 // ── Waste & Drift page ────────────────────────────────────────────────────────
 
 type wastePageData struct {
-	DashHref      string
-	WrHref        string
-	CostsHref     string
-	InfraHref     string
-	WasteHref     string
-	SecurityHref  string
-	IncidentsHref string
-	ActivePage    string
-	ClusterName   string
-	CriticalCount int
-	Clusters      []sidebarCluster
+	Presentation     analyzer.WastePresentation
+	RequestedStorage string
+	DashHref         string
+	WrHref           string
+	CostsHref        string
+	InfraHref        string
+	WasteHref        string
+	SecurityHref     string
+	IncidentsHref    string
+	ActivePage       string
+	ClusterName      string
+	CriticalCount    int
+	Clusters         []sidebarCluster
 
 	TotalWasteItems      int
 	ResourceCandidates   int
@@ -1245,6 +1218,7 @@ type wastePageData struct {
 	ScanAvailable        bool
 	ScanComplete         bool
 	ScannedAtMs          int64
+	FindingRows          []wasteReviewRow
 	ResourceRows         []wasteReviewRow
 	DriftRows            []wasteReviewRow
 	HousekeepingRows     []wasteReviewRow
@@ -1252,8 +1226,68 @@ type wastePageData struct {
 }
 
 type wasteReviewRow struct {
-	Category, Resource, Namespace, Evidence, Age, Storage, ReviewStatus, Command string
-	Score                                                                        float64
+	ID, Category, CategoryKey, Kind, Subtype, GroupKey, GroupLabel     string
+	Resource, Namespace, Evidence, Age, Storage, ReviewStatus, Command string
+	Score                                                              float64
+	Confidence, ConfidenceReason, Inference, Limitations               string
+}
+
+func wasteCategoryKey(f analyzer.WasteFinding) string {
+	switch f.Kind {
+	case "Namespace":
+		return "namespace"
+	case "ReplicaSet":
+		return "replicaset"
+	case "Job", "CronJob":
+		return "job"
+	case "PersistentVolumeClaim":
+		return "storage"
+	case "Service":
+		return "network"
+	case "HorizontalPodAutoscaler":
+		return "scaling"
+	case "Ingress":
+		return "failure"
+	case "Pod":
+		if f.Group == analyzer.WasteOperational {
+			return "failure"
+		}
+		return "workload"
+	case "Deployment", "StatefulSet":
+		return "workload"
+	default:
+		return "info"
+	}
+}
+
+func wasteGroup(f analyzer.WasteFinding) (key, label string) {
+	if f.Group == analyzer.WasteOperational {
+		return "operational", "Operational"
+	}
+	switch f.Section {
+	case "incident":
+		return "operational", "Operational"
+	case "resource":
+		return "resource", "Resource Review"
+	case "drift":
+		return "drift", "Drift"
+	case "housekeeping":
+		return "housekeeping", "Housekeeping / Retention"
+	default:
+		return "resource", "Resource Review"
+	}
+}
+
+func wasteRowFromFinding(f analyzer.WasteFinding) wasteReviewRow {
+	groupKey, groupLabel := wasteGroup(f)
+	return wasteReviewRow{
+		Category: f.Category, CategoryKey: wasteCategoryKey(f), Kind: f.Kind, Subtype: f.Subtype,
+		GroupKey: groupKey, GroupLabel: groupLabel, Resource: f.Name, Namespace: f.Namespace,
+		Evidence: f.Observed, Age: fmt.Sprintf("%dd", f.AgeDays), Storage: f.Storage,
+		ReviewStatus: f.Review, Command: f.Command, Score: f.Priority,
+		Confidence: f.Confidence, ConfidenceReason: f.ConfidenceReason,
+		Inference: f.Inference, Limitations: f.Limitations,
+	}
 }
 
 func wasteCommand(kind, name, namespace string) string {
@@ -1266,50 +1300,49 @@ func wasteCommand(kind, name, namespace string) string {
 	return fmt.Sprintf("kubectl get %s %s -n %s -o yaml", kind, name, namespace)
 }
 
-func buildWasteReviewRows(a *analyzer.WasteAudit, idle []analyzer.StalePod) (resource, drift, housekeeping []wasteReviewRow) {
-	for _, item := range a.AbandonedNamespaces {
-		resource = append(resource, wasteReviewRow{"Abandoned namespace", item.Name, "cluster-scoped", item.Reason, fmt.Sprintf("%dd", item.AgeDays), "—", "Review candidate", wasteCommand("namespace", item.Name, ""), item.Score})
-	}
-	for _, item := range idle {
-		resource = append(resource, wasteReviewRow{"Idle / unmanaged pod", item.Name, item.Namespace, item.Reason, fmt.Sprintf("%dd", item.AgeDays), "—", "Review candidate", wasteCommand("pod", item.Name, item.Namespace), item.Score})
-	}
-	for _, item := range a.OrphanedPVCs {
-		resource = append(resource, wasteReviewRow{"Unattached PVC candidate", item.Name, item.Namespace, item.Reason, fmt.Sprintf("%dd", item.AgeDays), fmt.Sprintf("%d GB", item.SizeGB), "Ownership review", wasteCommand("pvc", item.Name, item.Namespace), item.Score})
-	}
-	for _, item := range a.OrphanedServices {
-		resource = append(resource, wasteReviewRow{"Orphaned Service candidate", item.Name, item.Namespace, item.Reason, fmt.Sprintf("%dd", item.AgeDays), "—", "Selector evidence", wasteCommand("service", item.Name, item.Namespace), item.Score})
-	}
-	for _, item := range a.StaleJobs {
-		kind := "job"
-		if item.IsCronJob {
-			kind = "cronjob"
+func buildWasteReviewRows(a *analyzer.WasteAudit, _ []analyzer.StalePod) (resource, drift, housekeeping []wasteReviewRow) {
+	for _, f := range analyzer.BuildWastePresentation(a).Findings {
+		row := wasteRowFromFinding(f)
+		switch f.Section {
+		case "resource":
+			resource = append(resource, row)
+		case "drift":
+			drift = append(drift, row)
+		case "housekeeping":
+			housekeeping = append(housekeeping, row)
 		}
-		drift = append(drift, wasteReviewRow{"Stale job history", item.Name, item.Namespace, item.Reason, fmt.Sprintf("%dd", item.AgeDays), "—", "Retention review", wasteCommand(kind, item.Name, item.Namespace), item.Score})
 	}
-	for _, item := range a.ZeroReplicaWorkloads {
-		drift = append(drift, wasteReviewRow{"Zero-replica workload", item.Name, item.Namespace, item.Reason, fmt.Sprintf("%dd", item.AgeDays), "—", "Intent review", wasteCommand(strings.ToLower(item.Kind), item.Name, item.Namespace), item.Score})
-	}
-	for _, item := range a.BrokenIngresses {
-		status := "Active routing failure"
-		if !item.IsActive {
-			status = "Configuration review"
-		}
-		drift = append(drift, wasteReviewRow{"Broken ingress", item.Name, item.Namespace, item.Reason, fmt.Sprintf("%dd", item.AgeDays), "—", status, wasteCommand("ingress", item.Name, item.Namespace), item.Score})
-	}
-	for _, item := range a.MisconfiguredHPAs {
-		status := "Configuration review"
-		if item.IsActive {
-			status = "Active autoscaling failure"
-		}
-		drift = append(drift, wasteReviewRow{"Misconfigured HPA", item.Name, item.Namespace, item.Reason, fmt.Sprintf("%dd", item.AgeDays), "—", status, wasteCommand("hpa", item.Name, item.Namespace), item.Score})
-	}
-	for _, item := range a.OldReplicaSets {
-		housekeeping = append(housekeeping, wasteReviewRow{"Old ReplicaSet", item.Name, item.Namespace, item.Reason, fmt.Sprintf("%dd", item.AgeDays), "—", "Housekeeping; excluded from total", wasteCommand("replicaset", item.Name, item.Namespace), item.Score})
-	}
+	// Preserve existing stable group sorting by the unchanged detector score.
 	sort.SliceStable(resource, func(i, j int) bool { return resource[i].Score > resource[j].Score })
 	sort.SliceStable(drift, func(i, j int) bool { return drift[i].Score > drift[j].Score })
 	sort.SliceStable(housekeeping, func(i, j int) bool { return housekeeping[i].Score > housekeeping[j].Score })
 	return
+}
+
+// buildWasteDashboardRows preserves the established group precedence and the
+// stable score-descending order within each group. The legacy score is not used
+// to reorder findings across groups.
+func buildWasteDashboardRows(a *analyzer.WasteAudit) []wasteReviewRow {
+	groups := map[string][]wasteReviewRow{
+		"operational":  nil,
+		"resource":     nil,
+		"drift":        nil,
+		"housekeeping": nil,
+	}
+	for _, f := range analyzer.BuildWastePresentation(a).Findings {
+		row := wasteRowFromFinding(f)
+		groups[row.GroupKey] = append(groups[row.GroupKey], row)
+	}
+	rows := make([]wasteReviewRow, 0)
+	for _, key := range []string{"operational", "resource", "drift", "housekeeping"} {
+		group := groups[key]
+		sort.SliceStable(group, func(i, j int) bool { return group[i].Score > group[j].Score })
+		for i := range group {
+			group[i].ID = fmt.Sprintf("waste-finding-%d", len(rows)+1)
+			rows = append(rows, group[i])
+		}
+	}
+	return rows
 }
 
 const dashboardWasteMinAgeDays = 7
@@ -1370,20 +1403,20 @@ func (srv *server) handleWastePage(w http.ResponseWriter, r *http.Request) {
 		ClusterName:   displayName(ctx),
 		CriticalCount: countCriticalIssues(scan),
 		Clusters:      clusters,
-		ScannedAtMs:   time.Now().UnixMilli(),
-		IncidentHref:  "/incidents" + q + "&status=active",
+
+		IncidentHref: "/incidents" + q + "&status=active",
 	}
 
 	if scan.wasteAudit != nil {
 		wa := scan.wasteAudit
+		data.Presentation = analyzer.BuildWastePresentation(wa)
 		data.ScanAvailable = true
 		data.ScanComplete = len(wa.DetectorWarnings) == 0
-		if data.ScanComplete {
-			data.ScanCoverage = "Complete"
-		} else {
-			data.ScanCoverage = "Incomplete"
+		data.ScanCoverage = data.Presentation.Coverage
+		data.RequestedStorage = analyzer.FormatWasteBytes(data.Presentation.RequestedStorageBytes)
+		if !wa.ScannedAt.IsZero() {
+			data.ScannedAtMs = wa.ScannedAt.UnixMilli()
 		}
-		data.OrphanedPVCStorageGB = wa.OrphanedPVCStorageGB
 		data.OrphanedPVCs = wa.OrphanedPVCs
 		data.ZeroReplicaWorkloads = wa.ZeroReplicaWorkloads
 		data.AbandonedNamespaces = wa.AbandonedNamespaces
@@ -1411,14 +1444,15 @@ func (srv *server) handleWastePage(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		data.ResourceRows, data.DriftRows, data.HousekeepingRows = buildWasteReviewRows(wa, data.IdlePods)
+		data.FindingRows = buildWasteDashboardRows(wa)
 		categoryCounts := []struct {
 			name  string
 			count int
 		}{
-			{"Unattached PVC candidates", len(wa.OrphanedPVCs)},
-			{"Idle / unmanaged pods", len(data.IdlePods)},
-			{"Abandoned namespaces", len(wa.AbandonedNamespaces)},
-			{"Orphaned Service candidates", len(wa.OrphanedServices)},
+			{"PVC state / reference review", len(wa.OrphanedPVCs)},
+			{"Pod ownership review", len(data.IdlePods)},
+			{"Namespace activity review", len(wa.AbandonedNamespaces)},
+			{"Service selector review", len(wa.OrphanedServices)},
 			{"Drift findings", len(data.DriftRows)},
 		}
 		sort.SliceStable(categoryCounts, func(i, j int) bool { return categoryCounts[i].count > categoryCounts[j].count })
@@ -1427,15 +1461,8 @@ func (srv *server) handleWastePage(w http.ResponseWriter, r *http.Request) {
 				data.TopWasteCategories = append(data.TopWasteCategories, fmt.Sprintf("%s (%d)", category.name, category.count))
 			}
 		}
-		data.ResourceCandidates = len(data.AbandonedNamespaces) +
-			len(data.IdlePods) +
-			len(data.OrphanedPVCs) +
-			len(data.StaleJobs) +
-			len(data.ZeroReplicaWorkloads) +
-			len(data.OrphanedServices) +
-			len(data.BrokenIngresses) +
-			len(data.MisconfiguredHPAs)
-		data.TotalWasteItems = data.ResourceCandidates
+		data.ResourceCandidates = data.Presentation.Counts.Review
+		data.TotalWasteItems = data.Presentation.Counts.Findings
 	}
 
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")

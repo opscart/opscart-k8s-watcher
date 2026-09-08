@@ -207,8 +207,8 @@ const wasteHTMLTemplate = `<!DOCTYPE html>
             <h1>🗑️ Waste & Drift Analysis</h1>
             <div class="header-meta">
                 <div>Cluster: <strong>{{.ClusterContext}}</strong></div>
-                <div>Scanned: {{.ScannedAt.Format "2006-01-02 15:04:05 MST"}}</div>
-                <div>Minimum Age: {{.MinAgeDays}} days</div>
+                <div>Scanned: {{.Presentation.ScanTimeLabel}}</div>
+                <div>Minimum resource age for age-gated checks: {{.MinAgeDays}} days</div>
             </div>
         </div>
 
@@ -220,88 +220,53 @@ const wasteHTMLTemplate = `<!DOCTYPE html>
                 <div class="exec-stats">
                     <div class="exec-stat">
                         <div class="exec-stat-value total">{{.TotalWasteItems}}</div>
-                        <div class="exec-stat-label">Total Items</div>
+                        <div class="exec-stat-label">Finding count</div>
                     </div>
                     <div class="exec-stat">
-                        <div class="exec-stat-value critical">{{.CriticalCount}}</div>
-                        <div class="exec-stat-label">Critical</div>
+                        <div class="exec-stat-value critical">{{.Presentation.Counts.DistinctResources}}</div>
+                        <div class="exec-stat-label">Distinct resources</div>
                     </div>
                     <div class="exec-stat">
-                        <div class="exec-stat-value warning">{{.WarningCount}}</div>
-                        <div class="exec-stat-label">Warning</div>
+                        <div class="exec-stat-value warning">{{.Presentation.Counts.Operational}}</div>
+                        <div class="exec-stat-label">Operational findings</div>
                     </div>
-                    {{if gt .OrphanedPVCStorageGB 0}}
+                    {{if gt .Presentation.RequestedStorageBytes 0}}
                     <div class="exec-stat">
-                        <div class="exec-stat-value storage">{{.OrphanedPVCStorageGB}}GB</div>
-                        <div class="exec-stat-label">Idle Storage</div>
+                        <div class="exec-stat-value storage">{{.RequestedStorage}}</div>
+                        <div class="exec-stat-label">Candidate PVC requests</div>
                     </div>
                     {{end}}
                 </div>
                 <hr class="exec-divider">
                 <div class="exec-findings">
-                    <div class="exec-col">
-                        <div class="exec-col-title critical">🔴 Critical — Action Required</div>
-                        {{if gt .ZombiePodCount 0}}
-                        <div class="exec-finding">• {{.ZombiePodCount}} zombie pod(s) — up to {{.MaxZombieRestarts}} restarts</div>
-                        {{end}}
-                        {{if gt .OrphanedPVCCount 0}}
-                        <div class="exec-finding">• {{.OrphanedPVCCount}} orphaned PVC(s){{if gt .OrphanedPVCStorageGB 0}} — {{.OrphanedPVCStorageGB}}GB idle storage{{end}}</div>
-                        {{end}}
-                        {{if gt .AbandonedNamespaceCount 0}}
-                        <div class="exec-finding">• {{.AbandonedNamespaceCount}} abandoned namespace(s)</div>
-                        {{end}}
-                        {{if eq .CriticalCount 0}}<div class="exec-finding none">None</div>{{end}}
-                    </div>
-                    <div class="exec-col">
-                        <div class="exec-col-title warning">🟡 Warning — Review Recommended</div>
-                        {{if gt .StaleJobCount 0}}
-                        <div class="exec-finding">• {{.StaleJobCount}} stale job(s)/cronjob(s)</div>
-                        {{end}}
-                        {{if gt .OrphanedServiceCount 0}}
-                        <div class="exec-finding">• {{.OrphanedServiceCount}} service(s) with no endpoints</div>
-                        {{end}}
-                        {{if gt .ZeroReplicaCount 0}}
-                        <div class="exec-finding">• {{.ZeroReplicaCount}} zero-replica workload(s)</div>
-                        {{end}}
-                        {{if gt .BrokenIngressCount 0}}
-                        <div class="exec-finding">• {{.BrokenIngressCount}} broken ingress(es)</div>
-                        {{end}}
-                        {{if gt .MisconfiguredHPACount 0}}
-                        <div class="exec-finding">• {{.MisconfiguredHPACount}} misconfigured HPA(s)</div>
-                        {{end}}
-                        {{if eq .WarningCount 0}}<div class="exec-finding none">None</div>{{end}}
-                    </div>
-                    <div class="exec-col">
-                        <div class="exec-col-title info">ℹ️ Housekeeping</div>
-                        {{if gt .OldReplicaSetCount 0}}
-                        <div class="exec-finding">• {{.OldReplicaSetCount}} old ReplicaSet(s) from rollouts</div>
-                        {{else}}
-                        <div class="exec-finding none">None</div>
-                        {{end}}
-                    </div>
+                    <div class="exec-col"><div class="exec-col-title critical">Operational findings</div><div class="exec-finding">{{.Presentation.Counts.Operational}} audit findings; this is not an incident-store count. Historical and inferred evidence may be included.</div></div>
+                    <div class="exec-col"><div class="exec-col-title warning">Other review findings</div><div class="exec-finding">{{.Presentation.Counts.Review}} findings. Priority is the unchanged heuristic score, not confidence or savings.</div></div>
+                    <div class="exec-col"><div class="exec-col-title info">Housekeeping / retention</div><div class="exec-finding">{{.Presentation.Counts.Retention}} findings, included in the finding count.</div></div>
                 </div>
             </div>
+            <p>Coverage: {{.Presentation.Coverage}}. Candidate PVC requests: {{.RequestedStorage}} ({{.Presentation.UnknownStorageRequests}} quantities unknown); not measured idle or billable storage.</p>
+            {{range .Presentation.Warnings}}<p>Check warning: {{.Category}}: {{.Error}}</p>{{end}}
 
             <!-- Scorecard -->
             <div class="scorecard">
                 <div class="score-card {{if gt .AbandonedNamespaceCount 0}}critical{{else}}success{{end}}">
-                    <div class="score-label">Abandoned Namespaces</div>
+                    <div class="score-label">Namespace Activity Review</div>
                     <div class="score-value">{{.AbandonedNamespaceCount}}</div>
                 </div>
                 <div class="score-card {{if gt .ZombiePodCount 0}}critical{{else}}success{{end}}">
-                    <div class="score-label">Zombie Pods</div>
+                    <div class="score-label">Pod Failure Evidence</div>
                     <div class="score-value">{{.ZombiePodCount}}</div>
                 </div>
                 <div class="score-card {{if gt .UnmanagedPodCount 0}}critical{{else}}success{{end}}">
-                    <div class="score-label">Unmanaged Pods</div>
+                    <div class="score-label">Pod Ownership Review</div>
                     <div class="score-value">{{.UnmanagedPodCount}}</div>
                 </div>
                 <div class="score-card {{if gt .OrphanedPVCCount 0}}critical{{else}}success{{end}}">
-                    <div class="score-label">Orphaned PVCs</div>
+                    <div class="score-label">PVC State / Reference Review</div>
                     <div class="score-value">{{.OrphanedPVCCount}}</div>
                 </div>
                 <div class="score-card {{if gt .StaleJobCount 0}}warning{{else}}success{{end}}">
-                    <div class="score-label">Stale Jobs/CronJobs</div>
+                    <div class="score-label">Job / CronJob Retention Review</div>
                     <div class="score-value">{{.StaleJobCount}}</div>
                 </div>
                 <div class="score-card {{if gt .ZeroReplicaCount 0}}warning{{else}}success{{end}}">
@@ -309,19 +274,19 @@ const wasteHTMLTemplate = `<!DOCTYPE html>
                     <div class="score-value">{{.ZeroReplicaCount}}</div>
                 </div>
                 <div class="score-card {{if gt .OrphanedServiceCount 0}}warning{{else}}success{{end}}">
-                    <div class="score-label">Orphaned Services</div>
+                    <div class="score-label">Service Selector Review</div>
                     <div class="score-value">{{.OrphanedServiceCount}}</div>
                 </div>
                 <div class="score-card {{if gt .BrokenIngressCount 0}}warning{{else}}success{{end}}">
-                    <div class="score-label">Broken Ingresses</div>
+                    <div class="score-label">Ingress Backend Evidence</div>
                     <div class="score-value">{{.BrokenIngressCount}}</div>
                 </div>
                 <div class="score-card {{if gt .MisconfiguredHPACount 0}}warning{{else}}success{{end}}">
-                    <div class="score-label">Misconfigured HPAs</div>
+                    <div class="score-label">HPA Configuration Review</div>
                     <div class="score-value">{{.MisconfiguredHPACount}}</div>
                 </div>
                 <div class="score-card {{if gt .TotalWasteItems 0}}warning{{else}}success{{end}}">
-                    <div class="score-label">Total Items</div>
+                    <div class="score-label">Finding count</div>
                     <div class="score-value">{{.TotalWasteItems}}</div>
                 </div>
             </div>
@@ -329,34 +294,33 @@ const wasteHTMLTemplate = `<!DOCTYPE html>
             {{if eq .TotalWasteItems 0}}
             <div class="empty-state">
                 <div class="empty-state-icon">✅</div>
-                <h2>No Waste Detected</h2>
-                <p>Your cluster looks clean! No abandoned, idle, or orphaned resources found.</p>
+                <h2>No findings reported</h2>
+                <p>No findings were reported by the available checks. This does not establish a clean cluster.</p>
             </div>
             {{else}}
 
-            <!-- Abandoned Namespaces -->
+            <!-- Namespace Activity Review -->
             {{if gt .AbandonedNamespaceCount 0}}
             <div class="section">
-                <div class="section-title">📁 Abandoned Namespaces ({{.AbandonedNamespaceCount}})</div>
-                {{range .AbandonedNamespaces}}
+                <div class="section-title">📁 Namespace Activity Review ({{.AbandonedNamespaceCount}})</div>
+                {{range $i, $item := .AbandonedNamespaces}}
                 <div class="item-box critical">
                     <div class="item-title">{{.Name}}</div>
                     <div class="item-meta">
                         <div class="item-meta-item"><span class="item-meta-label">Age:</span> {{.AgeDays}} days</div>
                         <div class="item-meta-item"><span class="item-meta-label">Pods:</span> {{.PodCount}}</div>
                     </div>
-                    <div class="item-finding">{{.Reason}}</div>
-                    <div class="item-suggest">kubectl get all -n {{.Name}}</div>
+                    {{template "waste-evidence" (index $.Evidence "AbandonedNamespaces" $i)}}
                 </div>
                 {{end}}
             </div>
             {{end}}
 
-            <!-- Zombie Pods -->
+            <!-- Pod Failure Evidence -->
             {{if gt .ZombiePodCount 0}}
             <div class="section">
-                <div class="section-title">💀 Zombie Pods ({{.ZombiePodCount}})</div>
-                {{range .ZombiePods}}
+                <div class="section-title">💀 Pod Failure Evidence ({{.ZombiePodCount}})</div>
+                {{range $i, $item := .ZombiePods}}
                 <div class="item-box critical">
                     <div class="item-title">{{.Name}} <span class="badge badge-critical">{{.Status}}</span></div>
                     <div class="item-meta">
@@ -364,46 +328,43 @@ const wasteHTMLTemplate = `<!DOCTYPE html>
                         <div class="item-meta-item"><span class="item-meta-label">Age:</span> {{.AgeDays}} days</div>
                         <div class="item-meta-item"><span class="item-meta-label">Restarts:</span> {{.RestartCount}}</div>
                     </div>
-                    <div class="item-finding">{{.Reason}}</div>
-                    <div class="item-suggest">kubectl logs {{.Name}} -n {{.Namespace}} --previous</div>
+                    {{template "waste-evidence" (index $.Evidence "ZombiePods" $i)}}
                 </div>
                 {{end}}
             </div>
             {{end}}
 
-            <!-- Unmanaged Pods -->
+            <!-- Pod Ownership Review -->
             {{if gt .UnmanagedPodCount 0}}
             <div class="section">
-                <div class="section-title">🔓 Unmanaged Pods ({{.UnmanagedPodCount}})</div>
-                {{range .UnmanagedPods}}
+                <div class="section-title">🔓 Pod Ownership Review ({{.UnmanagedPodCount}})</div>
+                {{range $i, $item := .UnmanagedPods}}
                 <div class="item-box warning">
-                    <div class="item-title">{{.Name}} <span class="badge badge-warning">No Controller</span></div>
+                    <div class="item-title">{{.Name}} <span class="badge badge-warning">Owner kind review</span></div>
                     <div class="item-meta">
                         <div class="item-meta-item"><span class="item-meta-label">Namespace:</span> {{.Namespace}}</div>
                         <div class="item-meta-item"><span class="item-meta-label">Age:</span> {{.AgeDays}} days</div>
                         <div class="item-meta-item"><span class="item-meta-label">Restarts:</span> {{.RestartCount}}</div>
                     </div>
-                    <div class="item-finding">{{.Reason}}</div>
-                    <div class="item-suggest">kubectl describe pod {{.Name}} -n {{.Namespace}}</div>
+                    {{template "waste-evidence" (index $.Evidence "UnmanagedPods" $i)}}
                 </div>
                 {{end}}
             </div>
             {{end}}
 
-            <!-- Orphaned PVCs -->
+            <!-- PVC State / Reference Review -->
             {{if gt .OrphanedPVCCount 0}}
             <div class="section">
-                <div class="section-title">💾 Orphaned PVCs ({{.OrphanedPVCCount}}){{if gt .OrphanedPVCStorageGB 0}} &nbsp;—&nbsp; Total idle storage: <strong>{{.OrphanedPVCStorageGB}}GB</strong>{{end}}</div>
-                {{range .OrphanedPVCs}}
+                <div class="section-title">💾 PVC State / Reference Review ({{.OrphanedPVCCount}}) &nbsp;—&nbsp; Candidate requests: <strong>{{.RequestedStorage}}</strong></div>
+                {{range $i, $item := .OrphanedPVCs}}
                 <div class="item-box critical">
-                    <div class="item-title">{{.Name}} <span class="badge badge-critical">{{.Status}}</span></div>
+                    <div class="item-title">{{.Name}} <span class="badge badge-critical">State review</span></div>
                     <div class="item-meta">
                         <div class="item-meta-item"><span class="item-meta-label">Namespace:</span> {{.Namespace}}</div>
-                        <div class="item-meta-item"><span class="item-meta-label">Size:</span> {{.SizeGB}}GB</div>
+                        <div class="item-meta-item"><span class="item-meta-label">Requested:</span> {{(index $.Evidence "OrphanedPVCs" $i).Storage}}</div>
                         <div class="item-meta-item"><span class="item-meta-label">Age:</span> {{.AgeDays}} days</div>
                     </div>
-                    <div class="item-finding">{{.Reason}}</div>
-                    <div class="item-suggest">kubectl get pvc {{.Name}} -n {{.Namespace}} -o yaml</div>
+                    {{template "waste-evidence" (index $.Evidence "OrphanedPVCs" $i)}}
                 </div>
                 {{end}}
             </div>
@@ -412,17 +373,16 @@ const wasteHTMLTemplate = `<!DOCTYPE html>
             <!-- Stale Jobs -->
             {{if gt .StaleJobCount 0}}
             <div class="section">
-                <div class="section-title">⏰ Stale Jobs & CronJobs ({{.StaleJobCount}})</div>
-                {{range .StaleJobs}}
+                <div class="section-title">⏰ Job / CronJob Retention Review ({{.StaleJobCount}})</div>
+                {{range $i, $item := .StaleJobs}}
                 <div class="item-box warning">
                     <div class="item-title">{{.Name}} {{if .IsCronJob}}<span class="badge badge-warning">CronJob</span>{{else}}<span class="badge badge-warning">Job</span>{{end}}</div>
                     <div class="item-meta">
                         <div class="item-meta-item"><span class="item-meta-label">Namespace:</span> {{.Namespace}}</div>
-                        <div class="item-meta-item"><span class="item-meta-label">Status:</span> {{.JobStatus}}</div>
+                        <div class="item-meta-item"><span class="item-meta-label">Review:</span> Status / retention</div>
                         <div class="item-meta-item"><span class="item-meta-label">Age:</span> {{.AgeDays}} days</div>
                     </div>
-                    <div class="item-finding">{{.Reason}}</div>
-                    <div class="item-suggest">kubectl describe {{if .IsCronJob}}cronjob{{else}}job{{end}} {{.Name}} -n {{.Namespace}}</div>
+                    {{template "waste-evidence" (index $.Evidence "StaleJobs" $i)}}
                 </div>
                 {{end}}
             </div>
@@ -432,60 +392,58 @@ const wasteHTMLTemplate = `<!DOCTYPE html>
             {{if gt .ZeroReplicaCount 0}}
             <div class="section">
                 <div class="section-title">📦 Zero-Replica Workloads ({{.ZeroReplicaCount}})</div>
-                {{range .ZeroReplicaWorkloads}}
+                {{range $i, $item := .ZeroReplicaWorkloads}}
                 <div class="item-box low">
                     <div class="item-title">{{.Name}} <span class="badge badge-warning">{{.Kind}}</span></div>
                     <div class="item-meta">
                         <div class="item-meta-item"><span class="item-meta-label">Namespace:</span> {{.Namespace}}</div>
                         <div class="item-meta-item"><span class="item-meta-label">Age:</span> {{.AgeDays}} days</div>
                     </div>
-                    <div class="item-finding">{{.Reason}}</div>
+                    {{template "waste-evidence" (index $.Evidence "ZeroReplicaWorkloads" $i)}}
                 </div>
                 {{end}}
             </div>
             {{end}}
 
-            <!-- Orphaned Services -->
+            <!-- Service Selector Review -->
             {{if gt .OrphanedServiceCount 0}}
             <div class="section">
-                <div class="section-title">🔌 Orphaned Services ({{.OrphanedServiceCount}})</div>
-                {{range .OrphanedServices}}
+                <div class="section-title">🔌 Service Selector Review ({{.OrphanedServiceCount}})</div>
+                {{range $i, $item := .OrphanedServices}}
                 <div class="item-box warning">
                     <div class="item-title">{{.Name}} <span class="badge badge-warning">{{.Type}}</span></div>
                     <div class="item-meta">
                         <div class="item-meta-item"><span class="item-meta-label">Namespace:</span> {{.Namespace}}</div>
                         <div class="item-meta-item"><span class="item-meta-label">Age:</span> {{.AgeDays}} days</div>
                     </div>
-                    <div class="item-finding">{{.Reason}}</div>
-                    <div class="item-suggest">kubectl describe service {{.Name}} -n {{.Namespace}}</div>
+                    {{template "waste-evidence" (index $.Evidence "OrphanedServices" $i)}}
                 </div>
                 {{end}}
             </div>
             {{end}}
 
-            <!-- Broken Ingresses -->
+            <!-- Ingress Backend Evidence -->
             {{if gt .BrokenIngressCount 0}}
             <div class="section">
-                <div class="section-title">🌐 Broken Ingresses ({{.BrokenIngressCount}})</div>
-                {{range .BrokenIngresses}}
+                <div class="section-title">🌐 Ingress Backend Evidence ({{.BrokenIngressCount}})</div>
+                {{range $i, $item := .BrokenIngresses}}
                 <div class="item-box warning">
                     <div class="item-title">{{.Name}}</div>
                     <div class="item-meta">
                         <div class="item-meta-item"><span class="item-meta-label">Namespace:</span> {{.Namespace}}</div>
                         <div class="item-meta-item"><span class="item-meta-label">Age:</span> {{.AgeDays}} days</div>
                     </div>
-                    <div class="item-finding">{{.Reason}}</div>
-                    <div class="item-suggest">kubectl describe ingress {{.Name}} -n {{.Namespace}}</div>
+                    {{template "waste-evidence" (index $.Evidence "BrokenIngresses" $i)}}
                 </div>
                 {{end}}
             </div>
             {{end}}
 
-            <!-- Misconfigured HPAs -->
+            <!-- HPA Configuration Review -->
             {{if gt .MisconfiguredHPACount 0}}
             <div class="section">
-                <div class="section-title">📈 Misconfigured HPAs ({{.MisconfiguredHPACount}})</div>
-                {{range .MisconfiguredHPAs}}
+                <div class="section-title">📈 HPA Configuration Review ({{.MisconfiguredHPACount}})</div>
+                {{range $i, $item := .MisconfiguredHPAs}}
                 <div class="item-box warning">
                     <div class="item-title">{{.Name}} <span class="badge badge-warning">{{.Condition}}</span></div>
                     <div class="item-meta">
@@ -494,31 +452,30 @@ const wasteHTMLTemplate = `<!DOCTYPE html>
                         <div class="item-meta-item"><span class="item-meta-label">Age:</span> {{.AgeDays}} days</div>
                         <div class="item-meta-item"><span class="item-meta-label">Replicas:</span> {{.MinReplicas}}-{{.MaxReplicas}}</div>
                     </div>
-                    <div class="item-finding">{{.Reason}}</div>
-                    <div class="item-suggest">kubectl describe hpa {{.Name}} -n {{.Namespace}}</div>
+                    {{template "waste-evidence" (index $.Evidence "MisconfiguredHPAs" $i)}}
                 </div>
                 {{end}}
             </div>
             {{end}}
 
-            <!-- Housekeeping Items (not counted in total) -->
+            <!-- Housekeeping Items (included in findings) -->
             {{if gt .OldReplicaSetCount 0}}
             <div class="section">
-                <div class="section-title">📋 Old ReplicaSets - Rollout Leftovers ({{.OldReplicaSetCount}})</div>
+                <div class="section-title">📋 ReplicaSet Retention Review ({{.OldReplicaSetCount}})</div>
                 <p style="color: #718096; font-size: 14px; margin-bottom: 15px;">
-                    ℹ️ These are leftover ReplicaSets from deployment rollouts. Safe to clean up but not counted in total waste items.
+                    Retention findings are included in the finding count. Age and desired replicas do not establish obsolescence or rollback requirements.
                 </p>
                 {{if gt .OldReplicaSetCount 20}}
                 <div class="item-box low">
                     <div class="item-title">{{.OldReplicaSetCount}} old ReplicaSets found</div>
                     <div class="item-finding">
-                        Kubernetes retains old ReplicaSets for rollback history. These accumulate over time from deployment updates.
-                        Most are safe to delete, but check with team first.
+                        Observed: {{.OldReplicaSetCount}} ReplicaSets met the existing age/desired-replica check.
+                        Inference: retention may warrant review. Limitations: actual replicas, revision history, rollback needs, and retention policy were not checked. Evidence confidence: Not assessed. Review retention requirements with the owner.
                     </div>
-                    <div class="item-suggest">kubectl get rs -A | awk '$3==0 && $4==0'</div>
+                    <div class="item-suggest">kubectl get rs -A -o yaml</div>
                 </div>
                 {{else}}
-                {{range .OldReplicaSets}}
+                {{range $i, $item := .OldReplicaSets}}
                 <div class="item-box low">
                     <div class="item-title">{{.Name}}</div>
                     <div class="item-meta">
@@ -526,6 +483,7 @@ const wasteHTMLTemplate = `<!DOCTYPE html>
                         <div class="item-meta-item"><span class="item-meta-label">Owner:</span> {{.OwnerDeployment}}</div>
                         <div class="item-meta-item"><span class="item-meta-label">Age:</span> {{.AgeDays}} days</div>
                     </div>
+                    {{template "waste-evidence" (index $.Evidence "OldReplicaSets" $i)}}
                 </div>
                 {{end}}
                 {{end}}
@@ -536,23 +494,35 @@ const wasteHTMLTemplate = `<!DOCTYPE html>
 
             <!-- Footer -->
             <div class="footer">
-                <p><strong>Note:</strong> This report shows SUGGESTIONS based on observed data. Always verify with the owning team before removing resources.</p>
-                <p><em>Old ReplicaSets are shown separately and not counted in the total waste items (they're low-severity housekeeping from deployment rollouts).</em></p>
-                <p>Generated by opscart-k8s-watcher on {{.ScannedAt.Format "2006-01-02 15:04:05 MST"}}</p>
+                <p><strong>Note:</strong> This report separates observations from inferences. Review intent and retention requirements with the owner.</p>
+                <p><em>All findings include retention and operational findings. Distinct resources are counted by kind, namespace, and name.</em></p>
+                <p>Audit scanned: {{.Presentation.ScanTimeLabel}} · Generated by opscart-k8s-watcher</p>
             </div>
         </div>
     </div>
 </body>
-</html>`
+</html>
+{{define "waste-evidence"}}<div class="item-finding">Observed: {{.Observed}}</div>
+<div class="item-finding">Inference: {{.Inference}}</div>
+<div class="item-finding">Limitations: {{.Limitations}}</div>
+<div class="item-finding">Evidence confidence: {{.Confidence}} — {{.ConfidenceReason}} Priority score: {{.Priority}} (legacy heuristic).</div>
+<div class="item-suggest">Review: {{.Review}}<br>{{.Command}}</div>{{end}}
+`
 
 type WasteHTMLData struct {
+	// Additive presentation contract. Legacy summary fields below remain available
+	// for source compatibility; templates use Presentation.Counts instead.
+	Presentation     analyzer.WastePresentation
+	RequestedStorage string
+	Evidence         map[string][]analyzer.WasteFinding
+
 	ClusterContext string
 	ScannedAt      time.Time
 	MinAgeDays     int
 
 	// Summary counts for executive section
-	CriticalCount    int
-	WarningCount     int
+	CriticalCount     int
+	WarningCount      int
 	MaxZombieRestarts int32
 
 	// Counts
@@ -567,7 +537,7 @@ type WasteHTMLData struct {
 	BrokenIngressCount      int
 	MisconfiguredHPACount   int
 	OldReplicaSetCount      int
-	TotalWasteItems         int
+	TotalWasteItems         int // Canonical finding count; includes ReplicaSet retention findings.
 
 	// Data
 	AbandonedNamespaces  []analyzer.AbandonedNamespace
@@ -582,7 +552,11 @@ type WasteHTMLData struct {
 	OldReplicaSets       []analyzer.OldReplicaSet
 }
 
-func GenerateWasteHTML(audit *analyzer.WasteAudit, clusterContext string, minAgeDays int) error {
+func buildWasteHTMLData(audit *analyzer.WasteAudit, clusterContext string, minAgeDays int) WasteHTMLData {
+	p := analyzer.BuildWastePresentation(audit)
+	if audit == nil {
+		audit = &analyzer.WasteAudit{}
+	}
 	// Separate zombie from unmanaged pods
 	zombiePods := []analyzer.StalePod{}
 	unmanagedPods := []analyzer.StalePod{}
@@ -621,7 +595,7 @@ func GenerateWasteHTML(audit *analyzer.WasteAudit, clusterContext string, minAge
 		BrokenIngressCount:      len(audit.BrokenIngresses),
 		MisconfiguredHPACount:   len(audit.MisconfiguredHPAs),
 		OldReplicaSetCount:      len(audit.OldReplicaSets),
-		TotalWasteItems:         audit.TotalWasteItems,
+		TotalWasteItems:         p.Counts.Findings,
 		AbandonedNamespaces:     audit.AbandonedNamespaces,
 		ZombiePods:              zombiePods,
 		UnmanagedPods:           unmanagedPods,
@@ -634,6 +608,25 @@ func GenerateWasteHTML(audit *analyzer.WasteAudit, clusterContext string, minAge
 		OldReplicaSets:          audit.OldReplicaSets,
 	}
 
+	data.Presentation = p
+	data.RequestedStorage = analyzer.FormatWasteBytes(p.RequestedStorageBytes)
+	data.Evidence = map[string][]analyzer.WasteFinding{
+		"AbandonedNamespaces":  p.FindingsInCategory("Namespace activity review"),
+		"ZombiePods":           p.FindingsInCategory("Pod failure evidence"),
+		"UnmanagedPods":        p.FindingsInCategory("Pod ownership review"),
+		"OrphanedPVCs":         p.FindingsInCategory("PVC state / reference review"),
+		"StaleJobs":            p.FindingsInCategory("Job / CronJob retention review"),
+		"ZeroReplicaWorkloads": p.FindingsInCategory("Zero-replica workload"),
+		"OrphanedServices":     p.FindingsInCategory("Service selector review"),
+		"BrokenIngresses":      p.FindingsInCategory("Ingress backend evidence"),
+		"MisconfiguredHPAs":    p.FindingsInCategory("HPA configuration review"),
+		"OldReplicaSets":       p.FindingsInCategory("ReplicaSet retention review"),
+	}
+	return data
+}
+
+func GenerateWasteHTML(audit *analyzer.WasteAudit, clusterContext string, minAgeDays int) error {
+	data := buildWasteHTMLData(audit, clusterContext, minAgeDays)
 	tmpl, err := template.New("waste").Parse(wasteHTMLTemplate)
 	if err != nil {
 		return fmt.Errorf("parsing template: %w", err)
