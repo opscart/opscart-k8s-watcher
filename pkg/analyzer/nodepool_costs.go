@@ -266,17 +266,20 @@ type nodePoolBuilder struct {
 func (b *nodePoolBuilder) build(npa *NodePoolCostAnalyzer) models.NodePoolCost {
 	nodeCount := len(b.nodes)
 
-	// Determine VM size — use most common across nodes
 	vmSize := b.vmSize
 	if vmSize == "" && len(b.nodes) > 0 {
 		vmSize = b.nodes[0].VMSize
 	}
 
-	// Look up pricing
-	var pricePerHour, pricePerMonth float64
+	// Capacity comes from the Kubernetes node snapshot. Monetary values come
+	// only from the configured provider API. A provider miss/error stays
+	// unavailable; static catalogs and closest-SKU estimates must never become
+	// production dollar values.
 	var cpuPerNode, memPerNode float64
-	var spotDiscount float64
-	var riSavings, riSavings3yr float64
+	if len(b.nodes) > 0 {
+		cpuPerNode = b.nodes[0].CPUCapacity
+		memPerNode = b.nodes[0].MemGBCapacity
+	}
 
 	region := b.region
 	if region == "" {
@@ -289,45 +292,16 @@ func (b *nodePoolBuilder) build(npa *NodePoolCostAnalyzer) models.NodePoolCost {
 			InstanceType: vmSize, Region: region, OS: b.os, CapacityType: b.priority,
 		})
 	}
-	pricing, azureCatalogMatch := LookupVMPrice(vmSize, region)
-	if priceErr == nil {
+
+	var pricePerHour, pricePerMonth float64
+	if priceErr == nil && priceResult.HourlyPrice > 0 {
 		pricePerHour = priceResult.HourlyPrice
 		pricePerMonth = pricePerHour * 730
 		if !priceResult.RefreshedAt.IsZero() && priceResult.RefreshedAt.After(npa.lastPriceRefresh) {
 			npa.lastPriceRefresh = priceResult.RefreshedAt
 		}
-	}
-	if b.provider == CloudProviderAzure && azureCatalogMatch {
-		cpuPerNode = float64(pricing.CPUCores)
-		memPerNode = pricing.MemoryGB
-		if strings.EqualFold(b.priority, "spot") && priceErr == nil {
-			spotDiscount = 1.0 - (pricing.SpotHour / pricing.PayAsYouGoHour)
-		}
-		// RI savings potential (if not already spot)
-		if !strings.EqualFold(b.priority, "spot") {
-			if pricing.OneYearRI > 0 {
-				riSavings = (pricing.PayAsYouGoMonth - pricing.OneYearRI) * float64(nodeCount)
-			}
-			if pricing.ThreeYearRI > 0 {
-				riSavings3yr = (pricing.PayAsYouGoMonth - pricing.ThreeYearRI) * float64(nodeCount)
-			}
-		}
-	} else if b.provider == CloudProviderAzure && npa.providerOverride == "" && priceErr != nil {
-		// Preserve the existing Azure-only capacity fallback. It is never used
-		// for AWS or unknown nodes.
-		if len(b.nodes) > 0 {
-			cpuPerNode = b.nodes[0].CPUCapacity
-			memPerNode = b.nodes[0].MemGBCapacity
-			// Try to estimate cost from closest SKU
-			if estimated, ok := EstimateVMFromResources(cpuPerNode, memPerNode); ok {
-				pricePerHour = estimated.PayAsYouGoHour
-				pricePerMonth = estimated.PayAsYouGoMonth
-				priceErr = nil
-			}
-		}
-	} else if len(b.nodes) > 0 {
-		cpuPerNode = b.nodes[0].CPUCapacity
-		memPerNode = b.nodes[0].MemGBCapacity
+	} else if priceErr == nil {
+		priceErr = fmt.Errorf("pricing provider returned a non-positive hourly price for %q", vmSize)
 	}
 
 	// Sum utilization across all nodes in pool
@@ -372,15 +346,15 @@ func (b *nodePoolBuilder) build(npa *NodePoolCostAnalyzer) models.NodePoolCost {
 		PricePerNodeHour:     pricePerHour,
 		PricePerNodeMonth:    pricePerMonth,
 		TotalMonthly:         pricePerMonth * float64(nodeCount),
-		SpotDiscount:         spotDiscount,
+		SpotDiscount:         0,
 		TotalCPUCapacity:     totalCPUCap,
 		TotalMemoryCapacity:  totalMemCap,
 		CPURequested:         totalCPUReq,
 		MemoryRequested:      totalMemReq,
 		CPUUtilizationPct:    cpuUtil,
 		MemoryUtilizationPct: memUtil,
-		RISavings:            riSavings,
-		RISavings3yr:         riSavings3yr,
+		RISavings:            0,
+		RISavings3yr:         0,
 		PricingWarning: func() string {
 			if priceErr != nil {
 				return priceErr.Error()
