@@ -2994,6 +2994,147 @@ func buildStorageAwareOptimizationScenarios(
 	)
 }
 
+func TestBuildNodeOptimizationRecommendationsClassifiesUnsupportedCSIStorageAsPartial(t *testing.T) {
+	info0, node0 := topologySpreadTestNode("node-0", "userpool", "worker-0", "zone-a", "centralus")
+	info1, node1 := topologySpreadTestNode("node-1", "userpool", "worker-1", "zone-a", "centralus")
+	pod := pvcBackedOptimizationTestPod("apps", "stateful", "node-0", "data")
+	claim, volume := boundOptimizationTestVolume("apps", "data", "pv-data", nil)
+	volume.Spec.NFS = nil
+	volume.Spec.CSI = &corev1.CSIPersistentVolumeSource{
+		Driver:       "storage.example.test",
+		VolumeHandle: "volume-1",
+	}
+
+	summary := buildStorageAwareOptimizationScenarios(
+		[]models.NodeInfo{info0, info1},
+		[]corev1.Node{node0, node1},
+		[]corev1.Pod{pod},
+		[]corev1.PersistentVolumeClaim{claim},
+		[]corev1.PersistentVolume{volume},
+	)
+	got := BuildNodeOptimizationRecommendations(summary, []corev1.Pod{pod})
+
+	if len(got) != 1 || got[0].Status != NodeOptimizationRecommendationPartial {
+		t.Fatalf("recommendations = %#v, want one PARTIAL result", got)
+	}
+	if len(got[0].Blockers) != 1 || got[0].Blockers[0].Code != "pvc_storage_mobility_unproven" {
+		t.Fatalf("blockers = %#v, want pvc_storage_mobility_unproven", got[0].Blockers)
+	}
+	if len(got[0].Assignments) != 0 || got[0].PodsAssigned != 0 {
+		t.Fatalf("assignments = %#v assigned=%d, want no positive assignment evidence", got[0].Assignments, got[0].PodsAssigned)
+	}
+}
+
+func TestBuildNodeOptimizationRecommendationsScopesIncompleteEvidenceByPool(t *testing.T) {
+	infoA0, nodeA0 := topologySpreadTestNode("workers-a-0", "workers-a", "workers-a-0", "zone-a", "centralus")
+	infoA1, nodeA1 := topologySpreadTestNode("workers-a-1", "workers-a", "workers-a-1", "zone-a", "centralus")
+	infoA2, nodeA2 := topologySpreadTestNode("workers-a-2", "workers-a", "workers-a-2", "zone-b", "centralus")
+	infoB0, nodeB0 := topologySpreadTestNode("gpu-workers-0", "gpu-workers", "gpu-workers-0", "zone-a", "centralus")
+	infoB1, _ := topologySpreadTestNode("gpu-workers-1", "gpu-workers", "gpu-workers-1", "zone-b", "centralus")
+	nodeInfos := []models.NodeInfo{infoA0, infoA1, infoA2, infoB0, infoB1}
+	nodes := []corev1.Node{nodeA0, nodeA1, nodeA2, nodeB0}
+	pods := []corev1.Pod{
+		optimizationTestPod("apps", "api", "workers-a-0", corev1.PodRunning, "500m", "256Mi"),
+		optimizationTestPod("apps", "worker", "workers-a-1", corev1.PodRunning, "500m", "256Mi"),
+	}
+
+	build := func(infos []models.NodeInfo, rawNodes []corev1.Node, snapshotPods []corev1.Pod) []NodeOptimizationRecommendation {
+		evidence := BuildNodeOptimizationSchedulingEvidence(infos, rawNodes)
+		summary := BuildNMinusOneNodeOptimizationScenariosWithSchedulingEvidence(infos, snapshotPods, evidence)
+		return BuildNodeOptimizationRecommendations(summary, snapshotPods)
+	}
+	forward := build(nodeInfos, nodes, pods)
+	reversed := build(
+		[]models.NodeInfo{infoB1, infoB0, infoA2, infoA1, infoA0},
+		[]corev1.Node{nodeB0, nodeA2, nodeA1, nodeA0},
+		[]corev1.Pod{pods[1], pods[0]},
+	)
+
+	if !reflect.DeepEqual(forward, reversed) {
+		t.Fatalf("recommendations differ by pool/node/Pod order:\nforward=%#v\nreversed=%#v", forward, reversed)
+	}
+	if len(forward) != 2 {
+		t.Fatalf("recommendation count = %d, want workers-a and gpu-workers", len(forward))
+	}
+	byPool := make(map[string]NodeOptimizationRecommendation, len(forward))
+	for _, recommendation := range forward {
+		byPool[recommendation.PoolKey.PoolName] = recommendation
+	}
+	workers := byPool["workers-a"]
+	if workers.Status != NodeOptimizationRecommendationSimulationPassed || !workers.Evidence.Complete {
+		t.Fatalf("workers-a recommendation = %#v, want independently complete SIMULATION_PASSED", workers)
+	}
+	if workers.SnapshotEvidence.Complete || !workers.SnapshotEvidence.EvidenceIncomplete {
+		t.Fatalf("workers-a SnapshotEvidence = %#v, want global incomplete health retained without status downgrade", workers.SnapshotEvidence)
+	}
+	gpu := byPool["gpu-workers"]
+	if gpu.Status != NodeOptimizationRecommendationPartial || gpu.Evidence.Complete || gpu.Evidence.UnresolvedNodeCount != 1 {
+		t.Fatalf("gpu-workers recommendation = %#v, want pool-scoped PARTIAL for missing Node evidence", gpu)
+	}
+}
+
+func TestBuildNodeOptimizationRecommendationsScopesUnsupportedConstraintByPool(t *testing.T) {
+	infoA0, _ := topologySpreadTestNode("workers-a-0", "workers-a", "workers-a-0", "zone-a", "centralus")
+	infoA1, _ := topologySpreadTestNode("workers-a-1", "workers-a", "workers-a-1", "zone-a", "centralus")
+	infoA2, _ := topologySpreadTestNode("workers-a-2", "workers-a", "workers-a-2", "zone-b", "centralus")
+	infoB0, _ := topologySpreadTestNode("gpu-workers-0", "gpu-workers", "gpu-workers-0", "zone-a", "centralus")
+	infoB1, _ := topologySpreadTestNode("gpu-workers-1", "gpu-workers", "gpu-workers-1", "zone-b", "centralus")
+	podA := optimizationTestPod("apps", "api", "workers-a-0", corev1.PodRunning, "500m", "256Mi")
+	podB := optimizationTestPod("ml", "gpu-job", "gpu-workers-0", corev1.PodRunning, "500m", "256Mi")
+	podB.Spec.SchedulerName = "gpu-scheduler"
+	nodeInfos := []models.NodeInfo{infoA0, infoA1, infoA2, infoB0, infoB1}
+	pods := []corev1.Pod{podA, podB}
+	summary := BuildNMinusOneNodeOptimizationScenariosFromSnapshots(nodeInfos, pods)
+	got := BuildNodeOptimizationRecommendations(summary, pods)
+
+	byPool := make(map[string]NodeOptimizationRecommendation, len(got))
+	for _, recommendation := range got {
+		byPool[recommendation.PoolKey.PoolName] = recommendation
+	}
+	if workers := byPool["workers-a"]; workers.Status != NodeOptimizationRecommendationSimulationPassed || !workers.Evidence.Complete {
+		t.Fatalf("workers-a recommendation = %#v, want independently complete SIMULATION_PASSED", workers)
+	}
+	if gpu := byPool["gpu-workers"]; gpu.Status != NodeOptimizationRecommendationPartial || gpu.Evidence.UnsupportedConstraintPodCount != 1 {
+		t.Fatalf("gpu-workers recommendation = %#v, want pool-scoped unsupported PARTIAL", gpu)
+	}
+}
+
+func TestBuildNodeOptimizationRecommendationsKeepsIncompleteCandidatePoolPartial(t *testing.T) {
+	info0, node0 := topologySpreadTestNode("workers-a-0", "workers-a", "workers-a-0", "zone-a", "centralus")
+	info1, _ := topologySpreadTestNode("workers-a-1", "workers-a", "workers-a-1", "zone-b", "centralus")
+	nodeInfos := []models.NodeInfo{info0, info1}
+	evidence := BuildNodeOptimizationSchedulingEvidence(nodeInfos, []corev1.Node{node0})
+	summary := BuildNMinusOneNodeOptimizationScenariosWithSchedulingEvidence(nodeInfos, nil, evidence)
+	got := BuildNodeOptimizationRecommendations(summary, nil)
+
+	if len(got) != 1 || got[0].PoolKey.PoolName != "workers-a" || got[0].Status != NodeOptimizationRecommendationPartial {
+		t.Fatalf("recommendations = %#v, want workers-a PARTIAL", got)
+	}
+	if got[0].Evidence.Complete || got[0].Evidence.UnresolvedNodeCount != 1 {
+		t.Fatalf("pool evidence = %#v, want unresolved candidate-pool Node evidence", got[0].Evidence)
+	}
+}
+
+func TestBuildNodeOptimizationRecommendationsPreservesClusterWideConstraintEvidenceGate(t *testing.T) {
+	infoA0, nodeA0 := topologySpreadTestNode("workers-a-0", "workers-a", "workers-a-0", "zone-a", "centralus")
+	infoA1, nodeA1 := topologySpreadTestNode("workers-a-1", "workers-a", "workers-a-1", "zone-b", "centralus")
+	infoB0, nodeB0 := topologySpreadTestNode("gpu-workers-0", "gpu-workers", "gpu-workers-0", "zone-a", "centralus")
+	infoB1, _ := topologySpreadTestNode("gpu-workers-1", "gpu-workers", "gpu-workers-1", "zone-b", "centralus")
+	nodeInfos := []models.NodeInfo{infoA0, infoA1, infoB0, infoB1}
+	pod := topologySpreadTestPod("apps", "api", "workers-a-0", corev1.LabelTopologyZone, 1)
+	evidence := BuildNodeOptimizationSchedulingEvidence(nodeInfos, []corev1.Node{nodeA0, nodeA1, nodeB0})
+	summary := BuildNMinusOneNodeOptimizationScenariosWithSchedulingEvidence(nodeInfos, []corev1.Pod{pod}, evidence)
+	got := BuildNodeOptimizationRecommendations(summary, []corev1.Pod{pod})
+
+	byPool := make(map[string]NodeOptimizationRecommendation, len(got))
+	for _, recommendation := range got {
+		byPool[recommendation.PoolKey.PoolName] = recommendation
+	}
+	if workers := byPool["workers-a"]; workers.Status != NodeOptimizationRecommendationPartial {
+		t.Fatalf("workers-a recommendation = %#v, want PARTIAL because topology spread consumes incomplete cluster-wide Node evidence", workers)
+	}
+}
+
 func TestBuildNMinusOneNodeOptimizationScenariosStorageLegacyAndUnconstrained(t *testing.T) {
 	info0, node0 := topologySpreadTestNode("node-0", "userpool", "worker-0", "zone-a", "centralus")
 	info1, node1 := topologySpreadTestNode("node-1", "userpool", "worker-1", "zone-a", "centralus")

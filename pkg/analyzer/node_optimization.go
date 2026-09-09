@@ -127,6 +127,7 @@ type NodeOptimizationPlacement struct {
 // into the pure placement simulator. It performs no Kubernetes or cloud API calls.
 type NodeOptimizationSnapshotSummary struct {
 	Scenarios                     []NodeOptimizationScenario
+	PoolEvidence                  []NodeOptimizationPoolEvidence
 	ExcludedPodCount              int
 	UnresolvedPodCount            int
 	UnresolvedNodeCount           int
@@ -135,7 +136,23 @@ type NodeOptimizationSnapshotSummary struct {
 	UnsupportedConstraintPodCount int
 	SchedulingBlockedPodCount     int
 	EvidenceIncomplete            bool
+	UnscopedEvidenceIncomplete    bool
 	SkippedPoolCount              int
+	Warnings                      []string
+}
+
+// NodeOptimizationPoolEvidence records incomplete or unsupported evidence for
+// one canonical pool. SnapshotSummary counters remain the scan-wide health
+// view; recommendation status uses this scoped evidence instead.
+type NodeOptimizationPoolEvidence struct {
+	PoolKey                       CostPoolKey
+	EvidenceIncomplete            bool
+	Skipped                       bool
+	UnresolvedPodCount            int
+	UnresolvedNodeCount           int
+	DuplicatePodCount             int
+	DuplicateNodeCount            int
+	UnsupportedConstraintPodCount int
 	Warnings                      []string
 }
 
@@ -150,7 +167,11 @@ type NodeOptimizationScenario struct {
 	DaemonSetCPUPerNodeMilli    int64
 	DaemonSetMemoryPerNodeBytes int64
 	SchedulingCaveats           []string
-	Simulation                  NodeOptimizationResult
+	VerifiedChecks              []NodeOptimizationVerifiedCheck
+	// movablePodKeys is the deterministic identity proof used to ensure that a
+	// positive recommendation exposes exactly one assignment per movable Pod.
+	movablePodKeys []string
+	Simulation     NodeOptimizationResult
 }
 
 // BuildNMinusOneNodeOptimizationScenariosFromSnapshots constructs one same-shape
@@ -193,7 +214,7 @@ func buildNMinusOneNodeOptimizationScenarios(
 	pods []corev1.Pod,
 	evidence *NodeOptimizationSchedulingEvidence,
 	storageEvidence *NodeOptimizationStorageEvidence,
-) NodeOptimizationSnapshotSummary {
+) (summary NodeOptimizationSnapshotSummary) {
 	type poolSnapshot struct {
 		key       CostPoolKey
 		nodeCount int
@@ -217,7 +238,28 @@ func buildNMinusOneNodeOptimizationScenarios(
 		inconsistent bool
 	}
 
-	summary := NodeOptimizationSnapshotSummary{}
+	poolEvidenceByKey := make(map[CostPoolKey]*NodeOptimizationPoolEvidence)
+	poolEvidenceFor := func(key CostPoolKey) *NodeOptimizationPoolEvidence {
+		if scoped := poolEvidenceByKey[key]; scoped != nil {
+			return scoped
+		}
+		scoped := &NodeOptimizationPoolEvidence{PoolKey: key}
+		poolEvidenceByKey[key] = scoped
+		return scoped
+	}
+	markPoolSkipped := func(key CostPoolKey) *NodeOptimizationPoolEvidence {
+		scoped := poolEvidenceFor(key)
+		if !scoped.Skipped {
+			scoped.Skipped = true
+			summary.SkippedPoolCount++
+		}
+		return scoped
+	}
+	defer func() {
+		sort.Strings(summary.Warnings)
+		summary.PoolEvidence = sortedNodeOptimizationPoolEvidence(poolEvidenceByKey)
+	}()
+
 	knownNodes := make(map[string]struct{}, len(nodeInfos))
 	nodeKeys := make(map[string]*CostPoolKey, len(nodeInfos))
 	pools := make(map[CostPoolKey]*poolSnapshot)
@@ -234,13 +276,33 @@ func buildNMinusOneNodeOptimizationScenarios(
 	}
 	sort.Strings(duplicateNodeNames)
 	for _, name := range duplicateNodeNames {
-		summary.DuplicateNodeCount++
-		summary.EvidenceIncomplete = true
-		summary.Warnings = append(summary.Warnings, fmt.Sprintf(
+		warning := fmt.Sprintf(
 			"duplicate NodeInfo identity %q appears %d times; node optimization evidence is incomplete",
 			name,
 			nodeNameCounts[name],
-		))
+		)
+		summary.DuplicateNodeCount++
+		summary.EvidenceIncomplete = true
+		summary.Warnings = append(summary.Warnings, warning)
+		scopedKeys := make(map[CostPoolKey]struct{})
+		for _, info := range nodeInfos {
+			if info.Name != name {
+				continue
+			}
+			key := costPoolKeyFromNodeInfo(info)
+			if len(missingCostPoolKeyFields(key)) == 0 {
+				scopedKeys[key] = struct{}{}
+			}
+		}
+		if len(scopedKeys) == 0 {
+			summary.UnscopedEvidenceIncomplete = true
+		}
+		for key := range scopedKeys {
+			scoped := markPoolSkipped(key)
+			scoped.EvidenceIncomplete = true
+			scoped.DuplicateNodeCount++
+			scoped.Warnings = append(scoped.Warnings, warning)
+		}
 	}
 
 	for _, info := range nodeInfos {
@@ -252,41 +314,60 @@ func buildNMinusOneNodeOptimizationScenarios(
 		key := costPoolKeyFromNodeInfo(info)
 
 		if missing := missingCostPoolKeyFields(key); len(missing) > 0 {
-			summary.UnresolvedNodeCount++
-			summary.Warnings = append(summary.Warnings, fmt.Sprintf(
+			warning := fmt.Sprintf(
 				"node %s excluded from node optimization because canonical pool identity is missing: %s",
 				info.Name,
 				strings.Join(missing, ", "),
-			))
+			)
+			summary.UnresolvedNodeCount++
+			summary.EvidenceIncomplete = true
+			summary.UnscopedEvidenceIncomplete = true
+			summary.Warnings = append(summary.Warnings, warning)
 			continue
 		}
 
 		cpuMilli, cpuValid := finiteNonNegativeToInt64(info.CPUCapacity * 1000)
 		if !cpuValid {
-			summary.UnresolvedNodeCount++
-			summary.EvidenceIncomplete = true
-			summary.Warnings = append(summary.Warnings, fmt.Sprintf(
+			warning := fmt.Sprintf(
 				"node %s excluded from node optimization because observed CPU capacity is non-finite, negative, or outside the int64 representable range",
 				info.Name,
-			))
+			)
+			summary.UnresolvedNodeCount++
+			summary.EvidenceIncomplete = true
+			summary.Warnings = append(summary.Warnings, warning)
+			scoped := markPoolSkipped(key)
+			scoped.EvidenceIncomplete = true
+			scoped.UnresolvedNodeCount++
+			scoped.Warnings = append(scoped.Warnings, warning)
 			continue
 		}
 		memBytes, memoryValid := finiteNonNegativeToInt64(info.MemGBCapacity * 1024 * 1024 * 1024)
 		if !memoryValid {
-			summary.UnresolvedNodeCount++
-			summary.EvidenceIncomplete = true
-			summary.Warnings = append(summary.Warnings, fmt.Sprintf(
+			warning := fmt.Sprintf(
 				"node %s excluded from node optimization because observed memory capacity is non-finite, negative, or outside the int64 representable range",
 				info.Name,
-			))
+			)
+			summary.UnresolvedNodeCount++
+			summary.EvidenceIncomplete = true
+			summary.Warnings = append(summary.Warnings, warning)
+			scoped := markPoolSkipped(key)
+			scoped.EvidenceIncomplete = true
+			scoped.UnresolvedNodeCount++
+			scoped.Warnings = append(scoped.Warnings, warning)
 			continue
 		}
 		if cpuMilli <= 0 || memBytes <= 0 {
-			summary.UnresolvedNodeCount++
-			summary.Warnings = append(summary.Warnings, fmt.Sprintf(
+			warning := fmt.Sprintf(
 				"node %s excluded from node optimization because observed CPU or memory capacity is unavailable",
 				info.Name,
-			))
+			)
+			summary.UnresolvedNodeCount++
+			summary.EvidenceIncomplete = true
+			summary.Warnings = append(summary.Warnings, warning)
+			scoped := markPoolSkipped(key)
+			scoped.EvidenceIncomplete = true
+			scoped.UnresolvedNodeCount++
+			scoped.Warnings = append(scoped.Warnings, warning)
 			continue
 		}
 
@@ -316,8 +397,6 @@ func buildNMinusOneNodeOptimizationScenarios(
 	eligibilityWarningsByPool := make(map[CostPoolKey][]string)
 	daemonSetsByPool := make(map[CostPoolKey]map[daemonSetKey]*daemonSetObservation)
 	unsupportedConstraintsByPool := make(map[CostPoolKey][]string)
-	unsupportedRequiredInterPodAffinity := false
-	requiredInterPodAffinityPresent := false
 
 	podNameCounts := make(map[string]int, len(pods))
 	persistentVolumeClaimPodCounts := make(map[string]int)
@@ -332,13 +411,32 @@ func buildNMinusOneNodeOptimizationScenarios(
 	}
 	sort.Strings(duplicatePodNames)
 	for _, name := range duplicatePodNames {
-		summary.DuplicatePodCount++
-		summary.EvidenceIncomplete = true
-		summary.Warnings = append(summary.Warnings, fmt.Sprintf(
+		warning := fmt.Sprintf(
 			"duplicate Pod identity %q appears %d times; node optimization evidence is incomplete",
 			strings.ReplaceAll(name, "\x00", "/"),
 			podNameCounts[name],
-		))
+		)
+		summary.DuplicatePodCount++
+		summary.EvidenceIncomplete = true
+		summary.Warnings = append(summary.Warnings, warning)
+		scopedKeys := make(map[CostPoolKey]struct{})
+		for _, pod := range pods {
+			if namespacedKey(pod.Namespace, pod.Name) != name {
+				continue
+			}
+			if key := nodeKeys[pod.Spec.NodeName]; key != nil {
+				scopedKeys[*key] = struct{}{}
+			}
+		}
+		if len(scopedKeys) == 0 {
+			summary.UnscopedEvidenceIncomplete = true
+		}
+		for key := range scopedKeys {
+			scoped := markPoolSkipped(key)
+			scoped.EvidenceIncomplete = true
+			scoped.DuplicatePodCount++
+			scoped.Warnings = append(scoped.Warnings, warning)
+		}
 	}
 
 	for _, pod := range pods {
@@ -354,19 +452,25 @@ func buildNMinusOneNodeOptimizationScenarios(
 				persistentVolumeClaimPodCounts[namespacedKey(pod.Namespace, claimName)]++
 			}
 		}
-		if hasRequiredPodAffinity(pod) || hasRequiredPodAntiAffinity(pod) {
-			requiredInterPodAffinityPresent = true
-		}
 		cpuMilli, memoryBytes, numericReason := checkedEffectivePodRequests(pod)
 		if numericReason != "" {
-			summary.UnresolvedPodCount++
-			summary.EvidenceIncomplete = true
-			summary.Warnings = append(summary.Warnings, fmt.Sprintf(
+			warning := fmt.Sprintf(
 				"pod %s/%s is unresolved for node optimization because effective resource requests are invalid: %s",
 				pod.Namespace,
 				pod.Name,
 				numericReason,
-			))
+			)
+			summary.UnresolvedPodCount++
+			summary.EvidenceIncomplete = true
+			summary.Warnings = append(summary.Warnings, warning)
+			if key := nodeKeys[pod.Spec.NodeName]; key != nil {
+				scoped := markPoolSkipped(*key)
+				scoped.EvidenceIncomplete = true
+				scoped.UnresolvedPodCount++
+				scoped.Warnings = append(scoped.Warnings, warning)
+			} else {
+				summary.UnscopedEvidenceIncomplete = true
+			}
 			continue
 		}
 		input := BuildPodCostInput(pod, knownNodes, nodeKeys, ControllerIndexes{})
@@ -384,31 +488,53 @@ func buildNMinusOneNodeOptimizationScenarios(
 			if reason == "" {
 				reason = string(input.EligibilityReason)
 			}
-			summary.Warnings = append(summary.Warnings, fmt.Sprintf(
+			warning := fmt.Sprintf(
 				"pod %s/%s is unresolved for node optimization: %s",
 				input.Namespace,
 				input.PodName,
 				reason,
-			))
+			)
+			summary.Warnings = append(summary.Warnings, warning)
+			if key := nodeKeys[pod.Spec.NodeName]; key != nil {
+				scoped := markPoolSkipped(*key)
+				scoped.EvidenceIncomplete = true
+				scoped.UnresolvedPodCount++
+				scoped.Warnings = append(scoped.Warnings, warning)
+			} else {
+				summary.UnscopedEvidenceIncomplete = true
+			}
 			continue
 		case PodCostEligible:
 			if input.PoolKey == nil {
-				summary.UnresolvedPodCount++
-				summary.Warnings = append(summary.Warnings, fmt.Sprintf(
+				warning := fmt.Sprintf(
 					"pod %s/%s is eligible but has no canonical pool identity",
 					input.Namespace,
 					input.PodName,
-				))
+				)
+				summary.UnresolvedPodCount++
+				summary.EvidenceIncomplete = true
+				summary.UnscopedEvidenceIncomplete = true
+				summary.Warnings = append(summary.Warnings, warning)
 				continue
 			}
 		default:
-			summary.UnresolvedPodCount++
-			summary.Warnings = append(summary.Warnings, fmt.Sprintf(
+			warning := fmt.Sprintf(
 				"pod %s/%s has unknown optimization eligibility %q",
 				input.Namespace,
 				input.PodName,
 				input.Eligibility,
-			))
+			)
+			summary.UnresolvedPodCount++
+			summary.EvidenceIncomplete = true
+			summary.Warnings = append(summary.Warnings, warning)
+			if key := nodeKeys[pod.Spec.NodeName]; key != nil {
+				scoped := markPoolSkipped(*key)
+				scoped.EvidenceIncomplete = true
+				scoped.UnresolvedPodCount++
+				scoped.Warnings = append(scoped.Warnings, warning)
+			} else {
+				summary.UnscopedEvidenceIncomplete = true
+			}
 			continue
 		}
 
@@ -424,14 +550,17 @@ func buildNMinusOneNodeOptimizationScenarios(
 		}
 		if len(interPodAffinityReasons) > 0 {
 			summary.UnsupportedConstraintPodCount++
-			unsupportedRequiredInterPodAffinity = true
+			summary.EvidenceIncomplete = true
+			summary.UnscopedEvidenceIncomplete = true
 			sort.Strings(interPodAffinityReasons)
-			summary.Warnings = append(summary.Warnings, fmt.Sprintf(
+			warning := fmt.Sprintf(
 				"pod %s/%s: %s",
 				input.Namespace,
 				input.PodName,
 				interPodAffinityReasons[0],
-			))
+			)
+			summary.Warnings = append(summary.Warnings, warning)
+			unsupportedConstraintsByPool[key] = append(unsupportedConstraintsByPool[key], warning)
 			continue
 		}
 		eligibleTopologyPods = append(eligibleTopologyPods, nodeOptimizationTopologyPod{
@@ -493,6 +622,20 @@ func buildNMinusOneNodeOptimizationScenarios(
 			}
 		}
 
+		if evidence == nil && (hasRequiredPodAffinity(pod) || hasRequiredPodAntiAffinity(pod)) {
+			summary.UnsupportedConstraintPodCount++
+			summary.EvidenceIncomplete = true
+			summary.UnscopedEvidenceIncomplete = true
+			warning := fmt.Sprintf(
+				"pod %s/%s: required inter-Pod affinity needs scheduling topology evidence",
+				input.Namespace,
+				input.PodName,
+			)
+			summary.Warnings = append(summary.Warnings, warning)
+			unsupportedConstraintsByPool[key] = append(unsupportedConstraintsByPool[key], warning)
+			continue
+		}
+
 		if evidence == nil && input.WorkloadKind != "DaemonSet" {
 			if reason := nodeSelectorCompatibilityReason(pod.Spec.NodeSelector, key); reason != "" {
 				summary.UnsupportedConstraintPodCount++
@@ -510,14 +653,19 @@ func buildNMinusOneNodeOptimizationScenarios(
 			daemonPodsByPool[key] = append(daemonPodsByPool[key], pod)
 			ownerUID, ok := daemonSetControllerUID(pod)
 			if !ok {
-				summary.EvidenceIncomplete = true
-				summary.Warnings = append(summary.Warnings, fmt.Sprintf(
+				warning := fmt.Sprintf(
 					"pod %s/%s identified as DaemonSet workload %s/%s but controller UID evidence is missing",
 					input.Namespace,
 					input.PodName,
 					input.Namespace,
 					input.WorkloadName,
-				))
+				)
+				summary.EvidenceIncomplete = true
+				summary.Warnings = append(summary.Warnings, warning)
+				scoped := markPoolSkipped(key)
+				scoped.EvidenceIncomplete = true
+				scoped.UnresolvedPodCount++
+				scoped.Warnings = append(scoped.Warnings, warning)
 				continue
 			}
 
@@ -574,36 +722,20 @@ func buildNMinusOneNodeOptimizationScenarios(
 			summary.DuplicateNodeCount += evidence.DuplicateNodeCount
 			summary.Warnings = append(summary.Warnings, evidence.Warnings...)
 		}
+		if evidence.UnmatchedSchedulingNodeCount > 0 {
+			summary.UnscopedEvidenceIncomplete = true
+		}
 	}
 	if storageEvidence != nil && storageEvidence.EvidenceIncomplete {
 		summary.EvidenceIncomplete = true
 		summary.Warnings = append(summary.Warnings, storageEvidence.Warnings...)
 	}
-	if unsupportedRequiredInterPodAffinity {
+	if summary.UnscopedEvidenceIncomplete {
 		for _, key := range keys {
 			if pools[key].nodeCount >= 2 {
-				summary.SkippedPoolCount++
-			}
-		}
-		sort.Strings(summary.Warnings)
-		return summary
-	}
-	if evidence == nil && requiredInterPodAffinityPresent {
-		for _, key := range keys {
-			if pools[key].nodeCount >= 2 {
-				summary.SkippedPoolCount++
-			}
-		}
-		summary.Warnings = append(summary.Warnings,
-			"node optimization skipped because required inter-Pod affinity needs scheduling topology evidence")
-		sort.Strings(summary.Warnings)
-		return summary
-	}
-
-	if summary.EvidenceIncomplete {
-		for _, key := range keys {
-			if pools[key].nodeCount >= 2 {
-				summary.SkippedPoolCount++
+				scoped := markPoolSkipped(key)
+				scoped.EvidenceIncomplete = true
+				scoped.Warnings = append(scoped.Warnings, "pool could not be evaluated because snapshot evidence could not be scoped to a canonical pool")
 			}
 		}
 		sort.Strings(summary.Warnings)
@@ -613,19 +745,42 @@ func buildNMinusOneNodeOptimizationScenarios(
 	for _, key := range keys {
 		pool := pools[key]
 		sort.Strings(pool.nodeNames)
+		if nodeOptimizationPodsRequireClusterWideSchedulingEvidence(movablePodsByPool[key]) &&
+			(summary.UnresolvedPodCount > 0 ||
+				summary.UnresolvedNodeCount > 0 ||
+				summary.DuplicatePodCount > 0 ||
+				summary.DuplicateNodeCount > 0) {
+			warning := fmt.Sprintf(
+				"pool %s skipped because its topology or inter-Pod constraints require complete cluster-wide Pod and Node occupancy evidence",
+				key.PoolName,
+			)
+			summary.Warnings = append(summary.Warnings, warning)
+			scoped := markPoolSkipped(key)
+			scoped.EvidenceIncomplete = true
+			scoped.Warnings = append(scoped.Warnings, warning)
+			continue
+		}
+		if scoped := poolEvidenceByKey[key]; scoped != nil && scoped.EvidenceIncomplete {
+			markPoolSkipped(key)
+			continue
+		}
 
 		var schedulingCaveats []string
 		scenarioPods := append([]NodeOptimizationPodInput(nil), podsByPool[key]...)
 		if evidence != nil {
 			nodes := schedulingNodesForPool(*evidence, key)
 			if len(nodes) != pool.nodeCount {
-				summary.SkippedPoolCount++
-				summary.Warnings = append(summary.Warnings, fmt.Sprintf(
+				warning := fmt.Sprintf(
 					"pool %s skipped because scheduling evidence covers %d of %d nodes",
 					key.PoolName,
 					len(nodes),
 					pool.nodeCount,
-				))
+				)
+				summary.Warnings = append(summary.Warnings, warning)
+				scoped := markPoolSkipped(key)
+				scoped.EvidenceIncomplete = true
+				scoped.UnresolvedNodeCount += pool.nodeCount - len(nodes)
+				scoped.Warnings = append(scoped.Warnings, warning)
 				continue
 			}
 			interPodAffinityState := buildNodeOptimizationInterPodAffinityState(
@@ -715,13 +870,16 @@ func buildNMinusOneNodeOptimizationScenarios(
 			}
 
 			if len(unsupported) > 0 {
-				summary.SkippedPoolCount++
 				sort.Strings(unsupported)
-				summary.Warnings = append(summary.Warnings, fmt.Sprintf(
+				warning := fmt.Sprintf(
 					"pool %s skipped because scheduling constraints are not fully modeled: %s",
 					key.PoolName,
 					strings.Join(unsupported, "; "),
-				))
+				)
+				summary.Warnings = append(summary.Warnings, warning)
+				scoped := markPoolSkipped(key)
+				scoped.UnsupportedConstraintPodCount += len(unsupported)
+				scoped.Warnings = append(scoped.Warnings, warning)
 				continue
 			}
 		} else {
@@ -758,22 +916,30 @@ func buildNMinusOneNodeOptimizationScenarios(
 		}
 
 		if blockers := unsupportedConstraintsByPool[key]; len(blockers) > 0 {
-			summary.SkippedPoolCount++
 			sort.Strings(blockers)
-			summary.Warnings = append(summary.Warnings, fmt.Sprintf(
+			warning := fmt.Sprintf(
 				"pool %s skipped because scheduling constraints are unsupported or lack evidence: %s",
 				key.PoolName,
 				strings.Join(blockers, "; "),
-			))
+			)
+			summary.Warnings = append(summary.Warnings, warning)
+			scoped := markPoolSkipped(key)
+			scoped.UnsupportedConstraintPodCount += len(blockers)
+			scoped.Warnings = append(scoped.Warnings, warning)
 			continue
 		}
 
 		if pool.invalid {
-			summary.SkippedPoolCount++
-			summary.Warnings = append(summary.Warnings, fmt.Sprintf(
+			warning := fmt.Sprintf(
 				"pool %s skipped because nodes with the same canonical identity expose inconsistent CPU or memory capacity",
 				key.PoolName,
-			))
+			)
+			summary.EvidenceIncomplete = true
+			summary.Warnings = append(summary.Warnings, warning)
+			scoped := markPoolSkipped(key)
+			scoped.EvidenceIncomplete = true
+			scoped.UnresolvedNodeCount += pool.nodeCount
+			scoped.Warnings = append(scoped.Warnings, warning)
 			continue
 		}
 		if pool.nodeCount < 2 {
@@ -801,48 +967,64 @@ func buildNMinusOneNodeOptimizationScenarios(
 			obs := daemonSetsByPool[key][dsKey]
 			if obs.inconsistent {
 				daemonEvidenceComplete = false
-				summary.Warnings = append(summary.Warnings, fmt.Sprintf(
+				warning := fmt.Sprintf(
 					"pool %s skipped because DaemonSet %s/%s replicas expose inconsistent effective CPU or memory requests",
 					key.PoolName,
 					dsKey.namespace,
 					dsKey.name,
-				))
+				)
+				summary.Warnings = append(summary.Warnings, warning)
+				scoped := markPoolSkipped(key)
+				scoped.EvidenceIncomplete = true
+				scoped.Warnings = append(scoped.Warnings, warning)
 				continue
 			}
 			if len(obs.nodes) != pool.nodeCount {
 				daemonEvidenceComplete = false
-				summary.Warnings = append(summary.Warnings, fmt.Sprintf(
+				warning := fmt.Sprintf(
 					"pool %s skipped because DaemonSet %s/%s is observed on %d of %d distinct nodes; placement scope is not modeled yet",
 					key.PoolName,
 					dsKey.namespace,
 					dsKey.name,
 					len(obs.nodes),
 					pool.nodeCount,
-				))
+				)
+				summary.Warnings = append(summary.Warnings, warning)
+				scoped := markPoolSkipped(key)
+				scoped.EvidenceIncomplete = true
+				scoped.Warnings = append(scoped.Warnings, warning)
 				continue
 			}
 			nextDaemonCPU, cpuOK := checkedAddInt64(daemonCPUPerNode, obs.cpuMilli)
 			if !cpuOK {
 				daemonEvidenceComplete = false
 				summary.EvidenceIncomplete = true
-				summary.Warnings = append(summary.Warnings, fmt.Sprintf(
+				warning := fmt.Sprintf(
 					"pool %s skipped because DaemonSet per-node CPU overhead exceeds the int64 representable range while adding %s/%s",
 					key.PoolName,
 					dsKey.namespace,
 					dsKey.name,
-				))
+				)
+				summary.Warnings = append(summary.Warnings, warning)
+				scoped := markPoolSkipped(key)
+				scoped.EvidenceIncomplete = true
+				scoped.Warnings = append(scoped.Warnings, warning)
 				break
 			}
 			nextDaemonMemory, memoryOK := checkedAddInt64(daemonMemPerNode, obs.memBytes)
 			if !memoryOK {
 				daemonEvidenceComplete = false
 				summary.EvidenceIncomplete = true
-				summary.Warnings = append(summary.Warnings, fmt.Sprintf(
+				warning := fmt.Sprintf(
 					"pool %s skipped because DaemonSet per-node memory overhead exceeds the int64 representable range while adding %s/%s",
 					key.PoolName,
 					dsKey.namespace,
 					dsKey.name,
-				))
+				)
+				summary.Warnings = append(summary.Warnings, warning)
+				scoped := markPoolSkipped(key)
+				scoped.EvidenceIncomplete = true
+				scoped.Warnings = append(scoped.Warnings, warning)
 				break
 			}
 			daemonCPUPerNode = nextDaemonCPU
@@ -851,27 +1033,34 @@ func buildNMinusOneNodeOptimizationScenarios(
 		}
 
 		if !daemonEvidenceComplete {
-			summary.SkippedPoolCount++
+			markPoolSkipped(key)
 			continue
 		}
 
 		usableCPUPerNode, cpuOK := checkedSubInt64(pool.cpuMilli, daemonCPUPerNode)
 		usableMemPerNode, memoryOK := checkedSubInt64(pool.memBytes, daemonMemPerNode)
 		if !cpuOK || !memoryOK {
-			summary.SkippedPoolCount++
-			summary.Warnings = append(summary.Warnings, fmt.Sprintf(
+			warning := fmt.Sprintf(
 				"pool %s skipped because allocatable capacity minus DaemonSet overhead cannot be represented as int64",
 				key.PoolName,
-			))
+			)
+			summary.EvidenceIncomplete = true
+			summary.Warnings = append(summary.Warnings, warning)
+			scoped := markPoolSkipped(key)
+			scoped.EvidenceIncomplete = true
+			scoped.Warnings = append(scoped.Warnings, warning)
 			continue
 		}
 		if usableCPUPerNode <= 0 || usableMemPerNode <= 0 {
-			summary.SkippedPoolCount++
 			summary.EvidenceIncomplete = true
-			summary.Warnings = append(summary.Warnings, fmt.Sprintf(
+			warning := fmt.Sprintf(
 				"pool %s skipped because observed DaemonSet per-node overhead leaves no positive CPU or memory capacity for movable workloads",
 				key.PoolName,
-			))
+			)
+			summary.Warnings = append(summary.Warnings, warning)
+			scoped := markPoolSkipped(key)
+			scoped.EvidenceIncomplete = true
+			scoped.Warnings = append(scoped.Warnings, warning)
 			continue
 		}
 
@@ -896,11 +1085,37 @@ func buildNMinusOneNodeOptimizationScenarios(
 			DaemonSetCPUPerNodeMilli:    daemonCPUPerNode,
 			DaemonSetMemoryPerNodeBytes: daemonMemPerNode,
 			SchedulingCaveats:           caveats,
+			VerifiedChecks:              nodeOptimizationScenarioVerifiedChecks(movablePodsByPool[key], evidence != nil, storageEvidence != nil, daemonSetCount),
+			movablePodKeys:              nodeOptimizationMovablePodKeys(movablePodsByPool[key]),
 			Simulation:                  simulation,
 		})
 	}
 
 	return summary
+}
+
+func nodeOptimizationPodsRequireClusterWideSchedulingEvidence(pods []corev1.Pod) bool {
+	for _, pod := range pods {
+		if hasHardTopologySpreadConstraints(pod) || hasRequiredPodAffinity(pod) || hasRequiredPodAntiAffinity(pod) {
+			return true
+		}
+	}
+	return false
+}
+
+func sortedNodeOptimizationPoolEvidence(
+	byPool map[CostPoolKey]*NodeOptimizationPoolEvidence,
+) []NodeOptimizationPoolEvidence {
+	result := make([]NodeOptimizationPoolEvidence, 0, len(byPool))
+	for _, scoped := range byPool {
+		copy := *scoped
+		sort.Strings(copy.Warnings)
+		result = append(result, copy)
+	}
+	sort.Slice(result, func(i, j int) bool {
+		return costPoolKeySortValue(result[i].PoolKey) < costPoolKeySortValue(result[j].PoolKey)
+	})
+	return result
 }
 
 // checkedEffectivePodRequests mirrors Kubernetes effective CPU/memory request

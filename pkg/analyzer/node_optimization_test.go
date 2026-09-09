@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"math"
 	"reflect"
+	"sort"
 	"strings"
 	"testing"
 
@@ -564,6 +565,369 @@ func optimizationNodeInfos(count int) []models.NodeInfo {
 		})
 	}
 	return nodeInfos
+}
+
+func TestBuildNodeOptimizationRecommendationsSimulationPassed(t *testing.T) {
+	nodeInfos := optimizationNodeInfos(3)
+	pods := []corev1.Pod{
+		optimizationTestPod("apps", "api", "node-0", corev1.PodRunning, "1000m", "1Gi"),
+		optimizationTestPod("jobs", "worker", "node-1", corev1.PodRunning, "500m", "512Mi"),
+	}
+
+	summary := BuildNMinusOneNodeOptimizationScenariosFromSnapshots(nodeInfos, pods)
+	got := BuildNodeOptimizationRecommendations(summary, pods)
+
+	if len(got) != 1 {
+		t.Fatalf("recommendation count = %d, want 1", len(got))
+	}
+	recommendation := got[0]
+	if recommendation.Status != NodeOptimizationRecommendationSimulationPassed {
+		t.Fatalf("status = %q, want %q; blockers=%#v", recommendation.Status, NodeOptimizationRecommendationSimulationPassed, recommendation.Blockers)
+	}
+	if recommendation.Summary != "Scheduling feasibility proved under the supported model." {
+		t.Fatalf("summary = %q, want exact read-only proof wording", recommendation.Summary)
+	}
+	if recommendation.CurrentNodeCount != 3 || recommendation.CandidateNodeCount != 2 {
+		t.Fatalf("node counts = %d/%d, want 3/2", recommendation.CurrentNodeCount, recommendation.CandidateNodeCount)
+	}
+	if recommendation.CandidateRemovedNode != "node-0" {
+		t.Fatalf("CandidateRemovedNode = %q, want deterministic node-0", recommendation.CandidateRemovedNode)
+	}
+	if recommendation.PodsConsidered != 2 || recommendation.PodsAssigned != 2 || len(recommendation.Assignments) != 2 {
+		t.Fatalf("pod counts/assignments = %d/%d/%d, want 2/2/2", recommendation.PodsConsidered, recommendation.PodsAssigned, len(recommendation.Assignments))
+	}
+	wantAssignments := []NodeOptimizationRecommendationAssignment{
+		{Namespace: "apps", PodName: "api", SourceNode: "node-0", DestinationNode: recommendation.Assignments[0].DestinationNode},
+		{Namespace: "jobs", PodName: "worker", SourceNode: "node-1", DestinationNode: recommendation.Assignments[1].DestinationNode},
+	}
+	if !reflect.DeepEqual(recommendation.Assignments, wantAssignments) {
+		t.Fatalf("assignments = %#v, want deterministic source-aware assignments %#v", recommendation.Assignments, wantAssignments)
+	}
+	for _, assignment := range recommendation.Assignments {
+		if assignment.DestinationNode == "" || assignment.DestinationNode == recommendation.CandidateRemovedNode {
+			t.Fatalf("assignment = %#v, want concrete retained-node destination", assignment)
+		}
+	}
+
+	wantCPUCapacity := int64(8000)
+	wantCPURequested := int64(1500)
+	wantMemoryCapacity := int64(16 * 1024 * 1024 * 1024)
+	wantMemoryRequested := int64(1536 * 1024 * 1024)
+	if recommendation.RetainedCPUCapacityMilli != wantCPUCapacity || recommendation.AggregateCPURequestedMilli != wantCPURequested || recommendation.CPUHeadroomMilli != wantCPUCapacity-wantCPURequested {
+		t.Fatalf("CPU capacity/request/headroom = %d/%d/%d, want %d/%d/%d", recommendation.RetainedCPUCapacityMilli, recommendation.AggregateCPURequestedMilli, recommendation.CPUHeadroomMilli, wantCPUCapacity, wantCPURequested, wantCPUCapacity-wantCPURequested)
+	}
+	if recommendation.RetainedMemoryCapacityBytes != wantMemoryCapacity || recommendation.AggregateMemoryRequestedBytes != wantMemoryRequested || recommendation.MemoryHeadroomBytes != wantMemoryCapacity-wantMemoryRequested {
+		t.Fatalf("memory capacity/request/headroom = %d/%d/%d, want %d/%d/%d", recommendation.RetainedMemoryCapacityBytes, recommendation.AggregateMemoryRequestedBytes, recommendation.MemoryHeadroomBytes, wantMemoryCapacity, wantMemoryRequested, wantMemoryCapacity-wantMemoryRequested)
+	}
+	if recommendation.CPUHeadroomPercent == nil || *recommendation.CPUHeadroomPercent != 81.25 {
+		t.Fatalf("CPUHeadroomPercent = %v, want 81.25", recommendation.CPUHeadroomPercent)
+	}
+	if recommendation.MemoryHeadroomPercent == nil || *recommendation.MemoryHeadroomPercent != 90.625 {
+		t.Fatalf("MemoryHeadroomPercent = %v, want 90.625", recommendation.MemoryHeadroomPercent)
+	}
+	wantChecks := []NodeOptimizationVerifiedCheck{
+		NodeOptimizationCheckCPUCapacity,
+		NodeOptimizationCheckMemoryCapacity,
+		NodeOptimizationCheckPodResourceRequests,
+	}
+	if !reflect.DeepEqual(recommendation.VerifiedChecks, wantChecks) {
+		t.Fatalf("VerifiedChecks = %#v, want %#v", recommendation.VerifiedChecks, wantChecks)
+	}
+	wantNotEvaluated := []string{
+		"application-level readiness",
+		"cloud node provisioning or termination",
+		"CSI volume attach or detach execution",
+		"drain or eviction execution",
+		"PodDisruptionBudget and disruption timing",
+	}
+	if !reflect.DeepEqual(recommendation.NotEvaluated, wantNotEvaluated) {
+		t.Fatalf("NotEvaluated = %#v, want %#v", recommendation.NotEvaluated, wantNotEvaluated)
+	}
+}
+
+func TestNodeOptimizationScenarioVerifiedChecksReflectEvaluatedConstraints(t *testing.T) {
+	pod := optimizationTestPod("apps", "api", "node-0", corev1.PodRunning, "100m", "128Mi")
+	pod.Spec.NodeSelector = map[string]string{"workload": "general"}
+	pod.Spec.Affinity = &corev1.Affinity{
+		NodeAffinity: &corev1.NodeAffinity{
+			RequiredDuringSchedulingIgnoredDuringExecution: &corev1.NodeSelector{
+				NodeSelectorTerms: []corev1.NodeSelectorTerm{{MatchExpressions: []corev1.NodeSelectorRequirement{{
+					Key: "topology.kubernetes.io/zone", Operator: corev1.NodeSelectorOpIn, Values: []string{"zone-a"},
+				}}}},
+			},
+		},
+		PodAffinity: &corev1.PodAffinity{RequiredDuringSchedulingIgnoredDuringExecution: []corev1.PodAffinityTerm{{
+			TopologyKey:   "kubernetes.io/hostname",
+			LabelSelector: &metav1.LabelSelector{MatchLabels: map[string]string{"app": "database"}},
+		}}},
+		PodAntiAffinity: &corev1.PodAntiAffinity{RequiredDuringSchedulingIgnoredDuringExecution: []corev1.PodAffinityTerm{{
+			TopologyKey:   "topology.kubernetes.io/zone",
+			LabelSelector: &metav1.LabelSelector{MatchLabels: map[string]string{"app": "api"}},
+		}}},
+	}
+	pod.Spec.TopologySpreadConstraints = []corev1.TopologySpreadConstraint{{
+		MaxSkew: 1, TopologyKey: "topology.kubernetes.io/region", WhenUnsatisfiable: corev1.DoNotSchedule,
+		LabelSelector: &metav1.LabelSelector{MatchLabels: map[string]string{"app": "api"}},
+	}}
+	pod.Spec.Volumes = []corev1.Volume{{
+		Name:         "data",
+		VolumeSource: corev1.VolumeSource{PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: "data"}},
+	}}
+
+	got := nodeOptimizationScenarioVerifiedChecks([]corev1.Pod{pod}, true, true, 1)
+	want := []NodeOptimizationVerifiedCheck{
+		NodeOptimizationCheckCordonState,
+		NodeOptimizationCheckCPUCapacity,
+		NodeOptimizationCheckDaemonSetOverhead,
+		NodeOptimizationCheckTopologySpread,
+		NodeOptimizationCheckMemoryCapacity,
+		NodeOptimizationCheckNodeSelector,
+		NodeOptimizationCheckPodResourceRequests,
+		NodeOptimizationCheckPersistentVolume,
+		NodeOptimizationCheckRequiredNodeAffinity,
+		NodeOptimizationCheckRequiredPodAffinity,
+		NodeOptimizationCheckRequiredPodAntiAffinity,
+		NodeOptimizationCheckTaintsTolerations,
+	}
+	sort.Slice(want, func(i, j int) bool { return want[i] < want[j] })
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("checks = %#v, want %#v", got, want)
+	}
+}
+
+func TestBuildNodeOptimizationRecommendationsClassifiesSupportedBlockers(t *testing.T) {
+	tests := []struct {
+		name     string
+		status   NodeOptimizationStatus
+		raw      string
+		wantCode string
+	}{
+		{name: "insufficient CPU", status: NodeOptimizationBlockedAggregate, raw: "aggregate_cpu_capacity", wantCode: "insufficient_cpu"},
+		{name: "required anti-affinity", status: NodeOptimizationPlacementNotFound, raw: "required_pod_anti_affinity", wantCode: "required_pod_anti_affinity_conflict"},
+		{name: "topology spread", status: NodeOptimizationPlacementNotFound, raw: "topology_spread_constraint", wantCode: "topology_spread_conflict"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			summary := NodeOptimizationSnapshotSummary{Scenarios: []NodeOptimizationScenario{{
+				RemovedNodeName:    "node-0",
+				CandidateNodeNames: []string{"node-1", "node-2"},
+				EligiblePodCount:   1,
+				Simulation: NodeOptimizationResult{
+					Status: tt.status, CurrentNodes: 3, CandidateNodes: 2, TotalPodCount: 1,
+					CandidateCPUCapacityMilli: 8000, CandidateMemoryCapacityBytes: 16 * 1024,
+					TotalCPURequestMilli: 9000, TotalMemoryRequestBytes: 1024,
+					Blockers: []NodeOptimizationBlocker{{Reason: tt.raw, Pod: "apps/api", Message: "modeled constraint was not satisfied"}},
+				},
+			}}}
+			got := BuildNodeOptimizationRecommendations(summary, nil)
+			if len(got) != 1 || got[0].Status != NodeOptimizationRecommendationBlocked {
+				t.Fatalf("recommendations = %#v, want one BLOCKED result", got)
+			}
+			if len(got[0].Blockers) != 1 || got[0].Blockers[0].Code != tt.wantCode || got[0].Blockers[0].Pod != "apps/api" || got[0].Blockers[0].Node != "node-0" {
+				t.Fatalf("blockers = %#v, want code %q with Pod/node identity", got[0].Blockers, tt.wantCode)
+			}
+		})
+	}
+}
+
+func TestBuildNodeOptimizationRecommendationsClassifiesIncompleteEvidenceAsPartial(t *testing.T) {
+	tests := []struct {
+		name     string
+		warning  string
+		wantCode string
+	}{
+		{name: "unsupported scheduling semantics", warning: "pool userpool skipped because a hard scheduling constraint is not modeled", wantCode: "unsupported_hard_scheduling_constraint"},
+		{name: "unsupported CSI storage", warning: "pod apps/stateful: CSI storage topology cannot be proven from PVC and PV evidence", wantCode: "pvc_storage_mobility_unproven"},
+		{name: "duplicate evidence", warning: "duplicate Pod identity apps/api makes scheduling evidence incomplete", wantCode: "incomplete_scheduling_evidence"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			summary := NodeOptimizationSnapshotSummary{
+				EvidenceIncomplete:            true,
+				SkippedPoolCount:              1,
+				UnsupportedConstraintPodCount: 1,
+				Warnings:                      []string{tt.warning},
+			}
+			got := BuildNodeOptimizationRecommendations(summary, nil)
+			if len(got) != 1 || got[0].Status != NodeOptimizationRecommendationPartial {
+				t.Fatalf("recommendations = %#v, want one PARTIAL result", got)
+			}
+			if got[0].Evidence.Complete || !got[0].Evidence.EvidenceIncomplete || got[0].Evidence.SkippedPoolCount != 1 {
+				t.Fatalf("evidence = %#v, want explicit incomplete/skipped evidence", got[0].Evidence)
+			}
+			if len(got[0].Blockers) != 1 || got[0].Blockers[0].Code != tt.wantCode {
+				t.Fatalf("blockers = %#v, want evidence reason %q", got[0].Blockers, tt.wantCode)
+			}
+			if len(got[0].NotEvaluated) == 0 {
+				t.Fatal("NotEvaluated is empty, want centralized execution concerns")
+			}
+		})
+	}
+}
+
+func TestBuildNodeOptimizationRecommendationsRejectsIncompleteAssignments(t *testing.T) {
+	pods := []corev1.Pod{
+		optimizationTestPod("apps", "api-a", "node-0", corev1.PodRunning, "100m", "128Mi"),
+		optimizationTestPod("apps", "api-b", "node-1", corev1.PodRunning, "100m", "128Mi"),
+	}
+	summary := NodeOptimizationSnapshotSummary{Scenarios: []NodeOptimizationScenario{{
+		RemovedNodeName:    "node-0",
+		CandidateNodeNames: []string{"node-1", "node-2"},
+		EligiblePodCount:   2,
+		movablePodKeys:     []string{namespacedKey("apps", "api-a"), namespacedKey("apps", "api-b")},
+		Simulation: NodeOptimizationResult{
+			Status: NodeOptimizationFit, PlacementFound: true,
+			CurrentNodes: 3, CandidateNodes: 2,
+			TotalPodCount: 2, PlacedPodCount: 1,
+			CandidateCPUCapacityMilli: 8000, CandidateMemoryCapacityBytes: 16 * 1024,
+			TotalCPURequestMilli: 200, TotalMemoryRequestBytes: 256,
+			CPUHeadroomMilli: 7800, MemoryHeadroomBytes: 16*1024 - 256,
+			Placements: []NodeOptimizationPlacement{{Namespace: "apps", PodName: "api-a", NodeName: "node-1"}},
+		},
+	}}}
+
+	got := BuildNodeOptimizationRecommendations(summary, pods)
+	if len(got) != 1 || got[0].Status != NodeOptimizationRecommendationPartial {
+		t.Fatalf("recommendations = %#v, want one PARTIAL result", got)
+	}
+	if len(got[0].Assignments) != 0 || got[0].PodsAssigned != 0 {
+		t.Fatalf("assignments = %#v assigned=%d, want no partial assignment evidence", got[0].Assignments, got[0].PodsAssigned)
+	}
+	if len(got[0].Blockers) != 1 || got[0].Blockers[0].Code != "assignment_evidence_incomplete" {
+		t.Fatalf("blockers = %#v, want assignment_evidence_incomplete", got[0].Blockers)
+	}
+}
+
+func TestBuildNodeOptimizationRecommendationsNeverPassesWithIncompleteScenarioEvidence(t *testing.T) {
+	nodeInfos := optimizationNodeInfos(3)
+	pods := []corev1.Pod{
+		optimizationTestPod("apps", "api", "node-0", corev1.PodRunning, "500m", "256Mi"),
+	}
+	summary := BuildNMinusOneNodeOptimizationScenariosFromSnapshots(nodeInfos, pods)
+	if len(summary.Scenarios) != 1 || !summary.Scenarios[0].Simulation.PlacementFound {
+		t.Fatalf("precondition summary = %#v, want one positive simulation", summary)
+	}
+	summary.EvidenceIncomplete = true
+	summary.UnresolvedNodeCount = 1
+	summary.Warnings = []string{"scheduling evidence is incomplete for node-z"}
+	summary.PoolEvidence = []NodeOptimizationPoolEvidence{{
+		PoolKey:             summary.Scenarios[0].PoolKey,
+		EvidenceIncomplete:  true,
+		UnresolvedNodeCount: 1,
+		Warnings:            []string{"scheduling evidence is incomplete for node-z"},
+	}}
+
+	got := BuildNodeOptimizationRecommendations(summary, pods)
+	if len(got) != 1 || got[0].Status != NodeOptimizationRecommendationPartial {
+		t.Fatalf("recommendations = %#v, want one PARTIAL result", got)
+	}
+	if len(got[0].Assignments) != 0 || got[0].PodsAssigned != 0 {
+		t.Fatalf("assignments = %#v assigned=%d, want no positive proof with incomplete evidence", got[0].Assignments, got[0].PodsAssigned)
+	}
+}
+
+func TestBuildNodeOptimizationRecommendationsRejectsWrongOrDuplicateAssignmentIdentity(t *testing.T) {
+	pods := []corev1.Pod{
+		optimizationTestPod("apps", "api-a", "node-0", corev1.PodRunning, "100m", "128Mi"),
+		optimizationTestPod("apps", "api-b", "node-1", corev1.PodRunning, "100m", "128Mi"),
+		optimizationTestPod("apps", "unrelated", "node-2", corev1.PodSucceeded, "100m", "128Mi"),
+	}
+	tests := []struct {
+		name       string
+		placements []NodeOptimizationPlacement
+	}{
+		{
+			name: "unrelated Pod substitutes for movable Pod",
+			placements: []NodeOptimizationPlacement{
+				{Namespace: "apps", PodName: "api-a", NodeName: "node-1"},
+				{Namespace: "apps", PodName: "unrelated", NodeName: "node-2"},
+			},
+		},
+		{
+			name: "duplicate Pod destinations",
+			placements: []NodeOptimizationPlacement{
+				{Namespace: "apps", PodName: "api-a", NodeName: "node-1"},
+				{Namespace: "apps", PodName: "api-a", NodeName: "node-2"},
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			summary := NodeOptimizationSnapshotSummary{Scenarios: []NodeOptimizationScenario{{
+				RemovedNodeName:    "node-0",
+				CandidateNodeNames: []string{"node-1", "node-2"},
+				EligiblePodCount:   2,
+				movablePodKeys:     []string{namespacedKey("apps", "api-a"), namespacedKey("apps", "api-b")},
+				Simulation: NodeOptimizationResult{
+					Status: NodeOptimizationFit, PlacementFound: true,
+					CurrentNodes: 3, CandidateNodes: 2,
+					TotalPodCount: 2, PlacedPodCount: 2,
+					CandidateCPUCapacityMilli: 8000, CandidateMemoryCapacityBytes: 16 * 1024,
+					TotalCPURequestMilli: 200, TotalMemoryRequestBytes: 256,
+					CPUHeadroomMilli: 7800, MemoryHeadroomBytes: 16*1024 - 256,
+					Placements: tt.placements,
+				},
+			}}}
+			got := BuildNodeOptimizationRecommendations(summary, pods)
+			if len(got) != 1 || got[0].Status != NodeOptimizationRecommendationPartial {
+				t.Fatalf("recommendations = %#v, want one PARTIAL result", got)
+			}
+			if len(got[0].Assignments) != 0 || got[0].PodsAssigned != 0 {
+				t.Fatalf("assignments = %#v assigned=%d, want no partial assignment evidence", got[0].Assignments, got[0].PodsAssigned)
+			}
+		})
+	}
+}
+
+func TestBuildNodeOptimizationRecommendationsDeterministicAcrossSnapshotOrder(t *testing.T) {
+	nodeInfos := optimizationNodeInfos(3)
+	pods := []corev1.Pod{
+		optimizationTestPod("zeta", "worker", "node-2", corev1.PodRunning, "500m", "512Mi"),
+		optimizationTestPod("alpha", "api", "node-0", corev1.PodRunning, "1000m", "1Gi"),
+	}
+	forward := BuildNodeOptimizationRecommendations(
+		BuildNMinusOneNodeOptimizationScenariosFromSnapshots(nodeInfos, pods),
+		pods,
+	)
+	reversedNodes := []models.NodeInfo{nodeInfos[2], nodeInfos[1], nodeInfos[0]}
+	reversedPods := []corev1.Pod{pods[1], pods[0]}
+	reversed := BuildNodeOptimizationRecommendations(
+		BuildNMinusOneNodeOptimizationScenariosFromSnapshots(reversedNodes, reversedPods),
+		reversedPods,
+	)
+
+	if !reflect.DeepEqual(forward, reversed) {
+		t.Fatalf("recommendations differ by snapshot order:\nforward=%#v\nreversed=%#v", forward, reversed)
+	}
+}
+
+func TestBuildNodeOptimizationRecommendationsLegacyObservationIsReadOnly(t *testing.T) {
+	summary := BuildNMinusOneNodeOptimizationScenariosFromSnapshots(optimizationNodeInfos(1), nil)
+	got := BuildNodeOptimizationRecommendations(summary, nil)
+	if len(got) != 1 || got[0].Status != NodeOptimizationRecommendationObservation {
+		t.Fatalf("recommendations = %#v, want one OBSERVATION", got)
+	}
+	if len(got[0].NotEvaluated) == 0 {
+		t.Fatal("NotEvaluated is empty, want execution concerns on observation")
+	}
+	language := strings.ToLower(fmt.Sprintf("%#v", got[0]))
+	for _, prohibited := range []string{"actionable", "safe to remove", "ready to delete"} {
+		if strings.Contains(language, prohibited) {
+			t.Fatalf("recommendation contains prohibited execution wording %q: %s", prohibited, language)
+		}
+	}
+}
+
+func TestNodeOptimizationRecommendationContractContainsNoMonetaryFields(t *testing.T) {
+	typeOf := reflect.TypeOf(NodeOptimizationRecommendation{})
+	for i := 0; i < typeOf.NumField(); i++ {
+		name := strings.ToLower(typeOf.Field(i).Name)
+		for _, monetary := range []string{"cost", "dollar", "price", "saving"} {
+			if strings.Contains(name, monetary) {
+				t.Fatalf("recommendation field %q introduces monetary/provider-pricing output", typeOf.Field(i).Name)
+			}
+		}
+	}
 }
 
 func TestBuildNMinusOneNodeOptimizationScenariosFailsClosedOnDuplicateNodeInfoIdentity(t *testing.T) {
