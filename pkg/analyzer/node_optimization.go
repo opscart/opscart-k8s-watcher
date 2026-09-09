@@ -8,6 +8,7 @@ import (
 
 	"github.com/opscart/opscart-k8s-watcher/pkg/models"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
 )
 
 // NodeOptimizationStatus describes the outcome of a same-shape placement
@@ -231,8 +232,26 @@ func buildNMinusOneNodeOptimizationScenarios(
 			continue
 		}
 
-		cpuMilli := int64(math.Round(info.CPUCapacity * 1000))
-		memBytes := int64(math.Round(info.MemGBCapacity * 1024 * 1024 * 1024))
+		cpuMilli, cpuValid := finiteNonNegativeToInt64(info.CPUCapacity * 1000)
+		if !cpuValid {
+			summary.UnresolvedNodeCount++
+			summary.EvidenceIncomplete = true
+			summary.Warnings = append(summary.Warnings, fmt.Sprintf(
+				"node %s excluded from node optimization because observed CPU capacity is non-finite, negative, or outside the int64 representable range",
+				info.Name,
+			))
+			continue
+		}
+		memBytes, memoryValid := finiteNonNegativeToInt64(info.MemGBCapacity * 1024 * 1024 * 1024)
+		if !memoryValid {
+			summary.UnresolvedNodeCount++
+			summary.EvidenceIncomplete = true
+			summary.Warnings = append(summary.Warnings, fmt.Sprintf(
+				"node %s excluded from node optimization because observed memory capacity is non-finite, negative, or outside the int64 representable range",
+				info.Name,
+			))
+			continue
+		}
 		if cpuMilli <= 0 || memBytes <= 0 {
 			summary.UnresolvedNodeCount++
 			summary.Warnings = append(summary.Warnings, fmt.Sprintf(
@@ -293,11 +312,29 @@ func buildNMinusOneNodeOptimizationScenarios(
 		if podNameCounts[namespacedKey(pod.Namespace, pod.Name)] > 1 {
 			continue
 		}
+		if eligibility, _, _ := ClassifyPodCostEligibility(pod, knownNodes); eligibility == PodCostExcluded {
+			summary.ExcludedPodCount++
+			continue
+		}
+		cpuMilli, memoryBytes, numericReason := checkedEffectivePodRequests(pod)
+		if numericReason != "" {
+			summary.UnresolvedPodCount++
+			summary.EvidenceIncomplete = true
+			summary.Warnings = append(summary.Warnings, fmt.Sprintf(
+				"pod %s/%s is unresolved for node optimization because effective resource requests are invalid: %s",
+				pod.Namespace,
+				pod.Name,
+				numericReason,
+			))
+			continue
+		}
 		input := BuildPodCostInput(pod, knownNodes, nodeKeys, ControllerIndexes{})
+		input.CPURequestMilli = cpuMilli
+		input.MemoryRequestBytes = memoryBytes
 
 		switch input.Eligibility {
 		case PodCostExcluded:
-			summary.ExcludedPodCount++
+			// Excluded Pods return before numeric request evaluation above.
 			continue
 		case PodCostUnresolved:
 			summary.UnresolvedPodCount++
@@ -601,9 +638,33 @@ func buildNMinusOneNodeOptimizationScenarios(
 				))
 				continue
 			}
+			nextDaemonCPU, cpuOK := checkedAddInt64(daemonCPUPerNode, obs.cpuMilli)
+			if !cpuOK {
+				daemonEvidenceComplete = false
+				summary.EvidenceIncomplete = true
+				summary.Warnings = append(summary.Warnings, fmt.Sprintf(
+					"pool %s skipped because DaemonSet per-node CPU overhead exceeds the int64 representable range while adding %s/%s",
+					key.PoolName,
+					dsKey.namespace,
+					dsKey.name,
+				))
+				break
+			}
+			nextDaemonMemory, memoryOK := checkedAddInt64(daemonMemPerNode, obs.memBytes)
+			if !memoryOK {
+				daemonEvidenceComplete = false
+				summary.EvidenceIncomplete = true
+				summary.Warnings = append(summary.Warnings, fmt.Sprintf(
+					"pool %s skipped because DaemonSet per-node memory overhead exceeds the int64 representable range while adding %s/%s",
+					key.PoolName,
+					dsKey.namespace,
+					dsKey.name,
+				))
+				break
+			}
+			daemonCPUPerNode = nextDaemonCPU
+			daemonMemPerNode = nextDaemonMemory
 			daemonSetCount++
-			daemonCPUPerNode += obs.cpuMilli
-			daemonMemPerNode += obs.memBytes
 		}
 
 		if !daemonEvidenceComplete {
@@ -611,10 +672,19 @@ func buildNMinusOneNodeOptimizationScenarios(
 			continue
 		}
 
-		usableCPUPerNode := pool.cpuMilli - daemonCPUPerNode
-		usableMemPerNode := pool.memBytes - daemonMemPerNode
+		usableCPUPerNode, cpuOK := checkedSubInt64(pool.cpuMilli, daemonCPUPerNode)
+		usableMemPerNode, memoryOK := checkedSubInt64(pool.memBytes, daemonMemPerNode)
+		if !cpuOK || !memoryOK {
+			summary.SkippedPoolCount++
+			summary.Warnings = append(summary.Warnings, fmt.Sprintf(
+				"pool %s skipped because allocatable capacity minus DaemonSet overhead cannot be represented as int64",
+				key.PoolName,
+			))
+			continue
+		}
 		if usableCPUPerNode <= 0 || usableMemPerNode <= 0 {
 			summary.SkippedPoolCount++
+			summary.EvidenceIncomplete = true
 			summary.Warnings = append(summary.Warnings, fmt.Sprintf(
 				"pool %s skipped because observed DaemonSet per-node overhead leaves no positive CPU or memory capacity for movable workloads",
 				key.PoolName,
@@ -648,6 +718,138 @@ func buildNMinusOneNodeOptimizationScenarios(
 	}
 
 	return summary
+}
+
+// checkedEffectivePodRequests mirrors Kubernetes effective CPU/memory request
+// semantics while rejecting negative quantities and every intermediate or final
+// int64 overflow. It is used only at the snapshot-to-simulator boundary; the
+// pure placement engine continues to consume validated integer requests.
+func checkedEffectivePodRequests(pod corev1.Pod) (int64, int64, string) {
+	appCPU, appMemory := int64(0), int64(0)
+	for _, container := range pod.Spec.Containers {
+		cpu, memory, reason := checkedOptimizationContainerRequests(container)
+		if reason != "" {
+			return 0, 0, reason
+		}
+		var ok bool
+		appCPU, ok = checkedAddInt64(appCPU, cpu)
+		if !ok {
+			return 0, 0, fmt.Sprintf("application CPU request overflows int64 while adding container %q", container.Name)
+		}
+		appMemory, ok = checkedAddInt64(appMemory, memory)
+		if !ok {
+			return 0, 0, fmt.Sprintf("application memory request overflows int64 while adding container %q", container.Name)
+		}
+	}
+
+	restartableCPU, restartableMemory := int64(0), int64(0)
+	peakInitCPU, peakInitMemory := int64(0), int64(0)
+	for _, container := range pod.Spec.InitContainers {
+		cpu, memory, reason := checkedOptimizationContainerRequests(container)
+		if reason != "" {
+			return 0, 0, reason
+		}
+
+		if container.RestartPolicy != nil && *container.RestartPolicy == corev1.ContainerRestartPolicyAlways {
+			var ok bool
+			restartableCPU, ok = checkedAddInt64(restartableCPU, cpu)
+			if !ok {
+				return 0, 0, fmt.Sprintf("restartable init-container CPU request overflows int64 while adding container %q", container.Name)
+			}
+			restartableMemory, ok = checkedAddInt64(restartableMemory, memory)
+			if !ok {
+				return 0, 0, fmt.Sprintf("restartable init-container memory request overflows int64 while adding container %q", container.Name)
+			}
+			appCPU, ok = checkedAddInt64(appCPU, cpu)
+			if !ok {
+				return 0, 0, fmt.Sprintf("effective application CPU request overflows int64 while adding restartable init container %q", container.Name)
+			}
+			appMemory, ok = checkedAddInt64(appMemory, memory)
+			if !ok {
+				return 0, 0, fmt.Sprintf("effective application memory request overflows int64 while adding restartable init container %q", container.Name)
+			}
+			if restartableCPU > peakInitCPU {
+				peakInitCPU = restartableCPU
+			}
+			if restartableMemory > peakInitMemory {
+				peakInitMemory = restartableMemory
+			}
+			continue
+		}
+
+		stageCPU, ok := checkedAddInt64(restartableCPU, cpu)
+		if !ok {
+			return 0, 0, fmt.Sprintf("init-container stage CPU request overflows int64 at container %q", container.Name)
+		}
+		stageMemory, ok := checkedAddInt64(restartableMemory, memory)
+		if !ok {
+			return 0, 0, fmt.Sprintf("init-container stage memory request overflows int64 at container %q", container.Name)
+		}
+		if stageCPU > peakInitCPU {
+			peakInitCPU = stageCPU
+		}
+		if stageMemory > peakInitMemory {
+			peakInitMemory = stageMemory
+		}
+	}
+
+	cpuMilli := maxInt64(appCPU, peakInitCPU)
+	memoryBytes := maxInt64(appMemory, peakInitMemory)
+	if quantity, ok := pod.Spec.Overhead[corev1.ResourceCPU]; ok {
+		overhead, reason := checkedOptimizationQuantityValue(quantity, resource.Milli)
+		if reason != "" {
+			return 0, 0, "Pod CPU overhead " + reason
+		}
+		cpuMilli, ok = checkedAddInt64(cpuMilli, overhead)
+		if !ok {
+			return 0, 0, "effective CPU request overflows int64 while adding Pod overhead"
+		}
+	}
+	if quantity, ok := pod.Spec.Overhead[corev1.ResourceMemory]; ok {
+		overhead, reason := checkedOptimizationQuantityValue(quantity, 0)
+		if reason != "" {
+			return 0, 0, "Pod memory overhead " + reason
+		}
+		memoryBytes, ok = checkedAddInt64(memoryBytes, overhead)
+		if !ok {
+			return 0, 0, "effective memory request overflows int64 while adding Pod overhead"
+		}
+	}
+	return cpuMilli, memoryBytes, ""
+}
+
+func checkedOptimizationContainerRequests(container corev1.Container) (int64, int64, string) {
+	var cpuMilli, memoryBytes int64
+	if quantity, ok := container.Resources.Requests[corev1.ResourceCPU]; ok {
+		value, reason := checkedOptimizationQuantityValue(quantity, resource.Milli)
+		if reason != "" {
+			return 0, 0, fmt.Sprintf("container %q CPU request %s", container.Name, reason)
+		}
+		cpuMilli = value
+	}
+	if quantity, ok := container.Resources.Requests[corev1.ResourceMemory]; ok {
+		value, reason := checkedOptimizationQuantityValue(quantity, 0)
+		if reason != "" {
+			return 0, 0, fmt.Sprintf("container %q memory request %s", container.Name, reason)
+		}
+		memoryBytes = value
+	}
+	return cpuMilli, memoryBytes, ""
+}
+
+func checkedOptimizationQuantityValue(quantity resource.Quantity, scale resource.Scale) (int64, string) {
+	if quantity.Sign() < 0 {
+		return 0, "is negative"
+	}
+	maximum := resource.NewScaledQuantity(math.MaxInt64, scale)
+	if quantity.Cmp(*maximum) > 0 {
+		return 0, "exceeds the int64 representable range"
+	}
+	value := quantity.ScaledValue(scale)
+	if value < 0 {
+		return 0, "cannot be represented as a nonnegative int64"
+	}
+	return value, ""
 }
 
 func costPoolKeySortValue(key CostPoolKey) string {

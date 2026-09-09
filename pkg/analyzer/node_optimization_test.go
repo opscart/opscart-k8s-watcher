@@ -2,6 +2,7 @@ package analyzer
 
 import (
 	"fmt"
+	"math"
 	"reflect"
 	"strings"
 	"testing"
@@ -1936,5 +1937,309 @@ func TestBuildNMinusOneNodeOptimizationScenariosFailsClosedOnDeferredSchedulingC
 				t.Fatalf("warnings = %#v, want %q", got.Warnings, tt.wantReason)
 			}
 		})
+	}
+}
+
+func TestBuildNMinusOneNodeOptimizationScenariosRejectsInvalidNodeCapacity(t *testing.T) {
+	tests := []struct {
+		name        string
+		mutate      func(*models.NodeInfo)
+		wantWarning string
+	}{
+		{
+			name:        "NaN CPU",
+			mutate:      func(info *models.NodeInfo) { info.CPUCapacity = math.NaN() },
+			wantWarning: "observed CPU capacity is non-finite, negative, or outside the int64 representable range",
+		},
+		{
+			name:        "positive infinite memory",
+			mutate:      func(info *models.NodeInfo) { info.MemGBCapacity = math.Inf(1) },
+			wantWarning: "observed memory capacity is non-finite, negative, or outside the int64 representable range",
+		},
+		{
+			name:        "negative CPU",
+			mutate:      func(info *models.NodeInfo) { info.CPUCapacity = -1 },
+			wantWarning: "observed CPU capacity is non-finite, negative, or outside the int64 representable range",
+		},
+		{
+			name:        "float to int overflow",
+			mutate:      func(info *models.NodeInfo) { info.CPUCapacity = math.Ldexp(1, 63) / 1000 },
+			wantWarning: "observed CPU capacity is non-finite, negative, or outside the int64 representable range",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			nodeInfos := optimizationNodeInfos(2)
+			tt.mutate(&nodeInfos[0])
+
+			got := BuildNMinusOneNodeOptimizationScenariosFromSnapshots(nodeInfos, nil)
+
+			if !got.EvidenceIncomplete || len(got.Scenarios) != 0 {
+				t.Fatalf("summary = %#v, want incomplete evidence and no scenario", got)
+			}
+			if !strings.Contains(strings.Join(got.Warnings, " "), tt.wantWarning) {
+				t.Fatalf("warnings = %#v, want %q", got.Warnings, tt.wantWarning)
+			}
+		})
+	}
+}
+
+func TestSimulateSameShapeNodeCountRejectsAggregateRequestOverflow(t *testing.T) {
+	tests := []struct {
+		name       string
+		pods       []NodeOptimizationPodInput
+		wantReason string
+	}{
+		{
+			name: "CPU",
+			pods: []NodeOptimizationPodInput{
+				{Namespace: "apps", Name: "a", CPURequestMilli: math.MaxInt64},
+				{Namespace: "apps", Name: "b", CPURequestMilli: 1},
+			},
+			wantReason: "aggregate_cpu_request_overflow",
+		},
+		{
+			name: "memory",
+			pods: []NodeOptimizationPodInput{
+				{Namespace: "apps", Name: "a", MemoryRequestBytes: math.MaxInt64},
+				{Namespace: "apps", Name: "b", MemoryRequestBytes: 1},
+			},
+			wantReason: "aggregate_memory_request_overflow",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := SimulateSameShapeNodeCount(NodeOptimizationInput{
+				CurrentNodes:            2,
+				CandidateNodes:          1,
+				NodeCPUCapacityMilli:    math.MaxInt64,
+				NodeMemoryCapacityBytes: math.MaxInt64,
+				Pods:                    tt.pods,
+			})
+
+			if got.Status != NodeOptimizationInvalidInput || got.PlacementFound {
+				t.Fatalf("result = %#v, want fail-closed invalid input", got)
+			}
+			if len(got.Blockers) != 1 || got.Blockers[0].Reason != tt.wantReason {
+				t.Fatalf("blockers = %#v, want reason %q", got.Blockers, tt.wantReason)
+			}
+		})
+	}
+}
+
+func TestSimulateSameShapeNodeCountRejectsCandidateCapacityOverflow(t *testing.T) {
+	tests := []struct {
+		name       string
+		cpu        int64
+		memory     int64
+		wantReason string
+	}{
+		{name: "CPU", cpu: math.MaxInt64, memory: 1, wantReason: "candidate_cpu_capacity_overflow"},
+		{name: "memory", cpu: 1, memory: math.MaxInt64, wantReason: "candidate_memory_capacity_overflow"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := SimulateSameShapeNodeCount(NodeOptimizationInput{
+				CurrentNodes:            3,
+				CandidateNodes:          2,
+				NodeCPUCapacityMilli:    tt.cpu,
+				NodeMemoryCapacityBytes: tt.memory,
+			})
+
+			if got.Status != NodeOptimizationInvalidInput || got.PlacementFound {
+				t.Fatalf("result = %#v, want fail-closed invalid input", got)
+			}
+			if len(got.Blockers) != 1 || got.Blockers[0].Reason != tt.wantReason {
+				t.Fatalf("blockers = %#v, want reason %q", got.Blockers, tt.wantReason)
+			}
+		})
+	}
+}
+
+func TestBuildNMinusOneNodeOptimizationScenariosRejectsPodRequestOverflow(t *testing.T) {
+	pod := optimizationTestPod("apps", "api", "node-0", corev1.PodRunning, "9223372036854776", "1Gi")
+
+	got := BuildNMinusOneNodeOptimizationScenariosFromSnapshots(optimizationNodeInfos(2), []corev1.Pod{pod})
+
+	if !got.EvidenceIncomplete || len(got.Scenarios) != 0 {
+		t.Fatalf("summary = %#v, want incomplete evidence and no scenario", got)
+	}
+	if !strings.Contains(strings.Join(got.Warnings, " "), "CPU request exceeds the int64 representable range") {
+		t.Fatalf("warnings = %#v, want Pod request overflow warning", got.Warnings)
+	}
+}
+
+func TestBuildNMinusOneNodeOptimizationScenariosRejectsEffectivePodRequestAdditionOverflow(t *testing.T) {
+	pod := optimizationTestPod("apps", "api", "node-0", corev1.PodRunning, "5000000000000000", "1")
+	pod.Spec.Containers = append(pod.Spec.Containers, corev1.Container{
+		Name: "sidecar",
+		Resources: corev1.ResourceRequirements{Requests: corev1.ResourceList{
+			corev1.ResourceCPU:    resource.MustParse("5000000000000000"),
+			corev1.ResourceMemory: resource.MustParse("1"),
+		}},
+	})
+
+	got := BuildNMinusOneNodeOptimizationScenariosFromSnapshots(optimizationNodeInfos(2), []corev1.Pod{pod})
+
+	if !got.EvidenceIncomplete || len(got.Scenarios) != 0 {
+		t.Fatalf("summary = %#v, want incomplete evidence and no scenario", got)
+	}
+	if !strings.Contains(strings.Join(got.Warnings, " "), "application CPU request overflows int64") {
+		t.Fatalf("warnings = %#v, want effective request addition overflow warning", got.Warnings)
+	}
+}
+
+func TestBuildNMinusOneNodeOptimizationScenariosRejectsNegativeAndOverheadRequests(t *testing.T) {
+	tests := []struct {
+		name        string
+		pod         corev1.Pod
+		wantWarning string
+	}{
+		{
+			name:        "negative container request",
+			pod:         optimizationTestPod("apps", "negative", "node-0", corev1.PodRunning, "-1m", "1Gi"),
+			wantWarning: "CPU request is negative",
+		},
+		{
+			name: "Pod overhead overflow",
+			pod: func() corev1.Pod {
+				pod := optimizationTestPod("apps", "overhead", "node-0", corev1.PodRunning, "9223372036854775", "1Gi")
+				pod.Spec.Overhead = corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("1")}
+				return pod
+			}(),
+			wantWarning: "effective CPU request overflows int64 while adding Pod overhead",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := BuildNMinusOneNodeOptimizationScenariosFromSnapshots(optimizationNodeInfos(2), []corev1.Pod{tt.pod})
+
+			if !got.EvidenceIncomplete || len(got.Scenarios) != 0 {
+				t.Fatalf("summary = %#v, want incomplete evidence and no scenario", got)
+			}
+			if !strings.Contains(strings.Join(got.Warnings, " "), tt.wantWarning) {
+				t.Fatalf("warnings = %#v, want %q", got.Warnings, tt.wantWarning)
+			}
+		})
+	}
+}
+
+func TestBuildNMinusOneNodeOptimizationScenariosRejectsDaemonSetOverheadOverflow(t *testing.T) {
+	nodeInfos := optimizationNodeInfos(2)
+	for i := range nodeInfos {
+		nodeInfos[i].CPUCapacity = 9_000_000_000_000_000
+	}
+	pods := make([]corev1.Pod, 0, 4)
+	controller := true
+	for _, daemonSet := range []string{"agent-a", "agent-b"} {
+		for node := 0; node < 2; node++ {
+			pod := optimizationTestPod("system", fmt.Sprintf("%s-%d", daemonSet, node), fmt.Sprintf("node-%d", node), corev1.PodRunning, "5000000000000000", "1")
+			pod.OwnerReferences = []metav1.OwnerReference{{
+				Kind:       "DaemonSet",
+				Name:       daemonSet,
+				UID:        types.UID(daemonSet + "-uid"),
+				Controller: &controller,
+			}}
+			pods = append(pods, pod)
+		}
+	}
+
+	got := BuildNMinusOneNodeOptimizationScenariosFromSnapshots(nodeInfos, pods)
+
+	if !got.EvidenceIncomplete || len(got.Scenarios) != 0 || got.SkippedPoolCount != 1 {
+		t.Fatalf("summary = %#v, want one fail-closed skipped pool", got)
+	}
+	if !strings.Contains(strings.Join(got.Warnings, " "), "DaemonSet per-node CPU overhead exceeds the int64 representable range") {
+		t.Fatalf("warnings = %#v, want DaemonSet overflow warning", got.Warnings)
+	}
+}
+
+func TestBuildNMinusOneNodeOptimizationScenariosRejectsDaemonSetOverheadExceedingCapacity(t *testing.T) {
+	controller := true
+	pods := make([]corev1.Pod, 0, 2)
+	for node := 0; node < 2; node++ {
+		pod := optimizationTestPod("system", fmt.Sprintf("agent-%d", node), fmt.Sprintf("node-%d", node), corev1.PodRunning, "5", "1Gi")
+		pod.OwnerReferences = []metav1.OwnerReference{{
+			Kind:       "DaemonSet",
+			Name:       "agent",
+			UID:        types.UID("agent-uid"),
+			Controller: &controller,
+		}}
+		pods = append(pods, pod)
+	}
+
+	got := BuildNMinusOneNodeOptimizationScenariosFromSnapshots(optimizationNodeInfos(2), pods)
+
+	if !got.EvidenceIncomplete || len(got.Scenarios) != 0 || got.SkippedPoolCount != 1 {
+		t.Fatalf("summary = %#v, want one fail-closed skipped pool", got)
+	}
+	if !strings.Contains(strings.Join(got.Warnings, " "), "leaves no positive CPU or memory capacity") {
+		t.Fatalf("warnings = %#v, want DaemonSet capacity warning", got.Warnings)
+	}
+}
+
+func TestBuildNMinusOneNodeOptimizationScenariosInvalidNumericDiagnosticsAreDeterministic(t *testing.T) {
+	nodeInfos := optimizationNodeInfos(4)
+	nodeInfos[0].CPUCapacity = math.NaN()
+	nodeInfos[1].MemGBCapacity = math.Inf(1)
+
+	cpuPod := optimizationTestPod("z", "cpu-overflow", "node-2", corev1.PodRunning, "5000000000000000", "1")
+	cpuPod.Spec.Containers = append(cpuPod.Spec.Containers, corev1.Container{
+		Name: "second",
+		Resources: corev1.ResourceRequirements{Requests: corev1.ResourceList{
+			corev1.ResourceCPU: resource.MustParse("5000000000000000"),
+		}},
+	})
+	memoryPod := optimizationTestPod("a", "memory-overflow", "node-3", corev1.PodRunning, "1m", "5000000000000000000")
+	memoryPod.Spec.Containers = append(memoryPod.Spec.Containers, corev1.Container{
+		Name: "second",
+		Resources: corev1.ResourceRequirements{Requests: corev1.ResourceList{
+			corev1.ResourceMemory: resource.MustParse("5000000000000000000"),
+		}},
+	})
+	pods := []corev1.Pod{cpuPod, memoryPod}
+
+	forward := BuildNMinusOneNodeOptimizationScenariosFromSnapshots(nodeInfos, pods)
+	reversed := BuildNMinusOneNodeOptimizationScenariosFromSnapshots(
+		[]models.NodeInfo{nodeInfos[3], nodeInfos[2], nodeInfos[1], nodeInfos[0]},
+		[]corev1.Pod{pods[1], pods[0]},
+	)
+
+	if !reflect.DeepEqual(forward, reversed) {
+		t.Fatalf("numeric diagnostics changed with Node/Pod order:\nforward=%#v\nreversed=%#v", forward, reversed)
+	}
+	if !forward.EvidenceIncomplete || len(forward.Scenarios) != 0 {
+		t.Fatalf("summary = %#v, want incomplete evidence and no scenario", forward)
+	}
+}
+
+func TestInvalidNumericSimulatorInputsNeverProducePlacement(t *testing.T) {
+	tests := []NodeOptimizationInput{
+		{
+			CurrentNodes: 2, CandidateNodes: 1,
+			NodeCPUCapacityMilli: -1, NodeMemoryCapacityBytes: 1,
+		},
+		{
+			CurrentNodes: 3, CandidateNodes: 2,
+			NodeCPUCapacityMilli: math.MaxInt64, NodeMemoryCapacityBytes: 1,
+		},
+		{
+			CurrentNodes: 2, CandidateNodes: 1,
+			NodeCPUCapacityMilli: math.MaxInt64, NodeMemoryCapacityBytes: math.MaxInt64,
+			Pods: []NodeOptimizationPodInput{
+				{Name: "a", CPURequestMilli: math.MaxInt64},
+				{Name: "b", CPURequestMilli: 1},
+			},
+		},
+	}
+
+	for i, input := range tests {
+		if got := SimulateSameShapeNodeCount(input); got.PlacementFound {
+			t.Fatalf("case %d produced a positive placement: %#v", i, got)
+		}
 	}
 }

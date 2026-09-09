@@ -2,6 +2,7 @@ package analyzer
 
 import (
 	"fmt"
+	"math"
 	"sort"
 	"strings"
 )
@@ -42,6 +43,18 @@ func SimulateSameShapeNodeCount(input NodeOptimizationInput) NodeOptimizationRes
 	if input.NodeMemoryCapacityBytes <= 0 {
 		return invalidNodeOptimizationResult(result, "node_memory_capacity", "node memory capacity must be greater than zero")
 	}
+
+	candidateCount := int64(input.CandidateNodes)
+	candidateCPUCapacity, ok := checkedMulInt64(candidateCount, input.NodeCPUCapacityMilli)
+	if !ok {
+		return invalidNodeOptimizationResult(result, "candidate_cpu_capacity_overflow", "candidate CPU capacity exceeds the int64 representable range")
+	}
+	candidateMemoryCapacity, ok := checkedMulInt64(candidateCount, input.NodeMemoryCapacityBytes)
+	if !ok {
+		return invalidNodeOptimizationResult(result, "candidate_memory_capacity_overflow", "candidate memory capacity exceeds the int64 representable range")
+	}
+	result.CandidateCPUCapacityMilli = candidateCPUCapacity
+	result.CandidateMemoryCapacityBytes = candidateMemoryCapacity
 
 	candidateNodeNames, explicitCandidateNames, err := normalizedCandidateNodeNames(input)
 	if err != "" {
@@ -103,16 +116,42 @@ func SimulateSameShapeNodeCount(input NodeOptimizationInput) NodeOptimizationRes
 	}
 
 	var oversizedPod *NodeOptimizationPodInput
+	var totalCPURequestMilli, totalMemoryRequestBytes int64
 	for i := range validationPods {
 		pod := validationPods[i]
-		result.TotalCPURequestMilli += pod.CPURequestMilli
-		result.TotalMemoryRequestBytes += pod.MemoryRequestBytes
+		var ok bool
+		totalCPURequestMilli, ok = checkedAddInt64(totalCPURequestMilli, pod.CPURequestMilli)
+		if !ok {
+			result = invalidNodeOptimizationResult(
+				result,
+				"aggregate_cpu_request_overflow",
+				fmt.Sprintf("aggregate CPU request exceeds the int64 representable range while adding pod %s", podDisplayName(pod)),
+			)
+			result.Blockers[len(result.Blockers)-1].Pod = podDisplayName(pod)
+			return result
+		}
+		totalMemoryRequestBytes, ok = checkedAddInt64(totalMemoryRequestBytes, pod.MemoryRequestBytes)
+		if !ok {
+			result = invalidNodeOptimizationResult(
+				result,
+				"aggregate_memory_request_overflow",
+				fmt.Sprintf("aggregate memory request exceeds the int64 representable range while adding pod %s", podDisplayName(pod)),
+			)
+			result.Blockers[len(result.Blockers)-1].Pod = podDisplayName(pod)
+			return result
+		}
 
 		if oversizedPod == nil &&
 			(pod.CPURequestMilli > input.NodeCPUCapacityMilli || pod.MemoryRequestBytes > input.NodeMemoryCapacityBytes) {
 			copy := pod
 			oversizedPod = &copy
 		}
+	}
+	result.TotalCPURequestMilli = totalCPURequestMilli
+	result.TotalMemoryRequestBytes = totalMemoryRequestBytes
+	result = finalizeNodeOptimizationCapacity(result)
+	if result.Status == NodeOptimizationInvalidInput {
+		return result
 	}
 
 	if oversizedPod != nil {
@@ -128,7 +167,7 @@ func SimulateSameShapeNodeCount(input NodeOptimizationInput) NodeOptimizationRes
 				input.NodeMemoryCapacityBytes,
 			),
 		})
-		return finalizeNodeOptimizationCapacity(result, input)
+		return result
 	}
 
 	for _, pod := range validationPods {
@@ -139,11 +178,9 @@ func SimulateSameShapeNodeCount(input NodeOptimizationInput) NodeOptimizationRes
 				Pod:     podDisplayName(pod),
 				Message: "pod has no eligible candidate nodes after applying modeled scheduling constraints",
 			})
-			return finalizeNodeOptimizationCapacity(result, input)
+			return result
 		}
 	}
-
-	result = finalizeNodeOptimizationCapacity(result, input)
 
 	if result.TotalCPURequestMilli > result.CandidateCPUCapacityMilli {
 		result.Status = NodeOptimizationBlockedAggregate
@@ -211,6 +248,7 @@ func SimulateSameShapeNodeCount(input NodeOptimizationInput) NodeOptimizationRes
 	for _, pod := range pods {
 		bestIndex := -1
 		bestScore := 0.0
+		var bestCPUUsed, bestMemoryUsed int64
 		eligible := make(map[string]struct{}, len(pod.EligibleNodeNames))
 		for _, name := range pod.EligibleNodeNames {
 			eligible[name] = struct{}{}
@@ -222,19 +260,47 @@ func SimulateSameShapeNodeCount(input NodeOptimizationInput) NodeOptimizationRes
 					continue
 				}
 			}
-			nextCPU := bins[i].cpuUsed + pod.CPURequestMilli
-			nextMem := bins[i].memUsed + pod.MemoryRequestBytes
+			nextCPU, ok := checkedAddInt64(bins[i].cpuUsed, pod.CPURequestMilli)
+			if !ok {
+				result = invalidNodeOptimizationResult(
+					result,
+					"placement_cpu_request_overflow",
+					fmt.Sprintf("CPU placement arithmetic exceeds the int64 representable range for pod %s", podDisplayName(pod)),
+				)
+				result.Blockers[len(result.Blockers)-1].Pod = podDisplayName(pod)
+				return result
+			}
+			nextMem, ok := checkedAddInt64(bins[i].memUsed, pod.MemoryRequestBytes)
+			if !ok {
+				result = invalidNodeOptimizationResult(
+					result,
+					"placement_memory_request_overflow",
+					fmt.Sprintf("memory placement arithmetic exceeds the int64 representable range for pod %s", podDisplayName(pod)),
+				)
+				result.Blockers[len(result.Blockers)-1].Pod = podDisplayName(pod)
+				return result
+			}
 			if nextCPU > input.NodeCPUCapacityMilli || nextMem > input.NodeMemoryCapacityBytes {
 				continue
 			}
 
-			remainingCPU := float64(input.NodeCPUCapacityMilli-nextCPU) / float64(input.NodeCPUCapacityMilli)
-			remainingMem := float64(input.NodeMemoryCapacityBytes-nextMem) / float64(input.NodeMemoryCapacityBytes)
+			remainingCPUValue, ok := checkedSubInt64(input.NodeCPUCapacityMilli, nextCPU)
+			if !ok {
+				return invalidNodeOptimizationResult(result, "remaining_cpu_capacity_overflow", "remaining CPU capacity cannot be represented as int64")
+			}
+			remainingMemoryValue, ok := checkedSubInt64(input.NodeMemoryCapacityBytes, nextMem)
+			if !ok {
+				return invalidNodeOptimizationResult(result, "remaining_memory_capacity_overflow", "remaining memory capacity cannot be represented as int64")
+			}
+			remainingCPU := float64(remainingCPUValue) / float64(input.NodeCPUCapacityMilli)
+			remainingMem := float64(remainingMemoryValue) / float64(input.NodeMemoryCapacityBytes)
 			score := remainingCPU + remainingMem
 
 			if bestIndex == -1 || score < bestScore || (score == bestScore && i < bestIndex) {
 				bestIndex = i
 				bestScore = score
+				bestCPUUsed = nextCPU
+				bestMemoryUsed = nextMem
 			}
 		}
 
@@ -248,8 +314,8 @@ func SimulateSameShapeNodeCount(input NodeOptimizationInput) NodeOptimizationRes
 			return result
 		}
 
-		bins[bestIndex].cpuUsed += pod.CPURequestMilli
-		bins[bestIndex].memUsed += pod.MemoryRequestBytes
+		bins[bestIndex].cpuUsed = bestCPUUsed
+		bins[bestIndex].memUsed = bestMemoryUsed
 		result.PlacedPodCount++
 		result.Placements = append(result.Placements, NodeOptimizationPlacement{
 			Namespace: pod.Namespace,
@@ -334,12 +400,72 @@ func invalidNodeOptimizationResult(result NodeOptimizationResult, reason, messag
 	return result
 }
 
-func finalizeNodeOptimizationCapacity(result NodeOptimizationResult, input NodeOptimizationInput) NodeOptimizationResult {
-	result.CandidateCPUCapacityMilli = int64(input.CandidateNodes) * input.NodeCPUCapacityMilli
-	result.CandidateMemoryCapacityBytes = int64(input.CandidateNodes) * input.NodeMemoryCapacityBytes
-	result.CPUHeadroomMilli = result.CandidateCPUCapacityMilli - result.TotalCPURequestMilli
-	result.MemoryHeadroomBytes = result.CandidateMemoryCapacityBytes - result.TotalMemoryRequestBytes
+func finalizeNodeOptimizationCapacity(result NodeOptimizationResult) NodeOptimizationResult {
+	cpuHeadroom, ok := checkedSubInt64(result.CandidateCPUCapacityMilli, result.TotalCPURequestMilli)
+	if !ok {
+		return invalidNodeOptimizationResult(result, "cpu_headroom_overflow", "CPU headroom cannot be represented as int64")
+	}
+	memoryHeadroom, ok := checkedSubInt64(result.CandidateMemoryCapacityBytes, result.TotalMemoryRequestBytes)
+	if !ok {
+		return invalidNodeOptimizationResult(result, "memory_headroom_overflow", "memory headroom cannot be represented as int64")
+	}
+	result.CPUHeadroomMilli = cpuHeadroom
+	result.MemoryHeadroomBytes = memoryHeadroom
 	return result
+}
+
+func checkedAddInt64(a, b int64) (int64, bool) {
+	if (b > 0 && a > math.MaxInt64-b) || (b < 0 && a < math.MinInt64-b) {
+		return 0, false
+	}
+	return a + b, true
+}
+
+func checkedSubInt64(a, b int64) (int64, bool) {
+	if (b > 0 && a < math.MinInt64+b) || (b < 0 && a > math.MaxInt64+b) {
+		return 0, false
+	}
+	return a - b, true
+}
+
+func checkedMulInt64(a, b int64) (int64, bool) {
+	switch {
+	case a == 0 || b == 0:
+		return 0, true
+	case a > 0 && b > 0:
+		if a > math.MaxInt64/b {
+			return 0, false
+		}
+	case a > 0 && b < 0:
+		if b < math.MinInt64/a {
+			return 0, false
+		}
+	case a < 0 && b > 0:
+		if a < math.MinInt64/b {
+			return 0, false
+		}
+	case a < 0 && b < 0:
+		if a < math.MaxInt64/b {
+			return 0, false
+		}
+	}
+	return a * b, true
+}
+
+// finiteNonNegativeToInt64 rounds a nonnegative finite float using the
+// simulator's existing nearest-integer semantics and rejects values that cannot
+// be represented exactly as an int64 result.
+func finiteNonNegativeToInt64(value float64) (int64, bool) {
+	if math.IsNaN(value) || math.IsInf(value, 0) || value < 0 {
+		return 0, false
+	}
+	rounded := math.Round(value)
+	// float64(math.MaxInt64) rounds to 2^63, so use that value as an
+	// exclusive upper bound instead of converting math.MaxInt64 to float64.
+	if rounded >= math.Ldexp(1, 63) {
+		return 0, false
+	}
+	return int64(rounded), true
 }
 
 func dominantRequestFraction(pod NodeOptimizationPodInput, nodeCPUMilli, nodeMemoryBytes int64) float64 {
