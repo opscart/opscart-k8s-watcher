@@ -44,11 +44,12 @@ type NodeOptimizationPodInput struct {
 	// expose Kubernetes selector types.
 	topologySpreadConstraints []nodeOptimizationTopologySpreadConstraint
 
-	// requiredAntiAffinityTerms and antiAffinityState are compiled from the same
+	// Required inter-Pod affinity terms and occupancy are compiled from the same
 	// snapshots. The shared state distinguishes fixed residents from movable Pods
 	// so placement never counts a movable Pod at both its old and new node.
-	requiredAntiAffinityTerms []nodeOptimizationRequiredAntiAffinityTerm
-	antiAffinityState         *nodeOptimizationAntiAffinityState
+	requiredAffinityTerms     []nodeOptimizationRequiredPodAffinityTerm
+	requiredAntiAffinityTerms []nodeOptimizationRequiredPodAffinityTerm
+	interPodAffinityState     *nodeOptimizationInterPodAffinityState
 }
 
 // NodeOptimizationInput describes a same-SKU node-count scenario.
@@ -302,8 +303,8 @@ func buildNMinusOneNodeOptimizationScenarios(
 	eligibilityWarningsByPool := make(map[CostPoolKey][]string)
 	daemonSetsByPool := make(map[CostPoolKey]map[daemonSetKey]*daemonSetObservation)
 	unsupportedConstraintsByPool := make(map[CostPoolKey][]string)
-	unsupportedRequiredAntiAffinity := false
-	requiredAntiAffinityPresent := false
+	unsupportedRequiredInterPodAffinity := false
+	requiredInterPodAffinityPresent := false
 
 	podNameCounts := make(map[string]int, len(pods))
 	for _, pod := range pods {
@@ -334,8 +335,8 @@ func buildNMinusOneNodeOptimizationScenarios(
 			summary.ExcludedPodCount++
 			continue
 		}
-		if hasRequiredPodAntiAffinity(pod) {
-			requiredAntiAffinityPresent = true
+		if hasRequiredPodAffinity(pod) || hasRequiredPodAntiAffinity(pod) {
+			requiredInterPodAffinityPresent = true
 		}
 		cpuMilli, memoryBytes, numericReason := checkedEffectivePodRequests(pod)
 		if numericReason != "" {
@@ -393,15 +394,24 @@ func buildNMinusOneNodeOptimizationScenarios(
 		}
 
 		key := *input.PoolKey
+		requiredAffinityTerms, affinityReason := buildNodeOptimizationRequiredAffinityTerms(pod)
 		requiredAntiAffinityTerms, antiAffinityReason := buildNodeOptimizationRequiredAntiAffinityTerms(pod)
+		interPodAffinityReasons := make([]string, 0, 2)
+		if affinityReason != "" {
+			interPodAffinityReasons = append(interPodAffinityReasons, affinityReason)
+		}
 		if antiAffinityReason != "" {
+			interPodAffinityReasons = append(interPodAffinityReasons, antiAffinityReason)
+		}
+		if len(interPodAffinityReasons) > 0 {
 			summary.UnsupportedConstraintPodCount++
-			unsupportedRequiredAntiAffinity = true
+			unsupportedRequiredInterPodAffinity = true
+			sort.Strings(interPodAffinityReasons)
 			summary.Warnings = append(summary.Warnings, fmt.Sprintf(
 				"pod %s/%s: %s",
 				input.Namespace,
 				input.PodName,
-				antiAffinityReason,
+				interPodAffinityReasons[0],
 			))
 			continue
 		}
@@ -410,6 +420,7 @@ func buildNMinusOneNodeOptimizationScenarios(
 			Name:                      input.PodName,
 			NodeName:                  input.NodeName,
 			Labels:                    cloneStringMap(pod.Labels),
+			RequiredAffinityTerms:     requiredAffinityTerms,
 			RequiredAntiAffinityTerms: requiredAntiAffinityTerms,
 		})
 		if input.EligibilityWarning != "" {
@@ -524,7 +535,7 @@ func buildNMinusOneNodeOptimizationScenarios(
 			summary.Warnings = append(summary.Warnings, evidence.Warnings...)
 		}
 	}
-	if unsupportedRequiredAntiAffinity {
+	if unsupportedRequiredInterPodAffinity {
 		for _, key := range keys {
 			if pools[key].nodeCount >= 2 {
 				summary.SkippedPoolCount++
@@ -533,14 +544,14 @@ func buildNMinusOneNodeOptimizationScenarios(
 		sort.Strings(summary.Warnings)
 		return summary
 	}
-	if evidence == nil && requiredAntiAffinityPresent {
+	if evidence == nil && requiredInterPodAffinityPresent {
 		for _, key := range keys {
 			if pools[key].nodeCount >= 2 {
 				summary.SkippedPoolCount++
 			}
 		}
 		summary.Warnings = append(summary.Warnings,
-			"node optimization skipped because required pod anti-affinity needs scheduling topology evidence for both incoming and resident Pods")
+			"node optimization skipped because required inter-Pod affinity needs scheduling topology evidence")
 		sort.Strings(summary.Warnings)
 		return summary
 	}
@@ -573,7 +584,7 @@ func buildNMinusOneNodeOptimizationScenarios(
 				))
 				continue
 			}
-			antiAffinityState := buildNodeOptimizationAntiAffinityState(
+			interPodAffinityState := buildNodeOptimizationInterPodAffinityState(
 				allSchedulingNodes(*evidence),
 				eligibleTopologyPods,
 				movablePodsByPool[key],
@@ -609,12 +620,16 @@ func buildNMinusOneNodeOptimizationScenarios(
 					continue
 				}
 				scenarioPods[i].topologySpreadConstraints = topologyConstraints
-				antiAffinityPod := antiAffinityState.MovablePods[namespacedKey(pod.Namespace, pod.Name)]
-				scenarioPods[i].requiredAntiAffinityTerms = append(
-					[]nodeOptimizationRequiredAntiAffinityTerm(nil),
-					antiAffinityPod.RequiredAntiAffinityTerms...,
+				interPodAffinityPod := interPodAffinityState.MovablePods[namespacedKey(pod.Namespace, pod.Name)]
+				scenarioPods[i].requiredAffinityTerms = append(
+					[]nodeOptimizationRequiredPodAffinityTerm(nil),
+					interPodAffinityPod.RequiredAffinityTerms...,
 				)
-				scenarioPods[i].antiAffinityState = antiAffinityState
+				scenarioPods[i].requiredAntiAffinityTerms = append(
+					[]nodeOptimizationRequiredPodAffinityTerm(nil),
+					interPodAffinityPod.RequiredAntiAffinityTerms...,
+				)
+				scenarioPods[i].interPodAffinityState = interPodAffinityState
 			}
 
 			// DaemonSet Pods remain modeled as per-node overhead. Preserve the

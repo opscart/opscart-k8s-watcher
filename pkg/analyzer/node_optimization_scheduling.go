@@ -15,10 +15,11 @@ type nodeOptimizationTopologyPod struct {
 	Name                      string
 	NodeName                  string
 	Labels                    map[string]string
-	RequiredAntiAffinityTerms []nodeOptimizationRequiredAntiAffinityTerm
+	RequiredAffinityTerms     []nodeOptimizationRequiredPodAffinityTerm
+	RequiredAntiAffinityTerms []nodeOptimizationRequiredPodAffinityTerm
 }
 
-type nodeOptimizationRequiredAntiAffinityTerm struct {
+type nodeOptimizationRequiredPodAffinityTerm struct {
 	TopologyKey         string
 	TopologyRequirement nodeOptimizationTopologyRequirement
 	Namespaces          []string
@@ -26,7 +27,7 @@ type nodeOptimizationRequiredAntiAffinityTerm struct {
 	SortKey             string
 }
 
-type nodeOptimizationAntiAffinityState struct {
+type nodeOptimizationInterPodAffinityState struct {
 	Nodes       []NodeOptimizationSchedulingNode
 	FixedPods   []nodeOptimizationTopologyPod
 	MovablePods map[string]nodeOptimizationTopologyPod
@@ -123,16 +124,43 @@ func hasRequiredPodAntiAffinity(pod corev1.Pod) bool {
 		len(pod.Spec.Affinity.PodAntiAffinity.RequiredDuringSchedulingIgnoredDuringExecution) > 0
 }
 
-func buildNodeOptimizationRequiredAntiAffinityTerms(pod corev1.Pod) ([]nodeOptimizationRequiredAntiAffinityTerm, string) {
+func hasRequiredPodAffinity(pod corev1.Pod) bool {
+	return pod.Spec.Affinity != nil &&
+		pod.Spec.Affinity.PodAffinity != nil &&
+		len(pod.Spec.Affinity.PodAffinity.RequiredDuringSchedulingIgnoredDuringExecution) > 0
+}
+
+func buildNodeOptimizationRequiredAntiAffinityTerms(pod corev1.Pod) ([]nodeOptimizationRequiredPodAffinityTerm, string) {
 	if !hasRequiredPodAntiAffinity(pod) {
 		return nil, ""
 	}
+	return buildNodeOptimizationRequiredPodAffinityTerms(
+		pod,
+		pod.Spec.Affinity.PodAntiAffinity.RequiredDuringSchedulingIgnoredDuringExecution,
+		"required pod anti-affinity",
+	)
+}
 
-	terms := make([]nodeOptimizationRequiredAntiAffinityTerm, 0,
-		len(pod.Spec.Affinity.PodAntiAffinity.RequiredDuringSchedulingIgnoredDuringExecution))
+func buildNodeOptimizationRequiredAffinityTerms(pod corev1.Pod) ([]nodeOptimizationRequiredPodAffinityTerm, string) {
+	if !hasRequiredPodAffinity(pod) {
+		return nil, ""
+	}
+	return buildNodeOptimizationRequiredPodAffinityTerms(
+		pod,
+		pod.Spec.Affinity.PodAffinity.RequiredDuringSchedulingIgnoredDuringExecution,
+		"required pod affinity",
+	)
+}
+
+func buildNodeOptimizationRequiredPodAffinityTerms(
+	pod corev1.Pod,
+	podAffinityTerms []corev1.PodAffinityTerm,
+	description string,
+) ([]nodeOptimizationRequiredPodAffinityTerm, string) {
+	terms := make([]nodeOptimizationRequiredPodAffinityTerm, 0, len(podAffinityTerms))
 	reasons := make([]string, 0)
-	for _, term := range pod.Spec.Affinity.PodAntiAffinity.RequiredDuringSchedulingIgnoredDuringExecution {
-		termIdentity := fmt.Sprintf("required pod anti-affinity term with topologyKey %q", term.TopologyKey)
+	for _, term := range podAffinityTerms {
+		termIdentity := fmt.Sprintf("%s term with topologyKey %q", description, term.TopologyKey)
 		if term.NamespaceSelector != nil {
 			reasons = append(reasons, termIdentity+" uses namespaceSelector, but namespace-label evidence is unavailable")
 		}
@@ -172,7 +200,7 @@ func buildNodeOptimizationRequiredAntiAffinityTerms(pod corev1.Pod) ([]nodeOptim
 			namespaces = normalized
 		}
 
-		terms = append(terms, nodeOptimizationRequiredAntiAffinityTerm{
+		terms = append(terms, nodeOptimizationRequiredPodAffinityTerm{
 			TopologyKey:         term.TopologyKey,
 			TopologyRequirement: requirement,
 			Namespaces:          append([]string(nil), namespaces...),
@@ -196,17 +224,17 @@ func buildNodeOptimizationRequiredAntiAffinityTerms(pod corev1.Pod) ([]nodeOptim
 	return terms, ""
 }
 
-func buildNodeOptimizationAntiAffinityState(
+func buildNodeOptimizationInterPodAffinityState(
 	nodes []NodeOptimizationSchedulingNode,
 	eligiblePods []nodeOptimizationTopologyPod,
 	movablePods []corev1.Pod,
-) *nodeOptimizationAntiAffinityState {
+) *nodeOptimizationInterPodAffinityState {
 	movableKeys := make(map[string]struct{}, len(movablePods))
 	for _, pod := range movablePods {
 		movableKeys[namespacedKey(pod.Namespace, pod.Name)] = struct{}{}
 	}
 
-	state := &nodeOptimizationAntiAffinityState{
+	state := &nodeOptimizationInterPodAffinityState{
 		Nodes:       append([]NodeOptimizationSchedulingNode(nil), nodes...),
 		MovablePods: make(map[string]nodeOptimizationTopologyPod, len(movablePods)),
 	}
@@ -228,7 +256,7 @@ func nodeOptimizationTopologyPodSortKey(pod nodeOptimizationTopologyPod) string 
 	return namespacedKey(pod.Namespace, pod.Name) + "\x00" + pod.NodeName
 }
 
-func requiredAntiAffinityTermMatchesPod(term nodeOptimizationRequiredAntiAffinityTerm, pod nodeOptimizationTopologyPod) bool {
+func requiredPodAffinityTermMatchesPod(term nodeOptimizationRequiredPodAffinityTerm, pod nodeOptimizationTopologyPod) bool {
 	namespaceIndex := sort.SearchStrings(term.Namespaces, pod.Namespace)
 	if namespaceIndex >= len(term.Namespaces) || term.Namespaces[namespaceIndex] != pod.Namespace {
 		return false
@@ -640,6 +668,9 @@ func unsupportedPodSchedulingConstraintReason(pod corev1.Pod) string {
 	if reason := hardTopologySpreadUnsupportedReason(pod); reason != "" {
 		return reason
 	}
+	if _, reason := buildNodeOptimizationRequiredAffinityTerms(pod); reason != "" {
+		return reason
+	}
 	if _, reason := buildNodeOptimizationRequiredAntiAffinityTerms(pod); reason != "" {
 		return reason
 	}
@@ -648,12 +679,6 @@ func unsupportedPodSchedulingConstraintReason(pod corev1.Pod) string {
 			if port.HostPort != 0 {
 				return "host-port scheduling conflicts are not modeled yet"
 			}
-		}
-	}
-	if pod.Spec.Affinity != nil {
-		if pod.Spec.Affinity.PodAffinity != nil &&
-			len(pod.Spec.Affinity.PodAffinity.RequiredDuringSchedulingIgnoredDuringExecution) > 0 {
-			return "required pod affinity is not modeled yet"
 		}
 	}
 	for _, volume := range pod.Spec.Volumes {

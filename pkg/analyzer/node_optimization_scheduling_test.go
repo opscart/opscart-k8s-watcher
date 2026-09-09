@@ -2176,8 +2176,8 @@ func TestBuildNMinusOneNodeOptimizationScenariosRequiredPodAntiAffinityRequiresS
 	if len(got.Scenarios) != 0 || got.SkippedPoolCount != 1 {
 		t.Fatalf("summary = %#v, want all candidate pools skipped without scheduling evidence", got)
 	}
-	if !strings.Contains(strings.Join(got.Warnings, " "), "required pod anti-affinity needs scheduling topology evidence") {
-		t.Fatalf("warnings = %#v, want required anti-affinity evidence warning", got.Warnings)
+	if !strings.Contains(strings.Join(got.Warnings, " "), "required inter-Pod affinity needs scheduling topology evidence") {
+		t.Fatalf("warnings = %#v, want required inter-Pod affinity evidence warning", got.Warnings)
 	}
 }
 
@@ -2334,10 +2334,564 @@ func TestRequiredPodAntiAffinitySupportsStandardMatchExpressions(t *testing.T) {
 				t.Fatalf("terms = %#v, reason = %q, want one supported term", terms, reason)
 			}
 			target := nodeOptimizationTopologyPod{Namespace: "apps", Name: "target", Labels: tt.labels}
-			if !requiredAntiAffinityTermMatchesPod(terms[0], target) {
+			if !requiredPodAffinityTermMatchesPod(terms[0], target) {
 				t.Fatalf("term did not match target labels %#v", tt.labels)
 			}
 		})
+	}
+}
+
+func requiredAffinityTestPod(
+	namespace, name, nodeName, topologyKey string,
+	selector *metav1.LabelSelector,
+	namespaces []string,
+) corev1.Pod {
+	pod := optimizationTestPod(namespace, name, nodeName, corev1.PodRunning, "500m", "256Mi")
+	pod.Labels = map[string]string{"app": "client"}
+	pod.Spec.Affinity = &corev1.Affinity{PodAffinity: &corev1.PodAffinity{
+		RequiredDuringSchedulingIgnoredDuringExecution: []corev1.PodAffinityTerm{{
+			LabelSelector: selector,
+			Namespaces:    namespaces,
+			TopologyKey:   topologyKey,
+		}},
+	}}
+	return pod
+}
+
+func TestBuildNMinusOneNodeOptimizationScenariosRequiredPodAffinityHostname(t *testing.T) {
+	selector := &metav1.LabelSelector{MatchLabels: map[string]string{"app": "database"}}
+	info0, node0 := topologySpreadTestNode("node-0", "userpool", "worker-0", "zone-a", "centralus")
+	info1, node1 := topologySpreadTestNode("node-1", "userpool", "worker-1", "zone-a", "centralus")
+	info2, node2 := topologySpreadTestNode("node-2", "userpool", "worker-2", "zone-b", "centralus")
+	nodeInfos := []models.NodeInfo{info0, info1, info2}
+	evidence := BuildNodeOptimizationSchedulingEvidence(nodeInfos, []corev1.Node{node0, node1, node2})
+
+	t.Run("fixed DaemonSet Pod satisfies hostname term", func(t *testing.T) {
+		client := requiredAffinityTestPod("apps", "client", "node-0", corev1.LabelHostname, selector, nil)
+		daemons := []corev1.Pod{
+			optimizationTestDaemonSetPod("apps", "agent-0", "node-0", "100m", "64Mi"),
+			optimizationTestDaemonSetPod("apps", "agent-1", "node-1", "100m", "64Mi"),
+			optimizationTestDaemonSetPod("apps", "agent-2", "node-2", "100m", "64Mi"),
+		}
+		daemons[1].Labels = map[string]string{"app": "database"}
+
+		got := BuildNMinusOneNodeOptimizationScenariosWithSchedulingEvidence(
+			nodeInfos,
+			append([]corev1.Pod{client}, daemons...),
+			evidence,
+		)
+
+		if len(got.Scenarios) != 1 || !got.Scenarios[0].Simulation.PlacementFound {
+			t.Fatalf("summary = %#v, want hostname affinity satisfied by fixed DaemonSet Pod", got)
+		}
+		placements := got.Scenarios[0].Simulation.Placements
+		if len(placements) != 1 || placements[0].NodeName != "node-1" {
+			t.Fatalf("placements = %#v, want client placed with matching fixed Pod on node-1", placements)
+		}
+	})
+
+	t.Run("no matching Pod blocks", func(t *testing.T) {
+		client := requiredAffinityTestPod("apps", "client", "node-0", corev1.LabelHostname, selector, nil)
+
+		got := BuildNMinusOneNodeOptimizationScenariosWithSchedulingEvidence(nodeInfos, []corev1.Pod{client}, evidence)
+
+		if len(got.Scenarios) != 1 || got.Scenarios[0].Simulation.PlacementFound {
+			t.Fatalf("summary = %#v, want missing hostname-affinity match to block", got)
+		}
+		if got.Scenarios[0].Simulation.Blockers[0].Reason != "required_pod_affinity" {
+			t.Fatalf("blockers = %#v, want required Pod affinity blocker", got.Scenarios[0].Simulation.Blockers)
+		}
+	})
+}
+
+func TestBuildNMinusOneNodeOptimizationScenariosRequiredPodAffinityZoneAndRegion(t *testing.T) {
+	selector := &metav1.LabelSelector{MatchLabels: map[string]string{"app": "database"}}
+	tests := []struct {
+		name        string
+		topologyKey string
+		region      string
+		zone        string
+	}{
+		{name: "zone", topologyKey: corev1.LabelTopologyZone, zone: "zone-a", region: "centralus"},
+		{name: "region", topologyKey: corev1.LabelTopologyRegion, zone: "zone-b", region: "centralus"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			info0, node0 := topologySpreadTestNode("node-0", "userpool", "worker-0", "zone-a", "centralus")
+			info1, node1 := topologySpreadTestNode("node-1", "userpool", "worker-1", "zone-a", "centralus")
+			info2, node2 := topologySpreadTestNode("node-2", "userpool", "worker-2", "zone-b", "centralus")
+			info3, node3 := topologySpreadTestNode("node-3", "databasepool", "worker-3", tt.zone, tt.region)
+			nodeInfos := []models.NodeInfo{info0, info1, info2, info3}
+			evidence := BuildNodeOptimizationSchedulingEvidence(nodeInfos, []corev1.Node{node0, node1, node2, node3})
+			client := requiredAffinityTestPod("apps", "client", "node-0", tt.topologyKey, selector, nil)
+			database := optimizationTestPod("apps", "database", "node-3", corev1.PodRunning, "500m", "256Mi")
+			database.Labels = map[string]string{"app": "database"}
+
+			got := BuildNMinusOneNodeOptimizationScenariosWithSchedulingEvidence(nodeInfos, []corev1.Pod{client, database}, evidence)
+
+			if len(got.Scenarios) != 1 || !got.Scenarios[0].Simulation.PlacementFound {
+				t.Fatalf("summary = %#v, want %s affinity satisfied", got, tt.name)
+			}
+		})
+	}
+}
+
+func TestBuildNMinusOneNodeOptimizationScenariosRequiredPodAffinityUsesPlacementState(t *testing.T) {
+	selector := &metav1.LabelSelector{MatchLabels: map[string]string{"app": "database"}}
+	info0, node0 := topologySpreadTestNode("node-0", "userpool", "worker-0", "zone-a", "centralus")
+	info1, node1 := topologySpreadTestNode("node-1", "userpool", "worker-1", "zone-a", "centralus")
+	info2, node2 := topologySpreadTestNode("node-2", "userpool", "worker-2", "zone-b", "centralus")
+	nodeInfos := []models.NodeInfo{info0, info1, info2}
+	evidence := BuildNodeOptimizationSchedulingEvidence(nodeInfos, []corev1.Node{node0, node1, node2})
+
+	t.Run("previously placed movable Pod satisfies later Pod", func(t *testing.T) {
+		database := optimizationTestPod("apps", "database", "node-2", corev1.PodRunning, "1000m", "512Mi")
+		database.Labels = map[string]string{"app": "database"}
+		client := requiredAffinityTestPod("apps", "client", "node-0", corev1.LabelTopologyZone, selector, nil)
+
+		got := BuildNMinusOneNodeOptimizationScenariosWithSchedulingEvidence(nodeInfos, []corev1.Pod{client, database}, evidence)
+
+		if len(got.Scenarios) != 1 || !got.Scenarios[0].Simulation.PlacementFound {
+			t.Fatalf("summary = %#v, want movable database to satisfy later client", got)
+		}
+		placements := got.Scenarios[0].Simulation.Placements
+		if len(placements) != 2 || placements[0].NodeName != placements[1].NodeName {
+			t.Fatalf("placements = %#v, want client co-located in movable database's assigned zone", placements)
+		}
+	})
+
+	t.Run("old location never satisfies before movable Pod is placed", func(t *testing.T) {
+		database := optimizationTestPod("apps", "database", "node-0", corev1.PodRunning, "500m", "256Mi")
+		database.Labels = map[string]string{"app": "database"}
+		client := requiredAffinityTestPod("apps", "client", "node-1", corev1.LabelTopologyZone, selector, nil)
+		client.Spec.Containers[0].Resources.Requests[corev1.ResourceCPU] = resource.MustParse("1000m")
+
+		got := BuildNMinusOneNodeOptimizationScenariosWithSchedulingEvidence(nodeInfos[:2], []corev1.Pod{client, database}, BuildNodeOptimizationSchedulingEvidence(nodeInfos[:2], []corev1.Node{node0, node1}))
+
+		if len(got.Scenarios) != 1 || got.Scenarios[0].RemovedNodeName != "node-0" || got.Scenarios[0].Simulation.PlacementFound {
+			t.Fatalf("summary = %#v, want removed-node database excluded from old occupancy", got)
+		}
+		if !strings.Contains(got.Scenarios[0].Simulation.Blockers[0].Message, "no resident Pod matching") {
+			t.Fatalf("blockers = %#v, want no-resident affinity blocker", got.Scenarios[0].Simulation.Blockers)
+		}
+	})
+}
+
+func TestBuildNMinusOneNodeOptimizationScenariosRequiredPodAffinitySelectorAndNamespaces(t *testing.T) {
+	tests := []struct {
+		name              string
+		clientNamespace   string
+		residentNamespace string
+		residentLabels    map[string]string
+		selector          *metav1.LabelSelector
+		namespaces        []string
+		wantPlacement     bool
+	}{
+		{
+			name: "selector excludes unrelated Pod", clientNamespace: "apps", residentNamespace: "apps",
+			residentLabels: map[string]string{"app": "other"},
+			selector: &metav1.LabelSelector{MatchExpressions: []metav1.LabelSelectorRequirement{{
+				Key: "app", Operator: metav1.LabelSelectorOpIn, Values: []string{"database"},
+			}}},
+		},
+		{
+			name: "same namespace default", clientNamespace: "apps", residentNamespace: "apps",
+			residentLabels: map[string]string{"app": "database"}, selector: &metav1.LabelSelector{MatchLabels: map[string]string{"app": "database"}},
+			wantPlacement: true,
+		},
+		{
+			name: "explicit namespace", clientNamespace: "apps", residentNamespace: "shared",
+			residentLabels: map[string]string{"app": "database"}, selector: &metav1.LabelSelector{MatchLabels: map[string]string{"app": "database"}},
+			namespaces: []string{"shared", "shared"}, wantPlacement: true,
+		},
+		{
+			name: "unrelated namespace does not satisfy", clientNamespace: "apps", residentNamespace: "other",
+			residentLabels: map[string]string{"app": "database"}, selector: &metav1.LabelSelector{MatchLabels: map[string]string{"app": "database"}},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			info0, node0 := topologySpreadTestNode("node-0", "userpool", "worker-0", "zone-a", "centralus")
+			info1, node1 := topologySpreadTestNode("node-1", "userpool", "worker-1", "zone-a", "centralus")
+			info2, node2 := topologySpreadTestNode("node-2", "databasepool", "worker-2", "zone-a", "centralus")
+			nodeInfos := []models.NodeInfo{info0, info1, info2}
+			evidence := BuildNodeOptimizationSchedulingEvidence(nodeInfos, []corev1.Node{node0, node1, node2})
+			client := requiredAffinityTestPod(tt.clientNamespace, "client", "node-0", corev1.LabelTopologyZone, tt.selector, tt.namespaces)
+			resident := optimizationTestPod(tt.residentNamespace, "database", "node-2", corev1.PodRunning, "500m", "256Mi")
+			resident.Labels = tt.residentLabels
+
+			got := BuildNMinusOneNodeOptimizationScenariosWithSchedulingEvidence(nodeInfos, []corev1.Pod{client, resident}, evidence)
+
+			if len(got.Scenarios) != 1 || got.Scenarios[0].Simulation.PlacementFound != tt.wantPlacement {
+				t.Fatalf("summary = %#v, want PlacementFound=%t", got, tt.wantPlacement)
+			}
+		})
+	}
+}
+
+func TestBuildNMinusOneNodeOptimizationScenariosRequiredPodAffinityMultipleTerms(t *testing.T) {
+	info0, node0 := topologySpreadTestNode("node-0", "userpool", "worker-0", "zone-a", "centralus")
+	info1, node1 := topologySpreadTestNode("node-1", "userpool", "worker-1", "zone-a", "centralus")
+	info2, node2 := topologySpreadTestNode("node-2", "databasepool", "worker-2", "zone-a", "centralus")
+	nodeInfos := []models.NodeInfo{info0, info1, info2}
+	evidence := BuildNodeOptimizationSchedulingEvidence(nodeInfos, []corev1.Node{node0, node1, node2})
+	newClient := func() corev1.Pod {
+		client := optimizationTestPod("apps", "client", "node-0", corev1.PodRunning, "500m", "256Mi")
+		client.Labels = map[string]string{"app": "client"}
+		client.Spec.Affinity = &corev1.Affinity{PodAffinity: &corev1.PodAffinity{
+			RequiredDuringSchedulingIgnoredDuringExecution: []corev1.PodAffinityTerm{
+				{LabelSelector: &metav1.LabelSelector{MatchLabels: map[string]string{"app": "database"}}, TopologyKey: corev1.LabelTopologyZone},
+				{LabelSelector: &metav1.LabelSelector{MatchLabels: map[string]string{"tier": "primary"}}, TopologyKey: corev1.LabelTopologyRegion},
+			},
+		}}
+		return client
+	}
+
+	t.Run("all terms satisfied", func(t *testing.T) {
+		resident := optimizationTestPod("apps", "database", "node-2", corev1.PodRunning, "500m", "256Mi")
+		resident.Labels = map[string]string{"app": "database", "tier": "primary"}
+
+		got := BuildNMinusOneNodeOptimizationScenariosWithSchedulingEvidence(nodeInfos, []corev1.Pod{newClient(), resident}, evidence)
+
+		if len(got.Scenarios) != 1 || !got.Scenarios[0].Simulation.PlacementFound {
+			t.Fatalf("summary = %#v, want both required terms satisfied", got)
+		}
+	})
+
+	t.Run("one unsatisfied term blocks", func(t *testing.T) {
+		resident := optimizationTestPod("apps", "database", "node-2", corev1.PodRunning, "500m", "256Mi")
+		resident.Labels = map[string]string{"app": "database", "tier": "replica"}
+
+		got := BuildNMinusOneNodeOptimizationScenariosWithSchedulingEvidence(nodeInfos, []corev1.Pod{newClient(), resident}, evidence)
+
+		if len(got.Scenarios) != 1 || got.Scenarios[0].Simulation.PlacementFound {
+			t.Fatalf("summary = %#v, want incomplete required term set blocked", got)
+		}
+	})
+}
+
+func TestBuildNMinusOneNodeOptimizationScenariosRequiredPodAffinityFirstPodException(t *testing.T) {
+	selector := &metav1.LabelSelector{MatchLabels: map[string]string{"app": "web"}}
+	info0, node0 := topologySpreadTestNode("node-0", "userpool", "worker-0", "zone-a", "centralus")
+	info1, node1 := topologySpreadTestNode("node-1", "userpool", "worker-1", "zone-a", "centralus")
+	info2, node2 := topologySpreadTestNode("node-2", "otherpool", "worker-2", "zone-b", "centralus")
+	nodeInfos := []models.NodeInfo{info0, info1, info2}
+	evidence := BuildNodeOptimizationSchedulingEvidence(nodeInfos, []corev1.Node{node0, node1, node2})
+
+	t.Run("self-matching first Pod is allowed", func(t *testing.T) {
+		pod := requiredAffinityTestPod("apps", "web", "node-0", corev1.LabelTopologyZone, selector, nil)
+		pod.Labels = map[string]string{"app": "web"}
+
+		got := BuildNMinusOneNodeOptimizationScenariosWithSchedulingEvidence(nodeInfos, []corev1.Pod{pod}, evidence)
+
+		if len(got.Scenarios) != 1 || !got.Scenarios[0].Simulation.PlacementFound {
+			t.Fatalf("summary = %#v, want Kubernetes first-Pod self-affinity exception", got)
+		}
+	})
+
+	t.Run("non-self-matching Pod is blocked", func(t *testing.T) {
+		pod := requiredAffinityTestPod("apps", "client", "node-0", corev1.LabelTopologyZone, selector, nil)
+
+		got := BuildNMinusOneNodeOptimizationScenariosWithSchedulingEvidence(nodeInfos, []corev1.Pod{pod}, evidence)
+
+		if len(got.Scenarios) != 1 || got.Scenarios[0].Simulation.PlacementFound {
+			t.Fatalf("summary = %#v, want non-self-matching affinity blocked", got)
+		}
+	})
+
+	t.Run("matching resident elsewhere disables exception", func(t *testing.T) {
+		pod := requiredAffinityTestPod("apps", "web", "node-0", corev1.LabelTopologyZone, selector, nil)
+		pod.Labels = map[string]string{"app": "web"}
+		resident := optimizationTestPod("apps", "existing-web", "node-2", corev1.PodRunning, "500m", "256Mi")
+		resident.Labels = map[string]string{"app": "web"}
+
+		got := BuildNMinusOneNodeOptimizationScenariosWithSchedulingEvidence(nodeInfos, []corev1.Pod{pod, resident}, evidence)
+
+		if len(got.Scenarios) != 1 || got.Scenarios[0].Simulation.PlacementFound {
+			t.Fatalf("summary = %#v, want existing global match to disable first-Pod exception", got)
+		}
+	})
+}
+
+func TestBuildNMinusOneNodeOptimizationScenariosRequiredPodAffinityTopologyEvidenceFailsClosed(t *testing.T) {
+	selector := &metav1.LabelSelector{MatchLabels: map[string]string{"app": "database"}}
+	tests := []struct {
+		name        string
+		topologyKey string
+		makeNodes   func() ([]models.NodeInfo, []corev1.Node)
+		wantMessage string
+	}{
+		{
+			name: "missing zone", topologyKey: corev1.LabelTopologyZone, wantMessage: "missing zone topology evidence",
+			makeNodes: func() ([]models.NodeInfo, []corev1.Node) {
+				infos := optimizationNodeInfos(3)
+				nodes := []corev1.Node{
+					{ObjectMeta: metav1.ObjectMeta{Name: "node-0", Labels: map[string]string{corev1.LabelHostname: "worker-0"}}},
+					{ObjectMeta: metav1.ObjectMeta{Name: "node-1", Labels: map[string]string{corev1.LabelHostname: "worker-1"}}},
+					{ObjectMeta: metav1.ObjectMeta{Name: "node-2", Labels: map[string]string{corev1.LabelHostname: "worker-2"}}},
+				}
+				return infos, nodes
+			},
+		},
+		{
+			name: "contradictory region", topologyKey: corev1.LabelTopologyRegion, wantMessage: "contradictory region topology evidence",
+			makeNodes: func() ([]models.NodeInfo, []corev1.Node) {
+				infos := optimizationNodeInfos(3)
+				nodes := make([]corev1.Node, 0, 3)
+				for i := 0; i < 3; i++ {
+					nodes = append(nodes, corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: fmt.Sprintf("node-%d", i), Labels: map[string]string{
+						corev1.LabelHostname: fmt.Sprintf("worker-%d", i), corev1.LabelTopologyRegion: "centralus", corev1.LabelFailureDomainBetaRegion: "eastus",
+					}}})
+				}
+				return infos, nodes
+			},
+		},
+		{
+			name: "ambiguous hostname", topologyKey: corev1.LabelHostname, wantMessage: "ambiguous across candidate nodes",
+			makeNodes: func() ([]models.NodeInfo, []corev1.Node) {
+				infos := optimizationNodeInfos(3)
+				nodes := []corev1.Node{
+					{ObjectMeta: metav1.ObjectMeta{Name: "node-0", Labels: map[string]string{corev1.LabelHostname: "shared"}}},
+					{ObjectMeta: metav1.ObjectMeta{Name: "node-1", Labels: map[string]string{corev1.LabelHostname: "shared"}}},
+					{ObjectMeta: metav1.ObjectMeta{Name: "node-2", Labels: map[string]string{corev1.LabelHostname: "shared"}}},
+				}
+				return infos, nodes
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			nodeInfos, nodes := tt.makeNodes()
+			evidence := BuildNodeOptimizationSchedulingEvidence(nodeInfos, nodes)
+			pod := requiredAffinityTestPod("apps", "client", "node-0", tt.topologyKey, selector, nil)
+
+			got := BuildNMinusOneNodeOptimizationScenariosWithSchedulingEvidence(nodeInfos, []corev1.Pod{pod}, evidence)
+
+			if len(got.Scenarios) != 1 || got.Scenarios[0].Simulation.PlacementFound {
+				t.Fatalf("summary = %#v, want fail-closed affinity topology evidence", got)
+			}
+			simulation := got.Scenarios[0].Simulation
+			if simulation.Status != NodeOptimizationInvalidInput || len(simulation.Blockers) != 1 || simulation.Blockers[0].Reason != "pod_affinity_evidence" {
+				t.Fatalf("simulation = %#v, want invalid affinity evidence", simulation)
+			}
+			if !strings.Contains(simulation.Blockers[0].Message, tt.wantMessage) {
+				t.Fatalf("blocker = %#v, want %q", simulation.Blockers[0], tt.wantMessage)
+			}
+		})
+	}
+}
+
+func TestBuildNMinusOneNodeOptimizationScenariosRejectsUnsupportedRequiredPodAffinity(t *testing.T) {
+	badOperator := metav1.LabelSelectorOperator("Invalid")
+	tests := []struct {
+		name       string
+		configure  func(*corev1.PodAffinityTerm)
+		wantReason string
+	}{
+		{name: "unsupported topology key", configure: func(term *corev1.PodAffinityTerm) { term.TopologyKey = "rack.example/id" }, wantReason: "unsupported topology key"},
+		{name: "malformed selector", configure: func(term *corev1.PodAffinityTerm) {
+			term.LabelSelector = &metav1.LabelSelector{MatchExpressions: []metav1.LabelSelectorRequirement{{Key: "app", Operator: badOperator}}}
+		}, wantReason: "invalid labelSelector"},
+		{name: "namespace selector", configure: func(term *corev1.PodAffinityTerm) { term.NamespaceSelector = &metav1.LabelSelector{} }, wantReason: "namespaceSelector"},
+		{name: "match label keys", configure: func(term *corev1.PodAffinityTerm) { term.MatchLabelKeys = []string{"app"} }, wantReason: "matchLabelKeys"},
+		{name: "mismatch label keys", configure: func(term *corev1.PodAffinityTerm) { term.MismatchLabelKeys = []string{"tenant"} }, wantReason: "mismatchLabelKeys"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			info0, node0 := topologySpreadTestNode("node-0", "userpool", "worker-0", "zone-a", "centralus")
+			info1, node1 := topologySpreadTestNode("node-1", "userpool", "worker-1", "zone-b", "centralus")
+			nodeInfos := []models.NodeInfo{info0, info1}
+			evidence := BuildNodeOptimizationSchedulingEvidence(nodeInfos, []corev1.Node{node0, node1})
+			pod := requiredAffinityTestPod("apps", "client", "node-0", corev1.LabelHostname,
+				&metav1.LabelSelector{MatchLabels: map[string]string{"app": "database"}}, nil)
+			tt.configure(&pod.Spec.Affinity.PodAffinity.RequiredDuringSchedulingIgnoredDuringExecution[0])
+
+			got := BuildNMinusOneNodeOptimizationScenariosWithSchedulingEvidence(nodeInfos, []corev1.Pod{pod}, evidence)
+
+			if len(got.Scenarios) != 0 || got.UnsupportedConstraintPodCount != 1 || got.SkippedPoolCount != 1 {
+				t.Fatalf("summary = %#v, want unsupported required affinity to skip every scenario", got)
+			}
+			if !strings.Contains(strings.Join(got.Warnings, " "), tt.wantReason) {
+				t.Fatalf("warnings = %#v, want %q", got.Warnings, tt.wantReason)
+			}
+		})
+	}
+}
+
+func TestBuildNMinusOneNodeOptimizationScenariosRequiredPodAffinityRequiresSchedulingEvidenceGlobally(t *testing.T) {
+	nodeInfos := []models.NodeInfo{
+		{Name: "node-0", NodePool: "userpool", VMSize: "Standard_D4s_v3", Region: "centralus", OS: "linux", Priority: "Regular", Provider: "azure", Architecture: "amd64", CPUCapacity: 4, MemGBCapacity: 8},
+		{Name: "node-1", NodePool: "userpool", VMSize: "Standard_D4s_v3", Region: "centralus", OS: "linux", Priority: "Regular", Provider: "azure", Architecture: "amd64", CPUCapacity: 4, MemGBCapacity: 8},
+	}
+	pod := requiredAffinityTestPod("apps", "client", "node-0", corev1.LabelHostname,
+		&metav1.LabelSelector{MatchLabels: map[string]string{"app": "database"}}, nil)
+
+	got := BuildNMinusOneNodeOptimizationScenariosFromSnapshots(nodeInfos, []corev1.Pod{pod})
+
+	if len(got.Scenarios) != 0 || got.SkippedPoolCount != 1 {
+		t.Fatalf("summary = %#v, want missing scheduling evidence to block required affinity globally", got)
+	}
+	if !strings.Contains(strings.Join(got.Warnings, " "), "required inter-Pod affinity needs scheduling topology evidence") {
+		t.Fatalf("warnings = %#v, want explicit missing inter-Pod affinity evidence warning", got.Warnings)
+	}
+}
+
+func TestRequiredPodAffinitySupportsStandardMatchExpressions(t *testing.T) {
+	tests := []struct {
+		name     string
+		operator metav1.LabelSelectorOperator
+		values   []string
+		labels   map[string]string
+	}{
+		{name: "In", operator: metav1.LabelSelectorOpIn, values: []string{"database"}, labels: map[string]string{"app": "database"}},
+		{name: "NotIn", operator: metav1.LabelSelectorOpNotIn, values: []string{"other"}, labels: map[string]string{"app": "database"}},
+		{name: "Exists", operator: metav1.LabelSelectorOpExists, labels: map[string]string{"app": "database"}},
+		{name: "DoesNotExist", operator: metav1.LabelSelectorOpDoesNotExist, labels: map[string]string{"other": "value"}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			pod := requiredAffinityTestPod("apps", "client", "node-0", corev1.LabelHostname,
+				&metav1.LabelSelector{MatchExpressions: []metav1.LabelSelectorRequirement{{
+					Key: "app", Operator: tt.operator, Values: tt.values,
+				}}}, nil)
+			terms, reason := buildNodeOptimizationRequiredAffinityTerms(pod)
+			if reason != "" || len(terms) != 1 {
+				t.Fatalf("terms = %#v, reason = %q, want one supported term", terms, reason)
+			}
+			target := nodeOptimizationTopologyPod{Namespace: "apps", Name: "target", Labels: tt.labels}
+			if !requiredPodAffinityTermMatchesPod(terms[0], target) {
+				t.Fatalf("term did not match target labels %#v", tt.labels)
+			}
+		})
+	}
+}
+
+func TestBuildNMinusOneNodeOptimizationScenariosCombinesRequiredPodAffinityAndAntiAffinity(t *testing.T) {
+	newSnapshot := func(guardZone string) ([]models.NodeInfo, []corev1.Node, []corev1.Pod) {
+		info0, node0 := topologySpreadTestNode("node-0", "userpool", "worker-0", "zone-a", "centralus")
+		info1, node1 := topologySpreadTestNode("node-1", "userpool", "worker-1", "zone-a", "centralus")
+		info2, node2 := topologySpreadTestNode("node-2", "userpool", "worker-2", "zone-b", "centralus")
+		info3, node3 := topologySpreadTestNode("node-3", "databasepool", "worker-3", "zone-a", "centralus")
+		info4, node4 := topologySpreadTestNode("node-4", "guardpool", "worker-4", guardZone, "centralus")
+		client := requiredAffinityTestPod("apps", "client", "node-0", corev1.LabelTopologyZone,
+			&metav1.LabelSelector{MatchLabels: map[string]string{"app": "database"}}, nil)
+		client.Labels = map[string]string{"role": "client"}
+		client.Spec.Affinity.PodAntiAffinity = &corev1.PodAntiAffinity{
+			RequiredDuringSchedulingIgnoredDuringExecution: []corev1.PodAffinityTerm{{
+				LabelSelector: &metav1.LabelSelector{MatchLabels: map[string]string{"app": "guard"}},
+				TopologyKey:   corev1.LabelTopologyZone,
+			}},
+		}
+		database := optimizationTestPod("apps", "database", "node-3", corev1.PodRunning, "500m", "256Mi")
+		database.Labels = map[string]string{"app": "database"}
+		guard := optimizationTestPod("apps", "guard", "node-4", corev1.PodRunning, "500m", "256Mi")
+		guard.Labels = map[string]string{"app": "guard"}
+		return []models.NodeInfo{info0, info1, info2, info3, info4}, []corev1.Node{node0, node1, node2, node3, node4}, []corev1.Pod{client, database, guard}
+	}
+
+	t.Run("candidate allowed only when both constraints pass", func(t *testing.T) {
+		nodeInfos, nodes, pods := newSnapshot("zone-b")
+		got := BuildNMinusOneNodeOptimizationScenariosWithSchedulingEvidence(nodeInfos, pods, BuildNodeOptimizationSchedulingEvidence(nodeInfos, nodes))
+
+		if len(got.Scenarios) != 1 || !got.Scenarios[0].Simulation.PlacementFound {
+			t.Fatalf("summary = %#v, want combined affinity and anti-affinity fit", got)
+		}
+		placements := got.Scenarios[0].Simulation.Placements
+		if len(placements) != 1 || placements[0].NodeName != "node-1" {
+			t.Fatalf("placements = %#v, want node-1 where affinity and anti-affinity both pass", placements)
+		}
+	})
+
+	t.Run("anti-affinity rejects every affinity-compatible candidate", func(t *testing.T) {
+		nodeInfos, nodes, pods := newSnapshot("zone-a")
+		got := BuildNMinusOneNodeOptimizationScenariosWithSchedulingEvidence(nodeInfos, pods, BuildNodeOptimizationSchedulingEvidence(nodeInfos, nodes))
+
+		if len(got.Scenarios) != 1 || got.Scenarios[0].Simulation.PlacementFound {
+			t.Fatalf("summary = %#v, want combined constraints to block", got)
+		}
+	})
+}
+
+func TestBuildNMinusOneNodeOptimizationScenariosRequiredPodAffinityIsDeterministic(t *testing.T) {
+	info0, node0 := topologySpreadTestNode("node-0", "userpool", "worker-0", "zone-a", "centralus")
+	info1, node1 := topologySpreadTestNode("node-1", "userpool", "worker-1", "zone-a", "centralus")
+	info2, node2 := topologySpreadTestNode("node-2", "userpool", "worker-2", "zone-b", "centralus")
+	info3, node3 := topologySpreadTestNode("node-3", "databasepool", "worker-3", "zone-a", "centralus")
+	nodeInfos := []models.NodeInfo{info0, info1, info2, info3}
+	nodes := []corev1.Node{node0, node1, node2, node3}
+	client := requiredAffinityTestPod("apps", "client", "node-0", corev1.LabelTopologyZone,
+		&metav1.LabelSelector{MatchLabels: map[string]string{"app": "database"}}, nil)
+	database := optimizationTestPod("apps", "database", "node-3", corev1.PodRunning, "500m", "256Mi")
+	database.Labels = map[string]string{"app": "database"}
+	pods := []corev1.Pod{client, database}
+
+	forward := BuildNMinusOneNodeOptimizationScenariosWithSchedulingEvidence(nodeInfos, pods, BuildNodeOptimizationSchedulingEvidence(nodeInfos, nodes))
+	reversedNodeInfos := []models.NodeInfo{nodeInfos[3], nodeInfos[2], nodeInfos[1], nodeInfos[0]}
+	reversedNodes := []corev1.Node{nodes[3], nodes[2], nodes[1], nodes[0]}
+	reversedPods := []corev1.Pod{pods[1], pods[0]}
+	reversed := BuildNMinusOneNodeOptimizationScenariosWithSchedulingEvidence(reversedNodeInfos, reversedPods, BuildNodeOptimizationSchedulingEvidence(reversedNodeInfos, reversedNodes))
+
+	if !reflect.DeepEqual(forward, reversed) {
+		t.Fatalf("required affinity result changed with snapshot order:\nforward=%#v\nreversed=%#v", forward, reversed)
+	}
+	if len(forward.Scenarios) != 1 || forward.Scenarios[0].RemovedNodeName != "node-0" || !forward.Scenarios[0].Simulation.PlacementFound {
+		t.Fatalf("summary = %#v, want deterministic node-0 removal and fit", forward)
+	}
+}
+
+func TestNMinusOneRequiredPodAffinityReassignsPodFromRemovedNode(t *testing.T) {
+	info0, node0 := topologySpreadTestNode("node-0", "userpool", "worker-0", "zone-a", "centralus")
+	info1, node1 := topologySpreadTestNode("node-1", "userpool", "worker-1", "zone-a", "centralus")
+	info2, node2 := topologySpreadTestNode("node-2", "userpool", "worker-2", "zone-b", "centralus")
+	info3, node3 := topologySpreadTestNode("node-3", "databasepool", "worker-3", "zone-a", "centralus")
+	nodeInfos := []models.NodeInfo{info0, info1, info2, info3}
+	nodes := []corev1.Node{node0, node1, node2, node3}
+	evacuated := requiredAffinityTestPod("apps", "evacuated-client", "node-0", corev1.LabelTopologyZone,
+		&metav1.LabelSelector{MatchLabels: map[string]string{"app": "database"}}, nil)
+	database := optimizationTestPod("apps", "database", "node-3", corev1.PodRunning, "500m", "256Mi")
+	database.Labels = map[string]string{"app": "database"}
+
+	got := BuildNMinusOneNodeOptimizationScenariosWithSchedulingEvidence(
+		nodeInfos,
+		[]corev1.Pod{evacuated, database},
+		BuildNodeOptimizationSchedulingEvidence(nodeInfos, nodes),
+	)
+
+	if len(got.Scenarios) != 1 {
+		t.Fatalf("summary = %#v, want one userpool scenario", got)
+	}
+	scenario := got.Scenarios[0]
+	if scenario.RemovedNodeName != "node-0" || !scenario.Simulation.PlacementFound {
+		t.Fatalf("scenario = %#v, want successful deterministic node-0 removal", scenario)
+	}
+	if scenario.Simulation.TotalCPURequestMilli != 500 || scenario.Simulation.TotalMemoryRequestBytes != 256*1024*1024 {
+		t.Fatalf("simulation totals = CPU %dm memory %d, want removed-node Pod demand retained", scenario.Simulation.TotalCPURequestMilli, scenario.Simulation.TotalMemoryRequestBytes)
+	}
+	if len(scenario.Simulation.Placements) != 1 {
+		t.Fatalf("placements = %#v, want exactly one destination for removed-node Pod", scenario.Simulation.Placements)
+	}
+	placement := scenario.Simulation.Placements[0]
+	if placement.PodName != "evacuated-client" || placement.NodeName != "node-1" || placement.NodeName == scenario.RemovedNodeName {
+		t.Fatalf("placement = %#v, want removed-node Pod reassigned into its required affinity zone", placement)
+	}
+}
+
+func TestBuildNMinusOneNodeOptimizationScenariosWithoutPodAffinityPreservesPlacement(t *testing.T) {
+	info0, node0 := topologySpreadTestNode("node-0", "userpool", "worker-0", "zone-a", "centralus")
+	info1, node1 := topologySpreadTestNode("node-1", "userpool", "worker-1", "zone-b", "centralus")
+	nodeInfos := []models.NodeInfo{info0, info1}
+	evidence := BuildNodeOptimizationSchedulingEvidence(nodeInfos, []corev1.Node{node0, node1})
+	pod := optimizationTestPod("apps", "api", "node-0", corev1.PodRunning, "500m", "256Mi")
+
+	got := BuildNMinusOneNodeOptimizationScenariosWithSchedulingEvidence(nodeInfos, []corev1.Pod{pod}, evidence)
+
+	if len(got.Scenarios) != 1 || !got.Scenarios[0].Simulation.PlacementFound || got.Scenarios[0].Simulation.Status != NodeOptimizationFit {
+		t.Fatalf("summary = %#v, want unchanged placement without Pod affinity", got)
 	}
 }
 

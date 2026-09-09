@@ -27,7 +27,7 @@ func SimulateSameShapeNodeCount(input NodeOptimizationInput) NodeOptimizationRes
 		TotalPodCount:  len(input.Pods),
 		Caveats: []string{
 			"models CPU and memory requests only",
-			"does not model scheduling constraints beyond supplied eligible-node sets, compiled hard topology spread constraints, and compiled required pod anti-affinity",
+			"does not model scheduling constraints beyond supplied eligible-node sets, compiled hard topology spread constraints, and compiled required inter-Pod affinity",
 		},
 	}
 
@@ -238,6 +238,9 @@ func SimulateSameShapeNodeCount(input NodeOptimizationInput) NodeOptimizationRes
 		if topologyI, topologyJ := topologySpreadConstraintSortValue(pods[i]), topologySpreadConstraintSortValue(pods[j]); topologyI != topologyJ {
 			return topologyI < topologyJ
 		}
+		if affinityI, affinityJ := requiredAffinitySortValue(pods[i]), requiredAffinitySortValue(pods[j]); affinityI != affinityJ {
+			return affinityI < affinityJ
+		}
 		return requiredAntiAffinitySortValue(pods[i]) < requiredAntiAffinitySortValue(pods[j])
 	})
 
@@ -256,6 +259,7 @@ func SimulateSameShapeNodeCount(input NodeOptimizationInput) NodeOptimizationRes
 		bestScore := 0.0
 		var bestCPUUsed, bestMemoryUsed int64
 		topologyBlockedReason := ""
+		affinityBlockedReason := ""
 		antiAffinityBlockedReason := ""
 		eligible := make(map[string]struct{}, len(pod.EligibleNodeNames))
 		for _, name := range pod.EligibleNodeNames {
@@ -310,6 +314,24 @@ func SimulateSameShapeNodeCount(input NodeOptimizationInput) NodeOptimizationRes
 				continue
 			}
 
+			affinityAllowed, affinityReason, affinityInvalidReason := requiredPodAffinityAllowsPlacement(
+				pod,
+				bins[i].name,
+				result.Placements,
+				input.removedNodeName,
+			)
+			if affinityInvalidReason != "" {
+				result = invalidNodeOptimizationResult(result, "pod_affinity_evidence", affinityInvalidReason)
+				result.Blockers[len(result.Blockers)-1].Pod = podDisplayName(pod)
+				return result
+			}
+			if !affinityAllowed {
+				if affinityBlockedReason == "" {
+					affinityBlockedReason = affinityReason
+				}
+				continue
+			}
+
 			antiAffinityAllowed, antiAffinityReason, antiAffinityInvalidReason := requiredPodAntiAffinityAllowsPlacement(
 				pod,
 				bins[i].name,
@@ -355,6 +377,9 @@ func SimulateSameShapeNodeCount(input NodeOptimizationInput) NodeOptimizationRes
 			if topologyBlockedReason != "" {
 				reason = "topology_spread_constraint"
 				message = topologyBlockedReason + "; deterministic placement could not prove a valid assignment"
+			} else if affinityBlockedReason != "" {
+				reason = "required_pod_affinity"
+				message = affinityBlockedReason + "; deterministic placement could not prove a valid assignment"
 			} else if antiAffinityBlockedReason != "" {
 				reason = "required_pod_anti_affinity"
 				message = antiAffinityBlockedReason + "; deterministic placement could not prove a valid assignment"
@@ -401,6 +426,9 @@ func nodeOptimizationPodValidationLess(a, b NodeOptimizationPodInput) bool {
 	if topologyA, topologyB := topologySpreadConstraintSortValue(a), topologySpreadConstraintSortValue(b); topologyA != topologyB {
 		return topologyA < topologyB
 	}
+	if affinityA, affinityB := requiredAffinitySortValue(a), requiredAffinitySortValue(b); affinityA != affinityB {
+		return affinityA < affinityB
+	}
 	return requiredAntiAffinitySortValue(a) < requiredAntiAffinitySortValue(b)
 }
 
@@ -422,65 +450,190 @@ func requiredAntiAffinitySortValue(pod NodeOptimizationPodInput) string {
 	return strings.Join(keys, "\x00")
 }
 
-func requiredPodAntiAffinityAllowsPlacement(
+func requiredAffinitySortValue(pod NodeOptimizationPodInput) string {
+	keys := make([]string, 0, len(pod.requiredAffinityTerms))
+	for _, term := range pod.requiredAffinityTerms {
+		keys = append(keys, term.SortKey)
+	}
+	sort.Strings(keys)
+	return strings.Join(keys, "\x00")
+}
+
+type nodeOptimizationInterPodPlacementContext struct {
+	Incoming      nodeOptimizationTopologyPod
+	Residents     []nodeOptimizationTopologyPod
+	RetainedNodes []NodeOptimizationSchedulingNode
+	NodesByName   map[string]NodeOptimizationSchedulingNode
+}
+
+func buildNodeOptimizationInterPodPlacementContext(
 	pod NodeOptimizationPodInput,
 	candidateNodeName string,
 	placements []NodeOptimizationPlacement,
 	removedNodeName string,
-) (bool, string, string) {
-	state := pod.antiAffinityState
+) (nodeOptimizationInterPodPlacementContext, string) {
+	context := nodeOptimizationInterPodPlacementContext{}
+	state := pod.interPodAffinityState
 	if state == nil {
-		if len(pod.requiredAntiAffinityTerms) > 0 {
-			return false, "", fmt.Sprintf("pod %s has required anti-affinity without compiled scheduling state", podDisplayName(pod))
-		}
-		return true, "", ""
+		return context, fmt.Sprintf("pod %s has no compiled inter-Pod affinity state", podDisplayName(pod))
 	}
 
-	retainedNodes := make([]NodeOptimizationSchedulingNode, 0, len(state.Nodes))
-	nodesByName := make(map[string]NodeOptimizationSchedulingNode, len(state.Nodes))
+	context.NodesByName = make(map[string]NodeOptimizationSchedulingNode, len(state.Nodes))
 	for _, node := range state.Nodes {
 		if node.Name == removedNodeName {
 			continue
 		}
-		retainedNodes = append(retainedNodes, node)
-		nodesByName[node.Name] = node
+		context.RetainedNodes = append(context.RetainedNodes, node)
+		context.NodesByName[node.Name] = node
 	}
-	if _, ok := nodesByName[candidateNodeName]; !ok {
-		return false, "", fmt.Sprintf("candidate node %s is absent from required anti-affinity topology evidence", candidateNodeName)
+	if _, ok := context.NodesByName[candidateNodeName]; !ok {
+		return context, fmt.Sprintf("candidate node %s is absent from inter-Pod affinity topology evidence", candidateNodeName)
 	}
 
 	incomingKey := namespacedKey(pod.Namespace, pod.Name)
 	incoming, ok := state.MovablePods[incomingKey]
 	if !ok {
-		return false, "", fmt.Sprintf("pod %s is absent from required anti-affinity movable-Pod evidence", podDisplayName(pod))
+		return context, fmt.Sprintf("pod %s is absent from inter-Pod affinity movable-Pod evidence", podDisplayName(pod))
 	}
 	incoming.NodeName = candidateNodeName
+	context.Incoming = incoming
 
-	residents := make([]nodeOptimizationTopologyPod, 0, len(state.FixedPods)+len(placements))
+	context.Residents = make([]nodeOptimizationTopologyPod, 0, len(state.FixedPods)+len(placements))
 	for _, fixed := range state.FixedPods {
 		if fixed.NodeName != removedNodeName {
-			residents = append(residents, fixed)
+			context.Residents = append(context.Residents, fixed)
 		}
 	}
 	for _, placement := range placements {
 		key := namespacedKey(placement.Namespace, placement.PodName)
 		placedPod, found := state.MovablePods[key]
 		if !found {
-			return false, "", fmt.Sprintf(
-				"placed pod %s/%s is absent from required anti-affinity movable-Pod evidence",
+			return context, fmt.Sprintf(
+				"placed pod %s/%s is absent from inter-Pod affinity movable-Pod evidence",
 				placement.Namespace,
 				placement.PodName,
 			)
 		}
 		placedPod.NodeName = placement.NodeName
-		residents = append(residents, placedPod)
+		context.Residents = append(context.Residents, placedPod)
 	}
-	sort.Slice(residents, func(i, j int) bool {
-		return nodeOptimizationTopologyPodSortKey(residents[i]) < nodeOptimizationTopologyPodSortKey(residents[j])
+	sort.Slice(context.Residents, func(i, j int) bool {
+		return nodeOptimizationTopologyPodSortKey(context.Residents[i]) < nodeOptimizationTopologyPodSortKey(context.Residents[j])
 	})
+	return context, ""
+}
+
+func requiredPodAffinityAllowsPlacement(
+	pod NodeOptimizationPodInput,
+	candidateNodeName string,
+	placements []NodeOptimizationPlacement,
+	removedNodeName string,
+) (bool, string, string) {
+	if len(pod.requiredAffinityTerms) == 0 {
+		return true, "", ""
+	}
+	if pod.interPodAffinityState == nil {
+		return false, "", fmt.Sprintf("pod %s has required affinity without compiled scheduling state", podDisplayName(pod))
+	}
+
+	context, contextReason := buildNodeOptimizationInterPodPlacementContext(pod, candidateNodeName, placements, removedNodeName)
+	if contextReason != "" {
+		return false, "", contextReason
+	}
+	for _, term := range pod.requiredAffinityTerms {
+		if reason := topologyEvidenceRequirementReason(context.RetainedNodes, term.TopologyRequirement); reason != "" {
+			return false, "", fmt.Sprintf(
+				"required pod affinity for pod %s cannot use %s: %s",
+				podDisplayName(pod),
+				term.TopologyKey,
+				reason,
+			)
+		}
+	}
+
+	matchingResidents := make([]nodeOptimizationTopologyPod, 0)
+	for _, resident := range context.Residents {
+		if requiredPodMatchesAllAffinityTerms(pod.requiredAffinityTerms, resident) {
+			matchingResidents = append(matchingResidents, resident)
+		}
+	}
+	if len(matchingResidents) == 0 {
+		if requiredPodMatchesAllAffinityTerms(pod.requiredAffinityTerms, context.Incoming) {
+			// Kubernetes permits the first Pod in a self-affine group only when no
+			// resident Pod matches the complete required term set anywhere.
+			return true, "", ""
+		}
+		return false, fmt.Sprintf(
+			"pod %s has no resident Pod matching its complete required affinity term set",
+			podDisplayName(pod),
+		), ""
+	}
+
+	for _, term := range pod.requiredAffinityTerms {
+		candidateDomain := topologyValueForKey(context.NodesByName[candidateNodeName].Topology, term.TopologyKey)
+		termSatisfied := false
+		for _, resident := range matchingResidents {
+			residentNode, found := context.NodesByName[resident.NodeName]
+			if !found {
+				return false, "", fmt.Sprintf(
+					"matching resident pod %s/%s references node %s outside required affinity evidence",
+					resident.Namespace,
+					resident.Name,
+					resident.NodeName,
+				)
+			}
+			if topologyValueForKey(residentNode.Topology, term.TopologyKey) == candidateDomain {
+				termSatisfied = true
+				break
+			}
+		}
+		if !termSatisfied {
+			return false, fmt.Sprintf(
+				"pod %s has no matching resident Pod in %s=%q for a required affinity term",
+				podDisplayName(pod),
+				term.TopologyKey,
+				candidateDomain,
+			), ""
+		}
+	}
+
+	return true, "", ""
+}
+
+func requiredPodMatchesAllAffinityTerms(
+	terms []nodeOptimizationRequiredPodAffinityTerm,
+	pod nodeOptimizationTopologyPod,
+) bool {
+	if len(terms) == 0 {
+		return false
+	}
+	for _, term := range terms {
+		if !requiredPodAffinityTermMatchesPod(term, pod) {
+			return false
+		}
+	}
+	return true
+}
+
+func requiredPodAntiAffinityAllowsPlacement(
+	pod NodeOptimizationPodInput,
+	candidateNodeName string,
+	placements []NodeOptimizationPlacement,
+	removedNodeName string,
+) (bool, string, string) {
+	if pod.interPodAffinityState == nil {
+		if len(pod.requiredAntiAffinityTerms) > 0 {
+			return false, "", fmt.Sprintf("pod %s has required anti-affinity without compiled scheduling state", podDisplayName(pod))
+		}
+		return true, "", ""
+	}
+	context, contextReason := buildNodeOptimizationInterPodPlacementContext(pod, candidateNodeName, placements, removedNodeName)
+	if contextReason != "" {
+		return false, "", contextReason
+	}
 
 	for _, term := range pod.requiredAntiAffinityTerms {
-		if reason := topologyEvidenceRequirementReason(retainedNodes, term.TopologyRequirement); reason != "" {
+		if reason := topologyEvidenceRequirementReason(context.RetainedNodes, term.TopologyRequirement); reason != "" {
 			return false, "", fmt.Sprintf(
 				"required pod anti-affinity for pod %s cannot use %s: %s",
 				podDisplayName(pod),
@@ -489,12 +642,12 @@ func requiredPodAntiAffinityAllowsPlacement(
 			)
 		}
 	}
-	for _, resident := range residents {
+	for _, resident := range context.Residents {
 		for _, term := range resident.RequiredAntiAffinityTerms {
-			if !requiredAntiAffinityTermMatchesPod(term, incoming) {
+			if !requiredPodAffinityTermMatchesPod(term, context.Incoming) {
 				continue
 			}
-			if reason := topologyEvidenceRequirementReason(retainedNodes, term.TopologyRequirement); reason != "" {
+			if reason := topologyEvidenceRequirementReason(context.RetainedNodes, term.TopologyRequirement); reason != "" {
 				return false, "", fmt.Sprintf(
 					"required pod anti-affinity on resident pod %s/%s cannot use %s: %s",
 					resident.Namespace,
@@ -507,12 +660,12 @@ func requiredPodAntiAffinityAllowsPlacement(
 	}
 
 	for _, term := range pod.requiredAntiAffinityTerms {
-		candidateDomain := topologyValueForKey(nodesByName[candidateNodeName].Topology, term.TopologyKey)
-		for _, resident := range residents {
-			if !requiredAntiAffinityTermMatchesPod(term, resident) {
+		candidateDomain := topologyValueForKey(context.NodesByName[candidateNodeName].Topology, term.TopologyKey)
+		for _, resident := range context.Residents {
+			if !requiredPodAffinityTermMatchesPod(term, resident) {
 				continue
 			}
-			residentNode, found := nodesByName[resident.NodeName]
+			residentNode, found := context.NodesByName[resident.NodeName]
 			if !found {
 				return false, "", fmt.Sprintf(
 					"matching resident pod %s/%s references node %s outside required anti-affinity evidence",
@@ -534,8 +687,8 @@ func requiredPodAntiAffinityAllowsPlacement(
 		}
 	}
 
-	for _, resident := range residents {
-		residentNode, found := nodesByName[resident.NodeName]
+	for _, resident := range context.Residents {
+		residentNode, found := context.NodesByName[resident.NodeName]
 		if !found {
 			return false, "", fmt.Sprintf(
 				"resident pod %s/%s references node %s outside required anti-affinity evidence",
@@ -545,10 +698,10 @@ func requiredPodAntiAffinityAllowsPlacement(
 			)
 		}
 		for _, term := range resident.RequiredAntiAffinityTerms {
-			if !requiredAntiAffinityTermMatchesPod(term, incoming) {
+			if !requiredPodAffinityTermMatchesPod(term, context.Incoming) {
 				continue
 			}
-			candidateDomain := topologyValueForKey(nodesByName[candidateNodeName].Topology, term.TopologyKey)
+			candidateDomain := topologyValueForKey(context.NodesByName[candidateNodeName].Topology, term.TopologyKey)
 			if topologyValueForKey(residentNode.Topology, term.TopologyKey) == candidateDomain {
 				return false, fmt.Sprintf(
 					"resident pod %s/%s required anti-affinity rejects pod %s in %s=%q",
