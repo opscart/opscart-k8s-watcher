@@ -547,6 +547,62 @@ func buildNMinusOneNodeOptimizationScenarios(
 				))
 				continue
 			}
+
+			var affinityBlocked, affinityPartial, affinityUnsupported []string
+			for _, pod := range eligiblePodsByPool[key] {
+				matchCount, unsupportedReason := requiredNodeAffinityMatchCount(pod, nodes)
+				podName := fmt.Sprintf("%s/%s", pod.Namespace, pod.Name)
+
+				if unsupportedReason != "" {
+					summary.UnsupportedConstraintPodCount++
+					affinityUnsupported = append(affinityUnsupported, fmt.Sprintf(
+						"%s: %s",
+						podName,
+						unsupportedReason,
+					))
+					continue
+				}
+				if matchCount == 0 {
+					summary.SchedulingBlockedPodCount++
+					affinityBlocked = append(affinityBlocked, fmt.Sprintf(
+						"%s: required node affinity matches no node in the pool",
+						podName,
+					))
+					continue
+				}
+				if matchCount != len(nodes) {
+					summary.UnsupportedConstraintPodCount++
+					affinityPartial = append(affinityPartial, fmt.Sprintf(
+						"%s: required node affinity matches %d of %d nodes",
+						podName,
+						matchCount,
+						len(nodes),
+					))
+				}
+			}
+
+			if len(affinityBlocked) > 0 || len(affinityPartial) > 0 || len(affinityUnsupported) > 0 {
+				summary.SkippedPoolCount++
+				parts := make([]string, 0, 3)
+				if len(affinityBlocked) > 0 {
+					sort.Strings(affinityBlocked)
+					parts = append(parts, strings.Join(affinityBlocked, "; "))
+				}
+				if len(affinityPartial) > 0 {
+					sort.Strings(affinityPartial)
+					parts = append(parts, strings.Join(affinityPartial, "; "))
+				}
+				if len(affinityUnsupported) > 0 {
+					sort.Strings(affinityUnsupported)
+					parts = append(parts, strings.Join(affinityUnsupported, "; "))
+				}
+				summary.Warnings = append(summary.Warnings, fmt.Sprintf(
+					"pool %s skipped because required node affinity is not fully compatible with identical-bin simulation: %s",
+					key.PoolName,
+					strings.Join(parts, "; "),
+				))
+				continue
+			}
 		}
 
 		if blockers := unsupportedSelectorsByPool[key]; len(blockers) > 0 {
@@ -938,4 +994,88 @@ func matchingToleration(
 		}
 	}
 	return corev1.Toleration{}, false
+}
+
+func requiredNodeAffinityMatchCount(
+	pod corev1.Pod,
+	nodes []NodeOptimizationSchedulingNode,
+) (int, string) {
+	if pod.Spec.Affinity == nil ||
+		pod.Spec.Affinity.NodeAffinity == nil ||
+		pod.Spec.Affinity.NodeAffinity.RequiredDuringSchedulingIgnoredDuringExecution == nil {
+		return len(nodes), ""
+	}
+
+	required := pod.Spec.Affinity.NodeAffinity.RequiredDuringSchedulingIgnoredDuringExecution
+	if len(required.NodeSelectorTerms) == 0 {
+		return 0, ""
+	}
+
+	for _, term := range required.NodeSelectorTerms {
+		if len(term.MatchFields) > 0 {
+			return 0, "required node affinity matchFields are not modeled yet"
+		}
+		for _, expression := range term.MatchExpressions {
+			switch expression.Operator {
+			case corev1.NodeSelectorOpIn, corev1.NodeSelectorOpExists:
+			default:
+				return 0, fmt.Sprintf(
+					"required node affinity operator %s is not modeled yet",
+					expression.Operator,
+				)
+			}
+		}
+	}
+
+	matchCount := 0
+	for _, node := range nodes {
+		if nodeMatchesRequiredNodeAffinity(node.Labels, required.NodeSelectorTerms) {
+			matchCount++
+		}
+	}
+	return matchCount, ""
+}
+
+func nodeMatchesRequiredNodeAffinity(
+	labels map[string]string,
+	terms []corev1.NodeSelectorTerm,
+) bool {
+	for _, term := range terms {
+		if nodeMatchesAffinityTerm(labels, term) {
+			return true
+		}
+	}
+	return false
+}
+
+func nodeMatchesAffinityTerm(labels map[string]string, term corev1.NodeSelectorTerm) bool {
+	if len(term.MatchFields) > 0 {
+		return false
+	}
+
+	for _, expression := range term.MatchExpressions {
+		switch expression.Operator {
+		case corev1.NodeSelectorOpIn:
+			value, ok := labels[expression.Key]
+			if !ok || !stringSliceContains(expression.Values, value) {
+				return false
+			}
+		case corev1.NodeSelectorOpExists:
+			if _, ok := labels[expression.Key]; !ok {
+				return false
+			}
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+func stringSliceContains(values []string, target string) bool {
+	for _, value := range values {
+		if value == target {
+			return true
+		}
+	}
+	return false
 }

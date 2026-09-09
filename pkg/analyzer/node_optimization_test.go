@@ -995,3 +995,203 @@ func optimizationNodeInfos(count int) []models.NodeInfo {
 	}
 	return nodeInfos
 }
+
+func TestBuildNMinusOneNodeOptimizationScenariosWithSchedulingEvidenceAcceptsRequiredNodeAffinityMatchingAllNodes(t *testing.T) {
+	nodeInfos := optimizationNodeInfos(2)
+	nodes := []corev1.Node{
+		{ObjectMeta: metav1.ObjectMeta{Name: "node-0", Labels: map[string]string{"workload": "apps"}}},
+		{ObjectMeta: metav1.ObjectMeta{Name: "node-1", Labels: map[string]string{"workload": "apps"}}},
+	}
+
+	pod := optimizationTestPod("apps", "api", "node-0", corev1.PodRunning, "1000m", "1Gi")
+	pod.Spec.Affinity = optimizationRequiredNodeAffinity(
+		corev1.NodeSelectorRequirement{
+			Key: "workload", Operator: corev1.NodeSelectorOpIn, Values: []string{"apps"},
+		},
+	)
+
+	evidence := BuildNodeOptimizationSchedulingEvidence(nodeInfos, nodes)
+	got := BuildNMinusOneNodeOptimizationScenariosWithSchedulingEvidence(
+		nodeInfos, []corev1.Pod{pod}, evidence,
+	)
+
+	if len(got.Scenarios) != 1 {
+		t.Fatalf("scenario count = %d, want 1; warnings=%v", len(got.Scenarios), got.Warnings)
+	}
+	if got.SchedulingBlockedPodCount != 0 || got.UnsupportedConstraintPodCount != 0 {
+		t.Fatalf(
+			"blocked=%d unsupported=%d, want 0/0",
+			got.SchedulingBlockedPodCount,
+			got.UnsupportedConstraintPodCount,
+		)
+	}
+}
+
+func TestBuildNMinusOneNodeOptimizationScenariosWithSchedulingEvidenceBlocksRequiredNodeAffinityMatchingNoNodes(t *testing.T) {
+	nodeInfos := optimizationNodeInfos(2)
+	nodes := []corev1.Node{
+		{ObjectMeta: metav1.ObjectMeta{Name: "node-0", Labels: map[string]string{"workload": "general"}}},
+		{ObjectMeta: metav1.ObjectMeta{Name: "node-1", Labels: map[string]string{"workload": "general"}}},
+	}
+
+	pod := optimizationTestPod("apps", "api", "node-0", corev1.PodRunning, "1000m", "1Gi")
+	pod.Spec.Affinity = optimizationRequiredNodeAffinity(
+		corev1.NodeSelectorRequirement{
+			Key: "workload", Operator: corev1.NodeSelectorOpIn, Values: []string{"apps"},
+		},
+	)
+
+	evidence := BuildNodeOptimizationSchedulingEvidence(nodeInfos, nodes)
+	got := BuildNMinusOneNodeOptimizationScenariosWithSchedulingEvidence(
+		nodeInfos, []corev1.Pod{pod}, evidence,
+	)
+
+	if len(got.Scenarios) != 0 {
+		t.Fatalf("scenario count = %d, want 0", len(got.Scenarios))
+	}
+	if got.SchedulingBlockedPodCount != 1 {
+		t.Fatalf("SchedulingBlockedPodCount = %d, want 1", got.SchedulingBlockedPodCount)
+	}
+	if len(got.Warnings) != 1 || !strings.Contains(got.Warnings[0], "matches no node in the pool") {
+		t.Fatalf("warnings = %#v, want no-match affinity warning", got.Warnings)
+	}
+}
+
+func TestBuildNMinusOneNodeOptimizationScenariosWithSchedulingEvidenceSkipsPartialRequiredNodeAffinity(t *testing.T) {
+	nodeInfos := optimizationNodeInfos(3)
+	nodes := []corev1.Node{
+		{ObjectMeta: metav1.ObjectMeta{Name: "node-0", Labels: map[string]string{"zone": "a"}}},
+		{ObjectMeta: metav1.ObjectMeta{Name: "node-1", Labels: map[string]string{"zone": "a"}}},
+		{ObjectMeta: metav1.ObjectMeta{Name: "node-2", Labels: map[string]string{"zone": "b"}}},
+	}
+
+	pod := optimizationTestPod("apps", "api", "node-0", corev1.PodRunning, "1000m", "1Gi")
+	pod.Spec.Affinity = optimizationRequiredNodeAffinity(
+		corev1.NodeSelectorRequirement{
+			Key: "zone", Operator: corev1.NodeSelectorOpIn, Values: []string{"a"},
+		},
+	)
+
+	evidence := BuildNodeOptimizationSchedulingEvidence(nodeInfos, nodes)
+	got := BuildNMinusOneNodeOptimizationScenariosWithSchedulingEvidence(
+		nodeInfos, []corev1.Pod{pod}, evidence,
+	)
+
+	if len(got.Scenarios) != 0 {
+		t.Fatalf("scenario count = %d, want 0", len(got.Scenarios))
+	}
+	if got.UnsupportedConstraintPodCount != 1 {
+		t.Fatalf("UnsupportedConstraintPodCount = %d, want 1", got.UnsupportedConstraintPodCount)
+	}
+	if len(got.Warnings) != 1 || !strings.Contains(got.Warnings[0], "matches 2 of 3 nodes") {
+		t.Fatalf("warnings = %#v, want partial-affinity warning", got.Warnings)
+	}
+}
+
+func TestBuildNMinusOneNodeOptimizationScenariosWithSchedulingEvidenceSupportsRequiredAffinityExists(t *testing.T) {
+	nodeInfos := optimizationNodeInfos(2)
+	nodes := []corev1.Node{
+		{ObjectMeta: metav1.ObjectMeta{Name: "node-0", Labels: map[string]string{"gpu": "true"}}},
+		{ObjectMeta: metav1.ObjectMeta{Name: "node-1", Labels: map[string]string{"gpu": "false"}}},
+	}
+
+	pod := optimizationTestPod("apps", "api", "node-0", corev1.PodRunning, "1000m", "1Gi")
+	pod.Spec.Affinity = optimizationRequiredNodeAffinity(
+		corev1.NodeSelectorRequirement{
+			Key: "gpu", Operator: corev1.NodeSelectorOpExists,
+		},
+	)
+
+	evidence := BuildNodeOptimizationSchedulingEvidence(nodeInfos, nodes)
+	got := BuildNMinusOneNodeOptimizationScenariosWithSchedulingEvidence(
+		nodeInfos, []corev1.Pod{pod}, evidence,
+	)
+
+	if len(got.Scenarios) != 1 {
+		t.Fatalf("scenario count = %d, want 1; warnings=%v", len(got.Scenarios), got.Warnings)
+	}
+}
+
+func TestBuildNMinusOneNodeOptimizationScenariosWithSchedulingEvidenceSkipsUnsupportedRequiredAffinityOperator(t *testing.T) {
+	nodeInfos := optimizationNodeInfos(2)
+	nodes := []corev1.Node{
+		{ObjectMeta: metav1.ObjectMeta{Name: "node-0", Labels: map[string]string{"workload": "apps"}}},
+		{ObjectMeta: metav1.ObjectMeta{Name: "node-1", Labels: map[string]string{"workload": "apps"}}},
+	}
+
+	pod := optimizationTestPod("apps", "api", "node-0", corev1.PodRunning, "1000m", "1Gi")
+	pod.Spec.Affinity = optimizationRequiredNodeAffinity(
+		corev1.NodeSelectorRequirement{
+			Key: "workload", Operator: corev1.NodeSelectorOpNotIn, Values: []string{"batch"},
+		},
+	)
+
+	evidence := BuildNodeOptimizationSchedulingEvidence(nodeInfos, nodes)
+	got := BuildNMinusOneNodeOptimizationScenariosWithSchedulingEvidence(
+		nodeInfos, []corev1.Pod{pod}, evidence,
+	)
+
+	if len(got.Scenarios) != 0 {
+		t.Fatalf("scenario count = %d, want 0", len(got.Scenarios))
+	}
+	if got.UnsupportedConstraintPodCount != 1 {
+		t.Fatalf("UnsupportedConstraintPodCount = %d, want 1", got.UnsupportedConstraintPodCount)
+	}
+	if len(got.Warnings) != 1 || !strings.Contains(got.Warnings[0], "operator NotIn is not modeled yet") {
+		t.Fatalf("warnings = %#v, want unsupported-operator warning", got.Warnings)
+	}
+}
+
+func TestBuildNMinusOneNodeOptimizationScenariosWithSchedulingEvidenceSkipsRequiredAffinityMatchFields(t *testing.T) {
+	nodeInfos := optimizationNodeInfos(2)
+	nodes := []corev1.Node{
+		{ObjectMeta: metav1.ObjectMeta{Name: "node-0"}},
+		{ObjectMeta: metav1.ObjectMeta{Name: "node-1"}},
+	}
+
+	pod := optimizationTestPod("apps", "api", "node-0", corev1.PodRunning, "1000m", "1Gi")
+	pod.Spec.Affinity = &corev1.Affinity{
+		NodeAffinity: &corev1.NodeAffinity{
+			RequiredDuringSchedulingIgnoredDuringExecution: &corev1.NodeSelector{
+				NodeSelectorTerms: []corev1.NodeSelectorTerm{
+					{
+						MatchFields: []corev1.NodeSelectorRequirement{
+							{
+								Key: "metadata.name", Operator: corev1.NodeSelectorOpIn, Values: []string{"node-0"},
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	evidence := BuildNodeOptimizationSchedulingEvidence(nodeInfos, nodes)
+	got := BuildNMinusOneNodeOptimizationScenariosWithSchedulingEvidence(
+		nodeInfos, []corev1.Pod{pod}, evidence,
+	)
+
+	if len(got.Scenarios) != 0 {
+		t.Fatalf("scenario count = %d, want 0", len(got.Scenarios))
+	}
+	if got.UnsupportedConstraintPodCount != 1 {
+		t.Fatalf("UnsupportedConstraintPodCount = %d, want 1", got.UnsupportedConstraintPodCount)
+	}
+	if len(got.Warnings) != 1 || !strings.Contains(got.Warnings[0], "matchFields are not modeled yet") {
+		t.Fatalf("warnings = %#v, want matchFields warning", got.Warnings)
+	}
+}
+
+func optimizationRequiredNodeAffinity(
+	requirements ...corev1.NodeSelectorRequirement,
+) *corev1.Affinity {
+	return &corev1.Affinity{
+		NodeAffinity: &corev1.NodeAffinity{
+			RequiredDuringSchedulingIgnoredDuringExecution: &corev1.NodeSelector{
+				NodeSelectorTerms: []corev1.NodeSelectorTerm{
+					{MatchExpressions: requirements},
+				},
+			},
+		},
+	}
+}
