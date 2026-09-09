@@ -21,13 +21,7 @@
 </style>
 </head>
 <body><div class="layout">
-<aside class="sidebar">
-<div class="logo"><div class="logo-icon"><img src="/static/logo.png" alt="OpsCart logo" width="55" height="55"></div><div><div class="logo-text">OpsCart</div><div class="logo-sub">K8s Operational Intelligence</div></div></div>
-<div class="nav-section"><div class="nav-label">Overview</div><a class="nav-item" href="{{.DashURL}}"><span class="nav-icon"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/></svg></span> Overview</a><a class="nav-item" href="{{.WrURL}}"><span class="nav-icon"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75"><polygon points="7.86 2 16.14 2 22 7.86 22 16.14 16.14 22 7.86 22 2 16.14 2 7.86 7.86 2"/><line x1="12" y1="8" x2="12" y2="12"/></svg></span> War Room</a></div>
-<div class="nav-section"><div class="nav-label">Investigate</div><a class="nav-item" href="{{.IncidentsURL}}">Incidents</a><a class="nav-item" href="{{.InfraURL}}">Infrastructure</a></div>
-<div class="nav-section"><div class="nav-label">Analyze</div><a class="nav-item active" href="{{.CostsURL}}"><span class="nav-icon"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75"><line x1="12" y1="2" x2="12" y2="22"/><path d="M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"/></svg></span> Cost Intelligence</a><a class="nav-item" href="{{.SecurityURL}}">Security Posture</a><a class="nav-item" href="{{.WasteURL}}">Waste &amp; Drift</a></div>
-<div class="nav-footer"><div class="nav-divider"></div><div class="cluster-selector"><div class="cluster-selector-label">Current Cluster</div><div class="cluster-selector-value">{{.ClusterName}}</div>{{range .ClusterList}}<a class="cluster-list-item{{if .IsActive}} active{{end}}" href="{{.Href}}">{{.Label}}</a>{{end}}</div></div>
-</aside>
+{{.Sidebar}}
 <main class="main">
 <header class="page-hdr cost-header"><div><div class="cost-title-row"><h1>Cost Intelligence</h1><span class="estimate-badge">ESTIMATED</span></div><p class="cost-subtitle"><span>{{.Provider}}</span><span class="dot">•</span><span>{{.Region}}</span><span class="dot">•</span><span>{{.PricingSource}}</span><span class="dot">•</span><span>{{.MatchedNodes}} / {{.TotalNodes}} nodes priced</span></p></div><div class="page-meta">Last scanned<br><strong>{{.Timestamp.Format "2006-01-02 15:04 MST"}}</strong></div></header>
 

@@ -404,19 +404,21 @@ func (srv *server) handleHealth(w http.ResponseWriter, _ *http.Request) {
 }
 
 type sidebarData struct {
-	DashHref      string
-	CostsHref     string
-	InfraHref     string
-	NsHref        string
-	OptHref       string
-	WasteHref     string
-	SecurityHref  string
-	IncidentsHref string
-	WrHref        string
-	ActivePage    string
-	ClusterName   string
-	Clusters      []sidebarCluster
-	CriticalCount int
+	DashHref        string
+	CostsHref       string
+	InfraHref       string
+	NsHref          string
+	OptHref         string
+	WasteHref       string
+	SecurityHref    string
+	IncidentsHref   string
+	DiagnosticsHref string
+	SettingsHref    string
+	WrHref          string
+	ActivePage      string
+	ClusterName     string
+	Clusters        []sidebarCluster
+	CriticalCount   int
 }
 
 type sidebarCluster struct {
@@ -572,8 +574,34 @@ func countCriticalIssues(scan *clusterScan) int {
 	return count
 }
 
+func sidebarBasePath(activePage string) string {
+	switch activePage {
+	case "infrastructure":
+		return "/infrastructure"
+	case "namespaces":
+		return "/namespaces"
+	case "optimizations":
+		return "/optimizations"
+	case "warroom":
+		return "/warroom"
+	case "costs":
+		return "/costs"
+	case "incidents":
+		return "/incidents"
+	case "security":
+		return "/security"
+	case "waste":
+		return "/waste"
+	case "diagnostics":
+		return "/settings/diagnostics"
+	case "settings":
+		return "/settings"
+	default:
+		return "/"
+	}
+}
+
 // buildSidebar returns a complete <aside>…</aside> sidebar, shared by all sub-pages.
-// activePage is one of: "dashboard", "infrastructure", "namespaces", "optimizations", "warroom".
 func buildSidebar(activePage, activeCtx, clusterName string, clusterList []string, criticalCount int) string {
 
 	q := ""
@@ -581,17 +609,7 @@ func buildSidebar(activePage, activeCtx, clusterName string, clusterList []strin
 		q = "?cluster=" + url.QueryEscape(activeCtx)
 	}
 
-	basePath := "/"
-	switch activePage {
-	case "infrastructure":
-		basePath = "/infrastructure"
-	case "namespaces":
-		basePath = "/namespaces"
-	case "optimizations":
-		basePath = "/optimizations"
-	case "warroom":
-		basePath = "/warroom"
-	}
+	basePath := sidebarBasePath(activePage)
 
 	var clusters []sidebarCluster
 	if len(clusterList) > 1 {
@@ -609,19 +627,21 @@ func buildSidebar(activePage, activeCtx, clusterName string, clusterList []strin
 	}
 
 	data := sidebarData{
-		DashHref:      "/" + q,
-		CostsHref:     "/costs" + q,
-		InfraHref:     "/infrastructure" + q,
-		NsHref:        "/namespaces" + q,
-		OptHref:       "/optimizations" + q,
-		WrHref:        "/warroom" + q,
-		IncidentsHref: "/incidents" + q,
-		SecurityHref:  "/security" + q,
-		WasteHref:     "/waste" + q,
-		ActivePage:    activePage,
-		ClusterName:   clusterName,
-		Clusters:      clusters,
-		CriticalCount: criticalCount,
+		DashHref:        "/" + q,
+		CostsHref:       "/costs" + q,
+		InfraHref:       "/infrastructure" + q,
+		NsHref:          "/namespaces" + q,
+		OptHref:         "/optimizations" + q,
+		WrHref:          "/warroom" + q,
+		IncidentsHref:   "/incidents" + q,
+		DiagnosticsHref: "/settings/diagnostics" + q,
+		SettingsHref:    "/settings" + q,
+		SecurityHref:    "/security" + q,
+		WasteHref:       "/waste" + q,
+		ActivePage:      activePage,
+		ClusterName:     clusterName,
+		Clusters:        clusters,
+		CriticalCount:   criticalCount,
 	}
 
 	var buf strings.Builder
@@ -657,16 +677,18 @@ type overviewPageData struct {
 	VerdictLine2 string
 
 	// Sidebar aliases (matches sidebar.html template)
-	DashHref      string
-	InfraHref     string
-	NsHref        string
-	OptHref       string
-	WrHref        string
-	IncidentsHref string
-	SecurityHref  string
-	WasteHref     string
-	ActivePage    string
-	Clusters      []sidebarCluster
+	DashHref        string
+	InfraHref       string
+	NsHref          string
+	OptHref         string
+	WrHref          string
+	IncidentsHref   string
+	SecurityHref    string
+	WasteHref       string
+	DiagnosticsHref string
+	SettingsHref    string
+	ActivePage      string
+	Clusters        []sidebarCluster
 
 	// KPI bar
 	CriticalCount                int
@@ -675,6 +697,8 @@ type overviewPageData struct {
 	SecurityColor                string
 	WasteCount                   int
 	MonthlyCost                  float64
+	CostAvailable                bool
+	CostCoverage                 string
 	PrivilegedContainers         int
 	NonRootNotExplicitlyEnforced int
 	UnprotectedNamespaceCount    int
@@ -786,6 +810,8 @@ func buildOverviewData(scan *clusterScan, activeCtx string, clusterList []string
 
 	clusterName := displayName(activeCtx)
 	var monthlyCost, savings float64
+	var costAvailable bool
+	var costCoverage string
 	var podCount, nsCount, nodePoolCount int
 	var cpuUtil, memUtil int
 	var wasteCount, securityScore, secFailed int
@@ -814,6 +840,7 @@ func buildOverviewData(scan *clusterScan, activeCtx string, clusterList []string
 
 		if scan.report != nil {
 			monthlyCost = scan.report.TotalMonthlyCost
+			costCoverage = scan.report.PricingCoverage
 			savings = scan.report.TotalSavingsPotential.Best
 			clusterName = scan.report.ClusterName
 			nodePoolCount = len(scan.report.NodePoolCosts)
@@ -822,6 +849,9 @@ func buildOverviewData(scan *clusterScan, activeCtx string, clusterList []string
 			// Aggregate CPU/Mem utilization across pools
 			var totalCPU, usedCPU, totalMem, usedMem float64
 			for _, p := range scan.report.NodePoolCosts {
+				if p.PricingAvailable {
+					costAvailable = true
+				}
 				totalCPU += p.TotalCPUCapacity
 				usedCPU += p.CPURequested
 				totalMem += p.TotalMemoryCapacity
@@ -941,6 +971,8 @@ func buildOverviewData(scan *clusterScan, activeCtx string, clusterList []string
 		UnprotectedNamespaceCount:    unprotectedNamespaces,
 		WasteCount:                   wasteCount,
 		MonthlyCost:                  monthlyCost,
+		CostAvailable:                costAvailable,
+		CostCoverage:                 costCoverage,
 		TopIssues:                    topIssues,
 		HasTopIssue:                  hasTopIssue,
 		TopIssueName:                 topIssueName,
@@ -965,6 +997,8 @@ func buildOverviewData(scan *clusterScan, activeCtx string, clusterList []string
 		IncidentsHref:                "/incidents" + q,
 		SecurityHref:                 "/security" + q,
 		WasteHref:                    "/waste" + q,
+		DiagnosticsHref:              "/settings/diagnostics" + q,
+		SettingsHref:                 "/settings" + q,
 		ActivePage:                   "dashboard",
 		Clusters:                     convertToSidebarClusters(clusterList, activeCtx, "/"),
 		IncidentScore:                incidentScore,

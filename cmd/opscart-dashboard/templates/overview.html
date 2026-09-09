@@ -7,433 +7,297 @@
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
 {{template "base" .}}
 <style>
-/* ── Page header ── */
-.ov-hdr{display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:1.5rem;flex-wrap:wrap;gap:1rem}
-.ov-hdr h1{font-size:1.75rem;font-weight:800}
-.ov-hdr-sub{color:var(--text-muted);font-size:0.85rem;margin-top:0.25rem}
-.ov-badges{display:flex;gap:0.5rem;margin-top:0.75rem;flex-wrap:wrap}
-.ov-row-top5 .section-card{display:flex;flex-direction:column}
-.ov-row-top5 .section-card .view-all-link{margin-top:auto}
-.badge-ok{background:rgba(16,185,129,0.12);color:#34d399;border:1px solid rgba(16,185,129,0.2)}
-.badge-warn{background:rgba(245,158,11,0.12);color:#fbbf24;border:1px solid rgba(245,158,11,0.2)}
-.badge-danger{background:rgba(239,68,68,0.12);color:#f87171;border:1px solid rgba(239,68,68,0.2)}
+.overview-main{min-width:0;padding-top:2.2rem;padding-bottom:2.8rem}
+.ov-hdr{display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:1.4rem;flex-wrap:wrap;gap:1rem}
+.ov-hdr h1{font-size:1.85rem;font-weight:750;letter-spacing:-.02em}
+.ov-hdr-sub{color:var(--text-secondary);font-size:.86rem;margin-top:.2rem}
+.ov-kicker{background:linear-gradient(120deg,rgba(99,102,241,.08),rgba(15,23,42,.08));border:1px solid rgba(99,102,241,.16);border-radius:var(--radius-sm);padding:.68rem .9rem .68rem 1.05rem;margin-bottom:1.45rem;display:grid;grid-template-columns:1fr auto;gap:1.5rem;align-items:center}
+.ov-kicker-title{font-size:1.02rem;font-weight:700;letter-spacing:-.01em}
+.ov-kicker-sub{font-size:.8rem;color:var(--text-secondary);margin-top:.08rem}
+.ov-kpis{display:flex;border:1px solid var(--border);border-radius:var(--radius-sm);overflow:hidden;background:rgba(0,0,0,.12)}
+.ov-kpi{min-width:88px;padding:.42rem .75rem;text-align:center;border-left:1px solid var(--border)}
+.ov-kpi:first-child{border-left:0}
+.ov-kpi-n{font-size:1.15rem;font-weight:800;line-height:1.1;font-variant-numeric:tabular-nums}
+.ov-kpi-l{font-size:.65rem;color:var(--text-secondary);text-transform:uppercase;letter-spacing:.45px;margin-top:.12rem}
+.good{color:#4ade80}.warn{color:#fbbf24}.bad{color:#f87171}
 
-/* ── Fix-one-thing banner ── */
-.fix-one-banner{display:flex;align-items:center;gap:1rem;background:linear-gradient(180deg,rgba(239,68,68,0.06) 0%,var(--surface) 100%);border:1px solid rgba(239,68,68,0.3);border-radius:var(--radius);padding:1.1rem 1.4rem;margin-bottom:1.5rem;animation:fadeIn 0.3s ease both}
-.fix-one-icon{flex-shrink:0;color:#f87171;display:flex}
-.fix-one-body{flex:1;min-width:0}
-.fix-one-lbl{font-size:0.68rem;text-transform:uppercase;letter-spacing:0.6px;color:#f87171;font-weight:700;margin-bottom:0.25rem}
-.fix-one-title{font-size:1.02rem;font-weight:700;margin-bottom:0.2rem}
-.fix-one-sub{font-size:0.8rem;color:var(--text-muted)}
-.fix-one-btn{background:var(--danger);color:#fff;font-size:0.82rem;font-weight:600;padding:0.55rem 1.1rem;border-radius:6px;text-decoration:none;white-space:nowrap;transition:background .15s}
-.fix-one-btn:hover{background:#dc2626}
+.priority-grid{display:grid;grid-template-columns:minmax(0,1.65fr) minmax(320px,1fr);gap:1.3rem;margin-bottom:1.65rem;align-items:stretch;min-height:300px}
+@media(max-width:1100px){.priority-grid{grid-template-columns:1fr;min-height:0}.priority-hero{min-height:280px}}
+.priority-hero{position:relative;display:flex;flex-direction:column;background:linear-gradient(120deg,rgba(127,29,29,.22),rgba(30,41,59,.72));border:1px solid rgba(239,68,68,.55);border-radius:var(--radius);padding:1.65rem 1.8rem 1.7rem 1.95rem;overflow:hidden}
+.priority-hero:before{content:"";position:absolute;left:0;top:0;bottom:0;width:5px;background:#ef4444}
+.priority-eyebrow{display:flex;align-items:center;gap:.6rem;margin-bottom:.85rem;font-size:.75rem;font-weight:700;text-transform:uppercase;letter-spacing:.55px;color:#fca5a5}
+.priority-rank{font-size:1.25rem;font-weight:800;color:#f87171}
+.priority-title{font-size:1.58rem;font-weight:750;letter-spacing:-.02em;line-height:1.22;margin-bottom:.55rem}
+.priority-sub{font-size:.94rem;line-height:1.55;color:var(--text-secondary);max-width:780px}
+.priority-rationale{margin-top:1rem;padding-left:.8rem;border-left:2px solid rgba(248,113,113,.48);font-size:.82rem;line-height:1.5;color:var(--text-secondary)}
+.priority-rationale strong{color:#fecaca;font-size:.71rem;text-transform:uppercase;letter-spacing:.45px;margin-right:.35rem}
+.priority-evidence{display:flex;align-items:flex-start;gap:0;margin-top:1.15rem;padding:.8rem 0;border-top:1px solid rgba(148,163,184,.16);border-bottom:1px solid rgba(148,163,184,.16);flex-wrap:wrap}
+.priority-evidence-item{min-width:130px;padding:.1rem 1.15rem .1rem 0;margin-right:1.15rem}
+.priority-evidence-label{font-size:.67rem;color:var(--text-muted);text-transform:uppercase;letter-spacing:.45px}
+.priority-evidence-value{font-size:.82rem;color:var(--text);font-weight:650;margin-top:.12rem}
+.priority-memory{font-size:.78rem;color:var(--text-secondary);margin-top:.7rem}
+.priority-action{margin-top:.85rem;padding:.7rem .85rem;background:rgba(15,23,42,.32);border:1px solid rgba(148,163,184,.14);border-radius:var(--radius-sm)}
+.priority-action-label{font-size:.67rem;color:var(--text-muted);text-transform:uppercase;letter-spacing:.45px;margin-bottom:.2rem}
+.priority-action-code{font-family:'Consolas','Monaco',monospace;color:var(--primary-light);font-size:.78rem;line-height:1.45;overflow-wrap:anywhere}
+.priority-buttons{display:flex;gap:.7rem;margin-top:auto;padding-top:1.15rem;flex-wrap:wrap}
+.btn-hot,.btn-quiet{display:inline-flex;align-items:center;text-decoration:none;border-radius:var(--radius-sm);padding:.6rem 1rem;font-size:.83rem;font-weight:650}
+.btn-hot{background:var(--danger);color:#fff;border:1px solid var(--danger)}
+.btn-hot:hover{background:#dc2626}
+.btn-quiet{border:1px solid var(--border);color:var(--text-secondary);background:rgba(15,23,42,.35)}
+.btn-quiet:hover{border-color:var(--primary);color:var(--text)}
 
-/* ── Section card (shared) ── */
-.section-card{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:1.5rem;margin-bottom:1.5rem;animation:fadeIn 0.3s ease both}
-.section-title{font-size:1.05rem;font-weight:700;margin-bottom:0.25rem;display:flex;align-items:center;gap:6px}
-.section-sub{font-size:0.78rem;color:var(--text-muted);margin-bottom:1rem}
-.empty-state-small{padding:2rem 1rem;text-align:center;color:var(--text-muted);font-size:0.85rem}
-.empty-state-small .icon{display:flex;justify-content:center;margin-bottom:0.5rem}
-.empty-state-small .icon svg{width:28px;height:28px}
-.view-all-link{display:inline-flex;align-items:center;gap:0.4rem;color:var(--primary-light);font-size:0.85rem;margin-top:0.5rem;text-decoration:none}
-.view-all-link:hover{text-decoration:underline}
-.sev-badge{padding:3px 9px;border-radius:12px;font-size:0.66rem;font-weight:700;letter-spacing:0.5px;white-space:nowrap}
-.sev-badge.critical{background:rgba(239,68,68,0.18);color:#f87171}
-.sev-badge.high{background:rgba(245,158,11,0.18);color:#fbbf24}
-.sev-badge.medium{background:rgba(234,179,8,0.18);color:#facc15}
-.sev-badge.low{background:rgba(100,116,139,0.18);color:#94a3b8}
+.panel{background:rgba(30,41,59,.72);border:1px solid var(--border);border-radius:var(--radius);padding:1.35rem 1.45rem}
+.panel-title{font-size:1rem;font-weight:700;display:flex;align-items:center;justify-content:space-between;gap:1rem;margin-bottom:.72rem}
+.panel-sub{font-size:.78rem;color:var(--text-secondary);margin-top:.1rem}
+.panel-link{font-size:.78rem;color:var(--primary-light);text-decoration:none;font-weight:600;white-space:nowrap}
+.panel-link:hover{text-decoration:underline}
+.priority-queue{display:flex;flex-direction:column}
+.queue-row{display:grid;grid-template-columns:34px 1fr auto;gap:.8rem;align-items:center;padding:.95rem 0;border-top:1px solid rgba(51,65,85,.65)}
+.queue-row:first-of-type{border-top:0}
+.queue-rank{font-weight:800;color:#f87171;font-size:.9rem}
+.queue-title{font-size:.88rem;font-weight:600;line-height:1.35}
+.queue-sub{font-size:.75rem;color:var(--text-secondary);line-height:1.4;margin-top:.14rem}
+.sev-badge{padding:3px 8px;border-radius:20px;font-size:.61rem;font-weight:700;text-transform:uppercase;letter-spacing:.35px;white-space:nowrap}
+.sev-badge.critical{background:rgba(239,68,68,.17);color:#f87171}
+.sev-badge.high{background:rgba(245,158,11,.17);color:#fbbf24}
+.sev-badge.medium{background:rgba(234,179,8,.15);color:#facc15}
+.sev-badge.low{background:rgba(100,116,139,.15);color:#94a3b8}
 
-/* ── Row 1: Situation Briefing (62%) + Operational Memory (38%) ── */
-.ov-row-briefing{margin-bottom:1.5rem}
-.briefing-split{display:grid;grid-template-columns:1fr 1.6fr;gap:0}
-@media(max-width:1100px){.briefing-split{grid-template-columns:1fr}}
-.briefing-left{padding-right:1.5rem}
-.briefing-right{padding-left:1.5rem;border-left:1px solid var(--border)}
-@media(max-width:1100px){.briefing-right{padding-left:0;border-left:none;border-top:1px solid var(--border);padding-top:1.5rem;margin-top:1.5rem}}
-.ov-row-briefing .section-card{display:flex;flex-direction:column}
-.briefing-text{font-size:0.92rem;line-height:1.6;color:var(--text-secondary);margin-bottom:0.75rem}
-.briefing-text:last-child{margin-bottom:0}
-.briefing{border-color:rgba(239,68,68,.35);background:rgba(239,68,68,.04)}
-.briefing-ok{border-color:rgba(74,222,128,.3)}
-.briefing-facts{display:flex;gap:1.5rem;flex-wrap:wrap;margin-top:1rem;padding-top:1rem;border-top:1px solid var(--border)}
-.bf-label{font-size:0.66rem;text-transform:uppercase;letter-spacing:0.5px;color:var(--text-muted);margin-bottom:0.25rem}
-.bf-val{font-size:1.05rem;font-weight:700;color:var(--text);max-width:320px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.briefing-cta{padding-top:1.1rem}
-.btn-primary{display:inline-block;background:var(--primary-light);border:none;border-radius:var(--radius-sm);color:#fff;font-size:0.82rem;font-weight:600;padding:0.55rem 1.1rem;text-decoration:none;white-space:nowrap;transition:opacity .15s}
-.btn-primary:hover{opacity:.85}
-.mem-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:0.75rem;margin-bottom:1rem}
-.mem-cell{background:rgba(0,0,0,0.2);border:1px solid var(--border);border-radius:var(--radius-sm);padding:0.85rem;text-align:center}
-.mem-num{font-size:1.5rem;font-weight:800;line-height:1;margin-bottom:0.25rem;font-variant-numeric:tabular-nums}
-.mem-num.good{color:#4ade80}
-.mem-num.warn{color:#fbbf24}
-.mem-num.bad{color:#f87171}
-.mem-lbl{font-size:0.66rem;text-transform:uppercase;letter-spacing:0.5px;color:var(--text-muted)}
-.mem-line{font-size:0.9rem;color:var(--text);padding-top:0.7rem;border-top:1px solid var(--border);margin-top:0.2rem}
-.mem-line strong{color:var(--text)}
-.mem-line+.mem-line{border-top:none;padding-top:0.3rem;margin-top:0}
-
-/* ── Row 2: Top 5 (65%) + Changes/Recent stacked (35%) ── */
-.ov-row-top5{display:grid;grid-template-columns:1.85fr 1fr;gap:1.5rem;align-items:stretch}
-@media(max-width:1100px){.ov-row-top5{grid-template-columns:1fr}}
-.top-issue{display:grid;grid-template-columns:36px 1fr auto auto;gap:1rem;align-items:center;padding:1rem;background:rgba(0,0,0,0.2);border:1px solid var(--border);border-radius:var(--radius-sm);margin-bottom:0.65rem;transition:border-color 0.15s}
-.top-issue:hover{border-color:rgba(99,102,241,0.4)}
-.top-issue-rank{width:32px;height:32px;border-radius:50%;background:rgba(99,102,241,0.15);color:var(--primary-light);display:flex;align-items:center;justify-content:center;font-weight:700;font-size:0.9rem}
-.top-issue-title{font-weight:600;font-size:0.92rem;margin-bottom:0.2rem}
-.top-issue-sub{font-size:0.75rem;color:var(--text-muted);line-height:1.4}
-.top-issue-action{font-size:0.72rem;color:var(--primary-light);margin-top:0.3rem;font-family:'Consolas','Monaco',monospace}
-.top-issue-memory{font-size:0.7rem;color:var(--text-muted);margin-top:0.2rem}
-.top-issue-btn{background:transparent;border:1px solid var(--border);color:var(--text-secondary);font-size:0.78rem;padding:0.4rem 0.9rem;border-radius:6px;cursor:pointer;text-decoration:none;display:inline-flex;align-items:center;gap:0.3rem;transition:all 0.15s;white-space:nowrap}
-.top-issue-btn:hover{background:var(--surface-hover);border-color:var(--primary);color:var(--text)}
-.top-issue-btn.primary{background:var(--primary);border-color:var(--primary);color:#fff}
-.top-issue-btn.primary:hover{background:var(--primary-light);border-color:var(--primary-light);color:#fff}
-
-.feed-card .section-card{margin-bottom:1.5rem}
-.feed-card .section-card:last-child{margin-bottom:0}
-.change-row{display:flex;align-items:center;gap:0.6rem;padding:0.6rem 0;border-bottom:1px solid rgba(51,65,85,0.5);font-size:0.8rem}
-.change-row:last-child{border-bottom:none}
-.change-dot{width:8px;height:8px;border-radius:50%;flex-shrink:0}
+.middle-grid{display:grid;grid-template-columns:1.1fr 1.1fr .95fr;gap:1.3rem;margin-bottom:1.65rem;align-items:stretch}
+@media(max-width:1100px){.middle-grid{grid-template-columns:1fr}}
+.activity-panel,.memory-panel{min-height:245px}
+.context-panel{min-height:245px;background:rgba(30,41,59,.38);border-color:rgba(51,65,85,.72)}
+.context-panel .panel-title{color:var(--text-secondary)}
+.context-panel .panel-sub{color:var(--text-muted)}
+.change-row{display:flex;align-items:center;gap:.65rem;padding:.72rem 0;border-top:1px solid rgba(51,65,85,.55);font-size:.81rem}
+.change-row:first-of-type{border-top:0}
+.change-dot{width:7px;height:7px;border-radius:50%;flex-shrink:0}
 .change-dot.Detected{background:#fbbf24}
 .change-dot.Resolved{background:#4ade80}
-.change-dot.Reopened{background:#f87171;box-shadow:0 0 5px rgba(248,113,113,.5)}
-.change-dot.RestartMilestone{background:#f87171;box-shadow:0 0 5px rgba(248,113,113,.5)}
+.change-dot.Reopened,.change-dot.RestartMilestone{background:#f87171}
 .change-dot.SeverityChanged{background:var(--primary-light)}
 .change-phrase{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--text-secondary)}
-.change-age{color:var(--text-muted);font-size:0.72rem;white-space:nowrap;flex-shrink:0}
+.change-age{color:var(--text-muted);font-size:.73rem;white-space:nowrap}
+.memory-stats{display:grid;grid-template-columns:repeat(3,1fr);gap:.45rem;margin:1rem 0 .85rem}
+.memory-stat{padding:.85rem .5rem;text-align:center;border-right:1px solid var(--border)}
+.memory-stat:last-child{border-right:0}
+.memory-n{font-size:1.35rem;font-weight:800}
+.memory-l{font-size:.67rem;color:var(--text-secondary);text-transform:uppercase;letter-spacing:.4px}
+.fact-row{display:flex;justify-content:space-between;gap:1rem;padding:.45rem 0;font-size:.78rem;color:var(--text-secondary)}
+.fact-row strong{color:var(--text);font-weight:600;text-align:right}
+.context-panel .fact-row{color:var(--text-muted);border-top:1px solid rgba(51,65,85,.38)}
+.context-panel .fact-row strong{color:var(--text-secondary)}
+.cluster-facts{margin-top:.7rem}
 
-/* ── Row 3: Cluster Health / Namespace Health / Security Status ── */
-.ov-3col{display:grid;grid-template-columns:repeat(3,1fr);gap:1.5rem}
-@media(max-width:1100px){.ov-3col{grid-template-columns:1fr}}
-.ch-grid{display:grid;grid-template-columns:1fr 1fr;gap:0.75rem;margin-bottom:1rem}
-.ch-cell{background:rgba(0,0,0,0.15);border:1px solid var(--border);border-radius:var(--radius-sm);padding:0.85rem;text-align:center}
-.ch-num{font-size:1.3rem;font-weight:800;line-height:1;margin-bottom:0.2rem;font-variant-numeric:tabular-nums}
-.ch-lbl{font-size:0.64rem;text-transform:uppercase;letter-spacing:0.5px;color:var(--text-muted)}
-.ch-summary{font-size:0.78rem;padding:0.6rem 0.75rem;border-radius:var(--radius-sm);border:1px solid var(--border);display:flex;align-items:center;gap:0.5rem}
-.ch-summary svg{flex-shrink:0}
-.ch-summary.ok{color:#4ade80;border-color:rgba(16,185,129,0.25);background:rgba(16,185,129,0.06)}
-.ch-summary.warn{color:#fbbf24;border-color:rgba(245,158,11,0.25);background:rgba(245,158,11,0.06)}
-.wh-strip{display:flex;flex-wrap:wrap;gap:5px;margin-top:1rem;padding-top:1rem;border-top:1px solid var(--border)}
-.wh-strip-lbl{width:100%;font-size:0.64rem;text-transform:uppercase;letter-spacing:0.5px;color:var(--text-muted);margin-bottom:0.4rem}
-.wh-dot{width:9px;height:9px;border-radius:50%;flex-shrink:0;cursor:help}
-.wh-dot.critical{background:#f87171;box-shadow:0 0 5px rgba(248,113,113,0.5)}
-.wh-dot.high{background:#fbbf24}
-.wh-dot.medium{background:#facc15}
-.wh-dot.ok{background:#334155}
-.wh-legend{text-transform:none;letter-spacing:0}
-.wh-legend .wh-dot{display:inline-block;vertical-align:middle;margin:0 2px 0 6px;cursor:default}
-.ns-health-row{display:flex;justify-content:space-between;align-items:center;padding:0.55rem 0;border-bottom:1px solid rgba(51,65,85,0.5);font-size:0.85rem}
-.sec-row{display:flex;justify-content:space-between;align-items:center;padding:0.55rem 0;border-bottom:1px solid rgba(51,65,85,0.5);font-size:0.85rem}
-.sec-row:last-of-type{border-bottom:none}
-.sec-label{color:var(--text-secondary)}
-.sec-val{font-weight:700;font-variant-numeric:tabular-nums;color:#4ade80}
-.sec-val.warn{color:#fbbf24}
-.sec-val.bad{color:#f87171}
-.ns-health-row:last-child{border-bottom:none}
-.ns-health-name{color:var(--text-secondary);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.ns-health-ratio{font-variant-numeric:tabular-nums;font-weight:700}
+.posture{background:rgba(30,41,59,.54);border:1px solid var(--border);border-radius:var(--radius);padding:1.35rem 1.45rem 1.45rem}
+.posture-hdr{display:flex;justify-content:space-between;align-items:flex-start;gap:1rem;margin-bottom:1.05rem}
+.posture-title{font-size:1rem;font-weight:700}
+.posture-sub{font-size:.77rem;color:var(--text-secondary);margin-top:.15rem}
+.posture-grid{display:grid;grid-template-columns:repeat(6,1fr);gap:.85rem}
+@media(max-width:1300px){.posture-grid{grid-template-columns:repeat(3,1fr)}}
+@media(max-width:760px){.posture-grid{grid-template-columns:1fr}}
+.posture-card{display:flex;flex-direction:column;text-decoration:none;color:inherit;background:rgba(15,23,42,.34);border:1px solid var(--border);border-radius:var(--radius-sm);padding:1.05rem;min-height:150px;transition:border-color .15s,background .15s}
+.posture-card:hover{border-color:rgba(129,140,248,.55);background:rgba(15,23,42,.5)}
+.posture-card-muted{cursor:default;background:rgba(15,23,42,.2);border-style:dashed}
+.posture-card-muted:hover{border-color:var(--border);background:rgba(15,23,42,.2)}
+.posture-name{font-size:.8rem;font-weight:650;margin-bottom:.65rem}
+.posture-value{font-size:1.28rem;font-weight:800;line-height:1.15;font-variant-numeric:tabular-nums}
+.posture-value.unavailable{font-size:1.05rem;color:var(--text-secondary)}
+.posture-copy{font-size:.74rem;color:var(--text-secondary);line-height:1.45;margin-top:.5rem}
+.posture-state{font-size:.74rem;line-height:1.35;margin-top:auto;padding-top:.75rem;color:var(--primary-light)}
+.posture-card-muted .posture-state{color:var(--text-muted)}
 
-.sec-checklist{list-style:none;font-size:0.83rem;color:var(--text-secondary)}
-.sec-checklist li{display:flex;align-items:center;gap:0.6rem;padding:0.35rem 0}
-.sec-checklist svg{color:var(--success);flex-shrink:0}
-
-.stat-good{color:#4ade80}
-.stat-warn{color:#fbbf24}
-.stat-bad{color:#f87171}
-
-.bottom-val.bad{color:#f87171}
-.bottom-val.warn{color:#fbbf24}
-.bottom-val.good{color:#4ade80}
-
-/* ── Row 4: Bottom strip (demoted) ── */
-.bottom-strip{display:flex;align-items:center;gap:2rem;flex-wrap:wrap;background:rgba(0,0,0,0.15);border:1px solid var(--border);border-radius:var(--radius);padding:1.1rem 1.5rem;margin-top:0.5rem}
-.bottom-metric{min-width:110px}
-.bottom-lbl{font-size:0.66rem;text-transform:uppercase;letter-spacing:0.5px;color:var(--text-muted);margin-bottom:0.2rem}
-.bottom-val{font-size:1.15rem;font-weight:700;font-variant-numeric:tabular-nums;color:var(--text-secondary)}
-.bottom-delta{font-size:0.7rem;margin-top:0.1rem;color:var(--text-muted)}
-.bottom-delta.good{color:#4ade80}
-.bottom-delta.bad{color:#f87171}
-.bottom-actions{margin-left:auto;display:flex;gap:0.75rem;flex-wrap:wrap}
-.bottom-btn{border:1px solid var(--border);color:var(--text-secondary);font-size:0.8rem;font-weight:600;padding:0.5rem 1.1rem;border-radius:var(--radius-sm);text-decoration:none;transition:all 0.15s;white-space:nowrap}
-.bottom-btn:hover{background:var(--surface-hover);border-color:var(--primary);color:var(--text)}
-.bs-item{display:flex;flex-direction:column;gap:2px;padding-right:1.5rem;border-right:1px solid var(--border)}
-.bs-item:last-of-type{border-right:none}
-.bs-item .n{font-size:1.1rem;font-weight:700}
-.bs-item .l{font-size:.68rem;text-transform:uppercase;letter-spacing:.5px;color:var(--text-muted)}
-.bs-btn{margin-left:auto;font-size:.8rem;color:var(--primary-light);font-weight:600;text-decoration:none;border:1px solid rgba(129,140,248,.4);border-radius:8px;padding:.5rem 1rem;white-space:nowrap}
-.bs-btn:hover{background:rgba(129,140,248,.1)}
+.empty{padding:2rem .5rem;color:var(--text-secondary);font-size:.84rem;text-align:center}
+@media(max-width:760px){.overview-main{padding:1.5rem 1.2rem 2rem}.ov-kicker{grid-template-columns:1fr}.ov-kpis{width:100%}.ov-kpi{flex:1;min-width:0}.priority-hero{padding:1.4rem 1.3rem 1.45rem 1.55rem}.priority-evidence-item{min-width:50%;margin:0;padding:.45rem .75rem .45rem 0}}
 </style>
 </head>
 <body>
 <div class="layout">
 {{template "sidebar.html" .}}
-<main class="main">
+<main class="main overview-main">
 
-<!-- 1. Page header -->
 <div class="ov-hdr">
   <div>
     <h1>Overview</h1>
     <div class="ov-hdr-sub">{{.ClusterName}} · {{.NamespaceCount}} namespace(s)</div>
-    <div class="ov-badges">
-      <span class="badge badge-ok">Read-only</span>
-      <span class="badge badge-ok">Operational memory</span>
-      <span class="badge badge-ok">Auth enabled</span>
-    </div>
   </div>
-  <div class="page-meta">
-    <div>Last scanned: <strong id="ov-age">just now</strong></div>
-  </div>
+  <div class="page-meta">Last scanned: <strong id="ov-age">just now</strong></div>
 </div>
 
-<!-- 2. If you only fix one thing today -->
-{{if .HasTopIssue}}
-{{with index .TopIssues 0}}
-<div class="fix-one-banner">
-  <div class="fix-one-icon"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg></div>
-  <div class="fix-one-body">
-    <div class="fix-one-lbl">If you only fix one thing today</div>
-    <div class="fix-one-title">{{.Title}}</div>
-    <div class="fix-one-sub">{{.Subtitle}}{{if $.TopIssueNS}} · {{$.TopIssueNS}}{{end}}</div>
+<div class="ov-kicker">
+  <div>
+    <div class="ov-kicker-title">OpsCart has prioritized what needs your attention.</div>
+    <div class="ov-kicker-sub">Start with the top issue, or open the War Room for the full ranked analysis.</div>
   </div>
-  <span class="sev-badge {{.Severity}}">{{.SeverityLbl}}</span>
-  <a class="fix-one-btn" href="{{.URL}}">{{.ButtonLabel}}</a>
-</div>
-{{end}}
-{{end}}
-
-<!-- 3. Situation Briefing + Operational Memory -->
-<div class="ov-row-briefing">
-  <div class="section-card{{if gt .CriticalCount 0}} briefing{{else}} briefing-ok{{end}}">
-  <div class="briefing-split">
-    <div class="briefing-left">
-    <div class="section-title"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M14.5 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7.5L14.5 2z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/><line x1="10" y1="9" x2="8" y2="9"/></svg>Situation Briefing</div>
-    <div class="section-sub">Current situation summary</div>
-    <p class="briefing-text">{{.VerdictLine1}}</p>
-    {{if .VerdictLine2}}<p class="briefing-text">{{.VerdictLine2}}</p>{{end}}
-    <div class="briefing-facts">
-      <div class="bf-item"><div class="bf-label">Active Critical</div><div class="bf-val">{{.CriticalCount}}</div></div>
-      {{if .HasTopIssue}}
-      <div class="bf-item"><div class="bf-label">Highest Priority</div><div class="bf-val">{{.TopIssueNS}}</div></div>
-      {{end}}
-    </div>
-    <div class="briefing-cta"><a href="{{.WrURL}}" class="btn-primary">Open War Room →</a></div>
-  </div>
-
-  <div class="briefing-right">
-    <div class="section-title"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3"/><path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"/></svg> Operational Memory</div>
-    <div class="section-sub">What this cluster's history shows</div>
+  <div class="ov-kpis">
+    <div class="ov-kpi"><div class="ov-kpi-n bad">{{.CriticalCount}}</div><div class="ov-kpi-l">Critical</div></div>
     {{if .Scoreboard}}
-    <div class="mem-grid">
-      <div class="mem-cell">
-        <div class="mem-num">{{.Scoreboard.TotalSeen}}</div>
-        <div class="mem-lbl">Total Seen</div>
-      </div>
-      <div class="mem-cell">
-        <div class="mem-num good">{{.Scoreboard.Resolved}}</div>
-        <div class="mem-lbl">Resolved</div>
-      </div>
-      <div class="mem-cell">
-        <div class="mem-num bad">{{.Scoreboard.Accelerating}}</div>
-        <div class="mem-lbl">Accelerating</div>
-      </div>
-    </div>
-    {{if .Scoreboard.LongestActiveName}}
-    <div class="mem-line">Longest active: <strong>{{.Scoreboard.LongestActiveName}}</strong> — {{.Scoreboard.LongestActiveDays}}d</div>
+    <div class="ov-kpi"><div class="ov-kpi-n good">{{.Scoreboard.Resolved}}</div><div class="ov-kpi-l">Resolved</div></div>
+    <div class="ov-kpi"><div class="ov-kpi-n{{if gt .Scoreboard.Accelerating 0}} bad{{end}}">{{.Scoreboard.Accelerating}}</div><div class="ov-kpi-l">Accelerating</div></div>
+    <div class="ov-kpi"><div class="ov-kpi-n">{{.Scoreboard.TotalSeen}}</div><div class="ov-kpi-l">Total seen</div></div>
     {{end}}
-    {{if .Scoreboard.MostUnstableNamespace}}
-    <div class="mem-line">Most unstable namespace: <strong>{{.Scoreboard.MostUnstableNamespace}}</strong> ({{.Scoreboard.MostUnstableCount}} incidents)</div>
-    {{end}}
-    {{else}}
-    <div class="empty-state-small">
-      <span class="icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9.5 2A2.5 2.5 0 0 0 7 4.5v.5A2.5 2.5 0 0 0 4.5 7.5v1A2.5 2.5 0 0 0 2 11v1a2.5 2.5 0 0 0 2.5 2.5h1"/><path d="M14.5 2A2.5 2.5 0 0 1 17 4.5v.5a2.5 2.5 0 0 1 2.5 2.5v1A2.5 2.5 0 0 1 22 11v1a2.5 2.5 0 0 1-2.5 2.5h-1"/><path d="M6 18a4 4 0 0 0 4 4h4a4 4 0 0 0 4-4"/><path d="M12 2v20"/></svg></span>
-      <div>No operational memory yet</div>
-    </div>
-    {{end}}
-    <div class="mem-line">Earliest retained observation: <strong>{{if .EarliestRetainedObservation}}{{.EarliestRetainedObservation}}{{else}}—{{end}}</strong></div>
-    <div class="mem-line">Configured retention: <strong>{{.ConfiguredRetention}}</strong></div>
-    <div class="mem-line">Storage: <strong>{{.StorageMode}}</strong></div>
   </div>
 </div>
-</div>
-</div>
 
-<!-- 4. Top 5 Things To Fix + What's Changed / Recent Events -->
-<div class="ov-row-top5">
-  <div class="section-card">
-    <div class="section-title"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="m3 17 2 2 4-4"/><path d="m3 7 2 2 4-4"/><path d="M13 6h8"/><path d="M13 12h8"/><path d="M13 18h8"/></svg> Top 5 Things To Fix</div>
-    <div class="section-sub">Prioritized by impact</div>
+<div class="priority-grid">
+  {{if .HasTopIssue}}
+  {{with index .TopIssues 0}}
+  <section class="priority-hero">
+    <div class="priority-eyebrow"><span class="priority-rank">#1</span><span class="sev-badge {{.Severity}}">{{.SeverityLbl}}</span><span>Highest priority</span></div>
+    <div class="priority-title">{{.Title}}</div>
+    <div class="priority-sub">{{.Subtitle}}{{if $.TopIssueNS}} · {{$.TopIssueNS}}{{end}}</div>
+    <div class="priority-rationale"><strong>Why #1</strong>First in OpsCart’s current priority queue with {{.SeverityLbl}} severity{{if .CountText}} across {{.CountText}}{{end}}.</div>
+    <div class="priority-evidence">
+      {{if .CountText}}<div class="priority-evidence-item"><div class="priority-evidence-label">Affected scope</div><div class="priority-evidence-value">{{.CountText}}</div></div>{{end}}
+      {{if $.TopIssueNS}}<div class="priority-evidence-item"><div class="priority-evidence-label">Namespace</div><div class="priority-evidence-value">{{$.TopIssueNS}}</div></div>{{end}}
+      {{if .FirstDetectedLabel}}<div class="priority-evidence-item"><div class="priority-evidence-label">First detected</div><div class="priority-evidence-value">{{.FirstDetectedLabel}}</div></div>{{end}}
+      {{if .TrendVal}}<div class="priority-evidence-item"><div class="priority-evidence-label">Trend</div><div class="priority-evidence-value">{{.TrendVal}}</div></div>{{end}}
+      {{if gt .ReopenCountVal 0}}<div class="priority-evidence-item"><div class="priority-evidence-label">History</div><div class="priority-evidence-value">Reopened {{.ReopenCountVal}} time{{if ne .ReopenCountVal 1}}s{{end}}</div></div>{{end}}
+    </div>
+    {{if .MemoryLine}}<div class="priority-memory">{{.MemoryLine}}</div>{{end}}
+    {{if .Action}}<div class="priority-action"><div class="priority-action-label">Recommended next step</div><div class="priority-action-code">{{.Action}}</div></div>{{end}}
+    <div class="priority-buttons">
+      <a class="btn-hot" href="{{$.WrURL}}">Open in War Room →</a>
+      <a class="btn-quiet" href="{{.URL}}">{{.ButtonLabel}}</a>
+    </div>
+  </section>
+  {{end}}
+  {{else}}
+  <section class="priority-hero" style="border-color:rgba(16,185,129,.45);background:rgba(16,185,129,.04)">
+    <div class="priority-eyebrow" style="color:#4ade80">No urgent priorities</div>
+    <div class="priority-title">No active issues need immediate attention.</div>
+    <div class="priority-sub">OpsCart will keep ranking new operational signals as they appear.</div>
+  </section>
+  {{end}}
 
+  <section class="panel priority-queue">
+    <div class="panel-title"><span>Other priority issues</span><a class="panel-link" href="{{.WrURL}}">View all in War Room →</a></div>
     {{if not .TopIssues}}
-    <div class="empty-state-small">
-      <span class="icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="m9 12 2 2 4-4"/></svg></span>
-      <div>No issues detected. Cluster looks healthy.</div>
-    </div>
+      <div class="empty">No additional issues.</div>
     {{else}}
-    {{range .TopIssues}}
-    <div class="top-issue">
-      <div class="top-issue-rank">{{.Rank}}</div>
-      <div>
-        <div class="top-issue-title">{{.Title}}</div>
-        <div class="top-issue-sub">{{.Subtitle}}</div>
-        {{if .MemoryLine}}<div class="top-issue-memory">{{.MemoryLine}}</div>{{end}}
-        {{if .Action}}<div class="top-issue-action">▸ {{.Action}}</div>{{end}}
-      </div>
-      <span class="sev-badge {{.Severity}}">{{.SeverityLbl}}</span>
-      <a class="top-issue-btn{{if le .GroupSize 1}} primary{{end}}" href="{{.URL}}">{{.ButtonLabel}}</a>
-    </div>
+      {{range .TopIssues}}
+        {{if gt .Rank 1}}
+        <div class="queue-row">
+          <div class="queue-rank">#{{.Rank}}</div>
+          <div><div class="queue-title">{{.Title}}</div><div class="queue-sub">{{.Subtitle}}</div></div>
+          <span class="sev-badge {{.Severity}}">{{.SeverityLbl}}</span>
+        </div>
+        {{end}}
+      {{end}}
     {{end}}
-    <a class="view-all-link" href="{{.WrURL}}">View all issues in War Room →</a>
-    {{end}}
-  </div>
+  </section>
+</div>
 
-  <div class="feed-card">
-    <div class="section-card">
-      <div class="section-title"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg> Recent Events</div>
-      <div class="section-sub">Cluster-wide activity feed</div>
-      {{if not .RecentEvents}}
-      <div class="empty-state-small">
-        <span class="icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg></span>
-        <div>No activity recorded yet</div>
-      </div>
-      {{else}}
-      {{range limitSlice .RecentEvents 14}}
+<div class="middle-grid">
+  <section class="panel activity-panel">
+    <div class="panel-title"><span>Recent changes</span><a class="panel-link" href="{{.IncidentsHref}}">View all →</a></div>
+    <div class="panel-sub">What changed in the cluster recently</div>
+    {{if not .RecentEvents}}
+      <div class="empty">No recent activity recorded.</div>
+    {{else}}
+      {{range limitSlice .RecentEvents 5}}
       <div class="change-row">
         <span class="change-dot {{.EventReason}}"></span>
         <span class="change-phrase">{{.Phrase}}</span>
         <span class="change-age">{{eventAge .OccurredAt}}</span>
       </div>
       {{end}}
-      {{end}}
-      <a class="view-all-link" href="{{.IncidentsHref}}">View all →</a>
-    </div>
-  </div>
-</div>
-
-<!-- 5. Cluster Health / Namespace Health / Security Status -->
-<div class="ov-3col">
-
-  <div class="section-card">
-    <div class="section-title"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg> Cluster Health</div>
-    <div class="ch-grid">
-      <div class="ch-cell">
-        <div class="ch-num">{{.NodePoolCount}}</div>
-        <div class="ch-lbl">Node Pools</div>
-      </div>
-      <div class="ch-cell">
-        <div class="ch-num">{{.PodCount}}</div>
-        <div class="ch-lbl">Running Pods</div>
-      </div>
-      <div class="ch-cell">
-        <div class="ch-num{{if gt .CPUUtilization 85}} stat-warn{{end}}">{{.CPUUtilization}}%</div>
-        <div class="ch-lbl">CPU Utilization</div>
-      </div>
-      <div class="ch-cell">
-        <div class="ch-num{{if gt .MemUtilization 85}} stat-warn{{end}}">{{.MemUtilization}}%</div>
-        <div class="ch-lbl">Memory Utilization</div>
-      </div>
-    </div>
-    <div class="ch-summary {{if eq .UtilizationStatus "Nominal"}}ok{{else}}warn{{end}}">Utilization {{.UtilizationStatus}}</div>
-    {{if .WorkloadHealthGrid}}
-    <div class="wh-strip">
-      <div class="wh-strip-lbl">Workload Health ({{len .WorkloadHealthGrid}}) · <span class="wh-legend"><i class="wh-dot critical"></i> critical <i class="wh-dot high"></i> high <i class="wh-dot ok"></i> healthy</span> · hover for names</div>
-      {{range limitWorkloadHealth .WorkloadHealthGrid 40}}
-      <span class="wh-dot {{if .Severity}}{{.Severity}}{{else}}ok{{end}}" title="{{.Name}}{{if .Severity}} — {{.Severity}}{{end}}"></span>
-      {{end}}
-      {{if gt (len .WorkloadHealthGrid) 40}}
-      <a class="view-all-link" href="{{$.WrURL}}">View all {{len .WorkloadHealthGrid}} workloads →</a>
-      {{end}}
-    </div>
     {{end}}
-  </div>
+  </section>
 
-  <div class="section-card">
-    <div class="section-title"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M21 8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4a2 2 0 0 0 1-1.73z"/><polyline points="3.27 6.96 12 12.01 20.73 6.96"/><line x1="12" y1="22.08" x2="12" y2="12"/></svg> Namespace Health</div>
-    <div class="section-sub">Ready pods per namespace</div>
-    {{if not .NamespaceHealthList}}
-    <div class="empty-state-small">
-      <span class="icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z"/></svg></span>
-      <div>No namespace data available</div>
+  <section class="panel memory-panel">
+    <div class="panel-title"><span>Since your last visit</span></div>
+    <div class="panel-sub">Operational memory, compressed</div>
+    {{if .Scoreboard}}
+    <div class="memory-stats">
+      <div class="memory-stat"><div class="memory-n good">{{.Scoreboard.Resolved}}</div><div class="memory-l">Resolved</div></div>
+      <div class="memory-stat"><div class="memory-n{{if gt .Scoreboard.Accelerating 0}} bad{{end}}">{{.Scoreboard.Accelerating}}</div><div class="memory-l">Accelerating</div></div>
+      <div class="memory-stat"><div class="memory-n">{{.Scoreboard.TotalSeen}}</div><div class="memory-l">Total seen</div></div>
     </div>
+    {{if .Scoreboard.LongestActiveName}}<div class="fact-row"><span>Longest active</span><strong>{{.Scoreboard.LongestActiveName}} · {{.Scoreboard.LongestActiveDays}}d</strong></div>{{end}}
+    {{if .Scoreboard.MostUnstableNamespace}}<div class="fact-row"><span>Most unstable namespace</span><strong>{{.Scoreboard.MostUnstableNamespace}} ({{.Scoreboard.MostUnstableCount}} incidents)</strong></div>{{end}}
     {{else}}
-    {{range limitNamespaceHealth .NamespaceHealthList 6}}
-    <div class="ns-health-row">
-      <span class="ns-health-name">{{.Name}}</span>
-      <span class="badge badge-{{healthColor .Ready .Total}} ns-health-ratio">{{.Ready}}/{{.Total}}</span>
-    </div>
+    <div class="empty">No operational memory yet.</div>
     {{end}}
-    {{if gt (len .NamespaceHealthList) 6}}
-    <a class="view-all-link" href="{{.NSsURL}}">View all {{len .NamespaceHealthList}} namespaces →</a>
-    {{end}}
-    {{end}}
-  </div>
+    <div class="fact-row"><span>Earliest retained observation:</span><strong>{{if .EarliestRetainedObservation}}{{.EarliestRetainedObservation}}{{else}}—{{end}}</strong></div>
+    <div class="fact-row"><span>Configured retention:</span><strong>{{.ConfiguredRetention}}</strong></div>
+  </section>
 
-  <div class="section-card">
-<div class="section-title"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg> Security Posture</div>
-    <div class="section-sub">Current cluster security findings</div>
-
-    <div class="sec-row">
-      <span class="sec-label">OpsCart posture score</span>
-      <span class="sec-val{{if lt .SecurityScore 50}} bad{{else if lt .SecurityScore 80}} warn{{end}}">{{.SecurityScore}}/100</span>
+  <section class="panel context-panel">
+    <div class="panel-title"><span>Cluster information</span></div>
+    <div class="panel-sub">Current scope and data state</div>
+    <div class="cluster-facts">
+      <div class="fact-row"><span>Cluster</span><strong>{{.ClusterName}}</strong></div>
+      <div class="fact-row"><span>Namespaces</span><strong>{{.NamespaceCount}}</strong></div>
+      <div class="fact-row"><span>Node pools</span><strong>{{.NodePoolCount}}</strong></div>
+      <div class="fact-row"><span>Running pods</span><strong>{{.PodCount}}</strong></div>
+      <div class="fact-row"><span>Storage:</span><strong>{{.StorageMode}}</strong></div>
+      <div class="fact-row"><span>Configured retention</span><strong>{{.ConfiguredRetention}}</strong></div>
     </div>
-
-    <div class="sec-row">
-      <span class="sec-label">Privileged containers</span>
-      <span class="sec-val{{if gt .PrivilegedContainers 0}} bad{{end}}">{{.PrivilegedContainers}}</span>
-    </div>
-
-    <div class="sec-row">
-      <span class="sec-label">Non-root not explicitly enforced</span>
-      <span class="sec-val{{if gt .NonRootNotExplicitlyEnforced 0}} warn{{end}}">{{.NonRootNotExplicitlyEnforced}}</span>
-    </div>
-
-    <div class="sec-row">
-      <span class="sec-label">High-risk namespaces</span>
-      <span class="sec-val{{if gt .UnprotectedNamespaceCount 0}} warn{{end}}">{{.UnprotectedNamespaceCount}}</span>
-    </div>
-
-    <div class="section-sub">CIS-aligned checks · Not a formal compliance assessment.</div>
-    <a class="view-all-link" href="{{.SecurityHref}}" style="margin-top:0.75rem;display:inline-block">View full security posture →</a>
-  </div>
-
+  </section>
 </div>
 
-<!-- 6. Bottom strip (demoted) -->
-<div class="bottom-strip">
-  <div class="bottom-metric bs-item">
-    <div class="bottom-lbl l">Incident Score</div>
-    <div class="bottom-val n{{if lt .IncidentScore 50}} bad{{else if lt .IncidentScore 80}} warn{{else}} good{{end}}">{{.IncidentScore}}/100</div>
-    {{if .IncidentScoreDeltaText}}<div class="bottom-delta {{if hasPrefix .IncidentScoreDeltaText "+"}}good{{else}}bad{{end}}">{{.IncidentScoreDeltaText}} from last scan</div>{{end}}
+<section class="posture">
+  <div class="posture-hdr">
+    <div><div class="posture-title">Cluster posture at a glance</div><div class="posture-sub">Operational, efficiency, and risk signals without duplicating the detailed pages.</div></div>
   </div>
-  <div class="bottom-metric bs-item">
-    <div class="bottom-lbl l">Security Score</div>
-    <div class="bottom-val n{{if lt .SecurityScore 50}} bad{{else if lt .SecurityScore 80}} warn{{else}} good{{end}}">{{.SecurityScore}}/100</div>
-    {{if .SecurityScoreDeltaText}}<div class="bottom-delta {{if hasPrefix .SecurityScoreDeltaText "+"}}good{{else}}bad{{end}}">{{.SecurityScoreDeltaText}} from last scan</div>{{end}}
+  <div class="posture-grid">
+    <a class="posture-card" href="{{.InfraHref}}">
+      <div class="posture-name">Nodes</div>
+      <div class="posture-value">{{.NodePoolCount}}</div>
+      <div class="posture-copy">node pool(s) · CPU {{.CPUUtilization}}% · memory {{.MemUtilization}}%</div>
+      <div class="posture-state {{if eq .UtilizationStatus "Nominal"}}good{{else}}warn{{end}}">Utilization {{.UtilizationStatus}}</div>
+    </a>
+    <a class="posture-card" href="{{.NsHref}}">
+      <div class="posture-name">Namespaces</div>
+      <div class="posture-value">{{.NamespaceCount}}</div>
+      <div class="posture-copy">namespaces in the current cluster scope</div>
+      <div class="posture-state">Open namespace health →</div>
+    </a>
+    <a class="posture-card" href="{{.SecurityHref}}">
+      <div class="posture-name">Security</div>
+      <div class="posture-value{{if lt .SecurityScore 50}} bad{{else if lt .SecurityScore 80}} warn{{else}} good{{end}}">{{.SecurityScore}}/100</div>
+      <div class="posture-copy">{{.PrivilegedContainers}} privileged container(s)</div>
+      <div class="posture-state">Review risk →</div>
+    </a>
+    <a class="posture-card" href="{{.CostsHref}}">
+      <div class="posture-name">Cost</div>
+      {{if .CostAvailable}}
+      <div class="posture-value">${{money .MonthlyCost}}/mo</div>
+      <div class="posture-copy">Current monthly estimate from available provider/list pricing{{if .CostCoverage}} · {{.CostCoverage}}{{end}}</div>
+      <div class="posture-state">View cost evidence →</div>
+      {{else}}
+      <div class="posture-value unavailable">Unavailable</div>
+      <div class="posture-copy">{{if .CostCoverage}}{{.CostCoverage}}{{else}}No exact provider price is available{{end}}</div>
+      <div class="posture-state">Review pricing evidence →</div>
+      {{end}}
+    </a>
+    <a class="posture-card" href="{{.WasteHref}}">
+      <div class="posture-name">Waste &amp; Drift</div>
+      <div class="posture-value">{{.WasteCount}}</div>
+      <div class="posture-copy">current findings</div>
+      <div class="posture-state">Review findings →</div>
+    </a>
+    <article class="posture-card posture-card-muted node-optimization-card">
+      <div class="posture-name">Node Optimization</div>
+      <div class="posture-value">In development</div>
+      <div class="posture-copy">Simulation foundation exists; the dashboard workflow is not yet available.</div>
+      <div class="posture-state">No operator action yet</div>
+    </article>
   </div>
-  <div class="bottom-metric bs-item">
-    <div class="bottom-lbl l">Monthly Cost</div>
-    <div class="bottom-val n">${{money .MonthlyCost}}</div>
-    {{if .CostDeltaText}}<div class="bottom-delta {{if hasPrefix .CostDeltaText "+"}}good{{else}}bad{{end}}">{{.CostDeltaText}} from last scan</div>{{end}}
-  </div>
-  <div class="bottom-metric bs-item">
-    <div class="bottom-lbl l">Waste &amp; Drift Findings</div>
-    <div class="bottom-val n">{{.WasteCount}}</div>
-  </div>
-  <div class="bottom-actions">
-    <a class="bottom-btn bs-btn" href="{{.CostsHref}}">Cost Intelligence →</a>
-    <a class="bottom-btn bs-btn" href="{{.WasteHref}}">Waste &amp; Drift →</a>
-  </div>
-</div>
+</section>
 
 </main>
 </div>
 <script>
 (function(){
-  var el = document.getElementById('ov-age');
-  var TS = {{.ScannedAtMS}};
+  var el=document.getElementById('ov-age'),TS={{.ScannedAtMS}};
   function upd(){
-    var s = Math.floor((Date.now()-TS)/1000);
-    var t = s<5?'just now':s<60?s+'s ago':Math.floor(s/60)+'m ago';
-    if(el) el.textContent = t;
+    var s=Math.floor((Date.now()-TS)/1000);
+    var t=s<5?'just now':s<60?s+'s ago':Math.floor(s/60)+'m ago';
+    if(el)el.textContent=t;
   }
-  setInterval(upd,1000); upd();
+  setInterval(upd,1000);upd();
 })();
 </script>
 </body>

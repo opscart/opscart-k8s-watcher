@@ -33,6 +33,7 @@ type stubPageData struct {
 	CriticalCount   int
 	Clusters        []sidebarCluster
 	DiagnosticsHref string
+	SettingsHref    string
 }
 
 var getStubTmpl = sync.OnceValue(func() *template.Template {
@@ -52,19 +53,22 @@ func (srv *server) handleStubPage(page, title string) http.HandlerFunc {
 
 		q := "?cluster=" + url.QueryEscape(ctx)
 		data := stubPageData{
-			Title:         title,
-			ActivePage:    page,
-			DashHref:      "/" + q,
-			WrHref:        "/warroom" + q,
-			CostsHref:     "/costs" + q,
-			InfraHref:     "/infrastructure" + q,
-			NsHref:        "/namespaces" + q,
-			OptHref:       "/optimizations" + q,
-			WasteHref:     "/waste" + q,
-			SecurityHref:  "/security" + q,
-			IncidentsHref: "/incidents" + q,
-			ClusterName:   displayName(ctx),
-			CriticalCount: countCriticalIssues(scan),
+			Title:           title,
+			ActivePage:      page,
+			DashHref:        "/" + q,
+			WrHref:          "/warroom" + q,
+			CostsHref:       "/costs" + q,
+			InfraHref:       "/infrastructure" + q,
+			NsHref:          "/namespaces" + q,
+			OptHref:         "/optimizations" + q,
+			WasteHref:       "/waste" + q,
+			SecurityHref:    "/security" + q,
+			IncidentsHref:   "/incidents" + q,
+			DiagnosticsHref: "/settings/diagnostics" + q,
+			SettingsHref:    "/settings" + q,
+			ClusterName:     displayName(ctx),
+			CriticalCount:   countCriticalIssues(scan),
+			Clusters:        convertToSidebarClusters(srv.clusterList, ctx, sidebarBasePath(page)),
 		}
 
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
@@ -100,6 +104,7 @@ func (srv *server) handleSettingsPage(w http.ResponseWriter, r *http.Request) {
 		IncidentsHref: "/incidents" + q, ClusterName: displayName(ctx), CriticalCount: countCriticalIssues(scan),
 		Clusters:        convertToSidebarClusters(srv.clusterList, ctx, "/settings"),
 		DiagnosticsHref: "/settings/diagnostics" + q,
+		SettingsHref:    "/settings" + q,
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-cache, no-store, must-revalidate")
@@ -872,17 +877,21 @@ var getOptimizationsTmpl = sync.OnceValue(func() *template.Template {
 // ── Security Posture page ─────────────────────────────────────────────────────
 
 type securityPageData struct {
-	DashHref      string
-	WrHref        string
-	CostsHref     string
-	InfraHref     string
-	WasteHref     string
-	SecurityHref  string
-	IncidentsHref string
-	ActivePage    string
-	ClusterName   string
-	CriticalCount int
-	Clusters      []sidebarCluster
+	DashHref        string
+	WrHref          string
+	CostsHref       string
+	InfraHref       string
+	WasteHref       string
+	SecurityHref    string
+	IncidentsHref   string
+	DiagnosticsHref string
+	SettingsHref    string
+	ActivePage      string
+	ClusterName     string
+	NsHref          string
+	OptHref         string
+	CriticalCount   int
+	Clusters        []sidebarCluster
 
 	CISScore              int
 	CISScoreColor         string
@@ -1080,18 +1089,22 @@ func (srv *server) handleSecurityPage(w http.ResponseWriter, r *http.Request) {
 	}
 
 	data := securityPageData{
-		DashHref:      "/" + q,
-		WrHref:        "/warroom" + q,
-		CostsHref:     "/costs" + q,
-		InfraHref:     "/infrastructure" + q,
-		WasteHref:     "/waste" + q,
-		SecurityHref:  "/security" + q,
-		IncidentsHref: "/incidents" + q,
-		ActivePage:    "security",
-		ClusterName:   displayName(ctx),
-		CriticalCount: countCriticalIssues(scan),
-		Clusters:      clusters,
-		ScannedAtMs:   time.Now().UnixMilli(),
+		DashHref:        "/" + q,
+		WrHref:          "/warroom" + q,
+		CostsHref:       "/costs" + q,
+		InfraHref:       "/infrastructure" + q,
+		WasteHref:       "/waste" + q,
+		SecurityHref:    "/security" + q,
+		IncidentsHref:   "/incidents" + q,
+		DiagnosticsHref: "/settings/diagnostics" + q,
+		SettingsHref:    "/settings" + q,
+		ActivePage:      "security",
+		NsHref:          "/namespaces" + q,
+		OptHref:         "/optimizations" + q,
+		ClusterName:     displayName(ctx),
+		CriticalCount:   countCriticalIssues(scan),
+		Clusters:        clusters,
+		ScannedAtMs:     time.Now().UnixMilli(),
 	}
 
 	data.ScanAvailable = scan.secAudit != nil && scan.cisResult != nil
@@ -1190,8 +1203,12 @@ type wastePageData struct {
 	WasteHref        string
 	SecurityHref     string
 	IncidentsHref    string
+	DiagnosticsHref  string
+	SettingsHref     string
 	ActivePage       string
 	ClusterName      string
+	NsHref           string
+	OptHref          string
 	CriticalCount    int
 	Clusters         []sidebarCluster
 
@@ -1392,17 +1409,21 @@ func (srv *server) handleWastePage(w http.ResponseWriter, r *http.Request) {
 	}
 
 	data := wastePageData{
-		DashHref:      "/" + q,
-		WrHref:        "/warroom" + q,
-		CostsHref:     "/costs" + q,
-		InfraHref:     "/infrastructure" + q,
-		WasteHref:     "/waste" + q,
-		SecurityHref:  "/security" + q,
-		IncidentsHref: "/incidents" + q,
-		ActivePage:    "waste",
-		ClusterName:   displayName(ctx),
-		CriticalCount: countCriticalIssues(scan),
-		Clusters:      clusters,
+		DashHref:        "/" + q,
+		WrHref:          "/warroom" + q,
+		CostsHref:       "/costs" + q,
+		InfraHref:       "/infrastructure" + q,
+		WasteHref:       "/waste" + q,
+		SecurityHref:    "/security" + q,
+		IncidentsHref:   "/incidents" + q,
+		DiagnosticsHref: "/settings/diagnostics" + q,
+		SettingsHref:    "/settings" + q,
+		ActivePage:      "waste",
+		ClusterName:     displayName(ctx),
+		CriticalCount:   countCriticalIssues(scan),
+		Clusters:        clusters,
+		NsHref:          "/namespaces" + q,
+		OptHref:         "/optimizations" + q,
 
 		IncidentHref: "/incidents" + q + "&status=active",
 	}
@@ -1481,6 +1502,7 @@ func (srv *server) handleWastePage(w http.ResponseWriter, r *http.Request) {
 // costPageData holds all data needed to render the cost overview template.
 type costPageData struct {
 	ClusterName string
+	Sidebar     template.HTML
 	ActiveCtx   string
 	ClusterList []costClusterLink
 	DashURL     string
@@ -1882,6 +1904,7 @@ func buildCostPageData(scan *clusterScan, activeCtx string, clusterList []string
 			IsActive: ctx == activeCtx,
 		})
 	}
+	data.Sidebar = template.HTML(buildSidebar("costs", activeCtx, data.ClusterName, clusterList, countCriticalIssues(scan)))
 
 	return data
 }

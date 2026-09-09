@@ -257,31 +257,33 @@ type diagnosticOperation struct {
 }
 
 type diagnosticsPageData struct {
-	ActivePage    string
-	DashHref      string
-	WrHref        string
-	CostsHref     string
-	InfraHref     string
-	NsHref        string
-	OptHref       string
-	WasteHref     string
-	SecurityHref  string
-	IncidentsHref string
-	ClusterName   string
-	CriticalCount int
-	Clusters      []sidebarCluster
-	Cluster       string
-	CompletedAt   string
-	Duration      string
-	Interval      string
-	Requests      uint64
-	Errors        uint64
-	Throttles     uint64
-	ResponseData  string
-	TotalAPITime  string
-	MaxAPITime    string
-	TopOperations []diagnosticOperation
-	Investigation investigationDiagnostics
+	ActivePage      string
+	DashHref        string
+	WrHref          string
+	CostsHref       string
+	InfraHref       string
+	NsHref          string
+	OptHref         string
+	WasteHref       string
+	SecurityHref    string
+	IncidentsHref   string
+	DiagnosticsHref string
+	SettingsHref    string
+	ClusterName     string
+	CriticalCount   int
+	Clusters        []sidebarCluster
+	Cluster         string
+	CompletedAt     string
+	Duration        string
+	Interval        string
+	Requests        uint64
+	Errors          uint64
+	Throttles       uint64
+	ResponseData    string
+	TotalAPITime    string
+	MaxAPITime      string
+	TopOperations   []diagnosticOperation
+	Investigation   investigationDiagnostics
 }
 
 type investigationDiagnostics struct {
@@ -304,9 +306,10 @@ func (srv *server) handleDiagnostics(w http.ResponseWriter, r *http.Request) {
 	requests, errors := obs.API.totals()
 	responseBytes, totalAPITime, maxAPITime, throttles := obs.API.costTotals()
 	q := "?cluster=" + url.QueryEscape(ctx)
-	data := diagnosticsPageData{ActivePage: "settings", DashHref: "/" + q, WrHref: "/warroom" + q, CostsHref: "/costs" + q,
+	data := diagnosticsPageData{ActivePage: "diagnostics", DashHref: "/" + q, WrHref: "/warroom" + q, CostsHref: "/costs" + q,
 		InfraHref: "/infrastructure" + q, NsHref: "/namespaces" + q, OptHref: "/optimizations" + q, WasteHref: "/waste" + q,
-		SecurityHref: "/security" + q, IncidentsHref: "/incidents" + q, ClusterName: displayName(ctx), CriticalCount: countCriticalIssues(scan),
+		SecurityHref: "/security" + q, IncidentsHref: "/incidents" + q, DiagnosticsHref: "/settings/diagnostics" + q, SettingsHref: "/settings" + q,
+		ClusterName: displayName(ctx), CriticalCount: countCriticalIssues(scan),
 		Clusters: convertToSidebarClusters(srv.clusterList, ctx, "/settings/diagnostics"), Cluster: displayName(state.ctx), CompletedAt: "No completed scan", Interval: dashboardScanInterval.String(), Requests: requests, Errors: errors,
 		Throttles: throttles, ResponseData: formatByteCount(responseBytes), TotalAPITime: totalAPITime.Round(time.Millisecond).String(), MaxAPITime: maxAPITime.Round(time.Millisecond).String()}
 	if !obs.CompletedAt.IsZero() {

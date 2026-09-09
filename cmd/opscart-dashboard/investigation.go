@@ -33,17 +33,21 @@ type investigationEvent struct {
 
 type investigationPageData struct {
 	// Sidebar fields
-	DashHref      string
-	WrHref        string
-	CostsHref     string
-	InfraHref     string
-	WasteHref     string
-	SecurityHref  string
-	IncidentsHref string
-	ActivePage    string
-	ClusterName   string
-	CriticalCount int
-	Clusters      []sidebarCluster
+	DashHref        string
+	WrHref          string
+	CostsHref       string
+	InfraHref       string
+	WasteHref       string
+	SecurityHref    string
+	IncidentsHref   string
+	DiagnosticsHref string
+	SettingsHref    string
+	ActivePage      string
+	ClusterName     string
+	NsHref          string
+	OptHref         string
+	CriticalCount   int
+	Clusters        []sidebarCluster
 
 	// Pod identity
 	PodName          string
@@ -903,23 +907,28 @@ func (srv *server) handleInvestigationPage(w http.ResponseWriter, r *http.Reques
 		backURL = "/incidents" + q
 	}
 	data := investigationPageData{
-		DashHref:      "/" + q,
-		WrHref:        "/warroom" + q,
-		CostsHref:     "/costs" + q,
-		InfraHref:     "/infrastructure" + q,
-		WasteHref:     "/waste" + q,
-		SecurityHref:  "/security" + q,
-		IncidentsHref: "/incidents" + q,
-		ActivePage:    activePage,
-		ClusterName:   displayName(ctx),
-		CriticalCount: countCriticalIssues(scan),
-		PodName:       podName,
-		Namespace:     namespace,
-		IssueType:     issueType,
-		WorkloadLabel: "Workload/" + store.OwnerNameFromPod(podName),
-		TrackingLabel: "Workload scoped",
-		BackURL:       backURL,
-		ScannedAtMs:   time.Now().UnixMilli(),
+		DashHref:        "/" + q,
+		WrHref:          "/warroom" + q,
+		CostsHref:       "/costs" + q,
+		InfraHref:       "/infrastructure" + q,
+		WasteHref:       "/waste" + q,
+		SecurityHref:    "/security" + q,
+		IncidentsHref:   "/incidents" + q,
+		DiagnosticsHref: "/settings/diagnostics" + q,
+		SettingsHref:    "/settings" + q,
+		NsHref:          "/namespaces" + q,
+		OptHref:         "/optimizations" + q,
+		ActivePage:      activePage,
+		ClusterName:     displayName(ctx),
+		CriticalCount:   countCriticalIssues(scan),
+		Clusters:        convertToSidebarClusters(srv.clusterList, ctx, sidebarBasePath(activePage)),
+		PodName:         podName,
+		Namespace:       namespace,
+		IssueType:       issueType,
+		WorkloadLabel:   "Workload/" + store.OwnerNameFromPod(podName),
+		TrackingLabel:   "Workload scoped",
+		BackURL:         backURL,
+		ScannedAtMs:     time.Now().UnixMilli(),
 	}
 	if nodeName != "" {
 		srv.handleNodeInvestigation(w, ctx, nodeName, issueType, scan, data)
