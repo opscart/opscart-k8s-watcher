@@ -274,6 +274,174 @@ func TestSimulateSameShapeNodeCountRejectsInvalidInput(t *testing.T) {
 	}
 }
 
+func TestSimulateSameShapeNodeCountAllCandidateEligibilityPreservesPlacement(t *testing.T) {
+	base := NodeOptimizationInput{
+		CurrentNodes:            3,
+		CandidateNodes:          2,
+		CandidateNodeNames:      []string{"node-b", "node-a"},
+		NodeCPUCapacityMilli:    2000,
+		NodeMemoryCapacityBytes: 2000,
+		Pods: []NodeOptimizationPodInput{
+			{Namespace: "apps", Name: "api", CPURequestMilli: 1200, MemoryRequestBytes: 800},
+			{Namespace: "apps", Name: "worker", CPURequestMilli: 800, MemoryRequestBytes: 1200},
+		},
+	}
+	explicit := base
+	explicit.Pods = append([]NodeOptimizationPodInput(nil), base.Pods...)
+	for i := range explicit.Pods {
+		explicit.Pods[i].EligibleNodeNames = []string{"node-b", "node-a"}
+	}
+
+	unrestrictedResult := SimulateSameShapeNodeCount(base)
+	explicitResult := SimulateSameShapeNodeCount(explicit)
+
+	if !reflect.DeepEqual(unrestrictedResult, explicitResult) {
+		t.Fatalf("all-node eligibility changed placement:\nunrestricted=%#v\nexplicit=%#v", unrestrictedResult, explicitResult)
+	}
+	if explicitResult.Status != NodeOptimizationFit {
+		t.Fatalf("status = %q, want %q", explicitResult.Status, NodeOptimizationFit)
+	}
+}
+
+func TestSimulateSameShapeNodeCountPlacesPodOnOnlyEligibleCandidate(t *testing.T) {
+	got := SimulateSameShapeNodeCount(NodeOptimizationInput{
+		CurrentNodes:            3,
+		CandidateNodes:          2,
+		CandidateNodeNames:      []string{"node-a", "node-b"},
+		NodeCPUCapacityMilli:    2000,
+		NodeMemoryCapacityBytes: 2000,
+		Pods: []NodeOptimizationPodInput{
+			{
+				Namespace: "apps", Name: "pinned", CPURequestMilli: 1000, MemoryRequestBytes: 1000,
+				EligibleNodeNames: []string{"node-b"},
+			},
+		},
+	})
+
+	if got.Status != NodeOptimizationFit || len(got.Placements) != 1 {
+		t.Fatalf("result = %#v, want one successful placement", got)
+	}
+	if got.Placements[0].NodeName != "node-b" {
+		t.Fatalf("placement node = %q, want node-b", got.Placements[0].NodeName)
+	}
+}
+
+func TestSimulateSameShapeNodeCountPlacesOverlappingEligibleNodeSets(t *testing.T) {
+	got := SimulateSameShapeNodeCount(NodeOptimizationInput{
+		CurrentNodes:            4,
+		CandidateNodes:          3,
+		CandidateNodeNames:      []string{"node-c", "node-a", "node-b"},
+		NodeCPUCapacityMilli:    1000,
+		NodeMemoryCapacityBytes: 1000,
+		Pods: []NodeOptimizationPodInput{
+			{Name: "only-a", CPURequestMilli: 600, MemoryRequestBytes: 100, EligibleNodeNames: []string{"node-a"}},
+			{Name: "a-or-b", CPURequestMilli: 400, MemoryRequestBytes: 100, EligibleNodeNames: []string{"node-b", "node-a"}},
+			{Name: "b-or-c", CPURequestMilli: 600, MemoryRequestBytes: 100, EligibleNodeNames: []string{"node-c", "node-b"}},
+		},
+	})
+
+	if got.Status != NodeOptimizationFit {
+		t.Fatalf("status = %q, want %q; blockers=%v", got.Status, NodeOptimizationFit, got.Blockers)
+	}
+	allowed := map[string]map[string]bool{
+		"only-a": {"node-a": true},
+		"a-or-b": {"node-a": true, "node-b": true},
+		"b-or-c": {"node-b": true, "node-c": true},
+	}
+	for _, placement := range got.Placements {
+		if !allowed[placement.PodName][placement.NodeName] {
+			t.Fatalf("placement %#v is outside the Pod eligible-node set", placement)
+		}
+	}
+}
+
+func TestSimulateSameShapeNodeCountBlocksEmptyEligibleNodeSet(t *testing.T) {
+	got := SimulateSameShapeNodeCount(NodeOptimizationInput{
+		CurrentNodes:            2,
+		CandidateNodes:          1,
+		CandidateNodeNames:      []string{"node-a"},
+		NodeCPUCapacityMilli:    1000,
+		NodeMemoryCapacityBytes: 1000,
+		Pods: []NodeOptimizationPodInput{
+			{Name: "blocked", CPURequestMilli: 100, MemoryRequestBytes: 100, EligibleNodeNames: []string{}},
+		},
+	})
+
+	if got.Status != NodeOptimizationBlockedEligibility || got.PlacementFound {
+		t.Fatalf("result = %#v, want hard eligible-node blocker", got)
+	}
+	if len(got.Blockers) != 1 || got.Blockers[0].Reason != "no_eligible_candidate_nodes" {
+		t.Fatalf("blockers = %#v, want no_eligible_candidate_nodes", got.Blockers)
+	}
+}
+
+func TestSimulateSameShapeNodeCountEligibleSubsetCanCauseFragmentation(t *testing.T) {
+	got := SimulateSameShapeNodeCount(NodeOptimizationInput{
+		CurrentNodes:            3,
+		CandidateNodes:          2,
+		CandidateNodeNames:      []string{"node-a", "node-b"},
+		NodeCPUCapacityMilli:    1000,
+		NodeMemoryCapacityBytes: 1000,
+		Pods: []NodeOptimizationPodInput{
+			{Name: "a-one", CPURequestMilli: 600, MemoryRequestBytes: 100, EligibleNodeNames: []string{"node-a"}},
+			{Name: "a-two", CPURequestMilli: 600, MemoryRequestBytes: 100, EligibleNodeNames: []string{"node-a"}},
+		},
+	})
+
+	if got.TotalCPURequestMilli >= got.CandidateCPUCapacityMilli {
+		t.Fatalf("aggregate CPU request=%d capacity=%d, want aggregate fit", got.TotalCPURequestMilli, got.CandidateCPUCapacityMilli)
+	}
+	if got.Status != NodeOptimizationPlacementNotFound || got.PlacementFound {
+		t.Fatalf("result = %#v, want eligible-subset placement failure", got)
+	}
+}
+
+func TestSimulateSameShapeNodeCountRejectsInvalidEligibleNodeEvidence(t *testing.T) {
+	base := NodeOptimizationInput{
+		CurrentNodes:            3,
+		CandidateNodes:          2,
+		CandidateNodeNames:      []string{"node-a", "node-b"},
+		NodeCPUCapacityMilli:    1000,
+		NodeMemoryCapacityBytes: 1000,
+		Pods: []NodeOptimizationPodInput{
+			{Name: "pod", CPURequestMilli: 100, MemoryRequestBytes: 100, EligibleNodeNames: []string{"node-a"}},
+		},
+	}
+
+	tests := []struct {
+		name   string
+		mutate func(*NodeOptimizationInput)
+	}{
+		{"duplicate candidate identity", func(input *NodeOptimizationInput) {
+			input.CandidateNodeNames = []string{"node-a", "node-a"}
+		}},
+		{"unknown eligible identity", func(input *NodeOptimizationInput) {
+			input.Pods[0].EligibleNodeNames = []string{"node-c"}
+		}},
+		{"duplicate eligible identity", func(input *NodeOptimizationInput) {
+			input.Pods[0].EligibleNodeNames = []string{"node-a", "node-a"}
+		}},
+		{"eligibility without candidate identities", func(input *NodeOptimizationInput) {
+			input.CandidateNodeNames = nil
+		}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			input := base
+			input.CandidateNodeNames = append([]string(nil), base.CandidateNodeNames...)
+			input.Pods = append([]NodeOptimizationPodInput(nil), base.Pods...)
+			input.Pods[0].EligibleNodeNames = append([]string(nil), base.Pods[0].EligibleNodeNames...)
+			tt.mutate(&input)
+
+			got := SimulateSameShapeNodeCount(input)
+			if got.Status != NodeOptimizationInvalidInput || got.PlacementFound {
+				t.Fatalf("result = %#v, want invalid fail-closed result", got)
+			}
+		})
+	}
+}
+
 func TestBuildNMinusOneNodeOptimizationScenariosAreDeterministicAcrossSnapshotOrder(t *testing.T) {
 	nodeInfos := []models.NodeInfo{
 		{Name: "z-0", NodePool: "z-pool", VMSize: "Standard_D4s_v3", Region: "centralus", OS: "linux", Priority: "Regular", Provider: "azure", Architecture: "amd64", CPUCapacity: 4, MemGBCapacity: 8},
@@ -571,6 +739,26 @@ func TestBuildNMinusOneNodeOptimizationScenariosAcceptsOSAndArchitectureNodeSele
 	}
 }
 
+func TestBuildNMinusOneNodeOptimizationScenariosWithEvidencePreservesCanonicalOSArchitectureSelector(t *testing.T) {
+	nodeInfos := optimizationNodeInfos(2)
+	nodes := []corev1.Node{
+		{ObjectMeta: metav1.ObjectMeta{Name: "node-0"}},
+		{ObjectMeta: metav1.ObjectMeta{Name: "node-1"}},
+	}
+	pod := optimizationTestPod("apps", "api", "node-0", corev1.PodRunning, "1000m", "1Gi")
+	pod.Spec.NodeSelector = map[string]string{
+		corev1.LabelOSStable:   "linux",
+		corev1.LabelArchStable: "amd64",
+	}
+
+	evidence := BuildNodeOptimizationSchedulingEvidence(nodeInfos, nodes)
+	got := BuildNMinusOneNodeOptimizationScenariosWithSchedulingEvidence(nodeInfos, []corev1.Pod{pod}, evidence)
+
+	if len(got.Scenarios) != 1 || got.Scenarios[0].Simulation.Status != NodeOptimizationFit {
+		t.Fatalf("summary = %#v, want canonical OS/architecture selector to remain supported", got)
+	}
+}
+
 func TestBuildNMinusOneNodeOptimizationScenariosSkipsMismatchedOSNodeSelector(t *testing.T) {
 	nodeInfos := []models.NodeInfo{
 		{Name: "node-0", NodePool: "userpool", VMSize: "Standard_D4s_v3", Region: "centralus", OS: "linux", Priority: "Regular", Provider: "azure", Architecture: "amd64", CPUCapacity: 4, MemGBCapacity: 8},
@@ -691,6 +879,7 @@ func TestBuildNodeOptimizationSchedulingEvidenceJoinsAndCopiesNodeSnapshot(t *te
 				},
 			},
 			Spec: corev1.NodeSpec{
+				Unschedulable: true,
 				Taints: []corev1.Taint{
 					{
 						Key:    "dedicated",
@@ -723,6 +912,9 @@ func TestBuildNodeOptimizationSchedulingEvidenceJoinsAndCopiesNodeSnapshot(t *te
 	}
 	if len(evidence.Taints) != 1 || evidence.Taints[0].Key != "dedicated" {
 		t.Fatalf("taints = %#v, want dedicated taint", evidence.Taints)
+	}
+	if !evidence.Unschedulable {
+		t.Fatal("Unschedulable = false, want copied cordon state")
 	}
 
 	nodes[0].Labels["workload"] = "mutated"
@@ -836,17 +1028,14 @@ func TestBuildNMinusOneNodeOptimizationScenariosWithSchedulingEvidenceBlocksUnto
 		nodeInfos, []corev1.Pod{pod}, evidence,
 	)
 
-	if len(got.Scenarios) != 0 {
-		t.Fatalf("scenario count = %d, want 0", len(got.Scenarios))
+	if len(got.Scenarios) != 1 {
+		t.Fatalf("scenario count = %d, want 1", len(got.Scenarios))
 	}
 	if got.SchedulingBlockedPodCount != 1 {
 		t.Fatalf("SchedulingBlockedPodCount = %d, want 1", got.SchedulingBlockedPodCount)
 	}
-	if got.SkippedPoolCount != 1 {
-		t.Fatalf("SkippedPoolCount = %d, want 1", got.SkippedPoolCount)
-	}
-	if len(got.Warnings) != 1 || !strings.Contains(got.Warnings[0], "does not tolerate dedicated=apps:NoSchedule") {
-		t.Fatalf("warnings = %#v, want untolerated NoSchedule warning", got.Warnings)
+	if got.Scenarios[0].Simulation.Status != NodeOptimizationBlockedEligibility {
+		t.Fatalf("status = %q, want %q", got.Scenarios[0].Simulation.Status, NodeOptimizationBlockedEligibility)
 	}
 }
 
@@ -893,18 +1082,18 @@ func TestBuildNMinusOneNodeOptimizationScenariosWithSchedulingEvidenceRejectsFin
 		nodeInfos, []corev1.Pod{pod}, evidence,
 	)
 
-	if len(got.Scenarios) != 0 {
-		t.Fatalf("scenario count = %d, want 0", len(got.Scenarios))
+	if len(got.Scenarios) != 1 {
+		t.Fatalf("scenario count = %d, want 1", len(got.Scenarios))
 	}
 	if got.SchedulingBlockedPodCount != 1 {
 		t.Fatalf("SchedulingBlockedPodCount = %d, want 1", got.SchedulingBlockedPodCount)
 	}
-	if len(got.Warnings) != 1 || !strings.Contains(got.Warnings[0], "not durable steady-state placement evidence") {
-		t.Fatalf("warnings = %#v, want finite NoExecute toleration warning", got.Warnings)
+	if got.Scenarios[0].Simulation.Status != NodeOptimizationBlockedEligibility {
+		t.Fatalf("status = %q, want %q", got.Scenarios[0].Simulation.Status, NodeOptimizationBlockedEligibility)
 	}
 }
 
-func TestBuildNMinusOneNodeOptimizationScenariosWithSchedulingEvidenceSkipsHeterogeneousHardTaints(t *testing.T) {
+func TestBuildNMinusOneNodeOptimizationScenariosWithSchedulingEvidenceUsesHeterogeneousHardTaintsAsEligibility(t *testing.T) {
 	nodeInfos := optimizationNodeInfos(2)
 	nodes := []corev1.Node{
 		{
@@ -922,14 +1111,14 @@ func TestBuildNMinusOneNodeOptimizationScenariosWithSchedulingEvidenceSkipsHeter
 		nodeInfos, []corev1.Pod{pod}, evidence,
 	)
 
-	if len(got.Scenarios) != 0 {
-		t.Fatalf("scenario count = %d, want 0", len(got.Scenarios))
+	if len(got.Scenarios) != 1 {
+		t.Fatalf("scenario count = %d, want 1", len(got.Scenarios))
 	}
-	if got.SkippedPoolCount != 1 {
-		t.Fatalf("SkippedPoolCount = %d, want 1", got.SkippedPoolCount)
+	if got.Scenarios[0].Simulation.Status != NodeOptimizationFit {
+		t.Fatalf("status = %q, want %q", got.Scenarios[0].Simulation.Status, NodeOptimizationFit)
 	}
-	if len(got.Warnings) != 1 || !strings.Contains(got.Warnings[0], "hard taints differ across nodes") {
-		t.Fatalf("warnings = %#v, want heterogeneous hard-taint warning", got.Warnings)
+	if got.Scenarios[0].RemovedNodeName != "node-0" {
+		t.Fatalf("RemovedNodeName = %q, want node-0", got.Scenarios[0].RemovedNodeName)
 	}
 }
 
@@ -1037,18 +1226,18 @@ func TestBuildNMinusOneNodeOptimizationScenariosWithSchedulingEvidenceBlocksRequ
 		nodeInfos, []corev1.Pod{pod}, evidence,
 	)
 
-	if len(got.Scenarios) != 0 {
-		t.Fatalf("scenario count = %d, want 0", len(got.Scenarios))
+	if len(got.Scenarios) != 1 {
+		t.Fatalf("scenario count = %d, want 1", len(got.Scenarios))
 	}
 	if got.SchedulingBlockedPodCount != 1 {
 		t.Fatalf("SchedulingBlockedPodCount = %d, want 1", got.SchedulingBlockedPodCount)
 	}
-	if len(got.Warnings) != 1 || !strings.Contains(got.Warnings[0], "matches no node in the pool") {
-		t.Fatalf("warnings = %#v, want no-match affinity warning", got.Warnings)
+	if got.Scenarios[0].Simulation.Status != NodeOptimizationBlockedEligibility {
+		t.Fatalf("status = %q, want %q", got.Scenarios[0].Simulation.Status, NodeOptimizationBlockedEligibility)
 	}
 }
 
-func TestBuildNMinusOneNodeOptimizationScenariosWithSchedulingEvidenceSkipsPartialRequiredNodeAffinity(t *testing.T) {
+func TestBuildNMinusOneNodeOptimizationScenariosWithSchedulingEvidencePlacesPartialRequiredNodeAffinity(t *testing.T) {
 	nodeInfos := optimizationNodeInfos(3)
 	nodes := []corev1.Node{
 		{ObjectMeta: metav1.ObjectMeta{Name: "node-0", Labels: map[string]string{"zone": "a"}}},
@@ -1068,14 +1257,21 @@ func TestBuildNMinusOneNodeOptimizationScenariosWithSchedulingEvidenceSkipsParti
 		nodeInfos, []corev1.Pod{pod}, evidence,
 	)
 
-	if len(got.Scenarios) != 0 {
-		t.Fatalf("scenario count = %d, want 0", len(got.Scenarios))
+	if len(got.Scenarios) != 1 {
+		t.Fatalf("scenario count = %d, want 1", len(got.Scenarios))
 	}
-	if got.UnsupportedConstraintPodCount != 1 {
-		t.Fatalf("UnsupportedConstraintPodCount = %d, want 1", got.UnsupportedConstraintPodCount)
+	if got.UnsupportedConstraintPodCount != 0 {
+		t.Fatalf("UnsupportedConstraintPodCount = %d, want 0", got.UnsupportedConstraintPodCount)
 	}
-	if len(got.Warnings) != 1 || !strings.Contains(got.Warnings[0], "matches 2 of 3 nodes") {
-		t.Fatalf("warnings = %#v, want partial-affinity warning", got.Warnings)
+	if got.Scenarios[0].Simulation.Status != NodeOptimizationFit {
+		t.Fatalf("status = %q, want %q", got.Scenarios[0].Simulation.Status, NodeOptimizationFit)
+	}
+	if got.Scenarios[0].RemovedNodeName != "node-0" {
+		t.Fatalf("RemovedNodeName = %q, want node-0", got.Scenarios[0].RemovedNodeName)
+	}
+	if len(got.Scenarios[0].Simulation.Placements) != 1 ||
+		got.Scenarios[0].Simulation.Placements[0].NodeName != "node-1" {
+		t.Fatalf("placements = %#v, want affinity-compatible node-1", got.Scenarios[0].Simulation.Placements)
 	}
 }
 
@@ -1313,14 +1509,14 @@ func TestBuildNMinusOneNodeOptimizationScenariosWithSchedulingEvidenceEmptyRequi
 		evidence,
 	)
 
-	if len(got.Scenarios) != 0 {
-		t.Fatalf("scenario count = %d, want 0", len(got.Scenarios))
+	if len(got.Scenarios) != 1 {
+		t.Fatalf("scenario count = %d, want 1", len(got.Scenarios))
 	}
 	if got.SchedulingBlockedPodCount != 1 {
 		t.Fatalf("SchedulingBlockedPodCount = %d, want 1", got.SchedulingBlockedPodCount)
 	}
-	if !strings.Contains(strings.Join(got.Warnings, " "), "matches no node in the pool") {
-		t.Fatalf("warnings = %#v, want no-match required-affinity warning", got.Warnings)
+	if got.Scenarios[0].Simulation.Status != NodeOptimizationBlockedEligibility {
+		t.Fatalf("status = %q, want %q", got.Scenarios[0].Simulation.Status, NodeOptimizationBlockedEligibility)
 	}
 }
 
@@ -1547,5 +1743,198 @@ func TestSimulateSameShapeNodeCountOversizedPodSelectionAndTotalsDeterministicAc
 			wantCPU,
 			wantMem,
 		)
+	}
+}
+
+func TestBuildNMinusOneNodeOptimizationScenariosWithSchedulingEvidencePlacesCustomNodeSelectorSubset(t *testing.T) {
+	nodeInfos := optimizationNodeInfos(3)
+	nodes := []corev1.Node{
+		{ObjectMeta: metav1.ObjectMeta{Name: "node-0", Labels: map[string]string{"disk": "fast"}}},
+		{ObjectMeta: metav1.ObjectMeta{Name: "node-1", Labels: map[string]string{"disk": "slow"}}},
+		{ObjectMeta: metav1.ObjectMeta{Name: "node-2", Labels: map[string]string{"disk": "slow"}}},
+	}
+	pod := optimizationTestPod("apps", "api", "node-0", corev1.PodRunning, "1000m", "1Gi")
+	pod.Spec.NodeSelector = map[string]string{"disk": "fast"}
+
+	evidence := BuildNodeOptimizationSchedulingEvidence(nodeInfos, nodes)
+	got := BuildNMinusOneNodeOptimizationScenariosWithSchedulingEvidence(nodeInfos, []corev1.Pod{pod}, evidence)
+
+	if len(got.Scenarios) != 1 || got.Scenarios[0].Simulation.Status != NodeOptimizationFit {
+		t.Fatalf("summary = %#v, want a proven-fit scenario", got)
+	}
+	if got.UnsupportedConstraintPodCount != 0 {
+		t.Fatalf("UnsupportedConstraintPodCount = %d, want 0", got.UnsupportedConstraintPodCount)
+	}
+	if got.Scenarios[0].RemovedNodeName != "node-1" {
+		t.Fatalf("RemovedNodeName = %q, want node-1 after the node-0 removal attempt is blocked", got.Scenarios[0].RemovedNodeName)
+	}
+	if len(got.Scenarios[0].Simulation.Placements) != 1 ||
+		got.Scenarios[0].Simulation.Placements[0].NodeName != "node-0" {
+		t.Fatalf("placements = %#v, want custom-selector-compatible node-0", got.Scenarios[0].Simulation.Placements)
+	}
+}
+
+func TestBuildNMinusOneNodeOptimizationScenariosWithSchedulingEvidenceCombinesTaintsAndRequiredAffinity(t *testing.T) {
+	nodeInfos := optimizationNodeInfos(3)
+	nodes := []corev1.Node{
+		{
+			ObjectMeta: metav1.ObjectMeta{Name: "node-0", Labels: map[string]string{"zone": "a"}},
+			Spec: corev1.NodeSpec{Taints: []corev1.Taint{
+				{Key: "dedicated", Value: "other", Effect: corev1.TaintEffectNoSchedule},
+			}},
+		},
+		{ObjectMeta: metav1.ObjectMeta{Name: "node-1", Labels: map[string]string{"zone": "a"}}},
+		{ObjectMeta: metav1.ObjectMeta{Name: "node-2", Labels: map[string]string{"zone": "b"}}},
+	}
+	pod := optimizationTestPod("apps", "api", "node-1", corev1.PodRunning, "1000m", "1Gi")
+	pod.Spec.Affinity = optimizationRequiredNodeAffinity(corev1.NodeSelectorRequirement{
+		Key: "zone", Operator: corev1.NodeSelectorOpIn, Values: []string{"a"},
+	})
+
+	evidence := BuildNodeOptimizationSchedulingEvidence(nodeInfos, nodes)
+	got := BuildNMinusOneNodeOptimizationScenariosWithSchedulingEvidence(nodeInfos, []corev1.Pod{pod}, evidence)
+
+	if len(got.Scenarios) != 1 || got.Scenarios[0].Simulation.Status != NodeOptimizationFit {
+		t.Fatalf("summary = %#v, want a proven-fit scenario", got)
+	}
+	placements := got.Scenarios[0].Simulation.Placements
+	if len(placements) != 1 || placements[0].NodeName != "node-1" {
+		t.Fatalf("placements = %#v, want the only taint-and-affinity-compatible node", placements)
+	}
+}
+
+func TestBuildNMinusOneNodeOptimizationScenariosTreatsCordonedNodeAsIneligible(t *testing.T) {
+	nodeInfos := optimizationNodeInfos(2)
+	nodes := []corev1.Node{
+		{ObjectMeta: metav1.ObjectMeta{Name: "node-0"}, Spec: corev1.NodeSpec{Unschedulable: true}},
+		{ObjectMeta: metav1.ObjectMeta{Name: "node-1"}},
+	}
+	pod := optimizationTestPod("apps", "api", "node-1", corev1.PodRunning, "1000m", "1Gi")
+
+	evidence := BuildNodeOptimizationSchedulingEvidence(nodeInfos, nodes)
+	got := BuildNMinusOneNodeOptimizationScenariosWithSchedulingEvidence(nodeInfos, []corev1.Pod{pod}, evidence)
+
+	if len(got.Scenarios) != 1 || got.Scenarios[0].Simulation.Status != NodeOptimizationFit {
+		t.Fatalf("summary = %#v, want a proven-fit scenario", got)
+	}
+	if got.Scenarios[0].RemovedNodeName != "node-0" {
+		t.Fatalf("RemovedNodeName = %q, want cordoned node-0", got.Scenarios[0].RemovedNodeName)
+	}
+	placements := got.Scenarios[0].Simulation.Placements
+	if len(placements) != 1 || placements[0].NodeName != "node-1" {
+		t.Fatalf("placements = %#v, want schedulable node-1", placements)
+	}
+}
+
+func TestBuildNMinusOneNodeOptimizationScenariosWithEligibleSetsIsDeterministicAcrossSnapshotOrder(t *testing.T) {
+	nodeInfos := optimizationNodeInfos(3)
+	nodes := []corev1.Node{
+		{ObjectMeta: metav1.ObjectMeta{Name: "node-0", Labels: map[string]string{"zone": "a", "disk": "fast"}}},
+		{ObjectMeta: metav1.ObjectMeta{Name: "node-1", Labels: map[string]string{"zone": "a", "disk": "slow"}}},
+		{ObjectMeta: metav1.ObjectMeta{Name: "node-2", Labels: map[string]string{"zone": "b", "disk": "fast"}}},
+	}
+	affinityPod := optimizationTestPod("apps", "affinity", "node-0", corev1.PodRunning, "1000m", "1Gi")
+	affinityPod.Spec.Affinity = optimizationRequiredNodeAffinity(corev1.NodeSelectorRequirement{
+		Key: "zone", Operator: corev1.NodeSelectorOpIn, Values: []string{"a"},
+	})
+	selectorPod := optimizationTestPod("apps", "selector", "node-2", corev1.PodRunning, "1000m", "1Gi")
+	selectorPod.Spec.NodeSelector = map[string]string{"disk": "fast"}
+	pods := []corev1.Pod{affinityPod, selectorPod}
+
+	reversedNodeInfos := append([]models.NodeInfo(nil), nodeInfos...)
+	reversedNodes := append([]corev1.Node(nil), nodes...)
+	reversedPods := append([]corev1.Pod(nil), pods...)
+	for i, j := 0, len(reversedNodeInfos)-1; i < j; i, j = i+1, j-1 {
+		reversedNodeInfos[i], reversedNodeInfos[j] = reversedNodeInfos[j], reversedNodeInfos[i]
+	}
+	for i, j := 0, len(reversedNodes)-1; i < j; i, j = i+1, j-1 {
+		reversedNodes[i], reversedNodes[j] = reversedNodes[j], reversedNodes[i]
+	}
+	for i, j := 0, len(reversedPods)-1; i < j; i, j = i+1, j-1 {
+		reversedPods[i], reversedPods[j] = reversedPods[j], reversedPods[i]
+	}
+
+	forwardEvidence := BuildNodeOptimizationSchedulingEvidence(nodeInfos, nodes)
+	reversedEvidence := BuildNodeOptimizationSchedulingEvidence(reversedNodeInfos, reversedNodes)
+	forward := BuildNMinusOneNodeOptimizationScenariosWithSchedulingEvidence(nodeInfos, pods, forwardEvidence)
+	reversed := BuildNMinusOneNodeOptimizationScenariosWithSchedulingEvidence(reversedNodeInfos, reversedPods, reversedEvidence)
+
+	if !reflect.DeepEqual(forward, reversed) {
+		t.Fatalf("snapshot order changed eligible-node placement:\nforward=%#v\nreversed=%#v", forward, reversed)
+	}
+}
+
+func TestBuildNMinusOneNodeOptimizationScenariosFailsClosedOnDeferredSchedulingConstraints(t *testing.T) {
+	nodeInfos := optimizationNodeInfos(2)
+	nodes := []corev1.Node{
+		{ObjectMeta: metav1.ObjectMeta{Name: "node-0"}},
+		{ObjectMeta: metav1.ObjectMeta{Name: "node-1"}},
+	}
+	evidence := BuildNodeOptimizationSchedulingEvidence(nodeInfos, nodes)
+
+	tests := []struct {
+		name       string
+		configure  func(*corev1.Pod)
+		wantReason string
+	}{
+		{
+			name: "required pod anti-affinity",
+			configure: func(pod *corev1.Pod) {
+				pod.Spec.Affinity = &corev1.Affinity{PodAntiAffinity: &corev1.PodAntiAffinity{
+					RequiredDuringSchedulingIgnoredDuringExecution: []corev1.PodAffinityTerm{{TopologyKey: "kubernetes.io/hostname"}},
+				}}
+			},
+			wantReason: "required pod anti-affinity",
+		},
+		{
+			name: "hard topology spread",
+			configure: func(pod *corev1.Pod) {
+				pod.Spec.TopologySpreadConstraints = []corev1.TopologySpreadConstraint{{
+					MaxSkew: 1, TopologyKey: "topology.kubernetes.io/zone", WhenUnsatisfiable: corev1.DoNotSchedule,
+				}}
+			},
+			wantReason: "hard topology spread",
+		},
+		{
+			name: "persistent volume topology",
+			configure: func(pod *corev1.Pod) {
+				pod.Spec.Volumes = []corev1.Volume{{
+					Name: "data",
+					VolumeSource: corev1.VolumeSource{PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
+						ClaimName: "data",
+					}},
+				}}
+			},
+			wantReason: "persistent volume topology",
+		},
+		{
+			name: "extended resource request",
+			configure: func(pod *corev1.Pod) {
+				pod.Spec.Containers[0].Resources.Requests[corev1.ResourceName("example.com/device")] = resource.MustParse("1")
+			},
+			wantReason: "requested resource example.com/device",
+		},
+		{
+			name: "host port",
+			configure: func(pod *corev1.Pod) {
+				pod.Spec.Containers[0].Ports = []corev1.ContainerPort{{ContainerPort: 8080, HostPort: 8080}}
+			},
+			wantReason: "host-port scheduling conflicts",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			pod := optimizationTestPod("apps", "api", "node-0", corev1.PodRunning, "100m", "100Mi")
+			tt.configure(&pod)
+			got := BuildNMinusOneNodeOptimizationScenariosWithSchedulingEvidence(nodeInfos, []corev1.Pod{pod}, evidence)
+
+			if len(got.Scenarios) != 0 || got.UnsupportedConstraintPodCount != 1 || got.SkippedPoolCount != 1 {
+				t.Fatalf("summary = %#v, want one fail-closed unsupported constraint", got)
+			}
+			if !strings.Contains(strings.Join(got.Warnings, " "), tt.wantReason) {
+				t.Fatalf("warnings = %#v, want %q", got.Warnings, tt.wantReason)
+			}
+		})
 	}
 }
