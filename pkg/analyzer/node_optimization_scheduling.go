@@ -6,7 +6,28 @@ import (
 	"strings"
 
 	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/labels"
 )
+
+type nodeOptimizationTopologyPod struct {
+	Namespace string
+	Name      string
+	NodeName  string
+	Labels    map[string]string
+}
+
+type nodeOptimizationTopologySpreadConstraint struct {
+	TopologyKey string
+	MaxSkew     int32
+	MinDomains  int32
+	SortKey     string
+
+	DomainNodes              []NodeOptimizationSchedulingNode
+	TopologyRequirement      nodeOptimizationTopologyRequirement
+	ExistingMatchingPodNodes []string
+	MatchingMovablePodKeys   map[string]struct{}
+}
 
 // nodeOptimizationTopologyRequirement identifies the topology dimensions a
 // future scheduling check needs. Current CPU/memory placement does not request
@@ -79,6 +100,191 @@ func topologyEvidenceRequirementReason(
 	}
 
 	return ""
+}
+
+func hasHardTopologySpreadConstraints(pod corev1.Pod) bool {
+	for _, constraint := range pod.Spec.TopologySpreadConstraints {
+		if constraint.WhenUnsatisfiable == corev1.DoNotSchedule {
+			return true
+		}
+	}
+	return false
+}
+
+func hardTopologySpreadUnsupportedReason(pod corev1.Pod) string {
+	reasons := make([]string, 0)
+	for i, constraint := range pod.Spec.TopologySpreadConstraints {
+		switch constraint.WhenUnsatisfiable {
+		case corev1.ScheduleAnyway:
+			continue
+		case corev1.DoNotSchedule:
+		default:
+			reasons = append(reasons, fmt.Sprintf(
+				"topology spread constraint %d has unsupported whenUnsatisfiable value %q",
+				i,
+				constraint.WhenUnsatisfiable,
+			))
+			continue
+		}
+
+		if constraint.MaxSkew <= 0 {
+			reasons = append(reasons, fmt.Sprintf(
+				"hard topology spread constraint %d has nonpositive maxSkew %d",
+				i,
+				constraint.MaxSkew,
+			))
+		}
+		switch constraint.TopologyKey {
+		case corev1.LabelHostname, corev1.LabelTopologyZone, corev1.LabelTopologyRegion:
+		default:
+			reasons = append(reasons, fmt.Sprintf(
+				"hard topology spread constraint %d uses unsupported topologyKey %q",
+				i,
+				constraint.TopologyKey,
+			))
+		}
+		if constraint.MinDomains != nil && *constraint.MinDomains <= 0 {
+			reasons = append(reasons, fmt.Sprintf(
+				"hard topology spread constraint %d has nonpositive minDomains %d",
+				i,
+				*constraint.MinDomains,
+			))
+		}
+		if len(constraint.MatchLabelKeys) > 0 {
+			reasons = append(reasons, fmt.Sprintf(
+				"hard topology spread constraint %d uses matchLabelKeys, which is not modeled yet",
+				i,
+			))
+		}
+		if constraint.NodeAffinityPolicy != nil && *constraint.NodeAffinityPolicy != corev1.NodeInclusionPolicyHonor {
+			reasons = append(reasons, fmt.Sprintf(
+				"hard topology spread constraint %d uses nodeAffinityPolicy %q; only the default Honor policy is modeled",
+				i,
+				*constraint.NodeAffinityPolicy,
+			))
+		}
+		if constraint.NodeTaintsPolicy != nil && *constraint.NodeTaintsPolicy != corev1.NodeInclusionPolicyIgnore {
+			reasons = append(reasons, fmt.Sprintf(
+				"hard topology spread constraint %d uses nodeTaintsPolicy %q; only the default Ignore policy is modeled",
+				i,
+				*constraint.NodeTaintsPolicy,
+			))
+		}
+		if _, err := metav1.LabelSelectorAsSelector(constraint.LabelSelector); err != nil {
+			reasons = append(reasons, fmt.Sprintf(
+				"hard topology spread constraint %d has an invalid labelSelector: %v",
+				i,
+				err,
+			))
+		}
+	}
+
+	if len(reasons) == 0 {
+		return ""
+	}
+	sort.Strings(reasons)
+	return reasons[0]
+}
+
+func buildNodeOptimizationTopologySpreadConstraints(
+	pod corev1.Pod,
+	nodes []NodeOptimizationSchedulingNode,
+	eligiblePods []nodeOptimizationTopologyPod,
+	movablePods []corev1.Pod,
+) ([]nodeOptimizationTopologySpreadConstraint, string) {
+	constraints := make([]nodeOptimizationTopologySpreadConstraint, 0)
+	for index, constraint := range pod.Spec.TopologySpreadConstraints {
+		if constraint.WhenUnsatisfiable != corev1.DoNotSchedule {
+			continue
+		}
+
+		selector, err := metav1.LabelSelectorAsSelector(constraint.LabelSelector)
+		if err != nil {
+			return nil, fmt.Sprintf("hard topology spread constraint %d has an invalid labelSelector: %v", index, err)
+		}
+		minDomains := int32(1)
+		if constraint.MinDomains != nil {
+			minDomains = *constraint.MinDomains
+		}
+
+		domainNodes := make([]NodeOptimizationSchedulingNode, 0, len(nodes))
+		for _, node := range nodes {
+			if !nodeMatchesNodeSelector(node, pod.Spec.NodeSelector) {
+				continue
+			}
+			if hasRequiredNodeAffinity(pod) {
+				required := pod.Spec.Affinity.NodeAffinity.RequiredDuringSchedulingIgnoredDuringExecution
+				if !nodeMatchesRequiredNodeAffinity(node.Labels, required.NodeSelectorTerms) {
+					continue
+				}
+			}
+			domainNodes = append(domainNodes, node)
+		}
+
+		movableKeys := make(map[string]struct{}, len(movablePods))
+		matchingMovableKeys := make(map[string]struct{})
+		for _, movablePod := range movablePods {
+			key := namespacedKey(movablePod.Namespace, movablePod.Name)
+			movableKeys[key] = struct{}{}
+			if movablePod.Namespace == pod.Namespace && selector.Matches(labels.Set(movablePod.Labels)) {
+				matchingMovableKeys[key] = struct{}{}
+			}
+		}
+
+		existingMatchingPodNodes := make([]string, 0)
+		for _, existingPod := range eligiblePods {
+			if existingPod.Namespace != pod.Namespace || !selector.Matches(labels.Set(existingPod.Labels)) {
+				continue
+			}
+			if _, movable := movableKeys[namespacedKey(existingPod.Namespace, existingPod.Name)]; movable {
+				continue
+			}
+			existingMatchingPodNodes = append(existingMatchingPodNodes, existingPod.NodeName)
+		}
+		sort.Strings(existingMatchingPodNodes)
+
+		constraints = append(constraints, nodeOptimizationTopologySpreadConstraint{
+			TopologyKey:              constraint.TopologyKey,
+			MaxSkew:                  constraint.MaxSkew,
+			MinDomains:               minDomains,
+			SortKey:                  fmt.Sprintf("%s\x00%010d\x00%010d\x00%s", constraint.TopologyKey, constraint.MaxSkew, minDomains, selector.String()),
+			DomainNodes:              append([]NodeOptimizationSchedulingNode(nil), domainNodes...),
+			TopologyRequirement:      topologyRequirementForKey(constraint.TopologyKey),
+			ExistingMatchingPodNodes: existingMatchingPodNodes,
+			MatchingMovablePodKeys:   matchingMovableKeys,
+		})
+	}
+
+	sort.Slice(constraints, func(i, j int) bool {
+		return constraints[i].SortKey < constraints[j].SortKey
+	})
+	return constraints, ""
+}
+
+func topologyRequirementForKey(topologyKey string) nodeOptimizationTopologyRequirement {
+	switch topologyKey {
+	case corev1.LabelHostname:
+		return nodeOptimizationTopologyRequirement{Hostname: true}
+	case corev1.LabelTopologyZone:
+		return nodeOptimizationTopologyRequirement{Zone: true}
+	case corev1.LabelTopologyRegion:
+		return nodeOptimizationTopologyRequirement{Region: true}
+	default:
+		return nodeOptimizationTopologyRequirement{}
+	}
+}
+
+func topologyValueForKey(topology NodeOptimizationTopology, topologyKey string) string {
+	switch topologyKey {
+	case corev1.LabelHostname:
+		return topology.Hostname
+	case corev1.LabelTopologyZone:
+		return topology.Zone
+	case corev1.LabelTopologyRegion:
+		return topology.Region
+	default:
+		return ""
+	}
 }
 
 func nodeSelectorCompatibilityReason(selector map[string]string, pool CostPoolKey) string {
@@ -297,6 +503,9 @@ func unsupportedPodSchedulingConstraintReason(pod corev1.Pod) string {
 	if resourceName := firstUnsupportedPodRequestResource(pod); resourceName != "" {
 		return fmt.Sprintf("requested resource %s is not modeled yet", resourceName)
 	}
+	if reason := hardTopologySpreadUnsupportedReason(pod); reason != "" {
+		return reason
+	}
 	for _, container := range append(append([]corev1.Container(nil), pod.Spec.InitContainers...), pod.Spec.Containers...) {
 		for _, port := range container.Ports {
 			if port.HostPort != 0 {
@@ -312,11 +521,6 @@ func unsupportedPodSchedulingConstraintReason(pod corev1.Pod) string {
 		if pod.Spec.Affinity.PodAntiAffinity != nil &&
 			len(pod.Spec.Affinity.PodAntiAffinity.RequiredDuringSchedulingIgnoredDuringExecution) > 0 {
 			return "required pod anti-affinity is not modeled yet"
-		}
-	}
-	for _, constraint := range pod.Spec.TopologySpreadConstraints {
-		if constraint.WhenUnsatisfiable == corev1.DoNotSchedule {
-			return "hard topology spread constraints are not modeled yet"
 		}
 	}
 	for _, volume := range pod.Spec.Volumes {

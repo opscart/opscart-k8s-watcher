@@ -27,7 +27,7 @@ func SimulateSameShapeNodeCount(input NodeOptimizationInput) NodeOptimizationRes
 		TotalPodCount:  len(input.Pods),
 		Caveats: []string{
 			"models CPU and memory requests only",
-			"does not model scheduling constraints beyond supplied eligible-node sets",
+			"does not model scheduling constraints beyond supplied eligible-node sets and compiled hard topology spread constraints",
 		},
 	}
 
@@ -232,7 +232,10 @@ func SimulateSameShapeNodeCount(input NodeOptimizationInput) NodeOptimizationRes
 		if pods[i].Name != pods[j].Name {
 			return pods[i].Name < pods[j].Name
 		}
-		return strings.Join(pods[i].EligibleNodeNames, "\x00") < strings.Join(pods[j].EligibleNodeNames, "\x00")
+		if eligibleI, eligibleJ := strings.Join(pods[i].EligibleNodeNames, "\x00"), strings.Join(pods[j].EligibleNodeNames, "\x00"); eligibleI != eligibleJ {
+			return eligibleI < eligibleJ
+		}
+		return topologySpreadConstraintSortValue(pods[i]) < topologySpreadConstraintSortValue(pods[j])
 	})
 
 	type nodeBin struct {
@@ -249,6 +252,7 @@ func SimulateSameShapeNodeCount(input NodeOptimizationInput) NodeOptimizationRes
 		bestIndex := -1
 		bestScore := 0.0
 		var bestCPUUsed, bestMemoryUsed int64
+		topologyBlockedReason := ""
 		eligible := make(map[string]struct{}, len(pod.EligibleNodeNames))
 		for _, name := range pod.EligibleNodeNames {
 			eligible[name] = struct{}{}
@@ -284,6 +288,24 @@ func SimulateSameShapeNodeCount(input NodeOptimizationInput) NodeOptimizationRes
 				continue
 			}
 
+			topologyAllowed, topologyReason, topologyInvalidReason := topologySpreadAllowsPlacement(
+				pod,
+				bins[i].name,
+				result.Placements,
+				input.removedNodeName,
+			)
+			if topologyInvalidReason != "" {
+				result = invalidNodeOptimizationResult(result, "topology_spread_evidence", topologyInvalidReason)
+				result.Blockers[len(result.Blockers)-1].Pod = podDisplayName(pod)
+				return result
+			}
+			if !topologyAllowed {
+				if topologyBlockedReason == "" {
+					topologyBlockedReason = topologyReason
+				}
+				continue
+			}
+
 			remainingCPUValue, ok := checkedSubInt64(input.NodeCPUCapacityMilli, nextCPU)
 			if !ok {
 				return invalidNodeOptimizationResult(result, "remaining_cpu_capacity_overflow", "remaining CPU capacity cannot be represented as int64")
@@ -306,10 +328,16 @@ func SimulateSameShapeNodeCount(input NodeOptimizationInput) NodeOptimizationRes
 
 		if bestIndex == -1 {
 			result.Status = NodeOptimizationPlacementNotFound
+			reason := "heuristic_placement_failed"
+			message := "deterministic CPU/memory best-fit placement could not place this pod; this does not prove that no valid Kubernetes placement exists"
+			if topologyBlockedReason != "" {
+				reason = "topology_spread_constraint"
+				message = topologyBlockedReason + "; deterministic placement could not prove a valid assignment"
+			}
 			result.Blockers = append(result.Blockers, NodeOptimizationBlocker{
-				Reason:  "heuristic_placement_failed",
+				Reason:  reason,
 				Pod:     podDisplayName(pod),
-				Message: "deterministic CPU/memory best-fit placement could not place this pod; this does not prove that no valid Kubernetes placement exists",
+				Message: message,
 			})
 			return result
 		}
@@ -342,7 +370,135 @@ func nodeOptimizationPodValidationLess(a, b NodeOptimizationPodInput) bool {
 	if a.MemoryRequestBytes != b.MemoryRequestBytes {
 		return a.MemoryRequestBytes < b.MemoryRequestBytes
 	}
-	return strings.Join(a.EligibleNodeNames, "\x00") < strings.Join(b.EligibleNodeNames, "\x00")
+	if eligibleA, eligibleB := strings.Join(a.EligibleNodeNames, "\x00"), strings.Join(b.EligibleNodeNames, "\x00"); eligibleA != eligibleB {
+		return eligibleA < eligibleB
+	}
+	return topologySpreadConstraintSortValue(a) < topologySpreadConstraintSortValue(b)
+}
+
+func topologySpreadConstraintSortValue(pod NodeOptimizationPodInput) string {
+	keys := make([]string, 0, len(pod.topologySpreadConstraints))
+	for _, constraint := range pod.topologySpreadConstraints {
+		keys = append(keys, constraint.SortKey)
+	}
+	sort.Strings(keys)
+	return strings.Join(keys, "\x00")
+}
+
+func topologySpreadAllowsPlacement(
+	pod NodeOptimizationPodInput,
+	candidateNodeName string,
+	placements []NodeOptimizationPlacement,
+	removedNodeName string,
+) (bool, string, string) {
+	for _, constraint := range pod.topologySpreadConstraints {
+		if constraint.MaxSkew <= 0 || constraint.MinDomains <= 0 {
+			return false, "", fmt.Sprintf("pod %s has invalid normalized topology spread values", podDisplayName(pod))
+		}
+
+		retainedDomainNodes := make([]NodeOptimizationSchedulingNode, 0, len(constraint.DomainNodes))
+		for _, node := range constraint.DomainNodes {
+			if node.Name != removedNodeName {
+				retainedDomainNodes = append(retainedDomainNodes, node)
+			}
+		}
+		if reason := topologyEvidenceRequirementReason(retainedDomainNodes, constraint.TopologyRequirement); reason != "" {
+			return false, "", fmt.Sprintf(
+				"hard topology spread for pod %s cannot use %s: %s",
+				podDisplayName(pod),
+				constraint.TopologyKey,
+				reason,
+			)
+		}
+
+		nodeDomains := make(map[string]string, len(retainedDomainNodes))
+		domainCounts := make(map[string]int64)
+		for _, node := range retainedDomainNodes {
+			domain := topologyValueForKey(node.Topology, constraint.TopologyKey)
+			nodeDomains[node.Name] = domain
+			domainCounts[domain] = 0
+		}
+
+		candidateDomain, ok := nodeDomains[candidateNodeName]
+		if !ok || candidateNodeName == removedNodeName {
+			return false, fmt.Sprintf(
+				"candidate node %s has no eligible %s topology domain for pod %s",
+				candidateNodeName,
+				constraint.TopologyKey,
+				podDisplayName(pod),
+			), ""
+		}
+
+		for _, nodeName := range constraint.ExistingMatchingPodNodes {
+			if nodeName == removedNodeName {
+				continue
+			}
+			domain, domainKnown := nodeDomains[nodeName]
+			if !domainKnown {
+				continue
+			}
+			next, countOK := checkedAddInt64(domainCounts[domain], 1)
+			if !countOK {
+				return false, "", fmt.Sprintf("topology domain count overflows int64 for %s=%s", constraint.TopologyKey, domain)
+			}
+			domainCounts[domain] = next
+		}
+
+		for _, placement := range placements {
+			if _, matches := constraint.MatchingMovablePodKeys[namespacedKey(placement.Namespace, placement.PodName)]; !matches {
+				continue
+			}
+			domain, domainKnown := nodeDomains[placement.NodeName]
+			if !domainKnown {
+				continue
+			}
+			next, countOK := checkedAddInt64(domainCounts[domain], 1)
+			if !countOK {
+				return false, "", fmt.Sprintf("topology domain count overflows int64 for %s=%s", constraint.TopologyKey, domain)
+			}
+			domainCounts[domain] = next
+		}
+
+		domains := make([]string, 0, len(domainCounts))
+		for domain := range domainCounts {
+			domains = append(domains, domain)
+		}
+		sort.Strings(domains)
+		globalMinimum := domainCounts[domains[0]]
+		for _, domain := range domains[1:] {
+			if domainCounts[domain] < globalMinimum {
+				globalMinimum = domainCounts[domain]
+			}
+		}
+		if int64(len(domains)) < int64(constraint.MinDomains) {
+			globalMinimum = 0
+		}
+
+		candidateCount := domainCounts[candidateDomain]
+		if _, selfMatches := constraint.MatchingMovablePodKeys[namespacedKey(pod.Namespace, pod.Name)]; selfMatches {
+			var countOK bool
+			candidateCount, countOK = checkedAddInt64(candidateCount, 1)
+			if !countOK {
+				return false, "", fmt.Sprintf("topology candidate-domain count overflows int64 for %s=%s", constraint.TopologyKey, candidateDomain)
+			}
+		}
+		skew, skewOK := checkedSubInt64(candidateCount, globalMinimum)
+		if !skewOK {
+			return false, "", fmt.Sprintf("topology skew cannot be represented for %s=%s", constraint.TopologyKey, candidateDomain)
+		}
+		if skew > int64(constraint.MaxSkew) {
+			return false, fmt.Sprintf(
+				"hard topology spread %s=%q would have skew %d greater than maxSkew %d for pod %s",
+				constraint.TopologyKey,
+				candidateDomain,
+				skew,
+				constraint.MaxSkew,
+				podDisplayName(pod),
+			), ""
+		}
+	}
+
+	return true, "", ""
 }
 
 func normalizedCandidateNodeNames(input NodeOptimizationInput) ([]string, bool, string) {
@@ -530,6 +686,7 @@ func simulateNMinusOneNodeRemoval(
 			NodeCPUCapacityMilli:    nodeCPUCapacityMilli,
 			NodeMemoryCapacityBytes: nodeMemoryCapacityBytes,
 			CandidateNodeNames:      candidateNodeNames,
+			removedNodeName:         removedNodeName,
 			Pods:                    attemptPods,
 		})
 		if removedIndex == 0 {

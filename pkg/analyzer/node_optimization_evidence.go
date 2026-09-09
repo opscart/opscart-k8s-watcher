@@ -362,6 +362,17 @@ func schedulingNodesForPool(
 	return nodes
 }
 
+func allSchedulingNodes(evidence NodeOptimizationSchedulingEvidence) []NodeOptimizationSchedulingNode {
+	nodes := make([]NodeOptimizationSchedulingNode, 0, len(evidence.Nodes))
+	for _, node := range evidence.Nodes {
+		nodes = append(nodes, node)
+	}
+	sort.Slice(nodes, func(i, j int) bool {
+		return nodes[i].Name < nodes[j].Name
+	})
+	return nodes
+}
+
 func daemonSetControllerUID(pod corev1.Pod) (string, bool) {
 	for _, owner := range pod.OwnerReferences {
 		if owner.Kind != "DaemonSet" {

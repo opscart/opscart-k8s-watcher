@@ -1888,15 +1888,6 @@ func TestBuildNMinusOneNodeOptimizationScenariosFailsClosedOnDeferredSchedulingC
 			wantReason: "required pod anti-affinity",
 		},
 		{
-			name: "hard topology spread",
-			configure: func(pod *corev1.Pod) {
-				pod.Spec.TopologySpreadConstraints = []corev1.TopologySpreadConstraint{{
-					MaxSkew: 1, TopologyKey: "topology.kubernetes.io/zone", WhenUnsatisfiable: corev1.DoNotSchedule,
-				}}
-			},
-			wantReason: "hard topology spread",
-		},
-		{
 			name: "persistent volume topology",
 			configure: func(pod *corev1.Pod) {
 				pod.Spec.Volumes = []corev1.Volume{{
@@ -2505,5 +2496,425 @@ func TestBuildNodeOptimizationSchedulingEvidenceDuplicateHostnameIsDeterministic
 	}
 	if reason := topologyEvidenceRequirementReason(nodeList, nodeOptimizationTopologyRequirement{Zone: true}); reason != "" {
 		t.Fatalf("zone-only requirement was blocked by hostname ambiguity: %q", reason)
+	}
+}
+
+func topologySpreadTestNode(name, pool, hostname, zone, region string) (models.NodeInfo, corev1.Node) {
+	labels := make(map[string]string)
+	if hostname != "" {
+		labels[corev1.LabelHostname] = hostname
+	}
+	if zone != "" {
+		labels[corev1.LabelTopologyZone] = zone
+	}
+	if region != "" {
+		labels[corev1.LabelTopologyRegion] = region
+	}
+	return models.NodeInfo{
+		Name: name, NodePool: pool, VMSize: "Standard_D4s_v3", Region: region,
+		OS: "linux", Priority: "Regular", Provider: "azure", Architecture: "amd64",
+		CPUCapacity: 4, MemGBCapacity: 8,
+	}, corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: name, Labels: labels}}
+}
+
+func topologySpreadTestPod(namespace, name, nodeName, topologyKey string, maxSkew int32) corev1.Pod {
+	pod := optimizationTestPod(namespace, name, nodeName, corev1.PodRunning, "500m", "256Mi")
+	pod.Labels = map[string]string{"app": "demo"}
+	pod.Spec.TopologySpreadConstraints = []corev1.TopologySpreadConstraint{{
+		MaxSkew:           maxSkew,
+		TopologyKey:       topologyKey,
+		WhenUnsatisfiable: corev1.DoNotSchedule,
+		LabelSelector:     &metav1.LabelSelector{MatchLabels: map[string]string{"app": "demo"}},
+	}}
+	return pod
+}
+
+func TestBuildNMinusOneNodeOptimizationScenariosHardTopologySpreadExactFit(t *testing.T) {
+	t.Run("hostname", func(t *testing.T) {
+		info0, node0 := topologySpreadTestNode("node-0", "userpool", "worker-0", "zone-a", "centralus")
+		info1, node1 := topologySpreadTestNode("node-1", "userpool", "worker-1", "zone-a", "centralus")
+		info2, node2 := topologySpreadTestNode("node-2", "userpool", "worker-2", "zone-a", "centralus")
+		nodeInfos := []models.NodeInfo{info0, info1, info2}
+		evidence := BuildNodeOptimizationSchedulingEvidence(nodeInfos, []corev1.Node{node0, node1, node2})
+		pods := []corev1.Pod{
+			topologySpreadTestPod("apps", "api-0", "node-0", corev1.LabelHostname, 1),
+			topologySpreadTestPod("apps", "api-1", "node-1", corev1.LabelHostname, 1),
+		}
+
+		got := BuildNMinusOneNodeOptimizationScenariosWithSchedulingEvidence(nodeInfos, pods, evidence)
+
+		if len(got.Scenarios) != 1 || !got.Scenarios[0].Simulation.PlacementFound {
+			t.Fatalf("summary = %#v, want hostname-spread fit", got)
+		}
+		placements := got.Scenarios[0].Simulation.Placements
+		if len(placements) != 2 || placements[0].NodeName == placements[1].NodeName {
+			t.Fatalf("placements = %#v, want distinct hostname domains", placements)
+		}
+	})
+
+	t.Run("zone", func(t *testing.T) {
+		info0, node0 := topologySpreadTestNode("node-0", "userpool", "worker-0", "zone-a", "centralus")
+		info1, node1 := topologySpreadTestNode("node-1", "userpool", "worker-1", "zone-a", "centralus")
+		info2, node2 := topologySpreadTestNode("node-2", "userpool", "worker-2", "zone-b", "centralus")
+		nodeInfos := []models.NodeInfo{info0, info1, info2}
+		evidence := BuildNodeOptimizationSchedulingEvidence(nodeInfos, []corev1.Node{node0, node1, node2})
+		pods := []corev1.Pod{
+			topologySpreadTestPod("apps", "api-0", "node-0", corev1.LabelTopologyZone, 1),
+			topologySpreadTestPod("apps", "api-1", "node-1", corev1.LabelTopologyZone, 1),
+		}
+
+		got := BuildNMinusOneNodeOptimizationScenariosWithSchedulingEvidence(nodeInfos, pods, evidence)
+
+		if len(got.Scenarios) != 1 || !got.Scenarios[0].Simulation.PlacementFound {
+			t.Fatalf("summary = %#v, want zone-spread fit", got)
+		}
+		placements := got.Scenarios[0].Simulation.Placements
+		if len(placements) != 2 || placements[0].NodeName == placements[1].NodeName {
+			t.Fatalf("placements = %#v, want placement across zone-a and zone-b", placements)
+		}
+	})
+
+	t.Run("region", func(t *testing.T) {
+		info0, node0 := topologySpreadTestNode("node-0", "userpool", "worker-0", "zone-a", "centralus")
+		info1, node1 := topologySpreadTestNode("node-1", "userpool", "worker-1", "zone-a", "centralus")
+		info2, node2 := topologySpreadTestNode("node-2", "otherpool", "worker-2", "zone-b", "eastus")
+		nodeInfos := []models.NodeInfo{info0, info1, info2}
+		evidence := BuildNodeOptimizationSchedulingEvidence(nodeInfos, []corev1.Node{node0, node1, node2})
+		fixed := optimizationTestPod("apps", "east-existing", "node-2", corev1.PodRunning, "500m", "256Mi")
+		fixed.Labels = map[string]string{"app": "demo"}
+		pods := []corev1.Pod{
+			topologySpreadTestPod("apps", "api-0", "node-0", corev1.LabelTopologyRegion, 1),
+			topologySpreadTestPod("apps", "api-1", "node-1", corev1.LabelTopologyRegion, 1),
+			fixed,
+		}
+
+		got := BuildNMinusOneNodeOptimizationScenariosWithSchedulingEvidence(nodeInfos, pods, evidence)
+
+		if len(got.Scenarios) != 1 || !got.Scenarios[0].Simulation.PlacementFound {
+			t.Fatalf("summary = %#v, want region-spread fit", got)
+		}
+	})
+}
+
+func TestBuildNMinusOneNodeOptimizationScenariosHardTopologySpreadBlocksSkewViolation(t *testing.T) {
+	info0, node0 := topologySpreadTestNode("node-0", "userpool", "worker-0", "zone-a", "centralus")
+	info1, node1 := topologySpreadTestNode("node-1", "userpool", "worker-1", "zone-a", "centralus")
+	info2, node2 := topologySpreadTestNode("node-2", "other-a", "worker-2", "zone-a", "centralus")
+	info3, node3 := topologySpreadTestNode("node-3", "other-b", "worker-3", "zone-b", "centralus")
+	nodeInfos := []models.NodeInfo{info0, info1, info2, info3}
+	evidence := BuildNodeOptimizationSchedulingEvidence(nodeInfos, []corev1.Node{node0, node1, node2, node3})
+	fixed := optimizationTestPod("apps", "existing", "node-2", corev1.PodRunning, "500m", "256Mi")
+	fixed.Labels = map[string]string{"app": "demo"}
+	pod := topologySpreadTestPod("apps", "api", "node-0", corev1.LabelTopologyZone, 1)
+
+	got := BuildNMinusOneNodeOptimizationScenariosWithSchedulingEvidence(nodeInfos, []corev1.Pod{pod, fixed}, evidence)
+
+	if len(got.Scenarios) != 1 || got.Scenarios[0].Simulation.PlacementFound {
+		t.Fatalf("summary = %#v, want topology-blocked scenario", got)
+	}
+	simulation := got.Scenarios[0].Simulation
+	if simulation.Status != NodeOptimizationPlacementNotFound || len(simulation.Blockers) != 1 || simulation.Blockers[0].Reason != "topology_spread_constraint" {
+		t.Fatalf("simulation = %#v, want topology spread blocker", simulation)
+	}
+}
+
+func TestBuildNMinusOneNodeOptimizationScenariosHardTopologySpreadUsesAlternateCandidate(t *testing.T) {
+	info0, node0 := topologySpreadTestNode("node-0", "userpool", "worker-0", "zone-a", "centralus")
+	info1, node1 := topologySpreadTestNode("node-1", "userpool", "worker-1", "zone-a", "centralus")
+	info2, node2 := topologySpreadTestNode("node-2", "userpool", "worker-2", "zone-b", "centralus")
+	info3, node3 := topologySpreadTestNode("node-3", "otherpool", "worker-3", "zone-a", "centralus")
+	nodeInfos := []models.NodeInfo{info0, info1, info2, info3}
+	evidence := BuildNodeOptimizationSchedulingEvidence(nodeInfos, []corev1.Node{node0, node1, node2, node3})
+	fixed := optimizationTestPod("apps", "existing", "node-3", corev1.PodRunning, "500m", "256Mi")
+	fixed.Labels = map[string]string{"app": "demo"}
+	pod := topologySpreadTestPod("apps", "api", "node-0", corev1.LabelTopologyZone, 1)
+
+	got := BuildNMinusOneNodeOptimizationScenariosWithSchedulingEvidence(nodeInfos, []corev1.Pod{pod, fixed}, evidence)
+
+	if len(got.Scenarios) != 1 || !got.Scenarios[0].Simulation.PlacementFound {
+		t.Fatalf("summary = %#v, want proven alternate-candidate fit", got)
+	}
+	placements := got.Scenarios[0].Simulation.Placements
+	if len(placements) != 1 || placements[0].NodeName != "node-2" {
+		t.Fatalf("placements = %#v, want zone-b node-2", placements)
+	}
+}
+
+func TestBuildNMinusOneNodeOptimizationScenariosTopologySpreadSelectorAndNamespaceScoping(t *testing.T) {
+	tests := []struct {
+		name           string
+		fixedNamespace string
+		fixedLabels    map[string]string
+		selector       *metav1.LabelSelector
+	}{
+		{
+			name:           "selector excludes unrelated Pod",
+			fixedNamespace: "apps",
+			fixedLabels:    map[string]string{"app": "other"},
+			selector: &metav1.LabelSelector{MatchExpressions: []metav1.LabelSelectorRequirement{{
+				Key: "app", Operator: metav1.LabelSelectorOpIn, Values: []string{"demo"},
+			}}},
+		},
+		{
+			name:           "namespace excludes matching Pod",
+			fixedNamespace: "other",
+			fixedLabels:    map[string]string{"app": "demo"},
+			selector:       &metav1.LabelSelector{MatchLabels: map[string]string{"app": "demo"}},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			info0, node0 := topologySpreadTestNode("node-0", "userpool", "worker-0", "zone-a", "centralus")
+			info1, node1 := topologySpreadTestNode("node-1", "userpool", "worker-1", "zone-a", "centralus")
+			info2, node2 := topologySpreadTestNode("node-2", "userpool", "worker-2", "zone-b", "centralus")
+			info3, node3 := topologySpreadTestNode("node-3", "otherpool", "worker-3", "zone-a", "centralus")
+			nodeInfos := []models.NodeInfo{info0, info1, info2, info3}
+			evidence := BuildNodeOptimizationSchedulingEvidence(nodeInfos, []corev1.Node{node0, node1, node2, node3})
+			fixed := optimizationTestPod(tt.fixedNamespace, "existing", "node-3", corev1.PodRunning, "500m", "256Mi")
+			fixed.Labels = tt.fixedLabels
+			pod := topologySpreadTestPod("apps", "api", "node-0", corev1.LabelTopologyZone, 1)
+			pod.Spec.TopologySpreadConstraints[0].LabelSelector = tt.selector
+
+			got := BuildNMinusOneNodeOptimizationScenariosWithSchedulingEvidence(nodeInfos, []corev1.Pod{pod, fixed}, evidence)
+
+			if len(got.Scenarios) != 1 || !got.Scenarios[0].Simulation.PlacementFound {
+				t.Fatalf("summary = %#v, want proven fit", got)
+			}
+			placements := got.Scenarios[0].Simulation.Placements
+			if len(placements) != 1 || placements[0].NodeName != "node-1" {
+				t.Fatalf("placements = %#v, want unrelated fixed Pod excluded and deterministic node-1", placements)
+			}
+		})
+	}
+}
+
+func TestBuildNMinusOneNodeOptimizationScenariosTopologySpreadRequiredEvidenceFailsClosed(t *testing.T) {
+	tests := []struct {
+		name        string
+		topologyKey string
+		makeNodes   func() ([]models.NodeInfo, []corev1.Node)
+		wantMessage string
+	}{
+		{
+			name:        "missing zone",
+			topologyKey: corev1.LabelTopologyZone,
+			makeNodes: func() ([]models.NodeInfo, []corev1.Node) {
+				infos := make([]models.NodeInfo, 0, 3)
+				nodes := make([]corev1.Node, 0, 3)
+				for i := 0; i < 3; i++ {
+					info, node := topologySpreadTestNode(fmt.Sprintf("node-%d", i), "userpool", fmt.Sprintf("worker-%d", i), "", "centralus")
+					infos, nodes = append(infos, info), append(nodes, node)
+				}
+				return infos, nodes
+			},
+			wantMessage: "missing zone topology evidence",
+		},
+		{
+			name:        "contradictory region",
+			topologyKey: corev1.LabelTopologyRegion,
+			makeNodes: func() ([]models.NodeInfo, []corev1.Node) {
+				infos := make([]models.NodeInfo, 0, 3)
+				nodes := make([]corev1.Node, 0, 3)
+				for i := 0; i < 3; i++ {
+					info, node := topologySpreadTestNode(fmt.Sprintf("node-%d", i), "userpool", fmt.Sprintf("worker-%d", i), "zone-a", "centralus")
+					node.Labels[corev1.LabelFailureDomainBetaRegion] = "eastus"
+					infos, nodes = append(infos, info), append(nodes, node)
+				}
+				return infos, nodes
+			},
+			wantMessage: "contradictory region topology evidence",
+		},
+		{
+			name:        "ambiguous hostname",
+			topologyKey: corev1.LabelHostname,
+			makeNodes: func() ([]models.NodeInfo, []corev1.Node) {
+				infos := make([]models.NodeInfo, 0, 3)
+				nodes := make([]corev1.Node, 0, 3)
+				for i := 0; i < 3; i++ {
+					info, node := topologySpreadTestNode(fmt.Sprintf("node-%d", i), "userpool", "shared-worker", "zone-a", "centralus")
+					infos, nodes = append(infos, info), append(nodes, node)
+				}
+				return infos, nodes
+			},
+			wantMessage: "ambiguous across candidate nodes",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			nodeInfos, nodes := tt.makeNodes()
+			evidence := BuildNodeOptimizationSchedulingEvidence(nodeInfos, nodes)
+			pod := topologySpreadTestPod("apps", "api", "node-0", tt.topologyKey, 1)
+
+			got := BuildNMinusOneNodeOptimizationScenariosWithSchedulingEvidence(nodeInfos, []corev1.Pod{pod}, evidence)
+
+			if len(got.Scenarios) != 1 || got.Scenarios[0].Simulation.PlacementFound {
+				t.Fatalf("summary = %#v, want fail-closed topology scenario", got)
+			}
+			simulation := got.Scenarios[0].Simulation
+			if simulation.Status != NodeOptimizationInvalidInput || len(simulation.Blockers) != 1 || simulation.Blockers[0].Reason != "topology_spread_evidence" {
+				t.Fatalf("simulation = %#v, want invalid topology evidence blocker", simulation)
+			}
+			if !strings.Contains(simulation.Blockers[0].Message, tt.wantMessage) {
+				t.Fatalf("blocker = %#v, want %q", simulation.Blockers[0], tt.wantMessage)
+			}
+		})
+	}
+}
+
+func TestBuildNMinusOneNodeOptimizationScenariosScheduleAnywayDoesNotBlock(t *testing.T) {
+	nodeInfos := optimizationNodeInfos(2)
+	nodes := []corev1.Node{
+		{ObjectMeta: metav1.ObjectMeta{Name: "node-0"}},
+		{ObjectMeta: metav1.ObjectMeta{Name: "node-1"}},
+	}
+	evidence := BuildNodeOptimizationSchedulingEvidence(nodeInfos, nodes)
+	pod := optimizationTestPod("apps", "api", "node-0", corev1.PodRunning, "500m", "256Mi")
+	pod.Spec.TopologySpreadConstraints = []corev1.TopologySpreadConstraint{{
+		MaxSkew: 0, TopologyKey: "unsupported.example/key", WhenUnsatisfiable: corev1.ScheduleAnyway,
+		MatchLabelKeys: []string{"app"},
+	}}
+
+	got := BuildNMinusOneNodeOptimizationScenariosWithSchedulingEvidence(nodeInfos, []corev1.Pod{pod}, evidence)
+
+	if len(got.Scenarios) != 1 || !got.Scenarios[0].Simulation.PlacementFound {
+		t.Fatalf("summary = %#v, want ScheduleAnyway ignored by hard placement", got)
+	}
+}
+
+func TestBuildNMinusOneNodeOptimizationScenariosRejectsUnsupportedHardTopologySpread(t *testing.T) {
+	affinityIgnore := corev1.NodeInclusionPolicyIgnore
+	taintsHonor := corev1.NodeInclusionPolicyHonor
+	tests := []struct {
+		name       string
+		constraint corev1.TopologySpreadConstraint
+		wantReason string
+	}{
+		{
+			name:       "unsupported topology key",
+			constraint: corev1.TopologySpreadConstraint{MaxSkew: 1, TopologyKey: "rack.example/id", WhenUnsatisfiable: corev1.DoNotSchedule},
+			wantReason: "unsupported topologyKey",
+		},
+		{
+			name: "unsupported selector operator",
+			constraint: corev1.TopologySpreadConstraint{
+				MaxSkew: 1, TopologyKey: corev1.LabelTopologyZone, WhenUnsatisfiable: corev1.DoNotSchedule,
+				LabelSelector: &metav1.LabelSelector{MatchExpressions: []metav1.LabelSelectorRequirement{{
+					Key: "app", Operator: metav1.LabelSelectorOperator("Invalid"), Values: []string{"demo"},
+				}}},
+			},
+			wantReason: "invalid labelSelector",
+		},
+		{
+			name:       "zero maxSkew",
+			constraint: corev1.TopologySpreadConstraint{MaxSkew: 0, TopologyKey: corev1.LabelTopologyZone, WhenUnsatisfiable: corev1.DoNotSchedule},
+			wantReason: "nonpositive maxSkew",
+		},
+		{
+			name:       "negative maxSkew",
+			constraint: corev1.TopologySpreadConstraint{MaxSkew: -1, TopologyKey: corev1.LabelTopologyZone, WhenUnsatisfiable: corev1.DoNotSchedule},
+			wantReason: "nonpositive maxSkew",
+		},
+		{
+			name:       "matchLabelKeys",
+			constraint: corev1.TopologySpreadConstraint{MaxSkew: 1, TopologyKey: corev1.LabelTopologyZone, WhenUnsatisfiable: corev1.DoNotSchedule, MatchLabelKeys: []string{"app"}},
+			wantReason: "matchLabelKeys",
+		},
+		{
+			name:       "node affinity Ignore",
+			constraint: corev1.TopologySpreadConstraint{MaxSkew: 1, TopologyKey: corev1.LabelTopologyZone, WhenUnsatisfiable: corev1.DoNotSchedule, NodeAffinityPolicy: &affinityIgnore},
+			wantReason: "nodeAffinityPolicy",
+		},
+		{
+			name:       "node taints Honor",
+			constraint: corev1.TopologySpreadConstraint{MaxSkew: 1, TopologyKey: corev1.LabelTopologyZone, WhenUnsatisfiable: corev1.DoNotSchedule, NodeTaintsPolicy: &taintsHonor},
+			wantReason: "nodeTaintsPolicy",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			info0, node0 := topologySpreadTestNode("node-0", "userpool", "worker-0", "zone-a", "centralus")
+			info1, node1 := topologySpreadTestNode("node-1", "userpool", "worker-1", "zone-b", "centralus")
+			nodeInfos := []models.NodeInfo{info0, info1}
+			evidence := BuildNodeOptimizationSchedulingEvidence(nodeInfos, []corev1.Node{node0, node1})
+			pod := optimizationTestPod("apps", "api", "node-0", corev1.PodRunning, "500m", "256Mi")
+			pod.Labels = map[string]string{"app": "demo"}
+			pod.Spec.TopologySpreadConstraints = []corev1.TopologySpreadConstraint{tt.constraint}
+
+			got := BuildNMinusOneNodeOptimizationScenariosWithSchedulingEvidence(nodeInfos, []corev1.Pod{pod}, evidence)
+
+			if len(got.Scenarios) != 0 || got.UnsupportedConstraintPodCount != 1 || got.SkippedPoolCount != 1 {
+				t.Fatalf("summary = %#v, want unsupported hard topology constraint", got)
+			}
+			if !strings.Contains(strings.Join(got.Warnings, " "), tt.wantReason) {
+				t.Fatalf("warnings = %#v, want %q", got.Warnings, tt.wantReason)
+			}
+		})
+	}
+}
+
+func TestBuildNMinusOneNodeOptimizationScenariosHardTopologySpreadMinDomains(t *testing.T) {
+	minDomains := int32(3)
+	info0, node0 := topologySpreadTestNode("node-0", "userpool", "worker-0", "zone-a", "centralus")
+	info1, node1 := topologySpreadTestNode("node-1", "userpool", "worker-1", "zone-a", "centralus")
+	info2, node2 := topologySpreadTestNode("node-2", "userpool", "worker-2", "zone-b", "centralus")
+	nodeInfos := []models.NodeInfo{info0, info1, info2}
+	evidence := BuildNodeOptimizationSchedulingEvidence(nodeInfos, []corev1.Node{node0, node1, node2})
+	pods := []corev1.Pod{
+		topologySpreadTestPod("apps", "api-0", "node-0", corev1.LabelTopologyZone, 1),
+		topologySpreadTestPod("apps", "api-1", "node-1", corev1.LabelTopologyZone, 1),
+		topologySpreadTestPod("apps", "api-2", "node-2", corev1.LabelTopologyZone, 1),
+	}
+	for i := range pods {
+		pods[i].Spec.TopologySpreadConstraints[0].MinDomains = &minDomains
+	}
+
+	got := BuildNMinusOneNodeOptimizationScenariosWithSchedulingEvidence(nodeInfos, pods, evidence)
+
+	if len(got.Scenarios) != 1 || got.Scenarios[0].Simulation.PlacementFound {
+		t.Fatalf("summary = %#v, want MinDomains-enforced placement failure", got)
+	}
+}
+
+func TestBuildNMinusOneNodeOptimizationScenariosHardTopologySpreadIsDeterministic(t *testing.T) {
+	info0, node0 := topologySpreadTestNode("node-0", "userpool", "worker-0", "zone-a", "centralus")
+	info1, node1 := topologySpreadTestNode("node-1", "userpool", "worker-1", "zone-a", "centralus")
+	info2, node2 := topologySpreadTestNode("node-2", "userpool", "worker-2", "zone-b", "centralus")
+	nodeInfos := []models.NodeInfo{info0, info1, info2}
+	nodes := []corev1.Node{node0, node1, node2}
+	pods := []corev1.Pod{
+		topologySpreadTestPod("apps", "api-0", "node-0", corev1.LabelTopologyZone, 1),
+		topologySpreadTestPod("apps", "api-1", "node-1", corev1.LabelTopologyZone, 1),
+	}
+
+	forwardEvidence := BuildNodeOptimizationSchedulingEvidence(nodeInfos, nodes)
+	forward := BuildNMinusOneNodeOptimizationScenariosWithSchedulingEvidence(nodeInfos, pods, forwardEvidence)
+	reversedNodeInfos := []models.NodeInfo{nodeInfos[2], nodeInfos[1], nodeInfos[0]}
+	reversedNodes := []corev1.Node{nodes[2], nodes[1], nodes[0]}
+	reversedPods := []corev1.Pod{pods[1], pods[0]}
+	reversedEvidence := BuildNodeOptimizationSchedulingEvidence(reversedNodeInfos, reversedNodes)
+	reversed := BuildNMinusOneNodeOptimizationScenariosWithSchedulingEvidence(reversedNodeInfos, reversedPods, reversedEvidence)
+
+	if !reflect.DeepEqual(forward, reversed) {
+		t.Fatalf("topology spread result changed with snapshot order:\nforward=%#v\nreversed=%#v", forward, reversed)
+	}
+	if len(forward.Scenarios) != 1 || forward.Scenarios[0].RemovedNodeName != "node-0" || !forward.Scenarios[0].Simulation.PlacementFound {
+		t.Fatalf("summary = %#v, want deterministic node-0 removal and fit", forward)
+	}
+}
+
+func TestBuildNMinusOneNodeOptimizationScenariosNoTopologySpreadPreservesPlacement(t *testing.T) {
+	info0, node0 := topologySpreadTestNode("node-0", "userpool", "worker-0", "zone-a", "centralus")
+	info1, node1 := topologySpreadTestNode("node-1", "userpool", "worker-1", "zone-b", "centralus")
+	nodeInfos := []models.NodeInfo{info0, info1}
+	evidence := BuildNodeOptimizationSchedulingEvidence(nodeInfos, []corev1.Node{node0, node1})
+	pod := optimizationTestPod("apps", "api", "node-0", corev1.PodRunning, "500m", "256Mi")
+
+	got := BuildNMinusOneNodeOptimizationScenariosWithSchedulingEvidence(nodeInfos, []corev1.Pod{pod}, evidence)
+
+	if len(got.Scenarios) != 1 || !got.Scenarios[0].Simulation.PlacementFound || got.Scenarios[0].Simulation.Status != NodeOptimizationFit {
+		t.Fatalf("summary = %#v, want unchanged non-topology fit", got)
 	}
 }

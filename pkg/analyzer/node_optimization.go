@@ -38,6 +38,11 @@ type NodeOptimizationPodInput struct {
 	// may be placed. Nil preserves the legacy all-candidate-nodes behavior; a
 	// non-nil empty set is a hard scheduling blocker.
 	EligibleNodeNames []string
+
+	// topologySpreadConstraints is compiled from already-acquired Pod and Node
+	// snapshots. It remains internal so the public simulator contract does not
+	// expose Kubernetes selector types.
+	topologySpreadConstraints []nodeOptimizationTopologySpreadConstraint
 }
 
 // NodeOptimizationInput describes a same-SKU node-count scenario.
@@ -57,6 +62,10 @@ type NodeOptimizationInput struct {
 	// When present, it must contain exactly CandidateNodes unique, non-empty names.
 	// Nil preserves the legacy anonymous-bin behavior for direct simulator callers.
 	CandidateNodeNames []string
+
+	// removedNodeName identifies the node absent from an internally constructed
+	// N-1 attempt. Topology domain and fixed-Pod counts must exclude it.
+	removedNodeName string
 
 	Pods []NodeOptimizationPodInput
 }
@@ -282,6 +291,7 @@ func buildNMinusOneNodeOptimizationScenarios(
 
 	podsByPool := make(map[CostPoolKey][]NodeOptimizationPodInput)
 	movablePodsByPool := make(map[CostPoolKey][]corev1.Pod)
+	eligibleTopologyPods := make([]nodeOptimizationTopologyPod, 0, len(pods))
 	daemonPodsByPool := make(map[CostPoolKey][]corev1.Pod)
 	eligibilityWarningsByPool := make(map[CostPoolKey][]string)
 	daemonSetsByPool := make(map[CostPoolKey]map[daemonSetKey]*daemonSetObservation)
@@ -372,6 +382,12 @@ func buildNMinusOneNodeOptimizationScenarios(
 		}
 
 		key := *input.PoolKey
+		eligibleTopologyPods = append(eligibleTopologyPods, nodeOptimizationTopologyPod{
+			Namespace: input.Namespace,
+			Name:      input.PodName,
+			NodeName:  input.NodeName,
+			Labels:    cloneStringMap(pod.Labels),
+		})
 		if input.EligibilityWarning != "" {
 			eligibilityWarningsByPool[key] = append(eligibilityWarningsByPool[key], fmt.Sprintf(
 				"pod %s/%s: %s",
@@ -392,6 +408,14 @@ func buildNMinusOneNodeOptimizationScenarios(
 				))
 				continue
 			}
+		} else if hasHardTopologySpreadConstraints(pod) {
+			summary.UnsupportedConstraintPodCount++
+			unsupportedConstraintsByPool[key] = append(unsupportedConstraintsByPool[key], fmt.Sprintf(
+				"DaemonSet pod %s/%s: hard topology spread is not modeled for per-node overhead",
+				input.Namespace,
+				input.PodName,
+			))
+			continue
 		}
 
 		if evidence == nil && input.WorkloadKind != "DaemonSet" {
@@ -523,6 +547,19 @@ func buildNMinusOneNodeOptimizationScenarios(
 				if len(eligible) == 0 {
 					summary.SchedulingBlockedPodCount++
 				}
+
+				topologyConstraints, topologyReason := buildNodeOptimizationTopologySpreadConstraints(
+					pod,
+					allSchedulingNodes(*evidence),
+					eligibleTopologyPods,
+					movablePodsByPool[key],
+				)
+				if topologyReason != "" {
+					summary.SchedulingBlockedPodCount++
+					unsupported = append(unsupported, fmt.Sprintf("pod %s/%s: %s", pod.Namespace, pod.Name, topologyReason))
+					continue
+				}
+				scenarioPods[i].topologySpreadConstraints = topologyConstraints
 			}
 
 			// DaemonSet Pods remain modeled as per-node overhead. Preserve the
@@ -561,6 +598,15 @@ func buildNMinusOneNodeOptimizationScenarios(
 			}
 		} else {
 			for i, pod := range movablePodsByPool[key] {
+				if hasHardTopologySpreadConstraints(pod) {
+					summary.UnsupportedConstraintPodCount++
+					unsupportedConstraintsByPool[key] = append(unsupportedConstraintsByPool[key], fmt.Sprintf(
+						"pod %s/%s: hard topology spread constraints require scheduling topology evidence",
+						pod.Namespace,
+						pod.Name,
+					))
+					continue
+				}
 				if hasRequiredNodeAffinity(pod) {
 					summary.UnsupportedConstraintPodCount++
 					unsupportedConstraintsByPool[key] = append(unsupportedConstraintsByPool[key], fmt.Sprintf(
