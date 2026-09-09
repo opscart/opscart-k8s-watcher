@@ -591,6 +591,7 @@ func fullyPopulatedOverviewData() overviewPageData {
 
 		IncidentScore: 62, IncidentScoreColor: "orange", IncidentScoreLabel: "Needs attention",
 		SecurityScore: 78, WasteCount: 6, MonthlyCost: 1234.56,
+		CostAvailable: true, CostCoverage: "3 of 3 nodes priced",
 
 		DashHref:        "/?cluster=prod-eastus",
 		InfraHref:       "/infrastructure?cluster=prod-eastus",
@@ -629,6 +630,9 @@ func TestOverviewTemplate_RendersFullyPopulatedData(t *testing.T) {
 		"Highest priority",
 		"payments-api",
 		"First detected 2d ago · accelerating",
+		"Why #1",
+		"Affected scope",
+		"Recommended next step",
 		"Open in War Room",
 		"Other priority issues",
 		"Recent changes",
@@ -645,6 +649,7 @@ func TestOverviewTemplate_RendersFullyPopulatedData(t *testing.T) {
 		"Cost",
 		"Waste &amp; Drift",
 		"Node Optimization",
+		"In development",
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("rendered output missing %q", want)
@@ -674,7 +679,7 @@ func TestOverviewTemplate_PriorityHeroSeverityStyles(t *testing.T) {
 }
 
 // TestOverviewTemplate_CompactPostureLinksPreserveCluster verifies that each
-// compact posture card links to its detailed page in the active cluster.
+// currently actionable posture card links to its detailed page in the active cluster.
 func TestOverviewTemplate_CompactPostureLinksPreserveCluster(t *testing.T) {
 	data := fullyPopulatedOverviewData()
 	var buf strings.Builder
@@ -688,7 +693,6 @@ func TestOverviewTemplate_CompactPostureLinksPreserveCluster(t *testing.T) {
 		data.SecurityHref,
 		data.CostsHref,
 		data.WasteHref,
-		data.OptHref,
 	} {
 		if href == "" {
 			t.Fatalf("fixture has empty posture href")
@@ -698,6 +702,89 @@ func TestOverviewTemplate_CompactPostureLinksPreserveCluster(t *testing.T) {
 		}
 		if !strings.Contains(href, "cluster=prod-eastus") {
 			t.Errorf("posture link did not preserve active cluster: %q", href)
+		}
+	}
+	if !strings.Contains(out, `class="posture-card posture-card-muted node-optimization-card"`) {
+		t.Errorf("expected non-actionable Node Optimization status card")
+	}
+}
+
+func TestOverviewTemplate_CostRequiresPricingAvailability(t *testing.T) {
+	t.Run("unavailable pricing never falls back to zero", func(t *testing.T) {
+		data := fullyPopulatedOverviewData()
+		data.MonthlyCost = 0
+		data.CostAvailable = false
+		data.CostCoverage = "0 of 3 nodes priced"
+
+		var buf strings.Builder
+		if err := getOverviewTmpl().Execute(&buf, data); err != nil {
+			t.Fatalf("template execution failed: %v", err)
+		}
+		out := buf.String()
+		if !strings.Contains(out, `<div class="posture-value unavailable">Unavailable</div>`) {
+			t.Fatalf("expected unavailable cost state")
+		}
+		if strings.Contains(out, "$0/mo") {
+			t.Fatalf("unavailable pricing rendered a zero-dollar fallback")
+		}
+		if !strings.Contains(out, "0 of 3 nodes priced") {
+			t.Fatalf("expected pricing coverage evidence")
+		}
+	})
+
+	t.Run("available pricing renders reported amount", func(t *testing.T) {
+		data := fullyPopulatedOverviewData()
+
+		var buf strings.Builder
+		if err := getOverviewTmpl().Execute(&buf, data); err != nil {
+			t.Fatalf("template execution failed: %v", err)
+		}
+		if !strings.Contains(buf.String(), "$1,235/mo") {
+			t.Fatalf("available provider pricing did not render reported amount")
+		}
+	})
+}
+
+func TestBuildOverviewData_CostAvailabilityUsesPricingEvidence(t *testing.T) {
+	tests := []struct {
+		name      string
+		scan      *clusterScan
+		available bool
+	}{
+		{name: "no report", scan: &clusterScan{}, available: false},
+		{name: "unpriced pool", scan: &clusterScan{report: &models.CloudCostReport{
+			NodePoolCosts: []models.NodePoolCost{{Name: "workers", NodeCount: 3, PricingAvailable: false}},
+		}}, available: false},
+		{name: "provider-priced pool", scan: &clusterScan{report: &models.CloudCostReport{
+			NodePoolCosts: []models.NodePoolCost{{Name: "workers", NodeCount: 3, PricingAvailable: true}},
+		}}, available: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			data := buildOverviewData(tt.scan, "test-cluster", []string{"test-cluster"}, nil, time.Now())
+			if data.CostAvailable != tt.available {
+				t.Fatalf("CostAvailable = %v, want %v", data.CostAvailable, tt.available)
+			}
+		})
+	}
+}
+
+func TestOverviewTemplate_NodeOptimizationIsConservative(t *testing.T) {
+	data := fullyPopulatedOverviewData()
+	var buf strings.Builder
+	if err := getOverviewTmpl().Execute(&buf, data); err != nil {
+		t.Fatalf("template execution failed: %v", err)
+	}
+	out := buf.String()
+	for _, want := range []string{"In development", "Simulation foundation exists", "No operator action yet"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("Node Optimization card missing %q", want)
+		}
+	}
+	for _, forbidden := range []string{"simulation-backed node efficiency analysis", "Open optimization →"} {
+		if strings.Contains(out, forbidden) {
+			t.Errorf("Node Optimization card overstates availability with %q", forbidden)
 		}
 	}
 }
