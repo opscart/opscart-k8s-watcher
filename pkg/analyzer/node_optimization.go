@@ -287,6 +287,7 @@ type NodeOptimizationSnapshotSummary struct {
 	UnresolvedPodCount            int
 	UnresolvedNodeCount           int
 	UnsupportedConstraintPodCount int
+	SchedulingBlockedPodCount     int
 	SkippedPoolCount              int
 	Warnings                      []string
 }
@@ -299,6 +300,7 @@ type NodeOptimizationScenario struct {
 	DaemonSetCount              int
 	DaemonSetCPUPerNodeMilli    int64
 	DaemonSetMemoryPerNodeBytes int64
+	SchedulingCaveats           []string
 	Simulation                  NodeOptimizationResult
 }
 
@@ -310,6 +312,25 @@ type NodeOptimizationScenario struct {
 func BuildNMinusOneNodeOptimizationScenariosFromSnapshots(
 	nodeInfos []models.NodeInfo,
 	pods []corev1.Pod,
+) NodeOptimizationSnapshotSummary {
+	return buildNMinusOneNodeOptimizationScenarios(nodeInfos, pods, nil)
+}
+
+// BuildNMinusOneNodeOptimizationScenariosWithSchedulingEvidence adds
+// scheduler-relevant Node evidence to the N-1 simulation without performing
+// Kubernetes or cloud API calls.
+func BuildNMinusOneNodeOptimizationScenariosWithSchedulingEvidence(
+	nodeInfos []models.NodeInfo,
+	pods []corev1.Pod,
+	evidence NodeOptimizationSchedulingEvidence,
+) NodeOptimizationSnapshotSummary {
+	return buildNMinusOneNodeOptimizationScenarios(nodeInfos, pods, &evidence)
+}
+
+func buildNMinusOneNodeOptimizationScenarios(
+	nodeInfos []models.NodeInfo,
+	pods []corev1.Pod,
+	evidence *NodeOptimizationSchedulingEvidence,
 ) NodeOptimizationSnapshotSummary {
 	type poolSnapshot struct {
 		key       CostPoolKey
@@ -382,6 +403,7 @@ func BuildNMinusOneNodeOptimizationScenariosFromSnapshots(
 	}
 
 	podsByPool := make(map[CostPoolKey][]NodeOptimizationPodInput)
+	eligiblePodsByPool := make(map[CostPoolKey][]corev1.Pod)
 	daemonSetsByPool := make(map[CostPoolKey]map[daemonSetKey]*daemonSetObservation)
 	unsupportedSelectorsByPool := make(map[CostPoolKey][]string)
 
@@ -417,6 +439,7 @@ func BuildNMinusOneNodeOptimizationScenariosFromSnapshots(
 		}
 
 		key := *input.PoolKey
+		eligiblePodsByPool[key] = append(eligiblePodsByPool[key], pod)
 
 		if input.WorkloadKind != "DaemonSet" {
 			if reason := nodeSelectorCompatibilityReason(pod.Spec.NodeSelector, key); reason != "" {
@@ -472,6 +495,59 @@ func BuildNMinusOneNodeOptimizationScenariosFromSnapshots(
 
 	for _, key := range keys {
 		pool := pools[key]
+
+		var schedulingCaveats []string
+		if evidence != nil {
+			nodes := schedulingNodesForPool(*evidence, key)
+			if len(nodes) != pool.nodeCount {
+				summary.SkippedPoolCount++
+				summary.Warnings = append(summary.Warnings, fmt.Sprintf(
+					"pool %s skipped because scheduling evidence covers %d of %d nodes",
+					key.PoolName,
+					len(nodes),
+					pool.nodeCount,
+				))
+				continue
+			}
+
+			hardTaints, homogeneous := homogeneousHardTaints(nodes)
+			if !homogeneous {
+				summary.SkippedPoolCount++
+				summary.Warnings = append(summary.Warnings, fmt.Sprintf(
+					"pool %s skipped because hard taints differ across nodes; per-node taint placement is not modeled yet",
+					key.PoolName,
+				))
+				continue
+			}
+
+			if poolHasPreferNoSchedule(nodes) {
+				schedulingCaveats = append(schedulingCaveats,
+					"PreferNoSchedule taints are advisory and are not modeled as hard placement blockers")
+			}
+
+			var blockedPods []string
+			for _, pod := range eligiblePodsByPool[key] {
+				if reason := podHardTaintCompatibilityReason(pod, hardTaints); reason != "" {
+					summary.SchedulingBlockedPodCount++
+					blockedPods = append(blockedPods, fmt.Sprintf(
+						"%s/%s: %s",
+						pod.Namespace,
+						pod.Name,
+						reason,
+					))
+				}
+			}
+			if len(blockedPods) > 0 {
+				summary.SkippedPoolCount++
+				sort.Strings(blockedPods)
+				summary.Warnings = append(summary.Warnings, fmt.Sprintf(
+					"pool %s skipped because Pods do not have durable toleration for required hard taints: %s",
+					key.PoolName,
+					strings.Join(blockedPods, "; "),
+				))
+				continue
+			}
+		}
 
 		if blockers := unsupportedSelectorsByPool[key]; len(blockers) > 0 {
 			summary.SkippedPoolCount++
@@ -558,6 +634,7 @@ func BuildNMinusOneNodeOptimizationScenariosFromSnapshots(
 			DaemonSetCount:              daemonSetCount,
 			DaemonSetCPUPerNodeMilli:    daemonCPUPerNode,
 			DaemonSetMemoryPerNodeBytes: daemonMemPerNode,
+			SchedulingCaveats:           append([]string(nil), schedulingCaveats...),
 			Simulation:                  SimulateSameShapeNodeCount(scenarioInput),
 		})
 	}
@@ -731,4 +808,134 @@ func cloneStringMap(in map[string]string) map[string]string {
 		out[key] = value
 	}
 	return out
+}
+
+func schedulingNodesForPool(
+	evidence NodeOptimizationSchedulingEvidence,
+	poolKey CostPoolKey,
+) []NodeOptimizationSchedulingNode {
+	nodes := make([]NodeOptimizationSchedulingNode, 0)
+	for _, node := range evidence.Nodes {
+		if node.PoolKey == poolKey {
+			nodes = append(nodes, node)
+		}
+	}
+	sort.Slice(nodes, func(i, j int) bool {
+		return nodes[i].Name < nodes[j].Name
+	})
+	return nodes
+}
+
+func hardTaintsForNode(node NodeOptimizationSchedulingNode) []corev1.Taint {
+	taints := make([]corev1.Taint, 0)
+	for _, taint := range node.Taints {
+		if taint.Effect != corev1.TaintEffectNoSchedule && taint.Effect != corev1.TaintEffectNoExecute {
+			continue
+		}
+		taints = append(taints, corev1.Taint{
+			Key:    taint.Key,
+			Value:  taint.Value,
+			Effect: taint.Effect,
+		})
+	}
+	sort.Slice(taints, func(i, j int) bool {
+		if taints[i].Key != taints[j].Key {
+			return taints[i].Key < taints[j].Key
+		}
+		if taints[i].Value != taints[j].Value {
+			return taints[i].Value < taints[j].Value
+		}
+		return taints[i].Effect < taints[j].Effect
+	})
+	return taints
+}
+
+func homogeneousHardTaints(nodes []NodeOptimizationSchedulingNode) ([]corev1.Taint, bool) {
+	if len(nodes) == 0 {
+		return nil, true
+	}
+
+	expected := hardTaintsForNode(nodes[0])
+	for _, node := range nodes[1:] {
+		got := hardTaintsForNode(node)
+		if !sameHardTaints(expected, got) {
+			return nil, false
+		}
+	}
+	return expected, true
+}
+
+func sameHardTaints(a, b []corev1.Taint) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i].Key != b[i].Key || a[i].Value != b[i].Value || a[i].Effect != b[i].Effect {
+			return false
+		}
+	}
+	return true
+}
+
+func poolHasPreferNoSchedule(nodes []NodeOptimizationSchedulingNode) bool {
+	for _, node := range nodes {
+		for _, taint := range node.Taints {
+			if taint.Effect == corev1.TaintEffectPreferNoSchedule {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func podHardTaintCompatibilityReason(pod corev1.Pod, taints []corev1.Taint) string {
+	for _, taint := range taints {
+		toleration, ok := matchingToleration(pod.Spec.Tolerations, taint)
+		if !ok {
+			return fmt.Sprintf(
+				"does not tolerate %s=%s:%s",
+				taint.Key,
+				taint.Value,
+				taint.Effect,
+			)
+		}
+		if taint.Effect == corev1.TaintEffectNoExecute && toleration.TolerationSeconds != nil {
+			return fmt.Sprintf(
+				"tolerates %s=%s:%s only for %d seconds, which is not durable steady-state placement evidence",
+				taint.Key,
+				taint.Value,
+				taint.Effect,
+				*toleration.TolerationSeconds,
+			)
+		}
+	}
+	return ""
+}
+
+func matchingToleration(
+	tolerations []corev1.Toleration,
+	taint corev1.Taint,
+) (corev1.Toleration, bool) {
+	for _, toleration := range tolerations {
+		if toleration.Effect != "" && toleration.Effect != taint.Effect {
+			continue
+		}
+
+		operator := toleration.Operator
+		if operator == "" {
+			operator = corev1.TolerationOpEqual
+		}
+
+		switch operator {
+		case corev1.TolerationOpExists:
+			if toleration.Key == "" || toleration.Key == taint.Key {
+				return toleration, true
+			}
+		case corev1.TolerationOpEqual:
+			if toleration.Key == taint.Key && toleration.Value == taint.Value {
+				return toleration, true
+			}
+		}
+	}
+	return corev1.Toleration{}, false
 }

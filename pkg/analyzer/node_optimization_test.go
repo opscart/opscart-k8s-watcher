@@ -1,6 +1,7 @@
 package analyzer
 
 import (
+	"fmt"
 	"reflect"
 	"strings"
 	"testing"
@@ -207,12 +208,39 @@ func TestSimulateSameShapeNodeCountRejectsInvalidInput(t *testing.T) {
 		input NodeOptimizationInput
 	}{
 		{
+			name: "zero current nodes",
+			input: NodeOptimizationInput{
+				CurrentNodes:            0,
+				CandidateNodes:          1,
+				NodeCPUCapacityMilli:    1000,
+				NodeMemoryCapacityBytes: 1000,
+			},
+		},
+		{
 			name: "zero candidate nodes",
 			input: NodeOptimizationInput{
 				CurrentNodes:            1,
 				CandidateNodes:          0,
 				NodeCPUCapacityMilli:    1000,
 				NodeMemoryCapacityBytes: 1000,
+			},
+		},
+		{
+			name: "zero node CPU capacity",
+			input: NodeOptimizationInput{
+				CurrentNodes:            1,
+				CandidateNodes:          1,
+				NodeCPUCapacityMilli:    0,
+				NodeMemoryCapacityBytes: 1000,
+			},
+		},
+		{
+			name: "zero node memory capacity",
+			input: NodeOptimizationInput{
+				CurrentNodes:            1,
+				CandidateNodes:          1,
+				NodeCPUCapacityMilli:    1000,
+				NodeMemoryCapacityBytes: 0,
 			},
 		},
 		{
@@ -242,6 +270,34 @@ func TestSimulateSameShapeNodeCountRejectsInvalidInput(t *testing.T) {
 				t.Fatal("expected explicit blocker")
 			}
 		})
+	}
+}
+
+func TestBuildNMinusOneNodeOptimizationScenariosAreDeterministicAcrossSnapshotOrder(t *testing.T) {
+	nodeInfos := []models.NodeInfo{
+		{Name: "z-0", NodePool: "z-pool", VMSize: "Standard_D4s_v3", Region: "centralus", OS: "linux", Priority: "Regular", Provider: "azure", Architecture: "amd64", CPUCapacity: 4, MemGBCapacity: 8},
+		{Name: "a-0", NodePool: "a-pool", VMSize: "Standard_D4s_v3", Region: "centralus", OS: "linux", Priority: "Regular", Provider: "azure", Architecture: "amd64", CPUCapacity: 4, MemGBCapacity: 8},
+		{Name: "z-1", NodePool: "z-pool", VMSize: "Standard_D4s_v3", Region: "centralus", OS: "linux", Priority: "Regular", Provider: "azure", Architecture: "amd64", CPUCapacity: 4, MemGBCapacity: 8},
+		{Name: "a-1", NodePool: "a-pool", VMSize: "Standard_D4s_v3", Region: "centralus", OS: "linux", Priority: "Regular", Provider: "azure", Architecture: "amd64", CPUCapacity: 4, MemGBCapacity: 8},
+	}
+	pods := []corev1.Pod{
+		optimizationTestPod("apps", "z-workload", "z-0", corev1.PodRunning, "1000m", "1Gi"),
+		optimizationTestPod("apps", "a-workload", "a-0", corev1.PodRunning, "1000m", "1Gi"),
+	}
+
+	reversedNodes := append([]models.NodeInfo(nil), nodeInfos...)
+	for i, j := 0, len(reversedNodes)-1; i < j; i, j = i+1, j-1 {
+		reversedNodes[i], reversedNodes[j] = reversedNodes[j], reversedNodes[i]
+	}
+	reversedPods := append([]corev1.Pod(nil), pods...)
+	for i, j := 0, len(reversedPods)-1; i < j; i, j = i+1, j-1 {
+		reversedPods[i], reversedPods[j] = reversedPods[j], reversedPods[i]
+	}
+
+	forward := BuildNMinusOneNodeOptimizationScenariosFromSnapshots(nodeInfos, pods)
+	reversed := BuildNMinusOneNodeOptimizationScenariosFromSnapshots(reversedNodes, reversedPods)
+	if !reflect.DeepEqual(forward, reversed) {
+		t.Fatalf("snapshot order changed scenarios:\nforward=%#v\nreversed=%#v", forward, reversed)
 	}
 }
 
@@ -551,6 +607,30 @@ func TestBuildNMinusOneNodeOptimizationScenariosSkipsMismatchedOSNodeSelector(t 
 	}
 }
 
+func TestBuildNMinusOneNodeOptimizationScenariosSkipsMismatchedArchitectureNodeSelector(t *testing.T) {
+	nodeInfos := []models.NodeInfo{
+		{Name: "node-0", NodePool: "userpool", VMSize: "Standard_D4s_v3", Region: "centralus", OS: "linux", Priority: "Regular", Provider: "azure", Architecture: "amd64", CPUCapacity: 4, MemGBCapacity: 8},
+		{Name: "node-1", NodePool: "userpool", VMSize: "Standard_D4s_v3", Region: "centralus", OS: "linux", Priority: "Regular", Provider: "azure", Architecture: "amd64", CPUCapacity: 4, MemGBCapacity: 8},
+	}
+
+	pod := optimizationTestPod("apps", "arm-only", "node-0", corev1.PodRunning, "1000m", "1Gi")
+	pod.Spec.NodeSelector = map[string]string{
+		corev1.LabelArchStable: "arm64",
+	}
+
+	got := BuildNMinusOneNodeOptimizationScenariosFromSnapshots(nodeInfos, []corev1.Pod{pod})
+
+	if len(got.Scenarios) != 0 {
+		t.Fatalf("scenario count = %d, want 0", len(got.Scenarios))
+	}
+	if got.UnsupportedConstraintPodCount != 1 || got.SkippedPoolCount != 1 {
+		t.Fatalf("unsupported/skipped counts = %d/%d, want 1/1", got.UnsupportedConstraintPodCount, got.SkippedPoolCount)
+	}
+	if len(got.Warnings) != 1 || !strings.Contains(got.Warnings[0], "does not match pool architecture") {
+		t.Fatalf("warnings = %#v, want architecture mismatch warning", got.Warnings)
+	}
+}
+
 func TestBuildNMinusOneNodeOptimizationScenariosSkipsUnsupportedNodeSelector(t *testing.T) {
 	nodeInfos := []models.NodeInfo{
 		{Name: "node-0", NodePool: "userpool", VMSize: "Standard_D4s_v3", Region: "centralus", OS: "linux", Priority: "Regular", Provider: "azure", Architecture: "amd64", CPUCapacity: 4, MemGBCapacity: 8},
@@ -726,4 +806,192 @@ func TestBuildNodeOptimizationSchedulingEvidenceRejectsIncompletePoolIdentity(t 
 	if len(got.Warnings) != 1 || !strings.Contains(got.Warnings[0], "provider") {
 		t.Fatalf("warnings = %#v, want missing-provider warning", got.Warnings)
 	}
+}
+
+func TestBuildNMinusOneNodeOptimizationScenariosWithSchedulingEvidenceAllowsMatchingNoScheduleToleration(t *testing.T) {
+	nodeInfos, nodes := optimizationTaintedPool(corev1.Taint{
+		Key: "dedicated", Value: "apps", Effect: corev1.TaintEffectNoSchedule,
+	})
+
+	pod := optimizationTestPod("apps", "api", "node-0", corev1.PodRunning, "1000m", "1Gi")
+	pod.Spec.Tolerations = []corev1.Toleration{
+		{
+			Key: "dedicated", Operator: corev1.TolerationOpEqual,
+			Value: "apps", Effect: corev1.TaintEffectNoSchedule,
+		},
+	}
+
+	evidence := BuildNodeOptimizationSchedulingEvidence(nodeInfos, nodes)
+	got := BuildNMinusOneNodeOptimizationScenariosWithSchedulingEvidence(
+		nodeInfos, []corev1.Pod{pod}, evidence,
+	)
+
+	if len(got.Scenarios) != 1 {
+		t.Fatalf("scenario count = %d, want 1; warnings=%v", len(got.Scenarios), got.Warnings)
+	}
+	if got.SchedulingBlockedPodCount != 0 {
+		t.Fatalf("SchedulingBlockedPodCount = %d, want 0", got.SchedulingBlockedPodCount)
+	}
+}
+
+func TestBuildNMinusOneNodeOptimizationScenariosWithSchedulingEvidenceBlocksUntoleratedNoSchedule(t *testing.T) {
+	nodeInfos, nodes := optimizationTaintedPool(corev1.Taint{
+		Key: "dedicated", Value: "apps", Effect: corev1.TaintEffectNoSchedule,
+	})
+	pod := optimizationTestPod("apps", "api", "node-0", corev1.PodRunning, "1000m", "1Gi")
+
+	evidence := BuildNodeOptimizationSchedulingEvidence(nodeInfos, nodes)
+	got := BuildNMinusOneNodeOptimizationScenariosWithSchedulingEvidence(
+		nodeInfos, []corev1.Pod{pod}, evidence,
+	)
+
+	if len(got.Scenarios) != 0 {
+		t.Fatalf("scenario count = %d, want 0", len(got.Scenarios))
+	}
+	if got.SchedulingBlockedPodCount != 1 {
+		t.Fatalf("SchedulingBlockedPodCount = %d, want 1", got.SchedulingBlockedPodCount)
+	}
+	if got.SkippedPoolCount != 1 {
+		t.Fatalf("SkippedPoolCount = %d, want 1", got.SkippedPoolCount)
+	}
+	if len(got.Warnings) != 1 || !strings.Contains(got.Warnings[0], "does not tolerate dedicated=apps:NoSchedule") {
+		t.Fatalf("warnings = %#v, want untolerated NoSchedule warning", got.Warnings)
+	}
+}
+
+func TestBuildNMinusOneNodeOptimizationScenariosWithSchedulingEvidenceAllowsExistsToleration(t *testing.T) {
+	nodeInfos, nodes := optimizationTaintedPool(corev1.Taint{
+		Key: "dedicated", Value: "apps", Effect: corev1.TaintEffectNoSchedule,
+	})
+
+	pod := optimizationTestPod("apps", "api", "node-0", corev1.PodRunning, "1000m", "1Gi")
+	pod.Spec.Tolerations = []corev1.Toleration{
+		{
+			Operator: corev1.TolerationOpExists,
+			Effect:   corev1.TaintEffectNoSchedule,
+		},
+	}
+
+	evidence := BuildNodeOptimizationSchedulingEvidence(nodeInfos, nodes)
+	got := BuildNMinusOneNodeOptimizationScenariosWithSchedulingEvidence(
+		nodeInfos, []corev1.Pod{pod}, evidence,
+	)
+
+	if len(got.Scenarios) != 1 {
+		t.Fatalf("scenario count = %d, want 1; warnings=%v", len(got.Scenarios), got.Warnings)
+	}
+}
+
+func TestBuildNMinusOneNodeOptimizationScenariosWithSchedulingEvidenceRejectsFiniteNoExecuteToleration(t *testing.T) {
+	nodeInfos, nodes := optimizationTaintedPool(corev1.Taint{
+		Key: "dedicated", Value: "apps", Effect: corev1.TaintEffectNoExecute,
+	})
+
+	seconds := int64(300)
+	pod := optimizationTestPod("apps", "api", "node-0", corev1.PodRunning, "1000m", "1Gi")
+	pod.Spec.Tolerations = []corev1.Toleration{
+		{
+			Key: "dedicated", Operator: corev1.TolerationOpEqual,
+			Value: "apps", Effect: corev1.TaintEffectNoExecute,
+			TolerationSeconds: &seconds,
+		},
+	}
+
+	evidence := BuildNodeOptimizationSchedulingEvidence(nodeInfos, nodes)
+	got := BuildNMinusOneNodeOptimizationScenariosWithSchedulingEvidence(
+		nodeInfos, []corev1.Pod{pod}, evidence,
+	)
+
+	if len(got.Scenarios) != 0 {
+		t.Fatalf("scenario count = %d, want 0", len(got.Scenarios))
+	}
+	if got.SchedulingBlockedPodCount != 1 {
+		t.Fatalf("SchedulingBlockedPodCount = %d, want 1", got.SchedulingBlockedPodCount)
+	}
+	if len(got.Warnings) != 1 || !strings.Contains(got.Warnings[0], "not durable steady-state placement evidence") {
+		t.Fatalf("warnings = %#v, want finite NoExecute toleration warning", got.Warnings)
+	}
+}
+
+func TestBuildNMinusOneNodeOptimizationScenariosWithSchedulingEvidenceSkipsHeterogeneousHardTaints(t *testing.T) {
+	nodeInfos := optimizationNodeInfos(2)
+	nodes := []corev1.Node{
+		{
+			ObjectMeta: metav1.ObjectMeta{Name: "node-0"},
+			Spec: corev1.NodeSpec{Taints: []corev1.Taint{
+				{Key: "dedicated", Value: "apps", Effect: corev1.TaintEffectNoSchedule},
+			}},
+		},
+		{ObjectMeta: metav1.ObjectMeta{Name: "node-1"}},
+	}
+
+	pod := optimizationTestPod("apps", "api", "node-0", corev1.PodRunning, "1000m", "1Gi")
+	evidence := BuildNodeOptimizationSchedulingEvidence(nodeInfos, nodes)
+	got := BuildNMinusOneNodeOptimizationScenariosWithSchedulingEvidence(
+		nodeInfos, []corev1.Pod{pod}, evidence,
+	)
+
+	if len(got.Scenarios) != 0 {
+		t.Fatalf("scenario count = %d, want 0", len(got.Scenarios))
+	}
+	if got.SkippedPoolCount != 1 {
+		t.Fatalf("SkippedPoolCount = %d, want 1", got.SkippedPoolCount)
+	}
+	if len(got.Warnings) != 1 || !strings.Contains(got.Warnings[0], "hard taints differ across nodes") {
+		t.Fatalf("warnings = %#v, want heterogeneous hard-taint warning", got.Warnings)
+	}
+}
+
+func TestBuildNMinusOneNodeOptimizationScenariosWithSchedulingEvidenceTreatsPreferNoScheduleAsCaveat(t *testing.T) {
+	nodeInfos, nodes := optimizationTaintedPool(corev1.Taint{
+		Key: "preferred", Value: "apps", Effect: corev1.TaintEffectPreferNoSchedule,
+	})
+
+	pod := optimizationTestPod("apps", "api", "node-0", corev1.PodRunning, "1000m", "1Gi")
+	evidence := BuildNodeOptimizationSchedulingEvidence(nodeInfos, nodes)
+	got := BuildNMinusOneNodeOptimizationScenariosWithSchedulingEvidence(
+		nodeInfos, []corev1.Pod{pod}, evidence,
+	)
+
+	if len(got.Scenarios) != 1 {
+		t.Fatalf("scenario count = %d, want 1; warnings=%v", len(got.Scenarios), got.Warnings)
+	}
+	if len(got.Scenarios[0].SchedulingCaveats) != 1 ||
+		!strings.Contains(got.Scenarios[0].SchedulingCaveats[0], "PreferNoSchedule") {
+		t.Fatalf("SchedulingCaveats = %#v, want PreferNoSchedule caveat", got.Scenarios[0].SchedulingCaveats)
+	}
+}
+
+func optimizationTaintedPool(taint corev1.Taint) ([]models.NodeInfo, []corev1.Node) {
+	nodeInfos := optimizationNodeInfos(2)
+	nodes := []corev1.Node{
+		{
+			ObjectMeta: metav1.ObjectMeta{Name: "node-0"},
+			Spec:       corev1.NodeSpec{Taints: []corev1.Taint{taint}},
+		},
+		{
+			ObjectMeta: metav1.ObjectMeta{Name: "node-1"},
+			Spec:       corev1.NodeSpec{Taints: []corev1.Taint{taint}},
+		},
+	}
+	return nodeInfos, nodes
+}
+
+func optimizationNodeInfos(count int) []models.NodeInfo {
+	nodeInfos := make([]models.NodeInfo, 0, count)
+	for i := 0; i < count; i++ {
+		nodeInfos = append(nodeInfos, models.NodeInfo{
+			Name:          fmt.Sprintf("node-%d", i),
+			NodePool:      "userpool",
+			VMSize:        "Standard_D4s_v3",
+			Region:        "centralus",
+			OS:            "linux",
+			Priority:      "Regular",
+			Provider:      "azure",
+			Architecture:  "amd64",
+			CPUCapacity:   4,
+			MemGBCapacity: 8,
+		})
+	}
+	return nodeInfos
 }
