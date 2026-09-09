@@ -8,6 +8,79 @@ import (
 	corev1 "k8s.io/api/core/v1"
 )
 
+// nodeOptimizationTopologyRequirement identifies the topology dimensions a
+// future scheduling check needs. Current CPU/memory placement does not request
+// any topology dimensions and therefore remains independent of this gate.
+type nodeOptimizationTopologyRequirement struct {
+	Hostname bool
+	Zone     bool
+	Region   bool
+}
+
+// topologyEvidenceRequirementReason fails closed for the requested topology
+// dimensions without treating unrelated missing dimensions as blockers.
+func topologyEvidenceRequirementReason(
+	nodes []NodeOptimizationSchedulingNode,
+	requirement nodeOptimizationTopologyRequirement,
+) string {
+	if !requirement.Hostname && !requirement.Zone && !requirement.Region {
+		return ""
+	}
+
+	ordered := append([]NodeOptimizationSchedulingNode(nil), nodes...)
+	sort.Slice(ordered, func(i, j int) bool {
+		return ordered[i].Name < ordered[j].Name
+	})
+	if len(ordered) == 0 {
+		return "topology evidence contains no candidate nodes"
+	}
+
+	for _, node := range ordered {
+		if requirement.Hostname && !node.Topology.hasHostnameEvidence() {
+			return fmt.Sprintf("candidate node %s is missing hostname topology evidence", node.Name)
+		}
+		if requirement.Zone {
+			if node.Topology.ZoneContradictory {
+				return fmt.Sprintf("candidate node %s has contradictory zone topology evidence", node.Name)
+			}
+			if !node.Topology.hasZoneEvidence() {
+				return fmt.Sprintf("candidate node %s is missing zone topology evidence", node.Name)
+			}
+		}
+		if requirement.Region {
+			if node.Topology.RegionContradictory {
+				return fmt.Sprintf("candidate node %s has contradictory region topology evidence", node.Name)
+			}
+			if !node.Topology.hasRegionEvidence() {
+				return fmt.Sprintf("candidate node %s is missing region topology evidence", node.Name)
+			}
+		}
+	}
+
+	if requirement.Hostname {
+		hostnameNodes := make(map[string][]string, len(ordered))
+		for _, node := range ordered {
+			hostnameNodes[node.Topology.Hostname] = append(hostnameNodes[node.Topology.Hostname], node.Name)
+		}
+		hostnames := make([]string, 0, len(hostnameNodes))
+		for hostname := range hostnameNodes {
+			hostnames = append(hostnames, hostname)
+		}
+		sort.Strings(hostnames)
+		for _, hostname := range hostnames {
+			if len(hostnameNodes[hostname]) > 1 {
+				return fmt.Sprintf(
+					"hostname topology evidence %q is ambiguous across candidate nodes %s",
+					hostname,
+					strings.Join(hostnameNodes[hostname], ", "),
+				)
+			}
+		}
+	}
+
+	return ""
+}
+
 func nodeSelectorCompatibilityReason(selector map[string]string, pool CostPoolKey) string {
 	if len(selector) == 0 {
 		return ""

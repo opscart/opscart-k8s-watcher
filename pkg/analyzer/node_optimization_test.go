@@ -2243,3 +2243,267 @@ func TestInvalidNumericSimulatorInputsNeverProducePlacement(t *testing.T) {
 		}
 	}
 }
+
+func TestBuildNodeOptimizationSchedulingEvidenceExtractsStableTopology(t *testing.T) {
+	nodeInfos := optimizationNodeInfos(1)
+	nodes := []corev1.Node{{ObjectMeta: metav1.ObjectMeta{
+		Name: "node-0",
+		Labels: map[string]string{
+			corev1.LabelHostname:       "worker-a",
+			corev1.LabelTopologyZone:   "zone-a",
+			corev1.LabelTopologyRegion: "centralus",
+		},
+	}}}
+
+	got := BuildNodeOptimizationSchedulingEvidence(nodeInfos, nodes)
+	topology := got.Nodes["node-0"].Topology
+
+	if topology.Hostname != "worker-a" || topology.Zone != "zone-a" || topology.Region != "centralus" {
+		t.Fatalf("topology = %#v, want stable hostname/zone/region", topology)
+	}
+	if !topology.complete() || got.TopologyEvidenceIncomplete || len(got.TopologyWarnings) != 0 {
+		t.Fatalf("evidence = %#v, want complete topology", got)
+	}
+	if got.Nodes["node-0"].Name == topology.Hostname {
+		t.Fatalf("node Name %q and topology hostname %q unexpectedly collapsed", got.Nodes["node-0"].Name, topology.Hostname)
+	}
+}
+
+func TestBuildNodeOptimizationSchedulingEvidenceUsesDeprecatedTopologyFallback(t *testing.T) {
+	nodes := []corev1.Node{{ObjectMeta: metav1.ObjectMeta{
+		Name: "node-0",
+		Labels: map[string]string{
+			corev1.LabelHostname:                "worker-a",
+			corev1.LabelFailureDomainBetaZone:   "zone-legacy",
+			corev1.LabelFailureDomainBetaRegion: "centralus",
+		},
+	}}}
+
+	got := BuildNodeOptimizationSchedulingEvidence(optimizationNodeInfos(1), nodes)
+	topology := got.Nodes["node-0"].Topology
+
+	if topology.Zone != "zone-legacy" || topology.Region != "centralus" || !topology.complete() {
+		t.Fatalf("topology = %#v, want complete deprecated-label fallback", topology)
+	}
+	if len(got.TopologyWarnings) != 0 {
+		t.Fatalf("TopologyWarnings = %#v, want none", got.TopologyWarnings)
+	}
+}
+
+func TestBuildNodeOptimizationSchedulingEvidenceStableTopologyWinsMatchingDeprecated(t *testing.T) {
+	nodes := []corev1.Node{{ObjectMeta: metav1.ObjectMeta{
+		Name: "node-0",
+		Labels: map[string]string{
+			corev1.LabelHostname:                "worker-a",
+			corev1.LabelTopologyZone:            "zone-a",
+			corev1.LabelFailureDomainBetaZone:   "zone-a",
+			corev1.LabelTopologyRegion:          "centralus",
+			corev1.LabelFailureDomainBetaRegion: "centralus",
+		},
+	}}}
+
+	got := BuildNodeOptimizationSchedulingEvidence(optimizationNodeInfos(1), nodes)
+	topology := got.Nodes["node-0"].Topology
+
+	if topology.Zone != "zone-a" || topology.Region != "centralus" || topology.Contradictory {
+		t.Fatalf("topology = %#v, want matching stable values without contradiction", topology)
+	}
+	if got.TopologyEvidenceIncomplete || len(got.TopologyWarnings) != 0 {
+		t.Fatalf("evidence = %#v, want complete topology", got)
+	}
+}
+
+func TestBuildNodeOptimizationSchedulingEvidenceRejectsTopologyLabelConflicts(t *testing.T) {
+	tests := []struct {
+		name        string
+		stableKey   string
+		legacyKey   string
+		wantValue   string
+		wantWarning string
+	}{
+		{
+			name:      "zone",
+			stableKey: corev1.LabelTopologyZone, legacyKey: corev1.LabelFailureDomainBetaZone,
+			wantValue: "stable-zone", wantWarning: "contradictory topology zone labels",
+		},
+		{
+			name:      "region",
+			stableKey: corev1.LabelTopologyRegion, legacyKey: corev1.LabelFailureDomainBetaRegion,
+			wantValue: "centralus", wantWarning: "contradictory topology region labels",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			labels := map[string]string{
+				corev1.LabelHostname:       "worker-a",
+				corev1.LabelTopologyZone:   "zone-a",
+				corev1.LabelTopologyRegion: "centralus",
+				tt.stableKey:               tt.wantValue,
+				tt.legacyKey:               "legacy-conflict",
+			}
+			nodes := []corev1.Node{{ObjectMeta: metav1.ObjectMeta{Name: "node-0", Labels: labels}}}
+
+			got := BuildNodeOptimizationSchedulingEvidence(optimizationNodeInfos(1), nodes)
+			topology := got.Nodes["node-0"].Topology
+
+			if !topology.Contradictory || !got.TopologyContradictory || !got.TopologyEvidenceIncomplete {
+				t.Fatalf("evidence = %#v, want topology contradiction", got)
+			}
+			if (tt.name == "zone" && topology.Zone != tt.wantValue) || (tt.name == "region" && topology.Region != tt.wantValue) {
+				t.Fatalf("topology = %#v, want stable value %q preserved", topology, tt.wantValue)
+			}
+			if !strings.Contains(strings.Join(got.TopologyWarnings, " "), tt.wantWarning) {
+				t.Fatalf("TopologyWarnings = %#v, want %q", got.TopologyWarnings, tt.wantWarning)
+			}
+			requirement := nodeOptimizationTopologyRequirement{Zone: tt.name == "zone", Region: tt.name == "region"}
+			if reason := topologyEvidenceRequirementReason(schedulingNodesForPool(got, got.Nodes["node-0"].PoolKey), requirement); reason == "" {
+				t.Fatal("topology-dependent check accepted contradictory evidence")
+			}
+		})
+	}
+}
+
+func TestBuildNodeOptimizationSchedulingEvidenceReportsMissingTopologyDimensions(t *testing.T) {
+	tests := []struct {
+		name        string
+		remove      func(map[string]string)
+		wantWarning string
+	}{
+		{name: "hostname", remove: func(labels map[string]string) { delete(labels, corev1.LabelHostname) }, wantWarning: "missing topology hostname"},
+		{name: "zone", remove: func(labels map[string]string) { delete(labels, corev1.LabelTopologyZone) }, wantWarning: "missing topology zone"},
+		{name: "region", remove: func(labels map[string]string) { delete(labels, corev1.LabelTopologyRegion) }, wantWarning: "missing topology region"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			labels := map[string]string{
+				corev1.LabelHostname:       "worker-a",
+				corev1.LabelTopologyZone:   "zone-a",
+				corev1.LabelTopologyRegion: "centralus",
+			}
+			tt.remove(labels)
+			nodes := []corev1.Node{{ObjectMeta: metav1.ObjectMeta{Name: "node-0", Labels: labels}}}
+
+			got := BuildNodeOptimizationSchedulingEvidence(optimizationNodeInfos(1), nodes)
+
+			if !got.TopologyEvidenceIncomplete || got.EvidenceIncomplete {
+				t.Fatalf("evidence = %#v, want topology-only incompleteness", got)
+			}
+			if !strings.Contains(strings.Join(got.TopologyWarnings, " "), tt.wantWarning) {
+				t.Fatalf("TopologyWarnings = %#v, want %q", got.TopologyWarnings, tt.wantWarning)
+			}
+		})
+	}
+}
+
+func TestBuildNodeOptimizationSchedulingEvidenceDetectsNodeInfoRegionMismatch(t *testing.T) {
+	nodes := []corev1.Node{{ObjectMeta: metav1.ObjectMeta{
+		Name: "node-0",
+		Labels: map[string]string{
+			corev1.LabelHostname:       "worker-a",
+			corev1.LabelTopologyZone:   "zone-a",
+			corev1.LabelTopologyRegion: "eastus",
+		},
+	}}}
+
+	got := BuildNodeOptimizationSchedulingEvidence(optimizationNodeInfos(1), nodes)
+
+	if !got.Nodes["node-0"].Topology.RegionContradictory || !got.TopologyContradictory {
+		t.Fatalf("evidence = %#v, want raw Node/NodeInfo region contradiction", got)
+	}
+	if !strings.Contains(strings.Join(got.TopologyWarnings, " "), "disagrees with NodeInfo region") {
+		t.Fatalf("TopologyWarnings = %#v, want NodeInfo mismatch warning", got.TopologyWarnings)
+	}
+}
+
+func TestBuildNodeOptimizationSchedulingEvidenceTopologyIsDeterministicAcrossSnapshotOrder(t *testing.T) {
+	nodeInfos := optimizationNodeInfos(2)
+	nodes := []corev1.Node{
+		{ObjectMeta: metav1.ObjectMeta{Name: "node-0", Labels: map[string]string{
+			corev1.LabelHostname:       "worker-a",
+			corev1.LabelTopologyRegion: "centralus",
+		}}},
+		{ObjectMeta: metav1.ObjectMeta{Name: "node-1", Labels: map[string]string{
+			corev1.LabelHostname:                "worker-b",
+			corev1.LabelTopologyZone:            "stable-zone",
+			corev1.LabelFailureDomainBetaZone:   "legacy-zone",
+			corev1.LabelTopologyRegion:          "centralus",
+			corev1.LabelFailureDomainBetaRegion: "centralus",
+		}}},
+	}
+
+	forward := BuildNodeOptimizationSchedulingEvidence(nodeInfos, nodes)
+	reversed := BuildNodeOptimizationSchedulingEvidence(
+		[]models.NodeInfo{nodeInfos[1], nodeInfos[0]},
+		[]corev1.Node{nodes[1], nodes[0]},
+	)
+
+	if !reflect.DeepEqual(forward, reversed) {
+		t.Fatalf("topology evidence changed with snapshot order:\nforward=%#v\nreversed=%#v", forward, reversed)
+	}
+}
+
+func TestBuildNMinusOneNodeOptimizationScenariosAllowsMissingZoneAndRegion(t *testing.T) {
+	nodeInfos := optimizationNodeInfos(2)
+	nodes := []corev1.Node{
+		{ObjectMeta: metav1.ObjectMeta{Name: "node-0", Labels: map[string]string{corev1.LabelHostname: "worker-a"}}},
+		{ObjectMeta: metav1.ObjectMeta{Name: "node-1", Labels: map[string]string{corev1.LabelHostname: "worker-b"}}},
+	}
+	evidence := BuildNodeOptimizationSchedulingEvidence(nodeInfos, nodes)
+	pod := optimizationTestPod("apps", "api", "node-0", corev1.PodRunning, "1", "1Gi")
+
+	got := BuildNMinusOneNodeOptimizationScenariosWithSchedulingEvidence(nodeInfos, []corev1.Pod{pod}, evidence)
+
+	if !evidence.TopologyEvidenceIncomplete || evidence.EvidenceIncomplete {
+		t.Fatalf("evidence = %#v, want topology-only incompleteness", evidence)
+	}
+	if len(got.Scenarios) != 1 || !got.Scenarios[0].Simulation.PlacementFound {
+		t.Fatalf("summary = %#v, want non-topology placement to remain functional", got)
+	}
+}
+
+func TestTopologyEvidenceRequirementRefusesIncompleteScope(t *testing.T) {
+	nodes := []NodeOptimizationSchedulingNode{
+		{Name: "node-b", Topology: NodeOptimizationTopology{Hostname: "worker-b", Region: "centralus"}},
+		{Name: "node-a", Topology: NodeOptimizationTopology{Hostname: "worker-a", Region: "centralus"}},
+	}
+
+	reason := topologyEvidenceRequirementReason(nodes, nodeOptimizationTopologyRequirement{Zone: true})
+
+	if reason != "candidate node node-a is missing zone topology evidence" {
+		t.Fatalf("reason = %q, want deterministic missing-zone blocker", reason)
+	}
+}
+
+func TestBuildNodeOptimizationSchedulingEvidenceDuplicateHostnameIsDeterministicAndScoped(t *testing.T) {
+	nodeInfos := optimizationNodeInfos(2)
+	nodes := []corev1.Node{
+		{ObjectMeta: metav1.ObjectMeta{Name: "node-0", Labels: map[string]string{
+			corev1.LabelHostname: "shared-worker", corev1.LabelTopologyZone: "zone-a", corev1.LabelTopologyRegion: "centralus",
+		}}},
+		{ObjectMeta: metav1.ObjectMeta{Name: "node-1", Labels: map[string]string{
+			corev1.LabelHostname: "shared-worker", corev1.LabelTopologyZone: "zone-b", corev1.LabelTopologyRegion: "centralus",
+		}}},
+	}
+
+	forward := BuildNodeOptimizationSchedulingEvidence(nodeInfos, nodes)
+	reversed := BuildNodeOptimizationSchedulingEvidence(
+		[]models.NodeInfo{nodeInfos[1], nodeInfos[0]},
+		[]corev1.Node{nodes[1], nodes[0]},
+	)
+
+	if !reflect.DeepEqual(forward, reversed) {
+		t.Fatalf("duplicate-hostname evidence changed with snapshot order:\nforward=%#v\nreversed=%#v", forward, reversed)
+	}
+	if forward.DuplicateTopologyHostnameCount != 1 || !forward.TopologyEvidenceIncomplete || forward.EvidenceIncomplete {
+		t.Fatalf("evidence = %#v, want topology-only duplicate-hostname ambiguity", forward)
+	}
+	nodeList := schedulingNodesForPool(forward, forward.Nodes["node-0"].PoolKey)
+	if reason := topologyEvidenceRequirementReason(nodeList, nodeOptimizationTopologyRequirement{Hostname: true}); !strings.Contains(reason, "ambiguous") {
+		t.Fatalf("reason = %q, want ambiguous-hostname blocker", reason)
+	}
+	if reason := topologyEvidenceRequirementReason(nodeList, nodeOptimizationTopologyRequirement{Zone: true}); reason != "" {
+		t.Fatalf("zone-only requirement was blocked by hostname ambiguity: %q", reason)
+	}
+}
