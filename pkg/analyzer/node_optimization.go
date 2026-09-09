@@ -346,6 +346,7 @@ func buildNMinusOneNodeOptimizationScenarios(
 	type daemonSetKey struct {
 		namespace string
 		name      string
+		uid       string
 	}
 
 	type daemonSetObservation struct {
@@ -526,7 +527,24 @@ func buildNMinusOneNodeOptimizationScenarios(
 		}
 
 		if input.WorkloadKind == "DaemonSet" {
-			dsKey := daemonSetKey{namespace: input.Namespace, name: input.WorkloadName}
+			ownerUID, ok := daemonSetControllerUID(pod)
+			if !ok {
+				summary.EvidenceIncomplete = true
+				summary.Warnings = append(summary.Warnings, fmt.Sprintf(
+					"pod %s/%s identified as DaemonSet workload %s/%s but controller UID evidence is missing",
+					input.Namespace,
+					input.PodName,
+					input.Namespace,
+					input.WorkloadName,
+				))
+				continue
+			}
+
+			dsKey := daemonSetKey{
+				namespace: input.Namespace,
+				name:      input.WorkloadName,
+				uid:       ownerUID,
+			}
 			byDaemonSet := daemonSetsByPool[key]
 			if byDaemonSet == nil {
 				byDaemonSet = make(map[daemonSetKey]*daemonSetObservation)
@@ -724,7 +742,22 @@ func buildNMinusOneNodeOptimizationScenarios(
 		var daemonCPUPerNode, daemonMemPerNode int64
 		daemonSetCount := 0
 		daemonEvidenceComplete := true
-		for dsKey, obs := range daemonSetsByPool[key] {
+		daemonKeys := make([]daemonSetKey, 0, len(daemonSetsByPool[key]))
+		for dsKey := range daemonSetsByPool[key] {
+			daemonKeys = append(daemonKeys, dsKey)
+		}
+		sort.Slice(daemonKeys, func(i, j int) bool {
+			if daemonKeys[i].namespace != daemonKeys[j].namespace {
+				return daemonKeys[i].namespace < daemonKeys[j].namespace
+			}
+			if daemonKeys[i].name != daemonKeys[j].name {
+				return daemonKeys[i].name < daemonKeys[j].name
+			}
+			return daemonKeys[i].uid < daemonKeys[j].uid
+		})
+
+		for _, dsKey := range daemonKeys {
+			obs := daemonSetsByPool[key][dsKey]
 			if obs.inconsistent {
 				daemonEvidenceComplete = false
 				summary.Warnings = append(summary.Warnings, fmt.Sprintf(
@@ -807,12 +840,35 @@ func costPoolKeySortValue(key CostPoolKey) string {
 	}, "\x00")
 }
 
+func daemonSetControllerUID(pod corev1.Pod) (string, bool) {
+	for _, owner := range pod.OwnerReferences {
+		if owner.Kind != "DaemonSet" {
+			continue
+		}
+		if owner.Controller != nil && !*owner.Controller {
+			continue
+		}
+		if owner.UID == "" {
+			return "", false
+		}
+		return string(owner.UID), true
+	}
+	return "", false
+}
+
 func nodeSelectorCompatibilityReason(selector map[string]string, pool CostPoolKey) string {
 	if len(selector) == 0 {
 		return ""
 	}
 
-	for key, value := range selector {
+	keys := make([]string, 0, len(selector))
+	for key := range selector {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+
+	for _, key := range keys {
+		value := selector[key]
 		switch key {
 		case corev1.LabelOSStable, "beta.kubernetes.io/os":
 			if value != pool.OS {

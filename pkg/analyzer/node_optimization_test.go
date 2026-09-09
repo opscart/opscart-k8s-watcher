@@ -10,6 +10,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 )
 
 func TestSimulateSameShapeNodeCountFits(t *testing.T) {
@@ -538,6 +539,7 @@ func optimizationTestDaemonSetPod(namespace, name, nodeName, cpu, memory string)
 			APIVersion: "apps/v1",
 			Kind:       "DaemonSet",
 			Name:       "node-agent",
+			UID:        types.UID("node-agent-uid"),
 			Controller: &controller,
 		},
 	}
@@ -1376,5 +1378,102 @@ func TestBuildNMinusOneNodeOptimizationScenariosWithSchedulingEvidenceNoExecuteU
 				t.Fatalf("SchedulingBlockedPodCount = %d, want 0", got.SchedulingBlockedPodCount)
 			}
 		})
+	}
+}
+
+func TestBuildNMinusOneNodeOptimizationScenariosSameNameDifferentUIDDaemonSetsDoNotCollapse(t *testing.T) {
+	nodeInfos := optimizationNodeInfos(2)
+
+	controller := true
+	oldUID := types.UID("old-daemonset-uid")
+	newUID := types.UID("new-daemonset-uid")
+
+	oldPod := optimizationTestPod("apps", "agent-old", "node-0", corev1.PodRunning, "100m", "128Mi")
+	oldPod.OwnerReferences = []metav1.OwnerReference{{
+		APIVersion: "apps/v1",
+		Kind:       "DaemonSet",
+		Name:       "agent",
+		UID:        oldUID,
+		Controller: &controller,
+	}}
+
+	newPod := optimizationTestPod("apps", "agent-new", "node-1", corev1.PodRunning, "100m", "128Mi")
+	newPod.OwnerReferences = []metav1.OwnerReference{{
+		APIVersion: "apps/v1",
+		Kind:       "DaemonSet",
+		Name:       "agent",
+		UID:        newUID,
+		Controller: &controller,
+	}}
+
+	got := BuildNMinusOneNodeOptimizationScenariosFromSnapshots(
+		nodeInfos,
+		[]corev1.Pod{oldPod, newPod},
+	)
+
+	if len(got.Scenarios) != 0 {
+		t.Fatalf("scenario count = %d, want 0", len(got.Scenarios))
+	}
+	if got.SkippedPoolCount != 1 {
+		t.Fatalf("SkippedPoolCount = %d, want 1", got.SkippedPoolCount)
+	}
+
+	joined := strings.Join(got.Warnings, " ")
+	if !strings.Contains(joined, "observed on 1 of 2 distinct nodes") {
+		t.Fatalf("warnings = %#v, want partial DaemonSet generation evidence", got.Warnings)
+	}
+}
+
+func TestNodeSelectorWarningDeterministicAcrossMapInsertionOrder(t *testing.T) {
+	pool := CostPoolKey{
+		OS:           "linux",
+		Architecture: "amd64",
+	}
+
+	first := map[string]string{}
+	first["z-custom"] = "one"
+	first["a-custom"] = "two"
+
+	second := map[string]string{}
+	second["a-custom"] = "two"
+	second["z-custom"] = "one"
+
+	gotA := nodeSelectorCompatibilityReason(first, pool)
+	gotB := nodeSelectorCompatibilityReason(second, pool)
+
+	if gotA != gotB {
+		t.Fatalf("warning differs by map insertion order: %q != %q", gotA, gotB)
+	}
+	if !strings.Contains(gotA, "a-custom") {
+		t.Fatalf("warning = %q, want lexically first unsupported selector key", gotA)
+	}
+}
+
+func TestBuildNMinusOneNodeOptimizationScenariosWarningsDeterministicAcrossDaemonSetPodOrder(t *testing.T) {
+	nodeInfos := optimizationNodeInfos(2)
+	controller := true
+
+	makeDaemonPod := func(name, node, uid string) corev1.Pod {
+		pod := optimizationTestPod("apps", name, node, corev1.PodRunning, "100m", "128Mi")
+		pod.OwnerReferences = []metav1.OwnerReference{{
+			APIVersion: "apps/v1",
+			Kind:       "DaemonSet",
+			Name:       name,
+			UID:        types.UID(uid),
+			Controller: &controller,
+		}}
+		return pod
+	}
+
+	pods := []corev1.Pod{
+		makeDaemonPod("z-agent", "node-0", "uid-z"),
+		makeDaemonPod("a-agent", "node-0", "uid-a"),
+	}
+
+	gotA := BuildNMinusOneNodeOptimizationScenariosFromSnapshots(nodeInfos, pods)
+	gotB := BuildNMinusOneNodeOptimizationScenariosFromSnapshots(nodeInfos, []corev1.Pod{pods[1], pods[0]})
+
+	if !reflect.DeepEqual(gotA.Warnings, gotB.Warnings) {
+		t.Fatalf("warnings differ by Pod order:\nA=%#v\nB=%#v", gotA.Warnings, gotB.Warnings)
 	}
 }
