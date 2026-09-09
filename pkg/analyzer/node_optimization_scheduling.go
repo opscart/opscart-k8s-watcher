@@ -652,7 +652,7 @@ func hasRequiredNodeAffinity(pod corev1.Pod) bool {
 		pod.Spec.Affinity.NodeAffinity.RequiredDuringSchedulingIgnoredDuringExecution != nil
 }
 
-func unsupportedPodSchedulingConstraintReason(pod corev1.Pod) string {
+func unsupportedPodSchedulingConstraintReason(pod corev1.Pod, storageEvidenceAvailable bool) string {
 	if schedulerName := strings.TrimSpace(pod.Spec.SchedulerName); schedulerName != "" && schedulerName != corev1.DefaultSchedulerName {
 		return fmt.Sprintf("custom scheduler %q is not modeled yet", schedulerName)
 	}
@@ -681,9 +681,19 @@ func unsupportedPodSchedulingConstraintReason(pod corev1.Pod) string {
 			}
 		}
 	}
+	return unsupportedPodStorageSchedulingReason(pod, storageEvidenceAvailable)
+}
+
+func unsupportedPodStorageSchedulingReason(pod corev1.Pod, storageEvidenceAvailable bool) string {
 	for _, volume := range pod.Spec.Volumes {
-		if volume.PersistentVolumeClaim != nil {
-			return "persistent volume topology is not modeled yet"
+		if volume.PersistentVolumeClaim != nil && !storageEvidenceAvailable {
+			return "persistent volume topology is not modeled without PVC/PV storage evidence"
+		}
+		if volume.CSI != nil {
+			return "inline CSI volume scheduling and topology are not modeled yet"
+		}
+		if volume.Ephemeral != nil {
+			return "generic ephemeral volume scheduling and topology are not modeled yet"
 		}
 	}
 	return ""

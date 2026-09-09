@@ -162,7 +162,7 @@ func BuildNMinusOneNodeOptimizationScenariosFromSnapshots(
 	nodeInfos []models.NodeInfo,
 	pods []corev1.Pod,
 ) NodeOptimizationSnapshotSummary {
-	return buildNMinusOneNodeOptimizationScenarios(nodeInfos, pods, nil)
+	return buildNMinusOneNodeOptimizationScenarios(nodeInfos, pods, nil, nil)
 }
 
 // BuildNMinusOneNodeOptimizationScenariosWithSchedulingEvidence adds
@@ -173,13 +173,26 @@ func BuildNMinusOneNodeOptimizationScenariosWithSchedulingEvidence(
 	pods []corev1.Pod,
 	evidence NodeOptimizationSchedulingEvidence,
 ) NodeOptimizationSnapshotSummary {
-	return buildNMinusOneNodeOptimizationScenarios(nodeInfos, pods, &evidence)
+	return buildNMinusOneNodeOptimizationScenarios(nodeInfos, pods, &evidence, nil)
+}
+
+// BuildNMinusOneNodeOptimizationScenariosWithSchedulingAndStorageEvidence adds
+// caller-acquired PVC/PV binding and topology evidence to scheduling-aware N-1
+// simulation. It performs no Kubernetes, CSI, or cloud API calls.
+func BuildNMinusOneNodeOptimizationScenariosWithSchedulingAndStorageEvidence(
+	nodeInfos []models.NodeInfo,
+	pods []corev1.Pod,
+	schedulingEvidence NodeOptimizationSchedulingEvidence,
+	storageEvidence NodeOptimizationStorageEvidence,
+) NodeOptimizationSnapshotSummary {
+	return buildNMinusOneNodeOptimizationScenarios(nodeInfos, pods, &schedulingEvidence, &storageEvidence)
 }
 
 func buildNMinusOneNodeOptimizationScenarios(
 	nodeInfos []models.NodeInfo,
 	pods []corev1.Pod,
 	evidence *NodeOptimizationSchedulingEvidence,
+	storageEvidence *NodeOptimizationStorageEvidence,
 ) NodeOptimizationSnapshotSummary {
 	type poolSnapshot struct {
 		key       CostPoolKey
@@ -307,6 +320,7 @@ func buildNMinusOneNodeOptimizationScenarios(
 	requiredInterPodAffinityPresent := false
 
 	podNameCounts := make(map[string]int, len(pods))
+	persistentVolumeClaimPodCounts := make(map[string]int)
 	for _, pod := range pods {
 		podNameCounts[namespacedKey(pod.Namespace, pod.Name)]++
 	}
@@ -334,6 +348,11 @@ func buildNMinusOneNodeOptimizationScenarios(
 		if eligibility, _, _ := ClassifyPodCostEligibility(pod, knownNodes); eligibility == PodCostExcluded {
 			summary.ExcludedPodCount++
 			continue
+		}
+		if claimNames, reason := podPersistentVolumeClaimNames(pod); reason == "" {
+			for _, claimName := range claimNames {
+				persistentVolumeClaimPodCounts[namespacedKey(pod.Namespace, claimName)]++
+			}
 		}
 		if hasRequiredPodAffinity(pod) || hasRequiredPodAntiAffinity(pod) {
 			requiredInterPodAffinityPresent = true
@@ -433,7 +452,7 @@ func buildNMinusOneNodeOptimizationScenarios(
 		}
 
 		if input.WorkloadKind != "DaemonSet" {
-			if reason := unsupportedPodSchedulingConstraintReason(pod); reason != "" {
+			if reason := unsupportedPodSchedulingConstraintReason(pod, storageEvidence != nil); reason != "" {
 				summary.UnsupportedConstraintPodCount++
 				unsupportedConstraintsByPool[key] = append(unsupportedConstraintsByPool[key], fmt.Sprintf(
 					"pod %s/%s: %s",
@@ -443,14 +462,35 @@ func buildNMinusOneNodeOptimizationScenarios(
 				))
 				continue
 			}
-		} else if hasHardTopologySpreadConstraints(pod) {
-			summary.UnsupportedConstraintPodCount++
-			unsupportedConstraintsByPool[key] = append(unsupportedConstraintsByPool[key], fmt.Sprintf(
-				"DaemonSet pod %s/%s: hard topology spread is not modeled for per-node overhead",
-				input.Namespace,
-				input.PodName,
-			))
-			continue
+		} else {
+			if podReferencesPersistentVolumeClaim(pod) {
+				summary.UnsupportedConstraintPodCount++
+				unsupportedConstraintsByPool[key] = append(unsupportedConstraintsByPool[key], fmt.Sprintf(
+					"DaemonSet pod %s/%s: PVC-backed DaemonSet storage placement is not modeled",
+					input.Namespace,
+					input.PodName,
+				))
+				continue
+			}
+			if reason := unsupportedPodStorageSchedulingReason(pod, true); reason != "" {
+				summary.UnsupportedConstraintPodCount++
+				unsupportedConstraintsByPool[key] = append(unsupportedConstraintsByPool[key], fmt.Sprintf(
+					"DaemonSet pod %s/%s: %s",
+					input.Namespace,
+					input.PodName,
+					reason,
+				))
+				continue
+			}
+			if hasHardTopologySpreadConstraints(pod) {
+				summary.UnsupportedConstraintPodCount++
+				unsupportedConstraintsByPool[key] = append(unsupportedConstraintsByPool[key], fmt.Sprintf(
+					"DaemonSet pod %s/%s: hard topology spread is not modeled for per-node overhead",
+					input.Namespace,
+					input.PodName,
+				))
+				continue
+			}
 		}
 
 		if evidence == nil && input.WorkloadKind != "DaemonSet" {
@@ -535,6 +575,10 @@ func buildNMinusOneNodeOptimizationScenarios(
 			summary.Warnings = append(summary.Warnings, evidence.Warnings...)
 		}
 	}
+	if storageEvidence != nil && storageEvidence.EvidenceIncomplete {
+		summary.EvidenceIncomplete = true
+		summary.Warnings = append(summary.Warnings, storageEvidence.Warnings...)
+	}
 	if unsupportedRequiredInterPodAffinity {
 		for _, key := range keys {
 			if pools[key].nodeCount >= 2 {
@@ -603,6 +647,20 @@ func buildNMinusOneNodeOptimizationScenarios(
 					unsupported = append(unsupported, fmt.Sprintf("pod %s/%s: %s", pod.Namespace, pod.Name, reason))
 					continue
 				}
+				storageEligible, hasPersistentStorage, storageReason := podStorageEligibleNodeNames(
+					pod,
+					nodes,
+					storageEvidence,
+					persistentVolumeClaimPodCounts,
+				)
+				if storageReason != "" {
+					summary.UnsupportedConstraintPodCount++
+					unsupported = append(unsupported, fmt.Sprintf("pod %s/%s: %s", pod.Namespace, pod.Name, storageReason))
+					continue
+				}
+				if hasPersistentStorage {
+					eligible = intersectSortedNodeNames(eligible, storageEligible)
+				}
 				scenarioPods[i].EligibleNodeNames = eligible
 				if len(eligible) == 0 {
 					summary.SchedulingBlockedPodCount++
@@ -668,6 +726,15 @@ func buildNMinusOneNodeOptimizationScenarios(
 			}
 		} else {
 			for i, pod := range movablePodsByPool[key] {
+				if podReferencesPersistentVolumeClaim(pod) {
+					summary.UnsupportedConstraintPodCount++
+					unsupportedConstraintsByPool[key] = append(unsupportedConstraintsByPool[key], fmt.Sprintf(
+						"pod %s/%s: persistent volume topology requires scheduling Node and PVC/PV storage evidence",
+						pod.Namespace,
+						pod.Name,
+					))
+					continue
+				}
 				if hasHardTopologySpreadConstraints(pod) {
 					summary.UnsupportedConstraintPodCount++
 					unsupportedConstraintsByPool[key] = append(unsupportedConstraintsByPool[key], fmt.Sprintf(

@@ -10,6 +10,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 )
 
 func TestSimulateSameShapeNodeCountAllCandidateEligibilityPreservesPlacement(t *testing.T) {
@@ -1142,6 +1143,26 @@ func TestBuildNMinusOneNodeOptimizationScenariosFailsClosedOnDeferredSchedulingC
 				}}
 			},
 			wantReason: "persistent volume topology",
+		},
+		{
+			name: "inline CSI volume",
+			configure: func(pod *corev1.Pod) {
+				pod.Spec.Volumes = []corev1.Volume{{
+					Name:         "data",
+					VolumeSource: corev1.VolumeSource{CSI: &corev1.CSIVolumeSource{Driver: "storage.example.csi"}},
+				}}
+			},
+			wantReason: "inline CSI volume scheduling",
+		},
+		{
+			name: "generic ephemeral volume",
+			configure: func(pod *corev1.Pod) {
+				pod.Spec.Volumes = []corev1.Volume{{
+					Name:         "scratch",
+					VolumeSource: corev1.VolumeSource{Ephemeral: &corev1.EphemeralVolumeSource{}},
+				}}
+			},
+			wantReason: "generic ephemeral volume scheduling",
 		},
 		{
 			name: "extended resource request",
@@ -2906,5 +2927,697 @@ func TestBuildNMinusOneNodeOptimizationScenariosWithoutPodAntiAffinityPreservesP
 
 	if len(got.Scenarios) != 1 || !got.Scenarios[0].Simulation.PlacementFound || got.Scenarios[0].Simulation.Status != NodeOptimizationFit {
 		t.Fatalf("summary = %#v, want unchanged placement without Pod anti-affinity", got)
+	}
+}
+
+func pvcBackedOptimizationTestPod(namespace, name, nodeName, claimName string) corev1.Pod {
+	pod := optimizationTestPod(namespace, name, nodeName, corev1.PodRunning, "500m", "256Mi")
+	pod.Spec.Volumes = []corev1.Volume{{
+		Name: "data",
+		VolumeSource: corev1.VolumeSource{PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
+			ClaimName: claimName,
+		}},
+	}}
+	return pod
+}
+
+func boundOptimizationTestVolume(
+	namespace, claimName, volumeName string,
+	nodeAffinity *corev1.VolumeNodeAffinity,
+) (corev1.PersistentVolumeClaim, corev1.PersistentVolume) {
+	uid := "uid-" + namespace + "-" + claimName
+	claim := corev1.PersistentVolumeClaim{
+		ObjectMeta: metav1.ObjectMeta{Namespace: namespace, Name: claimName, UID: types.UID(uid)},
+		Spec: corev1.PersistentVolumeClaimSpec{
+			VolumeName:  volumeName,
+			AccessModes: []corev1.PersistentVolumeAccessMode{corev1.ReadWriteMany},
+		},
+		Status: corev1.PersistentVolumeClaimStatus{Phase: corev1.ClaimBound},
+	}
+	volume := corev1.PersistentVolume{
+		ObjectMeta: metav1.ObjectMeta{Name: volumeName},
+		Spec: corev1.PersistentVolumeSpec{
+			PersistentVolumeSource: corev1.PersistentVolumeSource{NFS: &corev1.NFSVolumeSource{
+				Server: "storage.internal", Path: "/" + volumeName,
+			}},
+			AccessModes:  []corev1.PersistentVolumeAccessMode{corev1.ReadWriteMany},
+			ClaimRef:     &corev1.ObjectReference{Namespace: namespace, Name: claimName, UID: types.UID(uid)},
+			NodeAffinity: nodeAffinity,
+		},
+		Status: corev1.PersistentVolumeStatus{Phase: corev1.VolumeBound},
+	}
+	return claim, volume
+}
+
+func optimizationTestVolumeNodeAffinity(
+	key string,
+	operator corev1.NodeSelectorOperator,
+	values ...string,
+) *corev1.VolumeNodeAffinity {
+	return &corev1.VolumeNodeAffinity{Required: &corev1.NodeSelector{NodeSelectorTerms: []corev1.NodeSelectorTerm{{
+		MatchExpressions: []corev1.NodeSelectorRequirement{{Key: key, Operator: operator, Values: values}},
+	}}}}
+}
+
+func buildStorageAwareOptimizationScenarios(
+	nodeInfos []models.NodeInfo,
+	nodes []corev1.Node,
+	pods []corev1.Pod,
+	claims []corev1.PersistentVolumeClaim,
+	volumes []corev1.PersistentVolume,
+) NodeOptimizationSnapshotSummary {
+	return BuildNMinusOneNodeOptimizationScenariosWithSchedulingAndStorageEvidence(
+		nodeInfos,
+		pods,
+		BuildNodeOptimizationSchedulingEvidence(nodeInfos, nodes),
+		BuildNodeOptimizationStorageEvidence(claims, volumes),
+	)
+}
+
+func TestBuildNMinusOneNodeOptimizationScenariosStorageLegacyAndUnconstrained(t *testing.T) {
+	info0, node0 := topologySpreadTestNode("node-0", "userpool", "worker-0", "zone-a", "centralus")
+	info1, node1 := topologySpreadTestNode("node-1", "userpool", "worker-1", "zone-a", "centralus")
+	nodeInfos := []models.NodeInfo{info0, info1}
+	nodes := []corev1.Node{node0, node1}
+
+	t.Run("Pod without PVC preserves legacy behavior", func(t *testing.T) {
+		pod := optimizationTestPod("apps", "api", "node-0", corev1.PodRunning, "500m", "256Mi")
+		got := buildStorageAwareOptimizationScenarios(nodeInfos, nodes, []corev1.Pod{pod}, nil, nil)
+
+		if len(got.Scenarios) != 1 || !got.Scenarios[0].Simulation.PlacementFound {
+			t.Fatalf("summary = %#v, want unchanged non-storage placement", got)
+		}
+	})
+
+	t.Run("Bound PVC with unconstrained PV preserves candidate eligibility", func(t *testing.T) {
+		pod := pvcBackedOptimizationTestPod("apps", "api", "node-0", "data")
+		claim, volume := boundOptimizationTestVolume("apps", "data", "pv-data", nil)
+		got := buildStorageAwareOptimizationScenarios(nodeInfos, nodes, []corev1.Pod{pod}, []corev1.PersistentVolumeClaim{claim}, []corev1.PersistentVolume{volume})
+
+		if len(got.Scenarios) != 1 || !got.Scenarios[0].Simulation.PlacementFound {
+			t.Fatalf("summary = %#v, want portable bound PV placement", got)
+		}
+		if placements := got.Scenarios[0].Simulation.Placements; len(placements) != 1 || placements[0].NodeName != "node-1" {
+			t.Fatalf("placements = %#v, want reassignment to retained node-1", placements)
+		}
+	})
+}
+
+func TestPodStorageEligibleNodeNamesSupportsPVNodeAffinity(t *testing.T) {
+	poolKey := CostPoolKey{Provider: "azure", PoolName: "userpool", InstanceType: "Standard_D4s_v3", CapacityType: "Regular", Region: "centralus", OS: "linux", Architecture: "amd64"}
+	nodes := []NodeOptimizationSchedulingNode{
+		{Name: "node-0", PoolKey: poolKey, Labels: map[string]string{corev1.LabelHostname: "worker-0", corev1.LabelTopologyZone: "zone-a", corev1.LabelTopologyRegion: "centralus", "storage.example/tier": "slow"}, Topology: NodeOptimizationTopology{Hostname: "worker-0", Zone: "zone-a", Region: "centralus"}},
+		{Name: "node-1", PoolKey: poolKey, Labels: map[string]string{corev1.LabelHostname: "worker-1", corev1.LabelTopologyZone: "zone-a", corev1.LabelTopologyRegion: "centralus", "storage.example/tier": "fast"}, Topology: NodeOptimizationTopology{Hostname: "worker-1", Zone: "zone-a", Region: "centralus"}},
+		{Name: "node-2", PoolKey: poolKey, Labels: map[string]string{corev1.LabelHostname: "worker-2", corev1.LabelTopologyZone: "zone-b", corev1.LabelTopologyRegion: "eastus", "storage.example/tier": "fast"}, Topology: NodeOptimizationTopology{Hostname: "worker-2", Zone: "zone-b", Region: "eastus"}},
+	}
+	tests := []struct {
+		name      string
+		key       string
+		value     string
+		wantNodes []string
+	}{
+		{name: "hostname", key: corev1.LabelHostname, value: "worker-1", wantNodes: []string{"node-1"}},
+		{name: "zone", key: corev1.LabelTopologyZone, value: "zone-a", wantNodes: []string{"node-0", "node-1"}},
+		{name: "region", key: corev1.LabelTopologyRegion, value: "centralus", wantNodes: []string{"node-0", "node-1"}},
+		{name: "arbitrary label", key: "storage.example/tier", value: "fast", wantNodes: []string{"node-1", "node-2"}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			pod := pvcBackedOptimizationTestPod("apps", "api", "node-0", "data")
+			pod.Spec.NodeName = tt.wantNodes[0]
+			claim, volume := boundOptimizationTestVolume("apps", "data", "pv-data", optimizationTestVolumeNodeAffinity(tt.key, corev1.NodeSelectorOpIn, tt.value))
+			evidence := BuildNodeOptimizationStorageEvidence([]corev1.PersistentVolumeClaim{claim}, []corev1.PersistentVolume{volume})
+
+			got, hasStorage, reason := podStorageEligibleNodeNames(pod, nodes, &evidence, nil)
+
+			if reason != "" || !hasStorage || !reflect.DeepEqual(got, tt.wantNodes) {
+				t.Fatalf("eligible = %#v, hasStorage=%t, reason=%q, want %#v", got, hasStorage, reason, tt.wantNodes)
+			}
+		})
+	}
+}
+
+func TestPodStorageEligibleNodeNamesIntersectsMultiplePVCs(t *testing.T) {
+	info0, node0 := topologySpreadTestNode("node-0", "userpool", "worker-0", "zone-a", "centralus")
+	info1, node1 := topologySpreadTestNode("node-1", "userpool", "worker-1", "zone-a", "centralus")
+	info2, node2 := topologySpreadTestNode("node-2", "userpool", "worker-2", "zone-b", "centralus")
+	node0.Labels["storage.example/tier"] = "slow"
+	node1.Labels["storage.example/tier"] = "fast"
+	node2.Labels["storage.example/tier"] = "fast"
+	nodeInfos := []models.NodeInfo{info0, info1, info2}
+	scheduling := BuildNodeOptimizationSchedulingEvidence(nodeInfos, []corev1.Node{node0, node1, node2})
+	nodes := schedulingNodesForPool(scheduling, costPoolKeyFromNodeInfo(info0))
+	pod := pvcBackedOptimizationTestPod("apps", "api", "node-1", "zone-data")
+	pod.Spec.Volumes = append(pod.Spec.Volumes, corev1.Volume{
+		Name: "fast-data",
+		VolumeSource: corev1.VolumeSource{PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
+			ClaimName: "fast-data",
+		}},
+	})
+	zoneClaim, zoneVolume := boundOptimizationTestVolume("apps", "zone-data", "pv-zone", optimizationTestVolumeNodeAffinity(corev1.LabelTopologyZone, corev1.NodeSelectorOpIn, "zone-a"))
+	fastClaim, fastVolume := boundOptimizationTestVolume("apps", "fast-data", "pv-fast", optimizationTestVolumeNodeAffinity("storage.example/tier", corev1.NodeSelectorOpIn, "fast"))
+
+	t.Run("common candidate remains eligible", func(t *testing.T) {
+		evidence := BuildNodeOptimizationStorageEvidence(
+			[]corev1.PersistentVolumeClaim{zoneClaim, fastClaim},
+			[]corev1.PersistentVolume{zoneVolume, fastVolume},
+		)
+		got, hasStorage, reason := podStorageEligibleNodeNames(pod, nodes, &evidence, nil)
+		if reason != "" || !hasStorage || !reflect.DeepEqual(got, []string{"node-1"}) {
+			t.Fatalf("eligible = %#v, hasStorage=%t, reason=%q, want node-1", got, hasStorage, reason)
+		}
+	})
+
+	t.Run("conflicting PV constraints produce empty eligibility", func(t *testing.T) {
+		fastVolume.Spec.NodeAffinity = optimizationTestVolumeNodeAffinity(corev1.LabelTopologyZone, corev1.NodeSelectorOpIn, "zone-b")
+		evidence := BuildNodeOptimizationStorageEvidence(
+			[]corev1.PersistentVolumeClaim{zoneClaim, fastClaim},
+			[]corev1.PersistentVolume{zoneVolume, fastVolume},
+		)
+		got, hasStorage, reason := podStorageEligibleNodeNames(pod, nodes, &evidence, nil)
+		if reason != "" || !hasStorage || got == nil || len(got) != 0 {
+			t.Fatalf("eligible = %#v, hasStorage=%t, reason=%q, want explicit empty set", got, hasStorage, reason)
+		}
+	})
+}
+
+func TestBuildNMinusOneNodeOptimizationScenariosStorageEvidenceFailsClosed(t *testing.T) {
+	info0, node0 := topologySpreadTestNode("node-0", "userpool", "worker-0", "zone-a", "centralus")
+	info1, node1 := topologySpreadTestNode("node-1", "userpool", "worker-1", "zone-b", "centralus")
+	nodeInfos := []models.NodeInfo{info0, info1}
+	nodes := []corev1.Node{node0, node1}
+
+	tests := []struct {
+		name        string
+		build       func() (corev1.Pod, []corev1.PersistentVolumeClaim, []corev1.PersistentVolume)
+		wantWarning string
+	}{
+		{
+			name: "missing PVC",
+			build: func() (corev1.Pod, []corev1.PersistentVolumeClaim, []corev1.PersistentVolume) {
+				return pvcBackedOptimizationTestPod("apps", "api", "node-0", "missing"), nil, nil
+			},
+			wantWarning: "missing PersistentVolumeClaim apps/missing",
+		},
+		{
+			name: "unbound PVC",
+			build: func() (corev1.Pod, []corev1.PersistentVolumeClaim, []corev1.PersistentVolume) {
+				pod := pvcBackedOptimizationTestPod("apps", "api", "node-0", "data")
+				claim, _ := boundOptimizationTestVolume("apps", "data", "pv-data", nil)
+				claim.Status.Phase = corev1.ClaimPending
+				claim.Spec.VolumeName = ""
+				return pod, []corev1.PersistentVolumeClaim{claim}, nil
+			},
+			wantWarning: "not Bound; late binding is not modeled",
+		},
+		{
+			name: "Bound PVC without volumeName",
+			build: func() (corev1.Pod, []corev1.PersistentVolumeClaim, []corev1.PersistentVolume) {
+				pod := pvcBackedOptimizationTestPod("apps", "api", "node-0", "data")
+				claim, _ := boundOptimizationTestVolume("apps", "data", "pv-data", nil)
+				claim.Spec.VolumeName = ""
+				return pod, []corev1.PersistentVolumeClaim{claim}, nil
+			},
+			wantWarning: "has no spec.volumeName",
+		},
+		{
+			name: "missing PV",
+			build: func() (corev1.Pod, []corev1.PersistentVolumeClaim, []corev1.PersistentVolume) {
+				pod := pvcBackedOptimizationTestPod("apps", "api", "node-0", "data")
+				claim, _ := boundOptimizationTestVolume("apps", "data", "pv-missing", nil)
+				return pod, []corev1.PersistentVolumeClaim{claim}, nil
+			},
+			wantWarning: "missing PersistentVolume \"pv-missing\"",
+		},
+		{
+			name: "inconsistent PVC PV binding",
+			build: func() (corev1.Pod, []corev1.PersistentVolumeClaim, []corev1.PersistentVolume) {
+				pod := pvcBackedOptimizationTestPod("apps", "api", "node-0", "data")
+				claim, volume := boundOptimizationTestVolume("apps", "data", "pv-data", nil)
+				volume.Spec.ClaimRef.Name = "other"
+				return pod, []corev1.PersistentVolumeClaim{claim}, []corev1.PersistentVolume{volume}
+			},
+			wantWarning: "does not match PersistentVolumeClaim apps/data",
+		},
+		{
+			name: "malformed PV node affinity",
+			build: func() (corev1.Pod, []corev1.PersistentVolumeClaim, []corev1.PersistentVolume) {
+				pod := pvcBackedOptimizationTestPod("apps", "api", "node-0", "data")
+				claim, volume := boundOptimizationTestVolume("apps", "data", "pv-data", optimizationTestVolumeNodeAffinity(corev1.LabelTopologyZone, corev1.NodeSelectorOpIn))
+				return pod, []corev1.PersistentVolumeClaim{claim}, []corev1.PersistentVolume{volume}
+			},
+			wantWarning: "invalid or unsupported",
+		},
+		{
+			name: "unsupported PV affinity operator",
+			build: func() (corev1.Pod, []corev1.PersistentVolumeClaim, []corev1.PersistentVolume) {
+				pod := pvcBackedOptimizationTestPod("apps", "api", "node-0", "data")
+				claim, volume := boundOptimizationTestVolume("apps", "data", "pv-data", optimizationTestVolumeNodeAffinity(corev1.LabelTopologyZone, corev1.NodeSelectorOperator("Invalid"), "zone-a"))
+				return pod, []corev1.PersistentVolumeClaim{claim}, []corev1.PersistentVolume{volume}
+			},
+			wantWarning: "unsupported node selector operator",
+		},
+		{
+			name: "PV affinity matchFields",
+			build: func() (corev1.Pod, []corev1.PersistentVolumeClaim, []corev1.PersistentVolume) {
+				pod := pvcBackedOptimizationTestPod("apps", "api", "node-0", "data")
+				affinity := &corev1.VolumeNodeAffinity{Required: &corev1.NodeSelector{NodeSelectorTerms: []corev1.NodeSelectorTerm{{
+					MatchFields: []corev1.NodeSelectorRequirement{{Key: "metadata.name", Operator: corev1.NodeSelectorOpIn, Values: []string{"node-0"}}},
+				}}}}
+				claim, volume := boundOptimizationTestVolume("apps", "data", "pv-data", affinity)
+				return pod, []corev1.PersistentVolumeClaim{claim}, []corev1.PersistentVolume{volume}
+			},
+			wantWarning: "uses matchFields, which is not modeled",
+		},
+		{
+			name: "ReadWriteOncePod",
+			build: func() (corev1.Pod, []corev1.PersistentVolumeClaim, []corev1.PersistentVolume) {
+				pod := pvcBackedOptimizationTestPod("apps", "api", "node-0", "data")
+				claim, volume := boundOptimizationTestVolume("apps", "data", "pv-data", nil)
+				claim.Spec.AccessModes = []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOncePod}
+				volume.Spec.AccessModes = []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOncePod}
+				return pod, []corev1.PersistentVolumeClaim{claim}, []corev1.PersistentVolume{volume}
+			},
+			wantWarning: "ReadWriteOncePod",
+		},
+		{
+			name: "CSI PersistentVolume",
+			build: func() (corev1.Pod, []corev1.PersistentVolumeClaim, []corev1.PersistentVolume) {
+				pod := pvcBackedOptimizationTestPod("apps", "api", "node-0", "data")
+				claim, volume := boundOptimizationTestVolume("apps", "data", "pv-data", optimizationTestVolumeNodeAffinity(corev1.LabelTopologyZone, corev1.NodeSelectorOpIn, "zone-a"))
+				volume.Spec.PersistentVolumeSource = corev1.PersistentVolumeSource{CSI: &corev1.CSIPersistentVolumeSource{Driver: "storage.example.csi", VolumeHandle: "volume-1"}}
+				return pod, []corev1.PersistentVolumeClaim{claim}, []corev1.PersistentVolume{volume}
+			},
+			wantWarning: "CSI attachment limits and driver-specific scheduling constraints are not modeled",
+		},
+		{
+			name: "unsupported attachable PersistentVolume source",
+			build: func() (corev1.Pod, []corev1.PersistentVolumeClaim, []corev1.PersistentVolume) {
+				pod := pvcBackedOptimizationTestPod("apps", "api", "node-0", "data")
+				claim, volume := boundOptimizationTestVolume("apps", "data", "pv-data", optimizationTestVolumeNodeAffinity(corev1.LabelTopologyZone, corev1.NodeSelectorOpIn, "zone-a"))
+				volume.Spec.PersistentVolumeSource = corev1.PersistentVolumeSource{AzureDisk: &corev1.AzureDiskVolumeSource{DataDiskURI: "disk://example"}}
+				return pod, []corev1.PersistentVolumeClaim{claim}, []corev1.PersistentVolume{volume}
+			},
+			wantWarning: "attachment and driver-specific scheduling constraints are not modeled",
+		},
+		{
+			name: "local PV without node affinity",
+			build: func() (corev1.Pod, []corev1.PersistentVolumeClaim, []corev1.PersistentVolume) {
+				pod := pvcBackedOptimizationTestPod("apps", "api", "node-0", "data")
+				claim, volume := boundOptimizationTestVolume("apps", "data", "pv-data", nil)
+				volume.Spec.PersistentVolumeSource = corev1.PersistentVolumeSource{Local: &corev1.LocalVolumeSource{Path: "/data"}}
+				return pod, []corev1.PersistentVolumeClaim{claim}, []corev1.PersistentVolume{volume}
+			},
+			wantWarning: "cannot be treated as portable",
+		},
+		{
+			name: "observed node contradicts PV node affinity",
+			build: func() (corev1.Pod, []corev1.PersistentVolumeClaim, []corev1.PersistentVolume) {
+				pod := pvcBackedOptimizationTestPod("apps", "api", "node-0", "data")
+				claim, volume := boundOptimizationTestVolume("apps", "data", "pv-data", optimizationTestVolumeNodeAffinity(corev1.LabelHostname, corev1.NodeSelectorOpIn, "worker-1"))
+				return pod, []corev1.PersistentVolumeClaim{claim}, []corev1.PersistentVolume{volume}
+			},
+			wantWarning: "observed on node node-0, which does not satisfy its PersistentVolume node-affinity intersection",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			pod, claims, volumes := tt.build()
+			got := buildStorageAwareOptimizationScenarios(nodeInfos, nodes, []corev1.Pod{pod}, claims, volumes)
+
+			for _, scenario := range got.Scenarios {
+				if scenario.Simulation.PlacementFound {
+					t.Fatalf("summary = %#v, unsupported/incomplete storage produced positive placement", got)
+				}
+			}
+			if !strings.Contains(strings.Join(got.Warnings, " "), tt.wantWarning) {
+				t.Fatalf("warnings = %#v, want %q", got.Warnings, tt.wantWarning)
+			}
+		})
+	}
+}
+
+func TestSharedReadWriteOncePVCFailsClosed(t *testing.T) {
+	info0, node0 := topologySpreadTestNode("node-0", "userpool", "worker-0", "zone-a", "centralus")
+	info1, node1 := topologySpreadTestNode("node-1", "userpool", "worker-1", "zone-a", "centralus")
+	info2, node2 := topologySpreadTestNode("node-2", "userpool", "worker-2", "zone-b", "centralus")
+	nodeInfos := []models.NodeInfo{info0, info1, info2}
+	nodes := []corev1.Node{node0, node1, node2}
+	pod0 := pvcBackedOptimizationTestPod("apps", "api-0", "node-0", "data")
+	pod1 := pvcBackedOptimizationTestPod("apps", "api-1", "node-1", "data")
+	claim, volume := boundOptimizationTestVolume("apps", "data", "pv-data", nil)
+	claim.Spec.AccessModes = []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce}
+	volume.Spec.AccessModes = []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce}
+
+	got := buildStorageAwareOptimizationScenarios(
+		nodeInfos,
+		nodes,
+		[]corev1.Pod{pod0, pod1},
+		[]corev1.PersistentVolumeClaim{claim},
+		[]corev1.PersistentVolume{volume},
+	)
+
+	for _, scenario := range got.Scenarios {
+		if scenario.Simulation.PlacementFound {
+			t.Fatalf("summary = %#v, shared ReadWriteOnce PVC produced positive placement", got)
+		}
+	}
+	if !strings.Contains(strings.Join(got.Warnings, " "), "shared multi-attach placement is not modeled") {
+		t.Fatalf("warnings = %#v, want explicit shared ReadWriteOnce blocker", got.Warnings)
+	}
+}
+
+func TestBuildNodeOptimizationStorageEvidenceRejectsDuplicateIdentitiesDeterministically(t *testing.T) {
+	claimA, volumeA := boundOptimizationTestVolume("apps", "data", "pv-data", nil)
+	claimB := *claimA.DeepCopy()
+	volumeB := *volumeA.DeepCopy()
+
+	forward := BuildNodeOptimizationStorageEvidence(
+		[]corev1.PersistentVolumeClaim{claimA, claimB},
+		[]corev1.PersistentVolume{volumeA, volumeB},
+	)
+	reversed := BuildNodeOptimizationStorageEvidence(
+		[]corev1.PersistentVolumeClaim{claimB, claimA},
+		[]corev1.PersistentVolume{volumeB, volumeA},
+	)
+
+	if !reflect.DeepEqual(forward, reversed) {
+		t.Fatalf("storage evidence changed with snapshot order:\nforward=%#v\nreversed=%#v", forward, reversed)
+	}
+	if !forward.EvidenceIncomplete || forward.DuplicatePersistentVolumeClaimCount != 1 || forward.DuplicatePersistentVolumeCount != 1 {
+		t.Fatalf("evidence = %#v, want deterministic duplicate PVC and PV rejection", forward)
+	}
+
+	info0, node0 := topologySpreadTestNode("node-0", "userpool", "worker-0", "zone-a", "centralus")
+	info1, node1 := topologySpreadTestNode("node-1", "userpool", "worker-1", "zone-b", "centralus")
+	pod := pvcBackedOptimizationTestPod("apps", "api", "node-0", "data")
+	summary := BuildNMinusOneNodeOptimizationScenariosWithSchedulingAndStorageEvidence(
+		[]models.NodeInfo{info0, info1},
+		[]corev1.Pod{pod},
+		BuildNodeOptimizationSchedulingEvidence([]models.NodeInfo{info0, info1}, []corev1.Node{node0, node1}),
+		forward,
+	)
+	if len(summary.Scenarios) != 0 || !summary.EvidenceIncomplete {
+		t.Fatalf("summary = %#v, want duplicate referenced storage snapshot to fail closed", summary)
+	}
+}
+
+func TestPersistentVolumeTopologyEvidenceFailsClosed(t *testing.T) {
+	selector := optimizationTestVolumeNodeAffinity(corev1.LabelTopologyZone, corev1.NodeSelectorOpIn, "zone-a")
+	tests := []struct {
+		name        string
+		makeNodes   func() ([]models.NodeInfo, []corev1.Node)
+		wantWarning string
+	}{
+		{
+			name: "missing zone",
+			makeNodes: func() ([]models.NodeInfo, []corev1.Node) {
+				infos := optimizationNodeInfos(2)
+				return infos, []corev1.Node{
+					{ObjectMeta: metav1.ObjectMeta{Name: "node-0", Labels: map[string]string{corev1.LabelHostname: "worker-0"}}},
+					{ObjectMeta: metav1.ObjectMeta{Name: "node-1", Labels: map[string]string{corev1.LabelHostname: "worker-1"}}},
+				}
+			},
+			wantWarning: "missing zone topology evidence",
+		},
+		{
+			name: "contradictory zone",
+			makeNodes: func() ([]models.NodeInfo, []corev1.Node) {
+				infos := optimizationNodeInfos(2)
+				nodes := []corev1.Node{
+					{ObjectMeta: metav1.ObjectMeta{Name: "node-0", Labels: map[string]string{corev1.LabelHostname: "worker-0", corev1.LabelTopologyZone: "zone-a", corev1.LabelFailureDomainBetaZone: "zone-b"}}},
+					{ObjectMeta: metav1.ObjectMeta{Name: "node-1", Labels: map[string]string{corev1.LabelHostname: "worker-1", corev1.LabelTopologyZone: "zone-a", corev1.LabelFailureDomainBetaZone: "zone-b"}}},
+				}
+				return infos, nodes
+			},
+			wantWarning: "contradictory zone topology evidence",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			nodeInfos, nodes := tt.makeNodes()
+			pod := pvcBackedOptimizationTestPod("apps", "api", "node-0", "data")
+			claim, volume := boundOptimizationTestVolume("apps", "data", "pv-data", selector)
+
+			got := buildStorageAwareOptimizationScenarios(nodeInfos, nodes, []corev1.Pod{pod}, []corev1.PersistentVolumeClaim{claim}, []corev1.PersistentVolume{volume})
+
+			for _, scenario := range got.Scenarios {
+				if scenario.Simulation.PlacementFound {
+					t.Fatalf("summary = %#v, incomplete PV topology evidence produced positive placement", got)
+				}
+			}
+			if !strings.Contains(strings.Join(got.Warnings, " "), tt.wantWarning) {
+				t.Fatalf("warnings = %#v, want %q", got.Warnings, tt.wantWarning)
+			}
+		})
+	}
+}
+
+func TestBuildNMinusOneNodeOptimizationScenariosLocalPVsBlockTheirNodeRemoval(t *testing.T) {
+	info0, node0 := topologySpreadTestNode("node-0", "userpool", "worker-0", "zone-a", "centralus")
+	info1, node1 := topologySpreadTestNode("node-1", "userpool", "worker-1", "zone-a", "centralus")
+	nodeInfos := []models.NodeInfo{info0, info1}
+	nodes := []corev1.Node{node0, node1}
+	pod0 := pvcBackedOptimizationTestPod("apps", "stateful-0", "node-0", "data-0")
+	pod1 := pvcBackedOptimizationTestPod("apps", "stateful-1", "node-1", "data-1")
+	claim0, volume0 := boundOptimizationTestVolume("apps", "data-0", "pv-data-0", optimizationTestVolumeNodeAffinity(corev1.LabelHostname, corev1.NodeSelectorOpIn, "worker-0"))
+	claim1, volume1 := boundOptimizationTestVolume("apps", "data-1", "pv-data-1", optimizationTestVolumeNodeAffinity(corev1.LabelHostname, corev1.NodeSelectorOpIn, "worker-1"))
+	volume0.Spec.PersistentVolumeSource = corev1.PersistentVolumeSource{Local: &corev1.LocalVolumeSource{Path: "/data/0"}}
+	volume1.Spec.PersistentVolumeSource = corev1.PersistentVolumeSource{Local: &corev1.LocalVolumeSource{Path: "/data/1"}}
+
+	got := buildStorageAwareOptimizationScenarios(
+		nodeInfos,
+		nodes,
+		[]corev1.Pod{pod0, pod1},
+		[]corev1.PersistentVolumeClaim{claim0, claim1},
+		[]corev1.PersistentVolume{volume0, volume1},
+	)
+
+	if len(got.Scenarios) != 1 || got.Scenarios[0].Simulation.PlacementFound {
+		t.Fatalf("summary = %#v, want every node removal blocked by its local PV", got)
+	}
+	if got.Scenarios[0].Simulation.Status != NodeOptimizationBlockedEligibility {
+		t.Fatalf("simulation = %#v, want explicit empty storage eligibility after removal", got.Scenarios[0].Simulation)
+	}
+}
+
+func TestNMinusOnePVCBackedPodFromRemovedNodeGetsStorageValidDestination(t *testing.T) {
+	info0, node0 := topologySpreadTestNode("node-0", "userpool", "worker-0", "zone-a", "centralus")
+	info1, node1 := topologySpreadTestNode("node-1", "userpool", "worker-1", "zone-a", "centralus")
+	info2, node2 := topologySpreadTestNode("node-2", "userpool", "worker-2", "zone-b", "centralus")
+	nodeInfos := []models.NodeInfo{info0, info1, info2}
+	nodes := []corev1.Node{node0, node1, node2}
+	pod := pvcBackedOptimizationTestPod("apps", "stateful", "node-0", "data")
+	claim, volume := boundOptimizationTestVolume("apps", "data", "pv-data", optimizationTestVolumeNodeAffinity(corev1.LabelTopologyZone, corev1.NodeSelectorOpIn, "zone-a"))
+
+	got := buildStorageAwareOptimizationScenarios(nodeInfos, nodes, []corev1.Pod{pod}, []corev1.PersistentVolumeClaim{claim}, []corev1.PersistentVolume{volume})
+
+	if len(got.Scenarios) != 1 || got.Scenarios[0].RemovedNodeName != "node-0" || !got.Scenarios[0].Simulation.PlacementFound {
+		t.Fatalf("summary = %#v, want portable PVC-backed Pod evacuated from node-0", got)
+	}
+	simulation := got.Scenarios[0].Simulation
+	if simulation.TotalCPURequestMilli != 500 || simulation.TotalMemoryRequestBytes != 256*1024*1024 {
+		t.Fatalf("totals = CPU %dm memory %d, want PVC-backed Pod demand retained", simulation.TotalCPURequestMilli, simulation.TotalMemoryRequestBytes)
+	}
+	if len(simulation.Placements) != 1 || simulation.Placements[0].PodName != "stateful" || simulation.Placements[0].NodeName != "node-1" {
+		t.Fatalf("placements = %#v, want exactly one zone-a destination on node-1", simulation.Placements)
+	}
+}
+
+func TestPersistentVolumeNodeAffinitySupportsStandardOperators(t *testing.T) {
+	node := NodeOptimizationSchedulingNode{
+		Name: "node-0",
+		Labels: map[string]string{
+			"storage.example/tier":       "fast",
+			"storage.example/generation": "3",
+		},
+	}
+	tests := []struct {
+		name       string
+		expression corev1.NodeSelectorRequirement
+	}{
+		{name: "In", expression: corev1.NodeSelectorRequirement{Key: "storage.example/tier", Operator: corev1.NodeSelectorOpIn, Values: []string{"fast"}}},
+		{name: "NotIn", expression: corev1.NodeSelectorRequirement{Key: "storage.example/tier", Operator: corev1.NodeSelectorOpNotIn, Values: []string{"slow"}}},
+		{name: "Exists", expression: corev1.NodeSelectorRequirement{Key: "storage.example/tier", Operator: corev1.NodeSelectorOpExists}},
+		{name: "DoesNotExist", expression: corev1.NodeSelectorRequirement{Key: "storage.example/absent", Operator: corev1.NodeSelectorOpDoesNotExist}},
+		{name: "Gt", expression: corev1.NodeSelectorRequirement{Key: "storage.example/generation", Operator: corev1.NodeSelectorOpGt, Values: []string{"2"}}},
+		{name: "Lt", expression: corev1.NodeSelectorRequirement{Key: "storage.example/generation", Operator: corev1.NodeSelectorOpLt, Values: []string{"4"}}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			terms := []corev1.NodeSelectorTerm{{MatchExpressions: []corev1.NodeSelectorRequirement{tt.expression}}}
+			if reason := persistentVolumeNodeAffinityUnsupportedReason("pv-data", terms); reason != "" {
+				t.Fatalf("reason = %q, want supported operator", reason)
+			}
+			if !nodeMatchesPersistentVolumeNodeAffinity(node.Labels, terms) {
+				t.Fatalf("expression %#v did not match node labels %#v", tt.expression, node.Labels)
+			}
+		})
+	}
+}
+
+func TestStorageEligibilityIntersectsNodeAffinityAndTaints(t *testing.T) {
+	info0, node0 := topologySpreadTestNode("node-0", "userpool", "worker-0", "zone-a", "centralus")
+	info1, node1 := topologySpreadTestNode("node-1", "userpool", "worker-1", "zone-a", "centralus")
+	info2, node2 := topologySpreadTestNode("node-2", "userpool", "worker-2", "zone-b", "centralus")
+	node0.Labels["storage.example/tier"] = "slow"
+	node1.Labels["storage.example/tier"] = "fast"
+	node2.Labels["storage.example/tier"] = "fast"
+	node1.Spec.Taints = []corev1.Taint{{Key: "dedicated", Value: "storage", Effect: corev1.TaintEffectNoSchedule}}
+	nodeInfos := []models.NodeInfo{info0, info1, info2}
+	nodes := []corev1.Node{node0, node1, node2}
+
+	t.Run("required node affinity intersection", func(t *testing.T) {
+		pod := pvcBackedOptimizationTestPod("apps", "api", "node-0", "data")
+		pod.Spec.Affinity = optimizationRequiredNodeAffinity(corev1.NodeSelectorRequirement{
+			Key: "storage.example/tier", Operator: corev1.NodeSelectorOpIn, Values: []string{"fast"},
+		})
+		pod.Spec.Tolerations = []corev1.Toleration{{Key: "dedicated", Value: "storage", Effect: corev1.TaintEffectNoSchedule}}
+		claim, volume := boundOptimizationTestVolume("apps", "data", "pv-data", optimizationTestVolumeNodeAffinity(corev1.LabelTopologyZone, corev1.NodeSelectorOpIn, "zone-a"))
+
+		got := buildStorageAwareOptimizationScenarios(nodeInfos, nodes, []corev1.Pod{pod}, []corev1.PersistentVolumeClaim{claim}, []corev1.PersistentVolume{volume})
+
+		if len(got.Scenarios) != 1 || !got.Scenarios[0].Simulation.PlacementFound || got.Scenarios[0].Simulation.Placements[0].NodeName != "node-1" {
+			t.Fatalf("summary = %#v, want node-affinity/storage intersection on node-1", got)
+		}
+	})
+
+	t.Run("taint toleration intersection", func(t *testing.T) {
+		pod := pvcBackedOptimizationTestPod("apps", "api", "node-1", "data")
+		pod.Spec.Tolerations = []corev1.Toleration{{Key: "dedicated", Value: "storage", Effect: corev1.TaintEffectNoSchedule}}
+		claim, volume := boundOptimizationTestVolume("apps", "data", "pv-data", optimizationTestVolumeNodeAffinity(corev1.LabelHostname, corev1.NodeSelectorOpIn, "worker-1"))
+
+		got := buildStorageAwareOptimizationScenarios(nodeInfos, nodes, []corev1.Pod{pod}, []corev1.PersistentVolumeClaim{claim}, []corev1.PersistentVolume{volume})
+
+		if len(got.Scenarios) != 1 || !got.Scenarios[0].Simulation.PlacementFound || got.Scenarios[0].Simulation.Placements[0].NodeName != "node-1" {
+			t.Fatalf("summary = %#v, want tolerated storage destination node-1", got)
+		}
+	})
+}
+
+func TestStorageEligibilityCombinesWithPodAntiAffinity(t *testing.T) {
+	info0, node0 := topologySpreadTestNode("node-0", "userpool", "worker-0", "zone-a", "centralus")
+	info1, node1 := topologySpreadTestNode("node-1", "userpool", "worker-1", "zone-a", "centralus")
+	info2, node2 := topologySpreadTestNode("node-2", "userpool", "worker-2", "zone-b", "centralus")
+	info3, node3 := topologySpreadTestNode("node-3", "guardpool", "worker-3", "zone-a", "centralus")
+	nodeInfos := []models.NodeInfo{info0, info1, info2, info3}
+	nodes := []corev1.Node{node0, node1, node2, node3}
+	pod := pvcBackedOptimizationTestPod("apps", "api", "node-0", "data")
+	pod.Spec.Affinity = &corev1.Affinity{PodAntiAffinity: &corev1.PodAntiAffinity{
+		RequiredDuringSchedulingIgnoredDuringExecution: []corev1.PodAffinityTerm{{
+			LabelSelector: &metav1.LabelSelector{MatchLabels: map[string]string{"app": "guard"}},
+			TopologyKey:   corev1.LabelTopologyZone,
+		}},
+	}}
+	guard := optimizationTestPod("apps", "guard", "node-3", corev1.PodRunning, "500m", "256Mi")
+	guard.Labels = map[string]string{"app": "guard"}
+	claim, volume := boundOptimizationTestVolume("apps", "data", "pv-data", optimizationTestVolumeNodeAffinity(corev1.LabelTopologyZone, corev1.NodeSelectorOpIn, "zone-a"))
+
+	got := buildStorageAwareOptimizationScenarios(nodeInfos, nodes, []corev1.Pod{pod, guard}, []corev1.PersistentVolumeClaim{claim}, []corev1.PersistentVolume{volume})
+
+	if len(got.Scenarios) != 1 || got.Scenarios[0].Simulation.PlacementFound {
+		t.Fatalf("summary = %#v, want anti-affinity to reject every storage-eligible zone-a node", got)
+	}
+}
+
+func TestStorageEligibilityCombinesWithHardTopologySpread(t *testing.T) {
+	info0, node0 := topologySpreadTestNode("node-0", "userpool", "worker-0", "zone-a", "centralus")
+	info1, node1 := topologySpreadTestNode("node-1", "userpool", "worker-1", "zone-a", "centralus")
+	info2, node2 := topologySpreadTestNode("node-2", "userpool", "worker-2", "zone-b", "centralus")
+	info3, node3 := topologySpreadTestNode("node-3", "fixedpool", "worker-3", "zone-a", "centralus")
+	nodeInfos := []models.NodeInfo{info0, info1, info2, info3}
+	nodes := []corev1.Node{node0, node1, node2, node3}
+	pod := pvcBackedOptimizationTestPod("apps", "web", "node-0", "data")
+	pod.Labels = map[string]string{"app": "web"}
+	pod.Spec.TopologySpreadConstraints = []corev1.TopologySpreadConstraint{{
+		MaxSkew:           1,
+		TopologyKey:       corev1.LabelTopologyZone,
+		WhenUnsatisfiable: corev1.DoNotSchedule,
+		LabelSelector:     &metav1.LabelSelector{MatchLabels: map[string]string{"app": "web"}},
+	}}
+	fixed := optimizationTestPod("apps", "fixed-web", "node-3", corev1.PodRunning, "500m", "256Mi")
+	fixed.Labels = map[string]string{"app": "web"}
+	claim, volume := boundOptimizationTestVolume("apps", "data", "pv-data", optimizationTestVolumeNodeAffinity(corev1.LabelTopologyZone, corev1.NodeSelectorOpIn, "zone-a"))
+
+	got := buildStorageAwareOptimizationScenarios(nodeInfos, nodes, []corev1.Pod{pod, fixed}, []corev1.PersistentVolumeClaim{claim}, []corev1.PersistentVolume{volume})
+
+	if len(got.Scenarios) != 1 || !got.Scenarios[0].Simulation.PlacementFound || got.Scenarios[0].RemovedNodeName != "node-2" {
+		t.Fatalf("summary = %#v, want node-0/node-1 removals rejected and deterministic node-2 removal", got)
+	}
+	if placement := got.Scenarios[0].Simulation.Placements[0]; placement.NodeName != "node-0" {
+		t.Fatalf("placement = %#v, want retained zone-a storage destination", placement)
+	}
+}
+
+func TestStorageAwareNodeOptimizationIsDeterministicAcrossSnapshotOrder(t *testing.T) {
+	info0, node0 := topologySpreadTestNode("node-0", "userpool", "worker-0", "zone-a", "centralus")
+	info1, node1 := topologySpreadTestNode("node-1", "userpool", "worker-1", "zone-a", "centralus")
+	info2, node2 := topologySpreadTestNode("node-2", "userpool", "worker-2", "zone-b", "centralus")
+	nodeInfos := []models.NodeInfo{info0, info1, info2}
+	nodes := []corev1.Node{node0, node1, node2}
+	podA := pvcBackedOptimizationTestPod("apps", "stateful-a", "node-0", "data-a")
+	podB := pvcBackedOptimizationTestPod("apps", "stateful-b", "node-2", "data-b")
+	claimA, volumeA := boundOptimizationTestVolume("apps", "data-a", "pv-data-a", optimizationTestVolumeNodeAffinity(corev1.LabelTopologyZone, corev1.NodeSelectorOpIn, "zone-a"))
+	claimB, volumeB := boundOptimizationTestVolume("apps", "data-b", "pv-data-b", nil)
+	pods := []corev1.Pod{podA, podB}
+	claims := []corev1.PersistentVolumeClaim{claimA, claimB}
+	volumes := []corev1.PersistentVolume{volumeA, volumeB}
+
+	forward := buildStorageAwareOptimizationScenarios(nodeInfos, nodes, pods, claims, volumes)
+	reversed := buildStorageAwareOptimizationScenarios(
+		[]models.NodeInfo{nodeInfos[2], nodeInfos[1], nodeInfos[0]},
+		[]corev1.Node{nodes[2], nodes[1], nodes[0]},
+		[]corev1.Pod{pods[1], pods[0]},
+		[]corev1.PersistentVolumeClaim{claims[1], claims[0]},
+		[]corev1.PersistentVolume{volumes[1], volumes[0]},
+	)
+
+	if !reflect.DeepEqual(forward, reversed) {
+		t.Fatalf("storage-aware result changed with snapshot order:\nforward=%#v\nreversed=%#v", forward, reversed)
+	}
+	if len(forward.Scenarios) != 1 || !forward.Scenarios[0].Simulation.PlacementFound || forward.Scenarios[0].RemovedNodeName != "node-0" {
+		t.Fatalf("summary = %#v, want deterministic node-0 removal", forward)
+	}
+	placements := forward.Scenarios[0].Simulation.Placements
+	if len(placements) != 2 {
+		t.Fatalf("placements = %#v, want every movable PVC-backed Pod assigned exactly once", placements)
+	}
+	seen := make(map[string]string, len(placements))
+	for _, placement := range placements {
+		if _, duplicate := seen[placement.PodName]; duplicate {
+			t.Fatalf("placements = %#v, duplicate assignment for %s", placements, placement.PodName)
+		}
+		seen[placement.PodName] = placement.NodeName
+	}
+	if seen["stateful-a"] != "node-1" || seen["stateful-b"] == "" || seen["stateful-b"] == "node-0" {
+		t.Fatalf("placements = %#v, want one storage-valid retained destination per Pod", placements)
+	}
+}
+
+func TestPVCBackedDaemonSetFailsClosed(t *testing.T) {
+	info0, node0 := topologySpreadTestNode("node-0", "userpool", "worker-0", "zone-a", "centralus")
+	info1, node1 := topologySpreadTestNode("node-1", "userpool", "worker-1", "zone-a", "centralus")
+	nodeInfos := []models.NodeInfo{info0, info1}
+	nodes := []corev1.Node{node0, node1}
+	daemon0 := optimizationTestDaemonSetPod("system", "agent-0", "node-0", "100m", "64Mi")
+	daemon1 := optimizationTestDaemonSetPod("system", "agent-1", "node-1", "100m", "64Mi")
+	for _, daemon := range []*corev1.Pod{&daemon0, &daemon1} {
+		daemon.Spec.Volumes = []corev1.Volume{{
+			Name: "data",
+			VolumeSource: corev1.VolumeSource{PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
+				ClaimName: "data",
+			}},
+		}}
+	}
+	claim, volume := boundOptimizationTestVolume("system", "data", "pv-data", nil)
+
+	got := buildStorageAwareOptimizationScenarios(nodeInfos, nodes, []corev1.Pod{daemon0, daemon1}, []corev1.PersistentVolumeClaim{claim}, []corev1.PersistentVolume{volume})
+
+	if len(got.Scenarios) != 0 || !strings.Contains(strings.Join(got.Warnings, " "), "PVC-backed DaemonSet storage placement is not modeled") {
+		t.Fatalf("summary = %#v, want PVC-backed DaemonSet fail closed", got)
 	}
 }
