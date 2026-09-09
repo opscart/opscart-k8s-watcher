@@ -601,3 +601,129 @@ func TestBuildNMinusOneNodeOptimizationScenariosSkipsHostnameNodeSelector(t *tes
 		t.Fatalf("warnings = %#v, want hostname selector warning", got.Warnings)
 	}
 }
+
+func TestBuildNodeOptimizationSchedulingEvidenceJoinsAndCopiesNodeSnapshot(t *testing.T) {
+	nodeInfos := []models.NodeInfo{
+		{
+			Name: "node-0", NodePool: "userpool", VMSize: "Standard_D4s_v3",
+			Region: "centralus", OS: "linux", Priority: "Regular",
+			Provider: "azure", Architecture: "amd64",
+		},
+	}
+	nodes := []corev1.Node{
+		{
+			ObjectMeta: metav1.ObjectMeta{
+				Name: "node-0",
+				Labels: map[string]string{
+					corev1.LabelOSStable: "linux",
+					"workload":           "general",
+				},
+			},
+			Spec: corev1.NodeSpec{
+				Taints: []corev1.Taint{
+					{
+						Key:    "dedicated",
+						Value:  "apps",
+						Effect: corev1.TaintEffectNoSchedule,
+					},
+				},
+			},
+		},
+	}
+
+	got := BuildNodeOptimizationSchedulingEvidence(nodeInfos, nodes)
+
+	if got.UnresolvedNodeCount != 0 {
+		t.Fatalf("UnresolvedNodeCount = %d, want 0; warnings=%v", got.UnresolvedNodeCount, got.Warnings)
+	}
+	if got.UnmatchedSchedulingNodeCount != 0 {
+		t.Fatalf("UnmatchedSchedulingNodeCount = %d, want 0", got.UnmatchedSchedulingNodeCount)
+	}
+	if len(got.Nodes) != 1 {
+		t.Fatalf("node evidence count = %d, want 1", len(got.Nodes))
+	}
+
+	evidence := got.Nodes["node-0"]
+	if evidence.PoolKey.PoolName != "userpool" || evidence.PoolKey.Architecture != "amd64" {
+		t.Fatalf("PoolKey = %#v, want userpool/amd64", evidence.PoolKey)
+	}
+	if evidence.Labels["workload"] != "general" {
+		t.Fatalf("labels = %#v, want workload=general", evidence.Labels)
+	}
+	if len(evidence.Taints) != 1 || evidence.Taints[0].Key != "dedicated" {
+		t.Fatalf("taints = %#v, want dedicated taint", evidence.Taints)
+	}
+
+	nodes[0].Labels["workload"] = "mutated"
+	nodes[0].Spec.Taints[0].Value = "mutated"
+	if evidence.Labels["workload"] != "general" {
+		t.Fatalf("evidence labels changed after source mutation: %#v", evidence.Labels)
+	}
+	if evidence.Taints[0].Value != "apps" {
+		t.Fatalf("evidence taints changed after source mutation: %#v", evidence.Taints)
+	}
+}
+
+func TestBuildNodeOptimizationSchedulingEvidenceReportsSnapshotMismatch(t *testing.T) {
+	nodeInfos := []models.NodeInfo{
+		{
+			Name: "node-present", NodePool: "userpool", VMSize: "Standard_D4s_v3",
+			Region: "centralus", OS: "linux", Priority: "Regular",
+			Provider: "azure", Architecture: "amd64",
+		},
+		{
+			Name: "node-missing", NodePool: "userpool", VMSize: "Standard_D4s_v3",
+			Region: "centralus", OS: "linux", Priority: "Regular",
+			Provider: "azure", Architecture: "amd64",
+		},
+	}
+	nodes := []corev1.Node{
+		{ObjectMeta: metav1.ObjectMeta{Name: "node-present"}},
+		{ObjectMeta: metav1.ObjectMeta{Name: "node-extra"}},
+	}
+
+	got := BuildNodeOptimizationSchedulingEvidence(nodeInfos, nodes)
+
+	if len(got.Nodes) != 1 {
+		t.Fatalf("node evidence count = %d, want 1", len(got.Nodes))
+	}
+	if got.UnresolvedNodeCount != 1 {
+		t.Fatalf("UnresolvedNodeCount = %d, want 1", got.UnresolvedNodeCount)
+	}
+	if got.UnmatchedSchedulingNodeCount != 1 {
+		t.Fatalf("UnmatchedSchedulingNodeCount = %d, want 1", got.UnmatchedSchedulingNodeCount)
+	}
+	if len(got.Warnings) != 2 {
+		t.Fatalf("warnings = %#v, want 2 snapshot mismatch warnings", got.Warnings)
+	}
+
+	joined := strings.Join(got.Warnings, "\n")
+	if !strings.Contains(joined, "node-missing") || !strings.Contains(joined, "node-extra") {
+		t.Fatalf("warnings = %#v, want both missing and extra node names", got.Warnings)
+	}
+}
+
+func TestBuildNodeOptimizationSchedulingEvidenceRejectsIncompletePoolIdentity(t *testing.T) {
+	nodeInfos := []models.NodeInfo{
+		{
+			Name: "node-0", NodePool: "userpool", VMSize: "Standard_D4s_v3",
+			Region: "centralus", OS: "linux", Priority: "Regular",
+			Provider: "", Architecture: "amd64",
+		},
+	}
+	nodes := []corev1.Node{
+		{ObjectMeta: metav1.ObjectMeta{Name: "node-0"}},
+	}
+
+	got := BuildNodeOptimizationSchedulingEvidence(nodeInfos, nodes)
+
+	if len(got.Nodes) != 0 {
+		t.Fatalf("node evidence count = %d, want 0", len(got.Nodes))
+	}
+	if got.UnresolvedNodeCount != 1 {
+		t.Fatalf("UnresolvedNodeCount = %d, want 1", got.UnresolvedNodeCount)
+	}
+	if len(got.Warnings) != 1 || !strings.Contains(got.Warnings[0], "provider") {
+		t.Fatalf("warnings = %#v, want missing-provider warning", got.Warnings)
+	}
+}
