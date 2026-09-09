@@ -278,12 +278,21 @@
       <div class="posture-copy">current findings</div>
       <div class="posture-state">Review findings →</div>
     </a>
+    {{if .NodeOptimizationAvailable}}
+    <a class="posture-card node-optimization-card" href="{{.OptHref}}">
+      <div class="posture-name">Node Optimization</div>
+      <div class="posture-value">Available</div>
+      <div class="posture-copy">Read-only consolidation simulation</div>
+      <div class="posture-state">Open simulation →</div>
+    </a>
+    {{else}}
     <article class="posture-card posture-card-muted node-optimization-card">
       <div class="posture-name">Node Optimization</div>
       <div class="posture-value">In development</div>
       <div class="posture-copy">Simulation foundation exists; the dashboard workflow is not yet available.</div>
       <div class="posture-state">No operator action yet</div>
     </article>
+    {{end}}
   </div>
 </section>
 

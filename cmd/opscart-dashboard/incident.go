@@ -105,7 +105,7 @@ func (srv *server) handleIncidentsPage(w http.ResponseWriter, r *http.Request) {
 		SettingsHref:    "/settings" + clusterQ,
 		ActivePage:      "incidents",
 		NsHref:          "/namespaces" + clusterQ,
-		OptHref:         "/optimizations" + clusterQ,
+		OptHref:         "/node-optimization" + clusterQ,
 		ClusterName:     displayName(ctx),
 		ClusterParam:    ctx,
 		CriticalCount:   countCriticalIssues(scan),

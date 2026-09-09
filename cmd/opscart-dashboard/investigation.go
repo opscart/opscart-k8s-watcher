@@ -917,7 +917,7 @@ func (srv *server) handleInvestigationPage(w http.ResponseWriter, r *http.Reques
 		DiagnosticsHref: "/settings/diagnostics" + q,
 		SettingsHref:    "/settings" + q,
 		NsHref:          "/namespaces" + q,
-		OptHref:         "/optimizations" + q,
+		OptHref:         "/node-optimization" + q,
 		ActivePage:      activePage,
 		ClusterName:     displayName(ctx),
 		CriticalCount:   countCriticalIssues(scan),

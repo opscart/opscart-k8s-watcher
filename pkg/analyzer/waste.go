@@ -28,6 +28,11 @@ type WasteAuditor struct {
 	minAgeDays      int
 	podSnapshot     []corev1.Pod
 	podsByNamespace map[string][]corev1.Pod
+
+	// pvcSnapshot is the PersistentVolumeClaim list most recently retrieved
+	// by detectOrphanedPVCs under a cluster-wide (empty-namespace) AuditWaste
+	// call. See PVCSnapshot.
+	pvcSnapshot []corev1.PersistentVolumeClaim
 }
 
 type WasteAudit struct {
@@ -255,6 +260,15 @@ func (w *WasteAuditor) WithPodSnapshot(pods []corev1.Pod, clusterWide bool) *Was
 		w.podsByNamespace[pod.Namespace] = append(w.podsByNamespace[pod.Namespace], pod)
 	}
 	return w
+}
+
+// PVCSnapshot returns a copy of the cluster-wide PersistentVolumeClaim
+// snapshot most recently retrieved by AuditWaste (via detectOrphanedPVCs),
+// so other scan-pipeline consumers (e.g. Node Optimization storage evidence)
+// can reuse it instead of listing PersistentVolumeClaims again. It is nil
+// until AuditWaste has run with a cluster-wide (empty) namespace filter.
+func (w *WasteAuditor) PVCSnapshot() []corev1.PersistentVolumeClaim {
+	return append([]corev1.PersistentVolumeClaim(nil), w.pvcSnapshot...)
 }
 
 func (w *WasteAuditor) sharedPods(filterNamespace string) ([]corev1.Pod, bool) {
@@ -783,6 +797,9 @@ func (w *WasteAuditor) detectOrphanedPVCs(audit *WasteAudit, filterNamespace str
 	pvcs, err := w.clientset.CoreV1().PersistentVolumeClaims(filterNamespace).List(w.ctx, metav1.ListOptions{TimeoutSeconds: int64Ptr(10)})
 	if err != nil {
 		return err
+	}
+	if filterNamespace == "" {
+		w.pvcSnapshot = pvcs.Items
 	}
 
 	// Build set of PVCs actively used by pods.

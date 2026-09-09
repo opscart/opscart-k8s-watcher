@@ -1,0 +1,261 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1.0">
+<title>Node Optimization — {{.ClusterName}}</title>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+{{template "base" .}}
+<style>
+.no-readonly{display:inline-flex;align-items:center;gap:0.4rem;font-size:0.72rem;color:var(--text-muted);border:1px solid var(--border);border-radius:999px;padding:0.3rem 0.75rem;margin-top:0.4rem}
+.no-readonly-dot{width:6px;height:6px;border-radius:50%;background:var(--info)}
+.no-summary-table{overflow-x:auto;border:1px solid var(--border);border-radius:var(--radius-sm);margin-bottom:1.5rem}
+.no-summary-table table{width:100%;border-collapse:collapse}
+.no-summary-table th{background:rgba(0,0,0,0.35);padding:0.6rem 0.85rem;text-align:left;font-size:0.67rem;text-transform:uppercase;letter-spacing:0.8px;color:var(--text-muted);font-weight:600;border-bottom:1px solid var(--border);white-space:nowrap}
+.no-summary-table td{padding:0.7rem 0.85rem;border-bottom:1px solid var(--border);font-size:0.85rem;vertical-align:middle}
+.no-summary-table tbody tr:last-child td{border-bottom:none}
+.no-summary-table tbody tr:hover td{background:rgba(99,102,241,0.03)}
+.no-summary-table a{color:inherit;text-decoration:none}
+.no-summary-table a:hover .no-pool-link{text-decoration:underline}
+.no-status-badge{display:inline-flex;align-items:center;padding:3px 11px;border-radius:20px;font-size:0.68rem;font-weight:700;letter-spacing:0.4px;white-space:nowrap}
+.no-status-passed{background:rgba(16,185,129,0.12);color:var(--success);border:1px solid rgba(16,185,129,0.35)}
+.no-status-blocked{background:rgba(239,68,68,0.1);color:var(--danger);border:1px solid rgba(239,68,68,0.32)}
+.no-status-partial{background:rgba(245,158,11,0.12);color:var(--warning);border:1px solid rgba(245,158,11,0.32)}
+.no-status-observation{background:rgba(148,163,184,0.1);color:var(--text-secondary);border:1px solid var(--border)}
+.no-status-candidate{background:rgba(6,182,212,0.1);color:var(--info);border:1px solid rgba(6,182,212,0.3)}
+.no-status-precheck{background:rgba(6,182,212,0.1);color:var(--info);border:1px solid rgba(6,182,212,0.3)}
+.no-pool-card{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:1.5rem;margin-bottom:1.5rem;scroll-margin-top:1rem}
+.no-pool-hdr{display:flex;justify-content:space-between;align-items:flex-start;gap:1rem;margin-bottom:1.25rem;flex-wrap:wrap}
+.no-pool-name{font-size:1.05rem;font-weight:700}
+.no-pool-name span{color:var(--text-muted);font-weight:500;font-size:0.8rem;margin-left:0.5rem}
+.no-hero{border:1px solid var(--border);border-radius:var(--radius-sm);padding:1.25rem 1.5rem;margin-bottom:1.25rem}
+.no-hero-passed{border-color:rgba(16,185,129,0.35);background:rgba(16,185,129,0.045)}
+.no-hero-blocked{border-color:rgba(239,68,68,0.32);background:rgba(239,68,68,0.035)}
+.no-hero-partial{border-color:rgba(245,158,11,0.32);background:rgba(245,158,11,0.04)}
+.no-hero-neutral{background:rgba(148,163,184,0.04)}
+.no-hero-summary{font-size:0.85rem;color:var(--text-secondary);margin:0.6rem 0 0.9rem}
+.no-hero-metrics{display:flex;gap:2rem;flex-wrap:wrap;margin-bottom:0.4rem}
+.no-metric-val{font-size:1.6rem;font-weight:800;line-height:1.1}
+.no-metric-lbl{font-size:0.68rem;color:var(--text-muted);text-transform:uppercase;letter-spacing:0.6px;margin-top:0.15rem}
+.no-hero-note{font-size:0.76rem;color:var(--text-muted);margin-top:0.5rem}
+.no-hero-note strong{color:var(--text-secondary)}
+.no-headroom-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:0.85rem;margin-bottom:1.25rem}
+.no-headroom-card{background:rgba(0,0,0,0.18);border:1px solid var(--border);border-radius:var(--radius-sm);padding:0.9rem 1rem}
+.no-headroom-val{font-size:1.3rem;font-weight:800}
+.no-headroom-lbl{font-size:0.68rem;color:var(--text-muted);text-transform:uppercase;letter-spacing:0.5px;margin-top:0.15rem}
+.no-headroom-sub{font-size:0.72rem;color:var(--text-muted);margin-top:0.35rem}
+.no-section{margin-bottom:1.1rem}
+.no-section-title{font-size:0.78rem;font-weight:700;text-transform:uppercase;letter-spacing:0.5px;color:var(--text-secondary);margin-bottom:0.6rem}
+.no-check-list{display:flex;flex-wrap:wrap;gap:0.5rem}
+.no-check-chip{display:inline-flex;align-items:center;gap:0.4rem;font-size:0.75rem;color:var(--text-secondary);border:1px solid rgba(16,185,129,0.3);background:rgba(16,185,129,0.06);border-radius:999px;padding:0.3rem 0.7rem}
+.no-check-chip svg{width:12px;height:12px;color:var(--success);flex-shrink:0}
+.no-notevaluated{border:1px dashed var(--border);border-radius:var(--radius-sm);padding:0.85rem 1rem;background:rgba(0,0,0,0.12)}
+.no-notevaluated p{font-size:0.74rem;color:var(--text-muted);margin-bottom:0.5rem}
+.no-notevaluated ul{margin:0;padding-left:1.1rem}
+.no-notevaluated li{font-size:0.78rem;color:var(--text-secondary);margin-bottom:0.25rem}
+.no-reason-list{display:flex;flex-direction:column;gap:0.5rem}
+.no-reason{font-size:0.8rem;color:var(--text-secondary);border-left:3px solid var(--border);padding:0.4rem 0.75rem;background:rgba(0,0,0,0.14);border-radius:0 6px 6px 0}
+.no-reason-blocked{border-left-color:var(--danger)}
+.no-reason-partial{border-left-color:var(--warning)}
+.no-reason .no-reason-scope{color:var(--text-muted);font-size:0.7rem;margin-top:0.15rem}
+.no-caveat-list{margin:0;padding-left:1.1rem}
+.no-caveat-list li{font-size:0.78rem;color:var(--text-secondary);margin-bottom:0.25rem}
+.no-assign-wrap{overflow-x:auto;border:1px solid var(--border);border-radius:var(--radius-sm)}
+.no-assign-table{width:100%;border-collapse:collapse}
+.no-assign-table th{background:rgba(0,0,0,0.35);padding:0.55rem 0.8rem;text-align:left;font-size:0.65rem;text-transform:uppercase;letter-spacing:0.7px;color:var(--text-muted);font-weight:600;border-bottom:1px solid var(--border);white-space:nowrap}
+.no-assign-table td{padding:0.6rem 0.8rem;border-bottom:1px solid var(--border);font-size:0.8rem;font-family:'Consolas','Monaco',monospace}
+.no-assign-table tbody tr:last-child td{border-bottom:none}
+.no-assign-summary{display:flex;justify-content:space-between;align-items:center;margin-bottom:0.6rem;flex-wrap:wrap;gap:0.5rem}
+.no-empty{text-align:center;padding:2.5rem 1rem;color:var(--text-muted)}
+.no-empty .icon{font-size:2rem;margin-bottom:0.5rem}
+details.no-evidence summary{cursor:pointer;list-style:none;font-size:0.78rem;font-weight:700;color:var(--primary-light);text-transform:uppercase;letter-spacing:0.5px;margin-bottom:0.75rem}
+details.no-evidence summary::-webkit-details-marker{display:none}
+details.no-evidence[open] summary{margin-bottom:0.75rem}
+@media(max-width:900px){.no-hero-metrics{gap:1.25rem}.no-pool-hdr{flex-direction:column}}
+</style>
+</head>
+<body>
+<div class="layout">
+{{.Sidebar}}
+<main class="main">
+  <div class="page-hdr">
+    <div>
+      <h1>Node Optimization</h1>
+      <p>Read-only consolidation simulation</p>
+      <p style="max-width:640px;margin-top:0.5rem">OpsCart evaluates whether current workloads can be placed on fewer nodes under the supported Kubernetes scheduling model.</p>
+      <div class="no-readonly"><span class="no-readonly-dot"></span> Read-only · no cluster changes are made</div>
+    </div>
+    <div class="page-meta">
+      <div>{{.ClusterName}}</div>
+      <div>Last scanned: <strong id="no-age">just now</strong></div>
+      <a class="back-link" href="{{.DashURL}}">← Back to Dashboard</a>
+    </div>
+  </div>
+
+  {{if not .HasPools}}
+  <div class="section">
+    <div class="no-empty">
+      <div class="icon">◌</div>
+      <div>No proven consolidation candidate is available for this pool.</div>
+    </div>
+  </div>
+  {{else}}
+
+  {{if .MultiplePools}}
+  <div class="no-summary-table">
+    <table>
+      <thead><tr><th>Pool</th><th style="text-align:center">Current</th><th style="text-align:center">Candidate</th><th>Status</th></tr></thead>
+      <tbody>
+        {{range .Pools}}
+        <tr>
+          <td><a href="#{{.AnchorID}}"><span class="no-pool-link">{{.PoolName}}</span></a></td>
+          <td style="text-align:center">{{if .HasCandidate}}{{.CurrentNodeCount}}{{else}}—{{end}}</td>
+          <td style="text-align:center">{{if .HasCandidate}}{{.CandidateNodeCount}}{{else}}—{{end}}</td>
+          <td><span class="no-status-badge no-status-{{.StatusClass}}">{{.StatusLabel}}</span></td>
+        </tr>
+        {{end}}
+      </tbody>
+    </table>
+  </div>
+  {{end}}
+
+  {{range $pool := .Pools}}
+  <div class="no-pool-card" id="{{.AnchorID}}">
+    <div class="no-pool-hdr">
+      <div class="no-pool-name">{{.PoolName}}<span>node pool</span></div>
+      <span class="no-status-badge no-status-{{.StatusClass}}">{{.StatusLabel}}</span>
+    </div>
+
+    {{if .IsSimulationPassed}}
+    <div class="no-hero no-hero-passed">
+      <div class="no-hero-metrics">
+        <div><div class="no-metric-val">{{.CurrentNodeCount}} nodes</div><div class="no-metric-lbl">Current</div></div>
+        <div><div class="no-metric-val">{{.CandidateNodeCount}} nodes</div><div class="no-metric-lbl">Candidate</div></div>
+        <div><div class="no-metric-val">{{.CandidateRemovedNode}}</div><div class="no-metric-lbl">Candidate removal</div></div>
+        <div><div class="no-metric-val">{{.PodsAssigned}} / {{.PodsConsidered}}</div><div class="no-metric-lbl">Workloads reassigned</div></div>
+      </div>
+      <p class="no-hero-summary">{{.Summary}}</p>
+      <div class="no-hero-note"><strong>No cluster changes were made.</strong> Execution readiness was not evaluated.</div>
+    </div>
+
+    {{if .HasHeadroom}}
+    <div class="no-section">
+      <div class="no-section-title">Retained-cluster headroom</div>
+      <div class="no-headroom-grid">
+        <div class="no-headroom-card">
+          <div class="no-headroom-val">{{.CPUHeadroomPercent}}</div>
+          <div class="no-headroom-lbl">CPU headroom</div>
+          <div class="no-headroom-sub">{{.RequestedCPUText}} requested / {{.RetainedCPUText}} retained</div>
+        </div>
+        <div class="no-headroom-card">
+          <div class="no-headroom-val">{{.MemoryHeadroomPercent}}</div>
+          <div class="no-headroom-lbl">Memory headroom</div>
+          <div class="no-headroom-sub">{{.RequestedMemoryText}} requested / {{.RetainedMemoryText}} retained</div>
+        </div>
+      </div>
+    </div>
+    {{end}}
+
+    {{else if .IsBlocked}}
+    <div class="no-hero no-hero-blocked">
+      <p class="no-hero-summary" style="margin-top:0">OpsCart found a supported hard constraint that prevents this consolidation candidate.</p>
+      <div class="no-hero-metrics">
+        {{if .HasCandidate}}<div><div class="no-metric-val">{{.CandidateRemovedNode}}</div><div class="no-metric-lbl">Candidate node</div></div>{{end}}
+      </div>
+    </div>
+
+    {{else if .IsPartial}}
+    <div class="no-hero no-hero-partial">
+      <p class="no-hero-summary" style="margin-top:0">OpsCart cannot prove this consolidation candidate with the available evidence.</p>
+      {{if .HasCandidate}}
+      <div class="no-hero-metrics">
+        <div><div class="no-metric-val">{{.CandidateRemovedNode}}</div><div class="no-metric-lbl">Candidate node</div></div>
+      </div>
+      {{end}}
+    </div>
+
+    {{else}}
+    <div class="no-hero no-hero-neutral">
+      <p class="no-hero-summary" style="margin-top:0">{{.Summary}}</p>
+    </div>
+    {{end}}
+
+    {{if .HasVerifiedChecks}}
+    <div class="no-section">
+      <div class="no-section-title">What OpsCart verified</div>
+      <div class="no-check-list">
+        {{range .VerifiedChecks}}
+        <span class="no-check-chip"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><path d="M20 6L9 17l-5-5"/></svg>{{.}}</span>
+        {{end}}
+      </div>
+    </div>
+    {{end}}
+
+    {{if .HasBlockers}}
+    <div class="no-section">
+      <div class="no-section-title">{{if .IsBlocked}}Blockers{{else}}Evidence gaps{{end}}</div>
+      <div class="no-reason-list">
+        {{range .Blockers}}
+        <div class="no-reason {{if $pool.IsBlocked}}no-reason-blocked{{else}}no-reason-partial{{end}}">
+          <div>{{.Message}}</div>
+          {{if or .Pod .Node}}<div class="no-reason-scope">{{if .Pod}}Pod: {{.Pod}}{{end}}{{if .Node}} · Node: {{.Node}}{{end}}</div>{{end}}
+        </div>
+        {{end}}
+      </div>
+      {{if .BlockersTruncated}}<div class="no-reason-scope" style="margin-top:0.5rem">Showing {{len .Blockers}} of {{.BlockersTotal}} reasons.</div>{{end}}
+    </div>
+    {{end}}
+
+    {{if .HasCaveats}}
+    <div class="no-section">
+      <div class="no-section-title">Caveats</div>
+      <ul class="no-caveat-list">
+        {{range .Caveats}}<li>{{.}}</li>{{end}}
+      </ul>
+    </div>
+    {{end}}
+
+    <div class="no-section">
+      <div class="no-section-title">Not evaluated</div>
+      <div class="no-notevaluated">
+        <p>Simulation proof is not execution readiness. OpsCart did not evaluate:</p>
+        <ul>
+          {{range .NotEvaluated}}<li>{{.}}</li>{{end}}
+        </ul>
+      </div>
+    </div>
+
+    {{if .AssignmentTotal}}
+    <details class="no-evidence" open>
+      <summary>Placement evidence ({{.AssignmentTotal}})</summary>
+      <div class="no-assign-summary"><span class="muted" style="font-size:0.75rem;color:var(--text-muted)">Total assignments: {{.AssignmentTotal}}</span></div>
+      <div class="no-assign-wrap"><table class="no-assign-table">
+        <thead><tr><th>Namespace</th><th>Pod</th><th>Source Node</th><th>Destination Node</th></tr></thead>
+        <tbody>
+          {{range .Assignments}}
+          <tr><td>{{.Namespace}}</td><td>{{.PodName}}</td><td>{{.SourceNode}}</td><td>{{.DestinationNode}}</td></tr>
+          {{end}}
+        </tbody>
+      </table></div>
+    </details>
+    {{end}}
+  </div>
+  {{end}}
+  {{end}}
+
+</main>
+</div>
+<script>
+(function(){
+  var el=document.getElementById('no-age'),TS={{.ScannedAtMS}};
+  function upd(){
+    if(!TS){if(el)el.textContent='unknown';return;}
+    var s=Math.floor((Date.now()-TS)/1000);
+    var t=s<5?'just now':s<60?s+'s ago':Math.floor(s/60)+'m ago';
+    if(el)el.textContent=t;
+  }
+  setInterval(upd,1000);upd();
+})();
+</script>
+</body>
+</html>

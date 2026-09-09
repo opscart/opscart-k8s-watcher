@@ -21,6 +21,8 @@ import (
 	"github.com/opscart/opscart-k8s-watcher/pkg/models"
 	"github.com/opscart/opscart-k8s-watcher/pkg/scanner"
 	"github.com/opscart/opscart-k8s-watcher/pkg/store"
+	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
@@ -246,6 +248,7 @@ func (srv *server) newMux() http.Handler {
 	mux.HandleFunc("/infrastructure", srv.handleInfrastructurePage)
 	mux.HandleFunc("/namespaces", srv.handleNamespacesPage)
 	mux.HandleFunc("/optimizations", srv.handleOptimizationsPage)
+	mux.HandleFunc("/node-optimization", srv.handleNodeOptimizationPage)
 	mux.HandleFunc("/investigate", srv.handleInvestigationPage)
 	mux.HandleFunc("/api/investigation/logs", srv.handleInvestigationLogs)
 	mux.HandleFunc("/incidents", srv.handleIncidentsPage)
@@ -582,6 +585,8 @@ func sidebarBasePath(activePage string) string {
 		return "/namespaces"
 	case "optimizations":
 		return "/optimizations"
+	case "node-optimization":
+		return "/node-optimization"
 	case "warroom":
 		return "/warroom"
 	case "costs":
@@ -631,7 +636,7 @@ func buildSidebar(activePage, activeCtx, clusterName string, clusterList []strin
 		CostsHref:       "/costs" + q,
 		InfraHref:       "/infrastructure" + q,
 		NsHref:          "/namespaces" + q,
-		OptHref:         "/optimizations" + q,
+		OptHref:         "/node-optimization" + q,
 		WrHref:          "/warroom" + q,
 		IncidentsHref:   "/incidents" + q,
 		DiagnosticsHref: "/settings/diagnostics" + q,
@@ -702,6 +707,7 @@ type overviewPageData struct {
 	PrivilegedContainers         int
 	NonRootNotExplicitlyEnforced int
 	UnprotectedNamespaceCount    int
+	NodeOptimizationAvailable    bool
 
 	// Incident Score
 	IncidentScore      int
@@ -885,6 +891,10 @@ func buildOverviewData(scan *clusterScan, activeCtx string, clusterList []string
 			wasteCount = analyzer.BuildWastePresentation(scan.wasteAudit).Counts.Findings
 		}
 	}
+	// NodeOptimizationAvailable reflects whether the scan actually produced
+	// real recommendation contract data (see runFullScan), not a stub or
+	// placeholder — the overview card only claims availability when true.
+	nodeOptimizationAvailable := scan != nil && len(scan.nodeOptimization) > 0
 	incidentScore, incidentScoreColor, incidentScoreLabel := calcIncidentScore(scan)
 	_ = secFailed // reserved for future use
 
@@ -970,6 +980,7 @@ func buildOverviewData(scan *clusterScan, activeCtx string, clusterList []string
 		NonRootNotExplicitlyEnforced: runningAsRoot,
 		UnprotectedNamespaceCount:    unprotectedNamespaces,
 		WasteCount:                   wasteCount,
+		NodeOptimizationAvailable:    nodeOptimizationAvailable,
 		MonthlyCost:                  monthlyCost,
 		CostAvailable:                costAvailable,
 		CostCoverage:                 costCoverage,
@@ -992,7 +1003,7 @@ func buildOverviewData(scan *clusterScan, activeCtx string, clusterList []string
 		CostsHref:                    "/costs" + q,
 		InfraHref:                    "/infrastructure" + q,
 		NsHref:                       "/namespaces" + q,
-		OptHref:                      "/optimizations" + q,
+		OptHref:                      "/node-optimization" + q,
 		WrHref:                       "/warroom" + q,
 		IncidentsHref:                "/incidents" + q,
 		SecurityHref:                 "/security" + q,
@@ -2086,6 +2097,34 @@ func runFullScan(ctx string, scanCounters *apiCounters) (*clusterScan, error) {
 		result := analyzer.CalculateCISScore(scan.secAudit, scan.netAudit)
 		scan.cisResult = &result
 	}
+
+	// ── 6. Node Optimization (best effort) ─────────────────────────────
+	// Reuses snapshots already acquired above: NodeInfo/Pods from cost
+	// analysis (step 1), raw Nodes from the node-health scan (top of this
+	// function), and PVCs from the waste audit (step 3). No Node or Pod API
+	// call is repeated for this. PersistentVolumes are not acquired by any
+	// existing scan step, so — per the evidence contract's need for PV
+	// evidence — one new cluster-wide PersistentVolume list is added here as
+	// a first-class scan snapshot, not a page-handler-side fetch.
+	noPods := ra.PodSnapshot()
+	schedulingEvidence := analyzer.BuildNodeOptimizationSchedulingEvidence(nodeInfos, nodeScanner.NodeSnapshot())
+
+	var pvcSnapshot []corev1.PersistentVolumeClaim
+	if scan.wasteAudit != nil {
+		pvcSnapshot = wasteAuditor.PVCSnapshot()
+	}
+	var pvSnapshot []corev1.PersistentVolume
+	if pvList, err := clientset.CoreV1().PersistentVolumes().List(context.Background(), metav1.ListOptions{}); err == nil {
+		pvSnapshot = pvList.Items
+	} else {
+		log.Printf("[%s] persistent volume list skipped: %v", displayName(ctx), err)
+	}
+	storageEvidence := analyzer.BuildNodeOptimizationStorageEvidence(pvcSnapshot, pvSnapshot)
+
+	noSummary := analyzer.BuildNMinusOneNodeOptimizationScenariosWithSchedulingAndStorageEvidence(
+		nodeInfos, noPods, schedulingEvidence, storageEvidence,
+	)
+	scan.nodeOptimization = analyzer.BuildNodeOptimizationRecommendations(noSummary, noPods)
 
 	return scan, nil
 }

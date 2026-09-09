@@ -84,6 +84,7 @@ func (s *Scanner) FindNodeHealthConditions() ([]models.NodeConditionFinding, err
 	if err != nil {
 		return nil, fmt.Errorf("failed to list nodes: %w", err)
 	}
+	s.nodes = nodes.Items
 	findings := DetectUnhealthyNodeConditions(nodes.Items)
 	if len(findings) == 0 {
 		return findings, nil
@@ -93,6 +94,14 @@ func (s *Scanner) FindNodeHealthConditions() ([]models.NodeConditionFinding, err
 		return nil, fmt.Errorf("failed to list pods for node correlation: %w", err)
 	}
 	return correlateNodeWorkloadsWithOwners(findings, pods.Items, s.jobOwnerIndex("")), nil
+}
+
+// NodeSnapshot returns a copy of the Node snapshot most recently retrieved by
+// FindNodeHealthConditions, so other scan-pipeline consumers (e.g. Node
+// Optimization scheduling evidence) can reuse it instead of listing Nodes
+// again. It is nil until FindNodeHealthConditions has been called.
+func (s *Scanner) NodeSnapshot() []corev1.Node {
+	return append([]corev1.Node(nil), s.nodes...)
 }
 
 // DetectUnhealthyNodeConditions returns one finding per unhealthy Kubernetes

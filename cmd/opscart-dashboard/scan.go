@@ -39,6 +39,13 @@ type clusterScan struct {
 	// which cannot distinguish a real StatefulSet replica from an
 	// unrelated pod sharing its naming pattern.
 	PodWorkloads map[string]models.WorkloadRef
+
+	// nodeOptimization is the read-only consolidation-simulation
+	// recommendation contract (see pkg/analyzer/node_optimization_recommendation.go),
+	// built from the same NodeInfo/Pod snapshots already fetched above for
+	// cost analysis — not a second cluster fetch. Nil/empty until the Node
+	// Optimization page renders it.
+	nodeOptimization []analyzer.NodeOptimizationRecommendation
 }
 
 // ── Per-cluster state ─────────────────────────────────────────────────────────

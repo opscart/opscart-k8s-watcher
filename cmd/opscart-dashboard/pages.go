@@ -60,7 +60,7 @@ func (srv *server) handleStubPage(page, title string) http.HandlerFunc {
 			CostsHref:       "/costs" + q,
 			InfraHref:       "/infrastructure" + q,
 			NsHref:          "/namespaces" + q,
-			OptHref:         "/optimizations" + q,
+			OptHref:         "/node-optimization" + q,
 			WasteHref:       "/waste" + q,
 			SecurityHref:    "/security" + q,
 			IncidentsHref:   "/incidents" + q,
@@ -100,7 +100,7 @@ func (srv *server) handleSettingsPage(w http.ResponseWriter, r *http.Request) {
 	data := stubPageData{
 		Title: "Settings", ActivePage: "settings", DashHref: "/" + q, WrHref: "/warroom" + q,
 		CostsHref: "/costs" + q, InfraHref: "/infrastructure" + q, NsHref: "/namespaces" + q,
-		OptHref: "/optimizations" + q, WasteHref: "/waste" + q, SecurityHref: "/security" + q,
+		OptHref: "/node-optimization" + q, WasteHref: "/waste" + q, SecurityHref: "/security" + q,
 		IncidentsHref: "/incidents" + q, ClusterName: displayName(ctx), CriticalCount: countCriticalIssues(scan),
 		Clusters:        convertToSidebarClusters(srv.clusterList, ctx, "/settings"),
 		DiagnosticsHref: "/settings/diagnostics" + q,
@@ -1100,7 +1100,7 @@ func (srv *server) handleSecurityPage(w http.ResponseWriter, r *http.Request) {
 		SettingsHref:    "/settings" + q,
 		ActivePage:      "security",
 		NsHref:          "/namespaces" + q,
-		OptHref:         "/optimizations" + q,
+		OptHref:         "/node-optimization" + q,
 		ClusterName:     displayName(ctx),
 		CriticalCount:   countCriticalIssues(scan),
 		Clusters:        clusters,
@@ -1423,7 +1423,7 @@ func (srv *server) handleWastePage(w http.ResponseWriter, r *http.Request) {
 		CriticalCount:   countCriticalIssues(scan),
 		Clusters:        clusters,
 		NsHref:          "/namespaces" + q,
-		OptHref:         "/optimizations" + q,
+		OptHref:         "/node-optimization" + q,
 
 		IncidentHref: "/incidents" + q + "&status=active",
 	}

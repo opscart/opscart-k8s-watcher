@@ -307,7 +307,7 @@ func (srv *server) handleDiagnostics(w http.ResponseWriter, r *http.Request) {
 	responseBytes, totalAPITime, maxAPITime, throttles := obs.API.costTotals()
 	q := "?cluster=" + url.QueryEscape(ctx)
 	data := diagnosticsPageData{ActivePage: "diagnostics", DashHref: "/" + q, WrHref: "/warroom" + q, CostsHref: "/costs" + q,
-		InfraHref: "/infrastructure" + q, NsHref: "/namespaces" + q, OptHref: "/optimizations" + q, WasteHref: "/waste" + q,
+		InfraHref: "/infrastructure" + q, NsHref: "/namespaces" + q, OptHref: "/node-optimization" + q, WasteHref: "/waste" + q,
 		SecurityHref: "/security" + q, IncidentsHref: "/incidents" + q, DiagnosticsHref: "/settings/diagnostics" + q, SettingsHref: "/settings" + q,
 		ClusterName: displayName(ctx), CriticalCount: countCriticalIssues(scan),
 		Clusters: convertToSidebarClusters(srv.clusterList, ctx, "/settings/diagnostics"), Cluster: displayName(state.ctx), CompletedAt: "No completed scan", Interval: dashboardScanInterval.String(), Requests: requests, Errors: errors,
