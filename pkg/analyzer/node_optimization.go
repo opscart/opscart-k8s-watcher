@@ -123,33 +123,59 @@ func SimulateSameShapeNodeCount(input NodeOptimizationInput) NodeOptimizationRes
 		return invalidNodeOptimizationResult(result, "node_memory_capacity", "node memory capacity must be greater than zero")
 	}
 
-	for _, pod := range input.Pods {
+	validationPods := append([]NodeOptimizationPodInput(nil), input.Pods...)
+	sort.Slice(validationPods, func(i, j int) bool {
+		if validationPods[i].Namespace != validationPods[j].Namespace {
+			return validationPods[i].Namespace < validationPods[j].Namespace
+		}
+		if validationPods[i].Name != validationPods[j].Name {
+			return validationPods[i].Name < validationPods[j].Name
+		}
+		if validationPods[i].CPURequestMilli != validationPods[j].CPURequestMilli {
+			return validationPods[i].CPURequestMilli < validationPods[j].CPURequestMilli
+		}
+		return validationPods[i].MemoryRequestBytes < validationPods[j].MemoryRequestBytes
+	})
+
+	for _, pod := range validationPods {
 		if pod.CPURequestMilli < 0 || pod.MemoryRequestBytes < 0 {
-			return invalidNodeOptimizationResult(
+			result = invalidNodeOptimizationResult(
 				result,
 				"negative_pod_request",
 				fmt.Sprintf("pod %s has a negative resource request", podDisplayName(pod)),
 			)
+			result.Blockers[len(result.Blockers)-1].Pod = podDisplayName(pod)
+			return result
 		}
+	}
 
+	var oversizedPod *NodeOptimizationPodInput
+	for i := range validationPods {
+		pod := validationPods[i]
 		result.TotalCPURequestMilli += pod.CPURequestMilli
 		result.TotalMemoryRequestBytes += pod.MemoryRequestBytes
 
-		if pod.CPURequestMilli > input.NodeCPUCapacityMilli || pod.MemoryRequestBytes > input.NodeMemoryCapacityBytes {
-			result.Status = NodeOptimizationBlockedPodSize
-			result.Blockers = append(result.Blockers, NodeOptimizationBlocker{
-				Reason: "pod_exceeds_single_node",
-				Pod:    podDisplayName(pod),
-				Message: fmt.Sprintf(
-					"pod requires %dm CPU and %d bytes memory; one candidate node provides %dm CPU and %d bytes memory",
-					pod.CPURequestMilli,
-					pod.MemoryRequestBytes,
-					input.NodeCPUCapacityMilli,
-					input.NodeMemoryCapacityBytes,
-				),
-			})
-			return finalizeNodeOptimizationCapacity(result, input)
+		if oversizedPod == nil &&
+			(pod.CPURequestMilli > input.NodeCPUCapacityMilli || pod.MemoryRequestBytes > input.NodeMemoryCapacityBytes) {
+			copy := pod
+			oversizedPod = &copy
 		}
+	}
+
+	if oversizedPod != nil {
+		result.Status = NodeOptimizationBlockedPodSize
+		result.Blockers = append(result.Blockers, NodeOptimizationBlocker{
+			Reason: "pod_exceeds_single_node",
+			Pod:    podDisplayName(*oversizedPod),
+			Message: fmt.Sprintf(
+				"pod requires %dm CPU and %d bytes memory; one candidate node provides %dm CPU and %d bytes memory",
+				oversizedPod.CPURequestMilli,
+				oversizedPod.MemoryRequestBytes,
+				input.NodeCPUCapacityMilli,
+				input.NodeMemoryCapacityBytes,
+			),
+		})
+		return finalizeNodeOptimizationCapacity(result, input)
 	}
 
 	result = finalizeNodeOptimizationCapacity(result, input)

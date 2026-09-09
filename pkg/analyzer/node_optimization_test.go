@@ -1477,3 +1477,75 @@ func TestBuildNMinusOneNodeOptimizationScenariosWarningsDeterministicAcrossDaemo
 		t.Fatalf("warnings differ by Pod order:\nA=%#v\nB=%#v", gotA.Warnings, gotB.Warnings)
 	}
 }
+
+func TestSimulateSameShapeNodeCountInvalidPodSelectionDeterministicAcrossInputOrder(t *testing.T) {
+	input := NodeOptimizationInput{
+		CurrentNodes:            3,
+		CandidateNodes:          2,
+		NodeCPUCapacityMilli:    4000,
+		NodeMemoryCapacityBytes: 8 * 1024 * 1024 * 1024,
+		Pods: []NodeOptimizationPodInput{
+			{Namespace: "z", Name: "negative-z", CPURequestMilli: -1, MemoryRequestBytes: 1},
+			{Namespace: "a", Name: "negative-a", CPURequestMilli: 1, MemoryRequestBytes: -1},
+			{Namespace: "m", Name: "valid", CPURequestMilli: 500, MemoryRequestBytes: 1024},
+		},
+	}
+
+	reversed := input
+	reversed.Pods = []NodeOptimizationPodInput{input.Pods[2], input.Pods[0], input.Pods[1]}
+
+	gotA := SimulateSameShapeNodeCount(input)
+	gotB := SimulateSameShapeNodeCount(reversed)
+
+	if !reflect.DeepEqual(gotA, gotB) {
+		t.Fatalf("result differs by Pod input order:\nA=%#v\nB=%#v", gotA, gotB)
+	}
+	if gotA.Status != NodeOptimizationInvalidInput {
+		t.Fatalf("status = %q, want %q", gotA.Status, NodeOptimizationInvalidInput)
+	}
+	if len(gotA.Blockers) != 1 || gotA.Blockers[0].Pod != "a/negative-a" {
+		t.Fatalf("blockers = %#v, want deterministic a/negative-a blocker", gotA.Blockers)
+	}
+}
+
+func TestSimulateSameShapeNodeCountOversizedPodSelectionAndTotalsDeterministicAcrossInputOrder(t *testing.T) {
+	input := NodeOptimizationInput{
+		CurrentNodes:            3,
+		CandidateNodes:          2,
+		NodeCPUCapacityMilli:    4000,
+		NodeMemoryCapacityBytes: 8 * 1024 * 1024 * 1024,
+		Pods: []NodeOptimizationPodInput{
+			{Namespace: "z", Name: "too-big-z", CPURequestMilli: 5000, MemoryRequestBytes: 1024},
+			{Namespace: "a", Name: "too-big-a", CPURequestMilli: 4500, MemoryRequestBytes: 2048},
+			{Namespace: "m", Name: "valid", CPURequestMilli: 500, MemoryRequestBytes: 4096},
+		},
+	}
+
+	reversed := input
+	reversed.Pods = []NodeOptimizationPodInput{input.Pods[2], input.Pods[0], input.Pods[1]}
+
+	gotA := SimulateSameShapeNodeCount(input)
+	gotB := SimulateSameShapeNodeCount(reversed)
+
+	if !reflect.DeepEqual(gotA, gotB) {
+		t.Fatalf("result differs by Pod input order:\nA=%#v\nB=%#v", gotA, gotB)
+	}
+	if gotA.Status != NodeOptimizationBlockedPodSize {
+		t.Fatalf("status = %q, want %q", gotA.Status, NodeOptimizationBlockedPodSize)
+	}
+	if len(gotA.Blockers) != 1 || gotA.Blockers[0].Pod != "a/too-big-a" {
+		t.Fatalf("blockers = %#v, want deterministic a/too-big-a blocker", gotA.Blockers)
+	}
+
+	wantCPU := int64(10000)
+	wantMem := int64(7168)
+	if gotA.TotalCPURequestMilli != wantCPU || gotA.TotalMemoryRequestBytes != wantMem {
+		t.Fatalf(
+			"totals = %dm/%d bytes, want %dm/%d bytes",
+			gotA.TotalCPURequestMilli,
+			gotA.TotalMemoryRequestBytes,
+			wantCPU,
+			wantMem,
+		)
+	}
+}
