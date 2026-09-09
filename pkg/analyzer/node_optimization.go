@@ -1127,7 +1127,10 @@ func matchingToleration(
 	tolerations []corev1.Toleration,
 	taint corev1.Taint,
 ) (corev1.Toleration, bool) {
-	for _, toleration := range tolerations {
+	var finiteNoExecuteMatch *corev1.Toleration
+
+	for i := range tolerations {
+		toleration := tolerations[i]
 		if toleration.Effect != "" && toleration.Effect != taint.Effect {
 			continue
 		}
@@ -1137,16 +1140,30 @@ func matchingToleration(
 			operator = corev1.TolerationOpEqual
 		}
 
+		matches := false
 		switch operator {
 		case corev1.TolerationOpExists:
-			if toleration.Key == "" || toleration.Key == taint.Key {
-				return toleration, true
-			}
+			matches = toleration.Key == "" || toleration.Key == taint.Key
 		case corev1.TolerationOpEqual:
-			if toleration.Key == taint.Key && toleration.Value == taint.Value {
-				return toleration, true
-			}
+			matches = toleration.Key == taint.Key && toleration.Value == taint.Value
 		}
+		if !matches {
+			continue
+		}
+
+		if taint.Effect == corev1.TaintEffectNoExecute && toleration.TolerationSeconds != nil {
+			if finiteNoExecuteMatch == nil {
+				copy := toleration
+				finiteNoExecuteMatch = &copy
+			}
+			continue
+		}
+
+		return toleration, true
+	}
+
+	if finiteNoExecuteMatch != nil {
+		return *finiteNoExecuteMatch, true
 	}
 	return corev1.Toleration{}, false
 }
@@ -1204,6 +1221,9 @@ func nodeMatchesRequiredNodeAffinity(
 }
 
 func nodeMatchesAffinityTerm(labels map[string]string, term corev1.NodeSelectorTerm) bool {
+	if len(term.MatchExpressions) == 0 && len(term.MatchFields) == 0 {
+		return false
+	}
 	if len(term.MatchFields) > 0 {
 		return false
 	}
@@ -1223,6 +1243,7 @@ func nodeMatchesAffinityTerm(labels map[string]string, term corev1.NodeSelectorT
 			return false
 		}
 	}
+
 	return true
 }
 

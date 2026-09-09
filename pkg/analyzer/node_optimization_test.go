@@ -1287,3 +1287,94 @@ func TestBuildNodeOptimizationSchedulingEvidenceRejectsOSArchitectureDisagreemen
 		t.Fatalf("warnings = %#v, want OS and architecture disagreement warnings", got.Warnings)
 	}
 }
+
+func TestBuildNMinusOneNodeOptimizationScenariosWithSchedulingEvidenceEmptyRequiredAffinityTermMatchesNoNodes(t *testing.T) {
+	nodeInfos := optimizationNodeInfos(2)
+	nodes := []corev1.Node{
+		{ObjectMeta: metav1.ObjectMeta{Name: "node-0"}},
+		{ObjectMeta: metav1.ObjectMeta{Name: "node-1"}},
+	}
+
+	pod := optimizationTestPod("apps", "api", "node-0", corev1.PodRunning, "1000m", "1Gi")
+	pod.Spec.Affinity = &corev1.Affinity{
+		NodeAffinity: &corev1.NodeAffinity{
+			RequiredDuringSchedulingIgnoredDuringExecution: &corev1.NodeSelector{
+				NodeSelectorTerms: []corev1.NodeSelectorTerm{{}},
+			},
+		},
+	}
+
+	evidence := BuildNodeOptimizationSchedulingEvidence(nodeInfos, nodes)
+	got := BuildNMinusOneNodeOptimizationScenariosWithSchedulingEvidence(
+		nodeInfos,
+		[]corev1.Pod{pod},
+		evidence,
+	)
+
+	if len(got.Scenarios) != 0 {
+		t.Fatalf("scenario count = %d, want 0", len(got.Scenarios))
+	}
+	if got.SchedulingBlockedPodCount != 1 {
+		t.Fatalf("SchedulingBlockedPodCount = %d, want 1", got.SchedulingBlockedPodCount)
+	}
+	if !strings.Contains(strings.Join(got.Warnings, " "), "matches no node in the pool") {
+		t.Fatalf("warnings = %#v, want no-match required-affinity warning", got.Warnings)
+	}
+}
+
+func TestBuildNMinusOneNodeOptimizationScenariosWithSchedulingEvidenceNoExecuteUnlimitedTolerationWinsRegardlessOfOrder(t *testing.T) {
+	nodeInfos := optimizationNodeInfos(2)
+	nodes := []corev1.Node{
+		{
+			ObjectMeta: metav1.ObjectMeta{Name: "node-0"},
+			Spec: corev1.NodeSpec{Taints: []corev1.Taint{
+				{Key: "dedicated", Value: "apps", Effect: corev1.TaintEffectNoExecute},
+			}},
+		},
+		{
+			ObjectMeta: metav1.ObjectMeta{Name: "node-1"},
+			Spec: corev1.NodeSpec{Taints: []corev1.Taint{
+				{Key: "dedicated", Value: "apps", Effect: corev1.TaintEffectNoExecute},
+			}},
+		},
+	}
+
+	finite := int64(300)
+	finiteMatch := corev1.Toleration{
+		Key: "dedicated", Operator: corev1.TolerationOpEqual, Value: "apps",
+		Effect: corev1.TaintEffectNoExecute, TolerationSeconds: &finite,
+	}
+	unlimitedMatch := corev1.Toleration{
+		Key: "dedicated", Operator: corev1.TolerationOpEqual, Value: "apps",
+		Effect: corev1.TaintEffectNoExecute,
+	}
+
+	cases := []struct {
+		name        string
+		tolerations []corev1.Toleration
+	}{
+		{name: "finite-first", tolerations: []corev1.Toleration{finiteMatch, unlimitedMatch}},
+		{name: "unlimited-first", tolerations: []corev1.Toleration{unlimitedMatch, finiteMatch}},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			pod := optimizationTestPod("apps", "api-"+tc.name, "node-0", corev1.PodRunning, "1000m", "1Gi")
+			pod.Spec.Tolerations = tc.tolerations
+
+			evidence := BuildNodeOptimizationSchedulingEvidence(nodeInfos, nodes)
+			got := BuildNMinusOneNodeOptimizationScenariosWithSchedulingEvidence(
+				nodeInfos,
+				[]corev1.Pod{pod},
+				evidence,
+			)
+
+			if len(got.Scenarios) != 1 {
+				t.Fatalf("scenario count = %d, want 1; warnings=%v", len(got.Scenarios), got.Warnings)
+			}
+			if got.SchedulingBlockedPodCount != 0 {
+				t.Fatalf("SchedulingBlockedPodCount = %d, want 0", got.SchedulingBlockedPodCount)
+			}
+		})
+	}
+}
