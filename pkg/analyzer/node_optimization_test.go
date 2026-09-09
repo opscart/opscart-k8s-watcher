@@ -339,3 +339,162 @@ func optimizationTestPod(namespace, name, nodeName string, phase corev1.PodPhase
 		Status: corev1.PodStatus{Phase: phase},
 	}
 }
+
+func TestBuildNMinusOneNodeOptimizationScenariosModelsDaemonSetAsPerNodeOverhead(t *testing.T) {
+	nodeInfos := []models.NodeInfo{
+		{Name: "node-0", NodePool: "userpool", VMSize: "Standard_D4s_v3", Region: "centralus", OS: "linux", Priority: "Regular", Provider: "azure", Architecture: "amd64", CPUCapacity: 4, MemGBCapacity: 8},
+		{Name: "node-1", NodePool: "userpool", VMSize: "Standard_D4s_v3", Region: "centralus", OS: "linux", Priority: "Regular", Provider: "azure", Architecture: "amd64", CPUCapacity: 4, MemGBCapacity: 8},
+		{Name: "node-2", NodePool: "userpool", VMSize: "Standard_D4s_v3", Region: "centralus", OS: "linux", Priority: "Regular", Provider: "azure", Architecture: "amd64", CPUCapacity: 4, MemGBCapacity: 8},
+	}
+
+	pods := []corev1.Pod{
+		optimizationTestDaemonSetPod("kube-system", "agent-a", "node-0", "500m", "1Gi"),
+		optimizationTestDaemonSetPod("kube-system", "agent-b", "node-1", "500m", "1Gi"),
+		optimizationTestDaemonSetPod("kube-system", "agent-c", "node-2", "500m", "1Gi"),
+		optimizationTestPod("apps", "api-a", "node-0", corev1.PodRunning, "2500m", "2Gi"),
+		optimizationTestPod("apps", "api-b", "node-1", corev1.PodRunning, "2500m", "2Gi"),
+	}
+
+	got := BuildNMinusOneNodeOptimizationScenariosFromSnapshots(nodeInfos, pods)
+
+	if len(got.Scenarios) != 1 {
+		t.Fatalf("scenario count = %d, want 1; warnings=%v", len(got.Scenarios), got.Warnings)
+	}
+
+	scenario := got.Scenarios[0]
+	if scenario.DaemonSetCount != 1 {
+		t.Fatalf("DaemonSetCount = %d, want 1", scenario.DaemonSetCount)
+	}
+	if scenario.DaemonSetCPUPerNodeMilli != 500 {
+		t.Fatalf("DaemonSetCPUPerNodeMilli = %d, want 500", scenario.DaemonSetCPUPerNodeMilli)
+	}
+	if scenario.DaemonSetMemoryPerNodeBytes != 1024*1024*1024 {
+		t.Fatalf("DaemonSetMemoryPerNodeBytes = %d, want 1Gi", scenario.DaemonSetMemoryPerNodeBytes)
+	}
+	if scenario.EligiblePodCount != 2 {
+		t.Fatalf("EligiblePodCount = %d, want 2 movable pods", scenario.EligiblePodCount)
+	}
+	if scenario.Simulation.Status != NodeOptimizationFit {
+		t.Fatalf("status = %q, want %q; blockers=%v", scenario.Simulation.Status, NodeOptimizationFit, scenario.Simulation.Blockers)
+	}
+}
+
+func TestBuildNMinusOneNodeOptimizationScenariosDaemonSetOverheadCanBlockReduction(t *testing.T) {
+	nodeInfos := []models.NodeInfo{
+		{Name: "node-0", NodePool: "userpool", VMSize: "Standard_D4s_v3", Region: "centralus", OS: "linux", Priority: "Regular", Provider: "azure", Architecture: "amd64", CPUCapacity: 4, MemGBCapacity: 8},
+		{Name: "node-1", NodePool: "userpool", VMSize: "Standard_D4s_v3", Region: "centralus", OS: "linux", Priority: "Regular", Provider: "azure", Architecture: "amd64", CPUCapacity: 4, MemGBCapacity: 8},
+		{Name: "node-2", NodePool: "userpool", VMSize: "Standard_D4s_v3", Region: "centralus", OS: "linux", Priority: "Regular", Provider: "azure", Architecture: "amd64", CPUCapacity: 4, MemGBCapacity: 8},
+	}
+
+	pods := []corev1.Pod{
+		optimizationTestDaemonSetPod("kube-system", "agent-a", "node-0", "1000m", "1Gi"),
+		optimizationTestDaemonSetPod("kube-system", "agent-b", "node-1", "1000m", "1Gi"),
+		optimizationTestDaemonSetPod("kube-system", "agent-c", "node-2", "1000m", "1Gi"),
+		optimizationTestPod("apps", "api-a", "node-0", corev1.PodRunning, "3000m", "2Gi"),
+		optimizationTestPod("apps", "api-b", "node-1", corev1.PodRunning, "3000m", "2Gi"),
+		optimizationTestPod("apps", "api-c", "node-2", corev1.PodRunning, "1000m", "1Gi"),
+	}
+
+	got := BuildNMinusOneNodeOptimizationScenariosFromSnapshots(nodeInfos, pods)
+
+	if len(got.Scenarios) != 1 {
+		t.Fatalf("scenario count = %d, want 1; warnings=%v", len(got.Scenarios), got.Warnings)
+	}
+	if got.Scenarios[0].Simulation.Status != NodeOptimizationBlockedAggregate {
+		t.Fatalf(
+			"status = %q, want %q; blockers=%v",
+			got.Scenarios[0].Simulation.Status,
+			NodeOptimizationBlockedAggregate,
+			got.Scenarios[0].Simulation.Blockers,
+		)
+	}
+}
+
+func TestBuildNMinusOneNodeOptimizationScenariosSkipsPartialDaemonSetScope(t *testing.T) {
+	nodeInfos := []models.NodeInfo{
+		{Name: "node-0", NodePool: "userpool", VMSize: "Standard_D4s_v3", Region: "centralus", OS: "linux", Priority: "Regular", Provider: "azure", Architecture: "amd64", CPUCapacity: 4, MemGBCapacity: 8},
+		{Name: "node-1", NodePool: "userpool", VMSize: "Standard_D4s_v3", Region: "centralus", OS: "linux", Priority: "Regular", Provider: "azure", Architecture: "amd64", CPUCapacity: 4, MemGBCapacity: 8},
+		{Name: "node-2", NodePool: "userpool", VMSize: "Standard_D4s_v3", Region: "centralus", OS: "linux", Priority: "Regular", Provider: "azure", Architecture: "amd64", CPUCapacity: 4, MemGBCapacity: 8},
+	}
+
+	pods := []corev1.Pod{
+		optimizationTestDaemonSetPod("kube-system", "agent-a", "node-0", "500m", "1Gi"),
+		optimizationTestDaemonSetPod("kube-system", "agent-b", "node-1", "500m", "1Gi"),
+	}
+
+	got := BuildNMinusOneNodeOptimizationScenariosFromSnapshots(nodeInfos, pods)
+
+	if len(got.Scenarios) != 0 {
+		t.Fatalf("scenario count = %d, want 0", len(got.Scenarios))
+	}
+	if got.SkippedPoolCount != 1 {
+		t.Fatalf("SkippedPoolCount = %d, want 1", got.SkippedPoolCount)
+	}
+	if len(got.Warnings) != 1 || !strings.Contains(got.Warnings[0], "placement scope is not modeled yet") {
+		t.Fatalf("warnings = %#v, want partial-scope warning", got.Warnings)
+	}
+}
+
+func TestBuildNMinusOneNodeOptimizationScenariosRequiresDistinctDaemonSetNodeCoverage(t *testing.T) {
+	nodeInfos := []models.NodeInfo{
+		{Name: "node-0", NodePool: "userpool", VMSize: "Standard_D4s_v3", Region: "centralus", OS: "linux", Priority: "Regular", Provider: "azure", Architecture: "amd64", CPUCapacity: 4, MemGBCapacity: 8},
+		{Name: "node-1", NodePool: "userpool", VMSize: "Standard_D4s_v3", Region: "centralus", OS: "linux", Priority: "Regular", Provider: "azure", Architecture: "amd64", CPUCapacity: 4, MemGBCapacity: 8},
+		{Name: "node-2", NodePool: "userpool", VMSize: "Standard_D4s_v3", Region: "centralus", OS: "linux", Priority: "Regular", Provider: "azure", Architecture: "amd64", CPUCapacity: 4, MemGBCapacity: 8},
+	}
+
+	pods := []corev1.Pod{
+		optimizationTestDaemonSetPod("kube-system", "agent-a", "node-0", "500m", "1Gi"),
+		optimizationTestDaemonSetPod("kube-system", "agent-b", "node-0", "500m", "1Gi"),
+		optimizationTestDaemonSetPod("kube-system", "agent-c", "node-1", "500m", "1Gi"),
+	}
+
+	got := BuildNMinusOneNodeOptimizationScenariosFromSnapshots(nodeInfos, pods)
+
+	if len(got.Scenarios) != 0 {
+		t.Fatalf("scenario count = %d, want 0", len(got.Scenarios))
+	}
+	if got.SkippedPoolCount != 1 {
+		t.Fatalf("SkippedPoolCount = %d, want 1", got.SkippedPoolCount)
+	}
+	if len(got.Warnings) != 1 || !strings.Contains(got.Warnings[0], "2 of 3 distinct nodes") {
+		t.Fatalf("warnings = %#v, want distinct-node coverage warning", got.Warnings)
+	}
+}
+
+func TestBuildNMinusOneNodeOptimizationScenariosSkipsInconsistentDaemonSetRequests(t *testing.T) {
+	nodeInfos := []models.NodeInfo{
+		{Name: "node-0", NodePool: "userpool", VMSize: "Standard_D4s_v3", Region: "centralus", OS: "linux", Priority: "Regular", Provider: "azure", Architecture: "amd64", CPUCapacity: 4, MemGBCapacity: 8},
+		{Name: "node-1", NodePool: "userpool", VMSize: "Standard_D4s_v3", Region: "centralus", OS: "linux", Priority: "Regular", Provider: "azure", Architecture: "amd64", CPUCapacity: 4, MemGBCapacity: 8},
+	}
+
+	pods := []corev1.Pod{
+		optimizationTestDaemonSetPod("kube-system", "agent-a", "node-0", "500m", "1Gi"),
+		optimizationTestDaemonSetPod("kube-system", "agent-b", "node-1", "750m", "1Gi"),
+	}
+
+	got := BuildNMinusOneNodeOptimizationScenariosFromSnapshots(nodeInfos, pods)
+
+	if len(got.Scenarios) != 0 {
+		t.Fatalf("scenario count = %d, want 0", len(got.Scenarios))
+	}
+	if got.SkippedPoolCount != 1 {
+		t.Fatalf("SkippedPoolCount = %d, want 1", got.SkippedPoolCount)
+	}
+	if len(got.Warnings) != 1 || !strings.Contains(got.Warnings[0], "inconsistent effective CPU or memory requests") {
+		t.Fatalf("warnings = %#v, want inconsistent-request warning", got.Warnings)
+	}
+}
+
+func optimizationTestDaemonSetPod(namespace, name, nodeName, cpu, memory string) corev1.Pod {
+	controller := true
+	pod := optimizationTestPod(namespace, name, nodeName, corev1.PodRunning, cpu, memory)
+	pod.OwnerReferences = []metav1.OwnerReference{
+		{
+			APIVersion: "apps/v1",
+			Kind:       "DaemonSet",
+			Name:       "node-agent",
+			Controller: &controller,
+		},
+	}
+	return pod
+}

@@ -293,9 +293,12 @@ type NodeOptimizationSnapshotSummary struct {
 // NodeOptimizationScenario is one N-1 same-shape pool simulation derived from
 // an already-observed cluster snapshot.
 type NodeOptimizationScenario struct {
-	PoolKey          CostPoolKey
-	EligiblePodCount int
-	Simulation       NodeOptimizationResult
+	PoolKey                     CostPoolKey
+	EligiblePodCount            int
+	DaemonSetCount              int
+	DaemonSetCPUPerNodeMilli    int64
+	DaemonSetMemoryPerNodeBytes int64
+	Simulation                  NodeOptimizationResult
 }
 
 // BuildNMinusOneNodeOptimizationScenariosFromSnapshots constructs one same-shape
@@ -313,6 +316,19 @@ func BuildNMinusOneNodeOptimizationScenariosFromSnapshots(
 		cpuMilli  int64
 		memBytes  int64
 		invalid   bool
+	}
+
+	type daemonSetKey struct {
+		namespace string
+		name      string
+	}
+
+	type daemonSetObservation struct {
+		nodes        map[string]struct{}
+		cpuMilli     int64
+		memBytes     int64
+		requestsSet  bool
+		inconsistent bool
 	}
 
 	summary := NodeOptimizationSnapshotSummary{}
@@ -376,6 +392,7 @@ func BuildNMinusOneNodeOptimizationScenariosFromSnapshots(
 	}
 
 	podsByPool := make(map[CostPoolKey][]NodeOptimizationPodInput)
+	daemonSetsByPool := make(map[CostPoolKey]map[daemonSetKey]*daemonSetObservation)
 
 	for _, pod := range pods {
 		input := BuildPodCostInput(pod, knownNodes, nodeKeys, ControllerIndexes{})
@@ -409,6 +426,30 @@ func BuildNMinusOneNodeOptimizationScenariosFromSnapshots(
 		}
 
 		key := *input.PoolKey
+
+		if input.WorkloadKind == "DaemonSet" {
+			dsKey := daemonSetKey{namespace: input.Namespace, name: input.WorkloadName}
+			byDaemonSet := daemonSetsByPool[key]
+			if byDaemonSet == nil {
+				byDaemonSet = make(map[daemonSetKey]*daemonSetObservation)
+				daemonSetsByPool[key] = byDaemonSet
+			}
+			obs := byDaemonSet[dsKey]
+			if obs == nil {
+				obs = &daemonSetObservation{nodes: make(map[string]struct{})}
+				byDaemonSet[dsKey] = obs
+			}
+			obs.nodes[input.NodeName] = struct{}{}
+			if !obs.requestsSet {
+				obs.cpuMilli = input.CPURequestMilli
+				obs.memBytes = input.MemoryRequestBytes
+				obs.requestsSet = true
+			} else if obs.cpuMilli != input.CPURequestMilli || obs.memBytes != input.MemoryRequestBytes {
+				obs.inconsistent = true
+			}
+			continue
+		}
+
 		podsByPool[key] = append(podsByPool[key], NodeOptimizationPodInput{
 			Namespace:          input.Namespace,
 			Name:               input.PodName,
@@ -439,19 +480,69 @@ func BuildNMinusOneNodeOptimizationScenariosFromSnapshots(
 			continue
 		}
 
+		var daemonCPUPerNode, daemonMemPerNode int64
+		daemonSetCount := 0
+		daemonEvidenceComplete := true
+		for dsKey, obs := range daemonSetsByPool[key] {
+			if obs.inconsistent {
+				daemonEvidenceComplete = false
+				summary.Warnings = append(summary.Warnings, fmt.Sprintf(
+					"pool %s skipped because DaemonSet %s/%s replicas expose inconsistent effective CPU or memory requests",
+					key.PoolName,
+					dsKey.namespace,
+					dsKey.name,
+				))
+				continue
+			}
+			if len(obs.nodes) != pool.nodeCount {
+				daemonEvidenceComplete = false
+				summary.Warnings = append(summary.Warnings, fmt.Sprintf(
+					"pool %s skipped because DaemonSet %s/%s is observed on %d of %d distinct nodes; placement scope is not modeled yet",
+					key.PoolName,
+					dsKey.namespace,
+					dsKey.name,
+					len(obs.nodes),
+					pool.nodeCount,
+				))
+				continue
+			}
+			daemonSetCount++
+			daemonCPUPerNode += obs.cpuMilli
+			daemonMemPerNode += obs.memBytes
+		}
+
+		if !daemonEvidenceComplete {
+			summary.SkippedPoolCount++
+			continue
+		}
+
+		usableCPUPerNode := pool.cpuMilli - daemonCPUPerNode
+		usableMemPerNode := pool.memBytes - daemonMemPerNode
+		if usableCPUPerNode <= 0 || usableMemPerNode <= 0 {
+			summary.SkippedPoolCount++
+			summary.Warnings = append(summary.Warnings, fmt.Sprintf(
+				"pool %s skipped because observed DaemonSet per-node overhead leaves no positive CPU or memory capacity for movable workloads",
+				key.PoolName,
+			))
+			continue
+		}
+
 		scenarioInput := NodeOptimizationInput{
 			PoolKey:                 key,
 			CurrentNodes:            pool.nodeCount,
 			CandidateNodes:          pool.nodeCount - 1,
-			NodeCPUCapacityMilli:    pool.cpuMilli,
-			NodeMemoryCapacityBytes: pool.memBytes,
+			NodeCPUCapacityMilli:    usableCPUPerNode,
+			NodeMemoryCapacityBytes: usableMemPerNode,
 			Pods:                    append([]NodeOptimizationPodInput(nil), podsByPool[key]...),
 		}
 
 		summary.Scenarios = append(summary.Scenarios, NodeOptimizationScenario{
-			PoolKey:          key,
-			EligiblePodCount: len(scenarioInput.Pods),
-			Simulation:       SimulateSameShapeNodeCount(scenarioInput),
+			PoolKey:                     key,
+			EligiblePodCount:            len(scenarioInput.Pods),
+			DaemonSetCount:              daemonSetCount,
+			DaemonSetCPUPerNodeMilli:    daemonCPUPerNode,
+			DaemonSetMemoryPerNodeBytes: daemonMemPerNode,
+			Simulation:                  SimulateSameShapeNodeCount(scenarioInput),
 		})
 	}
 
