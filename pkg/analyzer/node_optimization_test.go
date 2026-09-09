@@ -319,8 +319,8 @@ func TestBuildNMinusOneNodeOptimizationScenariosFromSnapshots(t *testing.T) {
 
 	got := BuildNMinusOneNodeOptimizationScenariosFromSnapshots(nodeInfos, pods)
 
-	if len(got.Scenarios) != 1 {
-		t.Fatalf("scenario count = %d, want 1; warnings=%v", len(got.Scenarios), got.Warnings)
+	if len(got.Scenarios) != 0 {
+		t.Fatalf("scenario count = %d, want 0 because unresolved Pending demand must fail closed", len(got.Scenarios))
 	}
 	if got.ExcludedPodCount != 1 {
 		t.Fatalf("ExcludedPodCount = %d, want 1", got.ExcludedPodCount)
@@ -328,28 +328,17 @@ func TestBuildNMinusOneNodeOptimizationScenariosFromSnapshots(t *testing.T) {
 	if got.UnresolvedPodCount != 1 {
 		t.Fatalf("UnresolvedPodCount = %d, want 1", got.UnresolvedPodCount)
 	}
+	if !got.EvidenceIncomplete {
+		t.Fatal("EvidenceIncomplete = false, want true for unresolved Pending demand")
+	}
 	if got.UnresolvedNodeCount != 0 {
 		t.Fatalf("UnresolvedNodeCount = %d, want 0", got.UnresolvedNodeCount)
 	}
-	if got.SkippedPoolCount != 0 {
-		t.Fatalf("SkippedPoolCount = %d, want 0", got.SkippedPoolCount)
+	if got.SkippedPoolCount != 1 {
+		t.Fatalf("SkippedPoolCount = %d, want 1", got.SkippedPoolCount)
 	}
-
-	scenario := got.Scenarios[0]
-	if scenario.PoolKey.PoolName != "userpool" {
-		t.Fatalf("pool = %q, want userpool", scenario.PoolKey.PoolName)
-	}
-	if scenario.Simulation.CurrentNodes != 3 || scenario.Simulation.CandidateNodes != 2 {
-		t.Fatalf("node counts = %d -> %d, want 3 -> 2", scenario.Simulation.CurrentNodes, scenario.Simulation.CandidateNodes)
-	}
-	if scenario.EligiblePodCount != 3 {
-		t.Fatalf("EligiblePodCount = %d, want 3", scenario.EligiblePodCount)
-	}
-	if scenario.Simulation.TotalCPURequestMilli != 4000 {
-		t.Fatalf("TotalCPURequestMilli = %d, want 4000", scenario.Simulation.TotalCPURequestMilli)
-	}
-	if scenario.Simulation.Status != NodeOptimizationFit {
-		t.Fatalf("status = %q, want %q; blockers=%v", scenario.Simulation.Status, NodeOptimizationFit, scenario.Simulation.Blockers)
+	if len(got.Warnings) == 0 || !strings.Contains(strings.Join(got.Warnings, " "), "unresolved for node optimization") {
+		t.Fatalf("warnings = %#v, want unresolved Pod warning", got.Warnings)
 	}
 }
 
@@ -1193,5 +1182,108 @@ func optimizationRequiredNodeAffinity(
 				},
 			},
 		},
+	}
+}
+
+func TestBuildNMinusOneNodeOptimizationScenariosFailsClosedOnDuplicateNodeInfoIdentity(t *testing.T) {
+	nodeInfos := optimizationNodeInfos(2)
+	nodeInfos[1].Name = nodeInfos[0].Name
+	got := BuildNMinusOneNodeOptimizationScenariosFromSnapshots(nodeInfos, nil)
+
+	if len(got.Scenarios) != 0 {
+		t.Fatalf("scenario count = %d, want 0", len(got.Scenarios))
+	}
+	if !got.EvidenceIncomplete || got.DuplicateNodeCount != 1 {
+		t.Fatalf("EvidenceIncomplete=%v DuplicateNodeCount=%d, want true/1", got.EvidenceIncomplete, got.DuplicateNodeCount)
+	}
+}
+
+func TestBuildNMinusOneNodeOptimizationScenariosFailsClosedOnDuplicatePodIdentity(t *testing.T) {
+	nodeInfos := optimizationNodeInfos(2)
+	pod := optimizationTestPod("apps", "api", "node-0", corev1.PodRunning, "1000m", "1Gi")
+	got := BuildNMinusOneNodeOptimizationScenariosFromSnapshots(nodeInfos, []corev1.Pod{pod, pod})
+
+	if len(got.Scenarios) != 0 || !got.EvidenceIncomplete || got.DuplicatePodCount != 1 {
+		t.Fatalf("scenarios=%d EvidenceIncomplete=%v DuplicatePodCount=%d, want 0/true/1",
+			len(got.Scenarios), got.EvidenceIncomplete, got.DuplicatePodCount)
+	}
+}
+
+func TestBuildNMinusOneNodeOptimizationScenariosFailsClosedOnUnresolvedPendingPod(t *testing.T) {
+	nodeInfos := optimizationNodeInfos(2)
+	pod := optimizationTestPod("apps", "pending", "", corev1.PodPending, "1000m", "1Gi")
+	got := BuildNMinusOneNodeOptimizationScenariosFromSnapshots(nodeInfos, []corev1.Pod{pod})
+
+	if len(got.Scenarios) != 0 || !got.EvidenceIncomplete || got.UnresolvedPodCount != 1 {
+		t.Fatalf("scenarios=%d EvidenceIncomplete=%v UnresolvedPodCount=%d, want 0/true/1",
+			len(got.Scenarios), got.EvidenceIncomplete, got.UnresolvedPodCount)
+	}
+}
+
+func TestBuildNMinusOneNodeOptimizationScenariosCarriesBoundUnknownPhaseWarningAsCaveat(t *testing.T) {
+	nodeInfos := optimizationNodeInfos(2)
+	pod := optimizationTestPod("apps", "unknown", "node-0", corev1.PodUnknown, "1000m", "1Gi")
+	got := BuildNMinusOneNodeOptimizationScenariosFromSnapshots(nodeInfos, []corev1.Pod{pod})
+
+	if len(got.Scenarios) != 1 {
+		t.Fatalf("scenario count = %d, want 1; warnings=%v", len(got.Scenarios), got.Warnings)
+	}
+	if len(got.Scenarios[0].SchedulingCaveats) == 0 ||
+		!strings.Contains(strings.Join(got.Scenarios[0].SchedulingCaveats, " "), "unknown") {
+		t.Fatalf("SchedulingCaveats = %#v, want unknown-phase caveat", got.Scenarios[0].SchedulingCaveats)
+	}
+}
+
+func TestBuildNodeOptimizationSchedulingEvidenceFailsClosedOnDuplicateRawNodeIdentity(t *testing.T) {
+	nodeInfos := optimizationNodeInfos(2)
+	nodes := []corev1.Node{
+		{ObjectMeta: metav1.ObjectMeta{Name: "node-0"}},
+		{ObjectMeta: metav1.ObjectMeta{Name: "node-0"}},
+		{ObjectMeta: metav1.ObjectMeta{Name: "node-1"}},
+	}
+	got := BuildNodeOptimizationSchedulingEvidence(nodeInfos, nodes)
+
+	if !got.EvidenceIncomplete || got.DuplicateNodeCount != 1 {
+		t.Fatalf("EvidenceIncomplete=%v DuplicateNodeCount=%d, want true/1", got.EvidenceIncomplete, got.DuplicateNodeCount)
+	}
+	if _, ok := got.Nodes["node-0"]; ok {
+		t.Fatal("duplicate raw node unexpectedly retained")
+	}
+}
+
+func TestBuildNMinusOneNodeOptimizationScenariosFailsClosedOnExtraSchedulingNode(t *testing.T) {
+	nodeInfos := optimizationNodeInfos(2)
+	nodes := []corev1.Node{
+		{ObjectMeta: metav1.ObjectMeta{Name: "node-0"}},
+		{ObjectMeta: metav1.ObjectMeta{Name: "node-1"}},
+		{ObjectMeta: metav1.ObjectMeta{Name: "node-extra"}},
+	}
+	evidence := BuildNodeOptimizationSchedulingEvidence(nodeInfos, nodes)
+	got := BuildNMinusOneNodeOptimizationScenariosWithSchedulingEvidence(nodeInfos, nil, evidence)
+
+	if len(got.Scenarios) != 0 || !got.EvidenceIncomplete {
+		t.Fatalf("scenarios=%d EvidenceIncomplete=%v, want 0/true", len(got.Scenarios), got.EvidenceIncomplete)
+	}
+}
+
+func TestBuildNodeOptimizationSchedulingEvidenceRejectsOSArchitectureDisagreement(t *testing.T) {
+	nodeInfos := optimizationNodeInfos(2)
+	nodes := []corev1.Node{
+		{ObjectMeta: metav1.ObjectMeta{Name: "node-0", Labels: map[string]string{
+			corev1.LabelOSStable: "windows", corev1.LabelArchStable: "amd64",
+		}}},
+		{ObjectMeta: metav1.ObjectMeta{Name: "node-1", Labels: map[string]string{
+			corev1.LabelOSStable: "linux", corev1.LabelArchStable: "arm64",
+		}}},
+	}
+	got := BuildNodeOptimizationSchedulingEvidence(nodeInfos, nodes)
+
+	if !got.EvidenceIncomplete || got.UnresolvedNodeCount != 2 {
+		t.Fatalf("EvidenceIncomplete=%v UnresolvedNodeCount=%d, want true/2",
+			got.EvidenceIncomplete, got.UnresolvedNodeCount)
+	}
+	joined := strings.Join(got.Warnings, " ")
+	if !strings.Contains(joined, "OS") || !strings.Contains(joined, "architecture") {
+		t.Fatalf("warnings = %#v, want OS and architecture disagreement warnings", got.Warnings)
 	}
 }

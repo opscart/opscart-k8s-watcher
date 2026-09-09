@@ -286,8 +286,11 @@ type NodeOptimizationSnapshotSummary struct {
 	ExcludedPodCount              int
 	UnresolvedPodCount            int
 	UnresolvedNodeCount           int
+	DuplicateNodeCount            int
+	DuplicatePodCount             int
 	UnsupportedConstraintPodCount int
 	SchedulingBlockedPodCount     int
+	EvidenceIncomplete            bool
 	SkippedPoolCount              int
 	Warnings                      []string
 }
@@ -358,7 +361,31 @@ func buildNMinusOneNodeOptimizationScenarios(
 	nodeKeys := make(map[string]*CostPoolKey, len(nodeInfos))
 	pools := make(map[CostPoolKey]*poolSnapshot)
 
+	nodeNameCounts := make(map[string]int, len(nodeInfos))
 	for _, info := range nodeInfos {
+		nodeNameCounts[info.Name]++
+	}
+	duplicateNodeNames := make([]string, 0)
+	for name, count := range nodeNameCounts {
+		if count > 1 {
+			duplicateNodeNames = append(duplicateNodeNames, name)
+		}
+	}
+	sort.Strings(duplicateNodeNames)
+	for _, name := range duplicateNodeNames {
+		summary.DuplicateNodeCount++
+		summary.EvidenceIncomplete = true
+		summary.Warnings = append(summary.Warnings, fmt.Sprintf(
+			"duplicate NodeInfo identity %q appears %d times; node optimization evidence is incomplete",
+			name,
+			nodeNameCounts[name],
+		))
+	}
+
+	for _, info := range nodeInfos {
+		if nodeNameCounts[info.Name] > 1 {
+			continue
+		}
 		knownNodes[info.Name] = struct{}{}
 
 		key := costPoolKeyFromNodeInfo(info)
@@ -404,10 +431,35 @@ func buildNMinusOneNodeOptimizationScenarios(
 
 	podsByPool := make(map[CostPoolKey][]NodeOptimizationPodInput)
 	eligiblePodsByPool := make(map[CostPoolKey][]corev1.Pod)
+	eligibilityWarningsByPool := make(map[CostPoolKey][]string)
 	daemonSetsByPool := make(map[CostPoolKey]map[daemonSetKey]*daemonSetObservation)
 	unsupportedSelectorsByPool := make(map[CostPoolKey][]string)
 
+	podNameCounts := make(map[string]int, len(pods))
 	for _, pod := range pods {
+		podNameCounts[namespacedKey(pod.Namespace, pod.Name)]++
+	}
+	duplicatePodNames := make([]string, 0)
+	for name, count := range podNameCounts {
+		if count > 1 {
+			duplicatePodNames = append(duplicatePodNames, name)
+		}
+	}
+	sort.Strings(duplicatePodNames)
+	for _, name := range duplicatePodNames {
+		summary.DuplicatePodCount++
+		summary.EvidenceIncomplete = true
+		summary.Warnings = append(summary.Warnings, fmt.Sprintf(
+			"duplicate Pod identity %q appears %d times; node optimization evidence is incomplete",
+			strings.ReplaceAll(name, "\x00", "/"),
+			podNameCounts[name],
+		))
+	}
+
+	for _, pod := range pods {
+		if podNameCounts[namespacedKey(pod.Namespace, pod.Name)] > 1 {
+			continue
+		}
 		input := BuildPodCostInput(pod, knownNodes, nodeKeys, ControllerIndexes{})
 
 		switch input.Eligibility {
@@ -416,6 +468,17 @@ func buildNMinusOneNodeOptimizationScenarios(
 			continue
 		case PodCostUnresolved:
 			summary.UnresolvedPodCount++
+			summary.EvidenceIncomplete = true
+			reason := input.EligibilityWarning
+			if reason == "" {
+				reason = string(input.EligibilityReason)
+			}
+			summary.Warnings = append(summary.Warnings, fmt.Sprintf(
+				"pod %s/%s is unresolved for node optimization: %s",
+				input.Namespace,
+				input.PodName,
+				reason,
+			))
 			continue
 		case PodCostEligible:
 			if input.PoolKey == nil {
@@ -440,6 +503,14 @@ func buildNMinusOneNodeOptimizationScenarios(
 
 		key := *input.PoolKey
 		eligiblePodsByPool[key] = append(eligiblePodsByPool[key], pod)
+		if input.EligibilityWarning != "" {
+			eligibilityWarningsByPool[key] = append(eligibilityWarningsByPool[key], fmt.Sprintf(
+				"pod %s/%s: %s",
+				input.Namespace,
+				input.PodName,
+				input.EligibilityWarning,
+			))
+		}
 
 		if input.WorkloadKind != "DaemonSet" {
 			if reason := nodeSelectorCompatibilityReason(pod.Spec.NodeSelector, key); reason != "" {
@@ -492,6 +563,28 @@ func buildNMinusOneNodeOptimizationScenarios(
 	sort.Slice(keys, func(i, j int) bool {
 		return costPoolKeySortValue(keys[i]) < costPoolKeySortValue(keys[j])
 	})
+
+	if evidence != nil {
+		if evidence.EvidenceIncomplete ||
+			evidence.UnresolvedNodeCount > 0 ||
+			evidence.UnmatchedSchedulingNodeCount > 0 ||
+			evidence.DuplicateNodeCount > 0 {
+			summary.EvidenceIncomplete = true
+			summary.UnresolvedNodeCount += evidence.UnresolvedNodeCount
+			summary.DuplicateNodeCount += evidence.DuplicateNodeCount
+			summary.Warnings = append(summary.Warnings, evidence.Warnings...)
+		}
+	}
+
+	if summary.EvidenceIncomplete {
+		for _, key := range keys {
+			if pools[key].nodeCount >= 2 {
+				summary.SkippedPoolCount++
+			}
+		}
+		sort.Strings(summary.Warnings)
+		return summary
+	}
 
 	for _, key := range keys {
 		pool := pools[key]
@@ -684,13 +777,17 @@ func buildNMinusOneNodeOptimizationScenarios(
 			Pods:                    append([]NodeOptimizationPodInput(nil), podsByPool[key]...),
 		}
 
+		caveats := append([]string(nil), schedulingCaveats...)
+		caveats = append(caveats, eligibilityWarningsByPool[key]...)
+		sort.Strings(caveats)
+
 		summary.Scenarios = append(summary.Scenarios, NodeOptimizationScenario{
 			PoolKey:                     key,
 			EligiblePodCount:            len(scenarioInput.Pods),
 			DaemonSetCount:              daemonSetCount,
 			DaemonSetCPUPerNodeMilli:    daemonCPUPerNode,
 			DaemonSetMemoryPerNodeBytes: daemonMemPerNode,
-			SchedulingCaveats:           append([]string(nil), schedulingCaveats...),
+			SchedulingCaveats:           caveats,
 			Simulation:                  SimulateSameShapeNodeCount(scenarioInput),
 		})
 	}
@@ -767,6 +864,8 @@ type NodeOptimizationSchedulingEvidence struct {
 	Nodes                        map[string]NodeOptimizationSchedulingNode
 	UnresolvedNodeCount          int
 	UnmatchedSchedulingNodeCount int
+	DuplicateNodeCount           int
+	EvidenceIncomplete           bool
 	Warnings                     []string
 }
 
@@ -781,13 +880,53 @@ func BuildNodeOptimizationSchedulingEvidence(
 		Nodes: make(map[string]NodeOptimizationSchedulingNode),
 	}
 
+	rawNameCounts := make(map[string]int, len(nodes))
+	for _, node := range nodes {
+		rawNameCounts[node.Name]++
+	}
+	infoNameCounts := make(map[string]int, len(nodeInfos))
+	for _, info := range nodeInfos {
+		infoNameCounts[info.Name]++
+	}
+
+	duplicateNames := make(map[string]struct{})
+	for name, count := range rawNameCounts {
+		if count > 1 {
+			duplicateNames[name] = struct{}{}
+			result.EvidenceIncomplete = true
+			result.Warnings = append(result.Warnings, fmt.Sprintf(
+				"duplicate Kubernetes Node identity %q appears %d times in scheduling evidence",
+				name,
+				count,
+			))
+		}
+	}
+	for name, count := range infoNameCounts {
+		if count > 1 {
+			duplicateNames[name] = struct{}{}
+			result.EvidenceIncomplete = true
+			result.Warnings = append(result.Warnings, fmt.Sprintf(
+				"duplicate NodeInfo identity %q appears %d times in scheduling evidence",
+				name,
+				count,
+			))
+		}
+	}
+	result.DuplicateNodeCount = len(duplicateNames)
+
 	rawByName := make(map[string]corev1.Node, len(nodes))
 	for _, node := range nodes {
+		if _, duplicate := duplicateNames[node.Name]; duplicate {
+			continue
+		}
 		rawByName[node.Name] = node
 	}
 
 	infoNames := make(map[string]struct{}, len(nodeInfos))
 	for _, info := range nodeInfos {
+		if _, duplicate := duplicateNames[info.Name]; duplicate {
+			continue
+		}
 		infoNames[info.Name] = struct{}{}
 
 		key := costPoolKeyFromNodeInfo(info)
@@ -804,9 +943,21 @@ func BuildNodeOptimizationSchedulingEvidence(
 		node, ok := rawByName[info.Name]
 		if !ok {
 			result.UnresolvedNodeCount++
+			result.EvidenceIncomplete = true
 			result.Warnings = append(result.Warnings, fmt.Sprintf(
 				"node %s excluded from scheduling evidence because it is missing from the Kubernetes Node snapshot",
 				info.Name,
+			))
+			continue
+		}
+
+		if reason := nodeInfoSchedulingIdentityMismatch(info, node); reason != "" {
+			result.UnresolvedNodeCount++
+			result.EvidenceIncomplete = true
+			result.Warnings = append(result.Warnings, fmt.Sprintf(
+				"node %s excluded from scheduling evidence because %s",
+				info.Name,
+				reason,
 			))
 			continue
 		}
@@ -824,7 +975,11 @@ func BuildNodeOptimizationSchedulingEvidence(
 		if _, ok := infoNames[node.Name]; ok {
 			continue
 		}
+		if _, duplicate := duplicateNames[node.Name]; duplicate {
+			continue
+		}
 		result.UnmatchedSchedulingNodeCount++
+		result.EvidenceIncomplete = true
 		extraNames = append(extraNames, node.Name)
 	}
 	sort.Strings(extraNames)
@@ -1078,4 +1233,26 @@ func stringSliceContains(values []string, target string) bool {
 		}
 	}
 	return false
+}
+
+func nodeInfoSchedulingIdentityMismatch(info models.NodeInfo, node corev1.Node) string {
+	rawOS := firstNonEmptyNodeLabel(node.Labels, corev1.LabelOSStable, "beta.kubernetes.io/os")
+	if rawOS != "" && !strings.EqualFold(strings.TrimSpace(info.OS), strings.TrimSpace(rawOS)) {
+		return fmt.Sprintf("NodeInfo OS %q disagrees with Kubernetes Node OS label %q", info.OS, rawOS)
+	}
+
+	rawArch := firstNonEmptyNodeLabel(node.Labels, corev1.LabelArchStable, "beta.kubernetes.io/arch")
+	if rawArch != "" && !strings.EqualFold(strings.TrimSpace(info.Architecture), strings.TrimSpace(rawArch)) {
+		return fmt.Sprintf("NodeInfo architecture %q disagrees with Kubernetes Node architecture label %q", info.Architecture, rawArch)
+	}
+	return ""
+}
+
+func firstNonEmptyNodeLabel(labels map[string]string, keys ...string) string {
+	for _, key := range keys {
+		if value := strings.TrimSpace(labels[key]); value != "" {
+			return value
+		}
+	}
+	return ""
 }
