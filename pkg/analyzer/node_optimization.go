@@ -282,12 +282,13 @@ func podDisplayName(pod NodeOptimizationPodInput) string {
 // NodeOptimizationSnapshotSummary bridges already-acquired Kubernetes snapshots
 // into the pure placement simulator. It performs no Kubernetes or cloud API calls.
 type NodeOptimizationSnapshotSummary struct {
-	Scenarios           []NodeOptimizationScenario
-	ExcludedPodCount    int
-	UnresolvedPodCount  int
-	UnresolvedNodeCount int
-	SkippedPoolCount    int
-	Warnings            []string
+	Scenarios                     []NodeOptimizationScenario
+	ExcludedPodCount              int
+	UnresolvedPodCount            int
+	UnresolvedNodeCount           int
+	UnsupportedConstraintPodCount int
+	SkippedPoolCount              int
+	Warnings                      []string
 }
 
 // NodeOptimizationScenario is one N-1 same-shape pool simulation derived from
@@ -393,6 +394,7 @@ func BuildNMinusOneNodeOptimizationScenariosFromSnapshots(
 
 	podsByPool := make(map[CostPoolKey][]NodeOptimizationPodInput)
 	daemonSetsByPool := make(map[CostPoolKey]map[daemonSetKey]*daemonSetObservation)
+	unsupportedSelectorsByPool := make(map[CostPoolKey][]string)
 
 	for _, pod := range pods {
 		input := BuildPodCostInput(pod, knownNodes, nodeKeys, ControllerIndexes{})
@@ -426,6 +428,19 @@ func BuildNMinusOneNodeOptimizationScenariosFromSnapshots(
 		}
 
 		key := *input.PoolKey
+
+		if input.WorkloadKind != "DaemonSet" {
+			if reason := nodeSelectorCompatibilityReason(pod.Spec.NodeSelector, key); reason != "" {
+				summary.UnsupportedConstraintPodCount++
+				unsupportedSelectorsByPool[key] = append(unsupportedSelectorsByPool[key], fmt.Sprintf(
+					"pod %s/%s: %s",
+					input.Namespace,
+					input.PodName,
+					reason,
+				))
+				continue
+			}
+		}
 
 		if input.WorkloadKind == "DaemonSet" {
 			dsKey := daemonSetKey{namespace: input.Namespace, name: input.WorkloadName}
@@ -468,6 +483,18 @@ func BuildNMinusOneNodeOptimizationScenariosFromSnapshots(
 
 	for _, key := range keys {
 		pool := pools[key]
+
+		if blockers := unsupportedSelectorsByPool[key]; len(blockers) > 0 {
+			summary.SkippedPoolCount++
+			sort.Strings(blockers)
+			summary.Warnings = append(summary.Warnings, fmt.Sprintf(
+				"pool %s skipped because nodeSelector compatibility is not fully modeled: %s",
+				key.PoolName,
+				strings.Join(blockers, "; "),
+			))
+			continue
+		}
+
 		if pool.invalid {
 			summary.SkippedPoolCount++
 			summary.Warnings = append(summary.Warnings, fmt.Sprintf(
@@ -559,4 +586,40 @@ func costPoolKeySortValue(key CostPoolKey) string {
 		key.OS,
 		key.Architecture,
 	}, "\x00")
+}
+
+func nodeSelectorCompatibilityReason(selector map[string]string, pool CostPoolKey) string {
+	if len(selector) == 0 {
+		return ""
+	}
+
+	for key, value := range selector {
+		switch key {
+		case corev1.LabelOSStable, "beta.kubernetes.io/os":
+			if value != pool.OS {
+				return fmt.Sprintf(
+					"nodeSelector %s=%s does not match pool OS %s",
+					key,
+					value,
+					pool.OS,
+				)
+			}
+		case corev1.LabelArchStable, "beta.kubernetes.io/arch":
+			if value != pool.Architecture {
+				return fmt.Sprintf(
+					"nodeSelector %s=%s does not match pool architecture %s",
+					key,
+					value,
+					pool.Architecture,
+				)
+			}
+		default:
+			return fmt.Sprintf(
+				"nodeSelector key %s is not modeled by the same-shape simulator",
+				key,
+			)
+		}
+	}
+
+	return ""
 }

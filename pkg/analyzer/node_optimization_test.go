@@ -498,3 +498,106 @@ func optimizationTestDaemonSetPod(namespace, name, nodeName, cpu, memory string)
 	}
 	return pod
 }
+
+func TestBuildNMinusOneNodeOptimizationScenariosAcceptsOSAndArchitectureNodeSelector(t *testing.T) {
+	nodeInfos := []models.NodeInfo{
+		{Name: "node-0", NodePool: "userpool", VMSize: "Standard_D4s_v3", Region: "centralus", OS: "linux", Priority: "Regular", Provider: "azure", Architecture: "amd64", CPUCapacity: 4, MemGBCapacity: 8},
+		{Name: "node-1", NodePool: "userpool", VMSize: "Standard_D4s_v3", Region: "centralus", OS: "linux", Priority: "Regular", Provider: "azure", Architecture: "amd64", CPUCapacity: 4, MemGBCapacity: 8},
+	}
+
+	pod := optimizationTestPod("apps", "api", "node-0", corev1.PodRunning, "1000m", "1Gi")
+	pod.Spec.NodeSelector = map[string]string{
+		corev1.LabelOSStable:   "linux",
+		corev1.LabelArchStable: "amd64",
+	}
+
+	got := BuildNMinusOneNodeOptimizationScenariosFromSnapshots(nodeInfos, []corev1.Pod{pod})
+
+	if len(got.Scenarios) != 1 {
+		t.Fatalf("scenario count = %d, want 1; warnings=%v", len(got.Scenarios), got.Warnings)
+	}
+	if got.UnsupportedConstraintPodCount != 0 {
+		t.Fatalf("UnsupportedConstraintPodCount = %d, want 0", got.UnsupportedConstraintPodCount)
+	}
+	if got.Scenarios[0].Simulation.Status != NodeOptimizationFit {
+		t.Fatalf("status = %q, want %q", got.Scenarios[0].Simulation.Status, NodeOptimizationFit)
+	}
+}
+
+func TestBuildNMinusOneNodeOptimizationScenariosSkipsMismatchedOSNodeSelector(t *testing.T) {
+	nodeInfos := []models.NodeInfo{
+		{Name: "node-0", NodePool: "userpool", VMSize: "Standard_D4s_v3", Region: "centralus", OS: "linux", Priority: "Regular", Provider: "azure", Architecture: "amd64", CPUCapacity: 4, MemGBCapacity: 8},
+		{Name: "node-1", NodePool: "userpool", VMSize: "Standard_D4s_v3", Region: "centralus", OS: "linux", Priority: "Regular", Provider: "azure", Architecture: "amd64", CPUCapacity: 4, MemGBCapacity: 8},
+	}
+
+	pod := optimizationTestPod("apps", "windows-only", "node-0", corev1.PodRunning, "1000m", "1Gi")
+	pod.Spec.NodeSelector = map[string]string{
+		corev1.LabelOSStable: "windows",
+	}
+
+	got := BuildNMinusOneNodeOptimizationScenariosFromSnapshots(nodeInfos, []corev1.Pod{pod})
+
+	if len(got.Scenarios) != 0 {
+		t.Fatalf("scenario count = %d, want 0", len(got.Scenarios))
+	}
+	if got.UnsupportedConstraintPodCount != 1 {
+		t.Fatalf("UnsupportedConstraintPodCount = %d, want 1", got.UnsupportedConstraintPodCount)
+	}
+	if got.SkippedPoolCount != 1 {
+		t.Fatalf("SkippedPoolCount = %d, want 1", got.SkippedPoolCount)
+	}
+	if len(got.Warnings) != 1 || !strings.Contains(got.Warnings[0], "does not match pool OS") {
+		t.Fatalf("warnings = %#v, want OS mismatch warning", got.Warnings)
+	}
+}
+
+func TestBuildNMinusOneNodeOptimizationScenariosSkipsUnsupportedNodeSelector(t *testing.T) {
+	nodeInfos := []models.NodeInfo{
+		{Name: "node-0", NodePool: "userpool", VMSize: "Standard_D4s_v3", Region: "centralus", OS: "linux", Priority: "Regular", Provider: "azure", Architecture: "amd64", CPUCapacity: 4, MemGBCapacity: 8},
+		{Name: "node-1", NodePool: "userpool", VMSize: "Standard_D4s_v3", Region: "centralus", OS: "linux", Priority: "Regular", Provider: "azure", Architecture: "amd64", CPUCapacity: 4, MemGBCapacity: 8},
+	}
+
+	pod := optimizationTestPod("apps", "zone-pinned", "node-0", corev1.PodRunning, "1000m", "1Gi")
+	pod.Spec.NodeSelector = map[string]string{
+		"topology.kubernetes.io/zone": "centralus-1",
+	}
+
+	got := BuildNMinusOneNodeOptimizationScenariosFromSnapshots(nodeInfos, []corev1.Pod{pod})
+
+	if len(got.Scenarios) != 0 {
+		t.Fatalf("scenario count = %d, want 0", len(got.Scenarios))
+	}
+	if got.UnsupportedConstraintPodCount != 1 {
+		t.Fatalf("UnsupportedConstraintPodCount = %d, want 1", got.UnsupportedConstraintPodCount)
+	}
+	if got.SkippedPoolCount != 1 {
+		t.Fatalf("SkippedPoolCount = %d, want 1", got.SkippedPoolCount)
+	}
+	if len(got.Warnings) != 1 || !strings.Contains(got.Warnings[0], "is not modeled by the same-shape simulator") {
+		t.Fatalf("warnings = %#v, want unsupported nodeSelector warning", got.Warnings)
+	}
+}
+
+func TestBuildNMinusOneNodeOptimizationScenariosSkipsHostnameNodeSelector(t *testing.T) {
+	nodeInfos := []models.NodeInfo{
+		{Name: "node-0", NodePool: "userpool", VMSize: "Standard_D4s_v3", Region: "centralus", OS: "linux", Priority: "Regular", Provider: "azure", Architecture: "amd64", CPUCapacity: 4, MemGBCapacity: 8},
+		{Name: "node-1", NodePool: "userpool", VMSize: "Standard_D4s_v3", Region: "centralus", OS: "linux", Priority: "Regular", Provider: "azure", Architecture: "amd64", CPUCapacity: 4, MemGBCapacity: 8},
+	}
+
+	pod := optimizationTestPod("apps", "host-pinned", "node-0", corev1.PodRunning, "1000m", "1Gi")
+	pod.Spec.NodeSelector = map[string]string{
+		corev1.LabelHostname: "node-0",
+	}
+
+	got := BuildNMinusOneNodeOptimizationScenariosFromSnapshots(nodeInfos, []corev1.Pod{pod})
+
+	if len(got.Scenarios) != 0 {
+		t.Fatalf("scenario count = %d, want 0", len(got.Scenarios))
+	}
+	if got.UnsupportedConstraintPodCount != 1 {
+		t.Fatalf("UnsupportedConstraintPodCount = %d, want 1", got.UnsupportedConstraintPodCount)
+	}
+	if len(got.Warnings) != 1 || !strings.Contains(got.Warnings[0], "kubernetes.io/hostname") {
+		t.Fatalf("warnings = %#v, want hostname selector warning", got.Warnings)
+	}
+}
