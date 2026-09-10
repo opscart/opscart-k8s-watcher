@@ -39,6 +39,20 @@ type clusterScan struct {
 	// which cannot distinguish a real StatefulSet replica from an
 	// unrelated pod sharing its naming pattern.
 	PodWorkloads map[string]models.WorkloadRef
+
+	// nodeOptimization is the read-only consolidation-simulation
+	// recommendation contract (see pkg/analyzer/node_optimization_recommendation.go),
+	// built from the same NodeInfo/Pod snapshots already fetched above for
+	// cost analysis — not a second cluster fetch. Nil/empty until the Node
+	// Optimization page renders it.
+	nodeOptimization []analyzer.NodeOptimizationRecommendation
+
+	// nodeOptimizationSavings is aligned 1:1 by index with nodeOptimization.
+	// Each entry reuses Cost Intelligence's already-computed provider pricing
+	// (poolCosts from the cost-analysis scan step, not a second pricing call)
+	// to project the monthly savings of that pool's recommendation, when an
+	// exact price can be joined. See pkg/analyzer/node_optimization_savings.go.
+	nodeOptimizationSavings []analyzer.NodeOptimizationSavingsProjection
 }
 
 // ── Per-cluster state ─────────────────────────────────────────────────────────

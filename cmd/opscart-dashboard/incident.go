@@ -17,18 +17,22 @@ import (
 
 type incidentsPageData struct {
 	// Sidebar
-	DashHref      string
-	WrHref        string
-	CostsHref     string
-	InfraHref     string
-	WasteHref     string
-	SecurityHref  string
-	IncidentsHref string
-	ActivePage    string
-	ClusterName   string
-	ClusterParam  string
-	CriticalCount int
-	Clusters      []sidebarCluster
+	DashHref        string
+	WrHref          string
+	CostsHref       string
+	InfraHref       string
+	WasteHref       string
+	SecurityHref    string
+	IncidentsHref   string
+	DiagnosticsHref string
+	SettingsHref    string
+	ActivePage      string
+	ClusterName     string
+	ClusterParam    string
+	CriticalCount   int
+	Clusters        []sidebarCluster
+	NsHref          string
+	OptHref         string
 
 	// Filter state
 	Filter store.IncidentFilter
@@ -90,20 +94,25 @@ func (srv *server) handleIncidentsPage(w http.ResponseWriter, r *http.Request) {
 
 	clusterQ := "?cluster=" + url.QueryEscape(ctx)
 	data := incidentsPageData{
-		DashHref:      "/" + clusterQ,
-		WrHref:        "/warroom" + clusterQ,
-		CostsHref:     "/costs" + clusterQ,
-		InfraHref:     "/infrastructure" + clusterQ,
-		WasteHref:     "/waste" + clusterQ,
-		SecurityHref:  "/security" + clusterQ,
-		IncidentsHref: "/incidents" + clusterQ,
-		ActivePage:    "incidents",
-		ClusterName:   displayName(ctx),
-		ClusterParam:  ctx,
-		CriticalCount: countCriticalIssues(scan),
-		Filter:        f,
-		Page:          page,
-		PerPage:       50,
+		DashHref:        "/" + clusterQ,
+		WrHref:          "/warroom" + clusterQ,
+		CostsHref:       "/costs" + clusterQ,
+		InfraHref:       "/infrastructure" + clusterQ,
+		WasteHref:       "/waste" + clusterQ,
+		SecurityHref:    "/security" + clusterQ,
+		IncidentsHref:   "/incidents" + clusterQ,
+		DiagnosticsHref: "/settings/diagnostics" + clusterQ,
+		SettingsHref:    "/settings" + clusterQ,
+		ActivePage:      "incidents",
+		NsHref:          "/namespaces" + clusterQ,
+		OptHref:         "/node-optimization" + clusterQ,
+		ClusterName:     displayName(ctx),
+		ClusterParam:    ctx,
+		CriticalCount:   countCriticalIssues(scan),
+		Clusters:        convertToSidebarClusters(srv.clusterList, ctx, "/incidents"),
+		Filter:          f,
+		Page:            page,
+		PerPage:         50,
 	}
 
 	// Query store

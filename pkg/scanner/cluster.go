@@ -20,6 +20,10 @@ type Scanner struct {
 	clientset   kubernetes.Interface
 	clusterName string
 	ctx         context.Context
+
+	// nodes is the raw Node snapshot most recently retrieved by
+	// FindNodeHealthConditions. See NodeSnapshot.
+	nodes []corev1.Node
 }
 
 // NewScannerWithClientset reuses an already-configured Kubernetes client for

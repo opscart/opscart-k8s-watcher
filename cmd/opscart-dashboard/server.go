@@ -21,6 +21,8 @@ import (
 	"github.com/opscart/opscart-k8s-watcher/pkg/models"
 	"github.com/opscart/opscart-k8s-watcher/pkg/scanner"
 	"github.com/opscart/opscart-k8s-watcher/pkg/store"
+	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
@@ -246,6 +248,8 @@ func (srv *server) newMux() http.Handler {
 	mux.HandleFunc("/infrastructure", srv.handleInfrastructurePage)
 	mux.HandleFunc("/namespaces", srv.handleNamespacesPage)
 	mux.HandleFunc("/optimizations", srv.handleOptimizationsPage)
+	mux.HandleFunc("/node-optimization", srv.handleNodeOptimizationPage)
+	mux.HandleFunc("/node-optimization/evidence", srv.handleNodeOptimizationEvidencePage)
 	mux.HandleFunc("/investigate", srv.handleInvestigationPage)
 	mux.HandleFunc("/api/investigation/logs", srv.handleInvestigationLogs)
 	mux.HandleFunc("/incidents", srv.handleIncidentsPage)
@@ -404,19 +408,21 @@ func (srv *server) handleHealth(w http.ResponseWriter, _ *http.Request) {
 }
 
 type sidebarData struct {
-	DashHref      string
-	CostsHref     string
-	InfraHref     string
-	NsHref        string
-	OptHref       string
-	WasteHref     string
-	SecurityHref  string
-	IncidentsHref string
-	WrHref        string
-	ActivePage    string
-	ClusterName   string
-	Clusters      []sidebarCluster
-	CriticalCount int
+	DashHref        string
+	CostsHref       string
+	InfraHref       string
+	NsHref          string
+	OptHref         string
+	WasteHref       string
+	SecurityHref    string
+	IncidentsHref   string
+	DiagnosticsHref string
+	SettingsHref    string
+	WrHref          string
+	ActivePage      string
+	ClusterName     string
+	Clusters        []sidebarCluster
+	CriticalCount   int
 }
 
 type sidebarCluster struct {
@@ -572,8 +578,36 @@ func countCriticalIssues(scan *clusterScan) int {
 	return count
 }
 
+func sidebarBasePath(activePage string) string {
+	switch activePage {
+	case "infrastructure":
+		return "/infrastructure"
+	case "namespaces":
+		return "/namespaces"
+	case "optimizations":
+		return "/optimizations"
+	case "node-optimization":
+		return "/node-optimization"
+	case "warroom":
+		return "/warroom"
+	case "costs":
+		return "/costs"
+	case "incidents":
+		return "/incidents"
+	case "security":
+		return "/security"
+	case "waste":
+		return "/waste"
+	case "diagnostics":
+		return "/settings/diagnostics"
+	case "settings":
+		return "/settings"
+	default:
+		return "/"
+	}
+}
+
 // buildSidebar returns a complete <aside>…</aside> sidebar, shared by all sub-pages.
-// activePage is one of: "dashboard", "infrastructure", "namespaces", "optimizations", "warroom".
 func buildSidebar(activePage, activeCtx, clusterName string, clusterList []string, criticalCount int) string {
 
 	q := ""
@@ -581,17 +615,7 @@ func buildSidebar(activePage, activeCtx, clusterName string, clusterList []strin
 		q = "?cluster=" + url.QueryEscape(activeCtx)
 	}
 
-	basePath := "/"
-	switch activePage {
-	case "infrastructure":
-		basePath = "/infrastructure"
-	case "namespaces":
-		basePath = "/namespaces"
-	case "optimizations":
-		basePath = "/optimizations"
-	case "warroom":
-		basePath = "/warroom"
-	}
+	basePath := sidebarBasePath(activePage)
 
 	var clusters []sidebarCluster
 	if len(clusterList) > 1 {
@@ -609,19 +633,21 @@ func buildSidebar(activePage, activeCtx, clusterName string, clusterList []strin
 	}
 
 	data := sidebarData{
-		DashHref:      "/" + q,
-		CostsHref:     "/costs" + q,
-		InfraHref:     "/infrastructure" + q,
-		NsHref:        "/namespaces" + q,
-		OptHref:       "/optimizations" + q,
-		WrHref:        "/warroom" + q,
-		IncidentsHref: "/incidents" + q,
-		SecurityHref:  "/security" + q,
-		WasteHref:     "/waste" + q,
-		ActivePage:    activePage,
-		ClusterName:   clusterName,
-		Clusters:      clusters,
-		CriticalCount: criticalCount,
+		DashHref:        "/" + q,
+		CostsHref:       "/costs" + q,
+		InfraHref:       "/infrastructure" + q,
+		NsHref:          "/namespaces" + q,
+		OptHref:         "/node-optimization" + q,
+		WrHref:          "/warroom" + q,
+		IncidentsHref:   "/incidents" + q,
+		DiagnosticsHref: "/settings/diagnostics" + q,
+		SettingsHref:    "/settings" + q,
+		SecurityHref:    "/security" + q,
+		WasteHref:       "/waste" + q,
+		ActivePage:      activePage,
+		ClusterName:     clusterName,
+		Clusters:        clusters,
+		CriticalCount:   criticalCount,
 	}
 
 	var buf strings.Builder
@@ -657,16 +683,18 @@ type overviewPageData struct {
 	VerdictLine2 string
 
 	// Sidebar aliases (matches sidebar.html template)
-	DashHref      string
-	InfraHref     string
-	NsHref        string
-	OptHref       string
-	WrHref        string
-	IncidentsHref string
-	SecurityHref  string
-	WasteHref     string
-	ActivePage    string
-	Clusters      []sidebarCluster
+	DashHref        string
+	InfraHref       string
+	NsHref          string
+	OptHref         string
+	WrHref          string
+	IncidentsHref   string
+	SecurityHref    string
+	WasteHref       string
+	DiagnosticsHref string
+	SettingsHref    string
+	ActivePage      string
+	Clusters        []sidebarCluster
 
 	// KPI bar
 	CriticalCount                int
@@ -675,9 +703,20 @@ type overviewPageData struct {
 	SecurityColor                string
 	WasteCount                   int
 	MonthlyCost                  float64
+	CostAvailable                bool
+	CostCoverage                 string
 	PrivilegedContainers         int
 	NonRootNotExplicitlyEnforced int
 	UnprotectedNamespaceCount    int
+	NodeOptimizationAvailable    bool
+	// NodeOptimizationProvenCount and NodeOptimizationAggregateSavingsText are
+	// optional enrichments of the connected-copy card: they only read the
+	// already-computed Status/SavingsProjection fields (see
+	// buildOverviewData), never re-derive simulation or pricing logic.
+	NodeOptimizationHasProvenCandidate   bool
+	NodeOptimizationProvenCount          int
+	NodeOptimizationHasAggregateSavings  bool
+	NodeOptimizationAggregateSavingsText string
 
 	// Incident Score
 	IncidentScore      int
@@ -786,6 +825,8 @@ func buildOverviewData(scan *clusterScan, activeCtx string, clusterList []string
 
 	clusterName := displayName(activeCtx)
 	var monthlyCost, savings float64
+	var costAvailable bool
+	var costCoverage string
 	var podCount, nsCount, nodePoolCount int
 	var cpuUtil, memUtil int
 	var wasteCount, securityScore, secFailed int
@@ -814,6 +855,7 @@ func buildOverviewData(scan *clusterScan, activeCtx string, clusterList []string
 
 		if scan.report != nil {
 			monthlyCost = scan.report.TotalMonthlyCost
+			costCoverage = scan.report.PricingCoverage
 			savings = scan.report.TotalSavingsPotential.Best
 			clusterName = scan.report.ClusterName
 			nodePoolCount = len(scan.report.NodePoolCosts)
@@ -822,6 +864,9 @@ func buildOverviewData(scan *clusterScan, activeCtx string, clusterList []string
 			// Aggregate CPU/Mem utilization across pools
 			var totalCPU, usedCPU, totalMem, usedMem float64
 			for _, p := range scan.report.NodePoolCosts {
+				if p.PricingAvailable {
+					costAvailable = true
+				}
 				totalCPU += p.TotalCPUCapacity
 				usedCPU += p.CPURequested
 				totalMem += p.TotalMemoryCapacity
@@ -855,6 +900,37 @@ func buildOverviewData(scan *clusterScan, activeCtx string, clusterList []string
 			wasteCount = analyzer.BuildWastePresentation(scan.wasteAudit).Counts.Findings
 		}
 	}
+	// NodeOptimizationAvailable reflects whether the scan actually produced
+	// real recommendation contract data (see runFullScan), not a stub or
+	// placeholder — the overview card only claims availability when true.
+	nodeOptimizationAvailable := scan != nil && len(scan.nodeOptimization) > 0
+
+	// provenCount/aggregateSavings only read the already-computed Status and
+	// SavingsProjection fields produced during the scan (see
+	// BuildNodeOptimizationRecommendations and
+	// BuildNodeOptimizationSavingsProjections) — this never re-derives
+	// simulation feasibility or pricing itself. The aggregate is shown only
+	// when every proven pool's savings projection is Available; otherwise no
+	// aggregate figure is shown at all, so a partially priced fleet never
+	// implies a partial (and therefore misleading) total.
+	var provenCount int
+	var aggregateSavings float64
+	allProvenPriced := true
+	if scan != nil {
+		for i, rec := range scan.nodeOptimization {
+			if rec.Status != analyzer.NodeOptimizationRecommendationSimulationPassed {
+				continue
+			}
+			provenCount++
+			if i < len(scan.nodeOptimizationSavings) && scan.nodeOptimizationSavings[i].Available &&
+				scan.nodeOptimizationSavings[i].EstimatedMonthlySavings != nil {
+				aggregateSavings += *scan.nodeOptimizationSavings[i].EstimatedMonthlySavings
+			} else {
+				allProvenPriced = false
+			}
+		}
+	}
+	hasAggregateSavings := provenCount > 0 && allProvenPriced
 	incidentScore, incidentScoreColor, incidentScoreLabel := calcIncidentScore(scan)
 	_ = secFailed // reserved for future use
 
@@ -923,54 +999,63 @@ func buildOverviewData(scan *clusterScan, activeCtx string, clusterList []string
 	}
 
 	return overviewPageData{
-		ClusterName:                  clusterName,
-		ActiveCtx:                    activeCtx,
-		ClusterList:                  clusters,
-		DashURL:                      "/" + q,
-		InfraURL:                     "/infrastructure" + q,
-		NSsURL:                       "/namespaces" + q,
-		OptURL:                       "/optimizations" + q,
-		WrURL:                        "/warroom" + q,
-		CostsURL:                     "/costs" + q,
-		ScannedAtMS:                  time.Now().UnixMilli(),
-		CriticalCount:                criticalCount,
-		SavingsPotential:             savings,
-		SecurityScore:                securityScore,
-		PrivilegedContainers:         privilegedContainers,
-		NonRootNotExplicitlyEnforced: runningAsRoot,
-		UnprotectedNamespaceCount:    unprotectedNamespaces,
-		WasteCount:                   wasteCount,
-		MonthlyCost:                  monthlyCost,
-		TopIssues:                    topIssues,
-		HasTopIssue:                  hasTopIssue,
-		TopIssueName:                 topIssueName,
-		TopIssueNS:                   topIssueNS,
-		TopIssueTrend:                topIssueTrend,
-		TopIssueReopen:               topIssueReopen,
-		FeaturedIssues:               featuredIssues,
-		HasFeatured:                  len(featuredIssues) > 0,
-		NodePoolCount:                nodePoolCount,
-		PodCount:                     podCount,
-		CPUUtilization:               cpuUtil,
-		MemUtilization:               memUtil,
-		UtilizationStatus:            utilizationStatus(cpuUtil, memUtil),
-		NamespaceCount:               nsCount,
-		Version:                      Version,
-		DashHref:                     "/" + q,
-		CostsHref:                    "/costs" + q,
-		InfraHref:                    "/infrastructure" + q,
-		NsHref:                       "/namespaces" + q,
-		OptHref:                      "/optimizations" + q,
-		WrHref:                       "/warroom" + q,
-		IncidentsHref:                "/incidents" + q,
-		SecurityHref:                 "/security" + q,
-		WasteHref:                    "/waste" + q,
-		ActivePage:                   "dashboard",
-		Clusters:                     convertToSidebarClusters(clusterList, activeCtx, "/"),
-		IncidentScore:                incidentScore,
-		IncidentScoreColor:           incidentScoreColor,
-		IncidentScoreLabel:           incidentScoreLabel,
-		Trend:                        trend,
+		ClusterName:                          clusterName,
+		ActiveCtx:                            activeCtx,
+		ClusterList:                          clusters,
+		DashURL:                              "/" + q,
+		InfraURL:                             "/infrastructure" + q,
+		NSsURL:                               "/namespaces" + q,
+		OptURL:                               "/optimizations" + q,
+		WrURL:                                "/warroom" + q,
+		CostsURL:                             "/costs" + q,
+		ScannedAtMS:                          time.Now().UnixMilli(),
+		CriticalCount:                        criticalCount,
+		SavingsPotential:                     savings,
+		SecurityScore:                        securityScore,
+		PrivilegedContainers:                 privilegedContainers,
+		NonRootNotExplicitlyEnforced:         runningAsRoot,
+		UnprotectedNamespaceCount:            unprotectedNamespaces,
+		WasteCount:                           wasteCount,
+		NodeOptimizationAvailable:            nodeOptimizationAvailable,
+		NodeOptimizationHasProvenCandidate:   provenCount > 0,
+		NodeOptimizationProvenCount:          provenCount,
+		NodeOptimizationHasAggregateSavings:  hasAggregateSavings,
+		NodeOptimizationAggregateSavingsText: formatNodeOptimizationMonthly(aggregateSavings),
+		MonthlyCost:                          monthlyCost,
+		CostAvailable:                        costAvailable,
+		CostCoverage:                         costCoverage,
+		TopIssues:                            topIssues,
+		HasTopIssue:                          hasTopIssue,
+		TopIssueName:                         topIssueName,
+		TopIssueNS:                           topIssueNS,
+		TopIssueTrend:                        topIssueTrend,
+		TopIssueReopen:                       topIssueReopen,
+		FeaturedIssues:                       featuredIssues,
+		HasFeatured:                          len(featuredIssues) > 0,
+		NodePoolCount:                        nodePoolCount,
+		PodCount:                             podCount,
+		CPUUtilization:                       cpuUtil,
+		MemUtilization:                       memUtil,
+		UtilizationStatus:                    utilizationStatus(cpuUtil, memUtil),
+		NamespaceCount:                       nsCount,
+		Version:                              Version,
+		DashHref:                             "/" + q,
+		CostsHref:                            "/costs" + q,
+		InfraHref:                            "/infrastructure" + q,
+		NsHref:                               "/namespaces" + q,
+		OptHref:                              "/node-optimization" + q,
+		WrHref:                               "/warroom" + q,
+		IncidentsHref:                        "/incidents" + q,
+		SecurityHref:                         "/security" + q,
+		WasteHref:                            "/waste" + q,
+		DiagnosticsHref:                      "/settings/diagnostics" + q,
+		SettingsHref:                         "/settings" + q,
+		ActivePage:                           "dashboard",
+		Clusters:                             convertToSidebarClusters(clusterList, activeCtx, "/"),
+		IncidentScore:                        incidentScore,
+		IncidentScoreColor:                   incidentScoreColor,
+		IncidentScoreLabel:                   incidentScoreLabel,
+		Trend:                                trend,
 
 		CostDeltaText:          costDeltaText,
 		IncidentScoreDeltaText: incidentScoreDeltaText,
@@ -2052,6 +2137,37 @@ func runFullScan(ctx string, scanCounters *apiCounters) (*clusterScan, error) {
 		result := analyzer.CalculateCISScore(scan.secAudit, scan.netAudit)
 		scan.cisResult = &result
 	}
+
+	// ── 6. Node Optimization (best effort) ─────────────────────────────
+	// Reuses snapshots already acquired above: NodeInfo/Pods from cost
+	// analysis (step 1), raw Nodes from the node-health scan (top of this
+	// function), and PVCs from the waste audit (step 3). No Node or Pod API
+	// call is repeated for this. PersistentVolumes are not acquired by any
+	// existing scan step, so — per the evidence contract's need for PV
+	// evidence — one new cluster-wide PersistentVolume list is added here as
+	// a first-class scan snapshot, not a page-handler-side fetch.
+	noPods := ra.PodSnapshot()
+	schedulingEvidence := analyzer.BuildNodeOptimizationSchedulingEvidence(nodeInfos, nodeScanner.NodeSnapshot())
+
+	var pvcSnapshot []corev1.PersistentVolumeClaim
+	if scan.wasteAudit != nil {
+		pvcSnapshot = wasteAuditor.PVCSnapshot()
+	}
+	var pvSnapshot []corev1.PersistentVolume
+	if pvList, err := clientset.CoreV1().PersistentVolumes().List(context.Background(), metav1.ListOptions{}); err == nil {
+		pvSnapshot = pvList.Items
+	} else {
+		log.Printf("[%s] persistent volume list skipped: %v", displayName(ctx), err)
+	}
+	storageEvidence := analyzer.BuildNodeOptimizationStorageEvidence(pvcSnapshot, pvSnapshot)
+
+	noSummary := analyzer.BuildNMinusOneNodeOptimizationScenariosWithSchedulingAndStorageEvidence(
+		nodeInfos, noPods, schedulingEvidence, storageEvidence,
+	)
+	scan.nodeOptimization = analyzer.BuildNodeOptimizationRecommendations(noSummary, noPods)
+	scan.nodeOptimizationSavings = analyzer.BuildNodeOptimizationSavingsProjections(
+		scan.nodeOptimization, poolCosts, scan.report.Currency,
+	)
 
 	return scan, nil
 }

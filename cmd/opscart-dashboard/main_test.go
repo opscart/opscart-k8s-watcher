@@ -591,8 +591,21 @@ func fullyPopulatedOverviewData() overviewPageData {
 
 		IncidentScore: 62, IncidentScoreColor: "orange", IncidentScoreLabel: "Needs attention",
 		SecurityScore: 78, WasteCount: 6, MonthlyCost: 1234.56,
+		CostAvailable: true, CostCoverage: "3 of 3 nodes priced",
 
-		CostsHref: "/costs", WasteHref: "/waste", WrURL: "/warroom", IncidentsHref: "/incidents", NSsURL: "/namespaces",
+		DashHref:        "/?cluster=prod-eastus",
+		InfraHref:       "/infrastructure?cluster=prod-eastus",
+		NsHref:          "/namespaces?cluster=prod-eastus",
+		OptHref:         "/optimizations?cluster=prod-eastus",
+		WrHref:          "/warroom?cluster=prod-eastus",
+		CostsHref:       "/costs?cluster=prod-eastus",
+		WasteHref:       "/waste?cluster=prod-eastus",
+		SecurityHref:    "/security?cluster=prod-eastus",
+		IncidentsHref:   "/incidents?cluster=prod-eastus",
+		DiagnosticsHref: "/settings/diagnostics?cluster=prod-eastus",
+		SettingsHref:    "/settings?cluster=prod-eastus",
+		WrURL:           "/warroom?cluster=prod-eastus",
+		NSsURL:          "/namespaces?cluster=prod-eastus",
 
 		ActivePage: "dashboard",
 		Version:    "test",
@@ -606,101 +619,173 @@ func fullyPopulatedOverviewData() overviewPageData {
 // a "can't evaluate field" template error.
 func TestOverviewTemplate_RendersFullyPopulatedData(t *testing.T) {
 	data := fullyPopulatedOverviewData()
-
 	var buf strings.Builder
 	if err := getOverviewTmpl().Execute(&buf, data); err != nil {
 		t.Fatalf("template execution failed: %v", err)
 	}
-
 	out := buf.String()
-	wantSubstrings := []string{
+	for _, want := range []string{
 		"prod-eastus",
-		"If you only fix one thing today",
-		data.VerdictLine1,
-		data.VerdictLine2,
+		"OpsCart has prioritized what needs your attention.",
+		"Highest priority",
 		"payments-api",
+		"First detected 2d ago · accelerating",
+		"Why #1",
+		"Affected scope",
+		"Recommended next step",
+		"Open in War Room",
+		"Other priority issues",
+		"Recent changes",
+		"Since your last visit",
 		"Longest active",
 		"Most unstable namespace",
-		"Recent Events",
-		"checkout", /* namespace health row */
-		// html/template escapes "+" as a numeric entity even in text
-		// nodes; "-10" needs no such escaping.
-		"&#43;$45 from last scan",
-		"-10 from last scan",
-		"&#43;5 from last scan",
-		"First detected 2d ago · accelerating", // MemoryLine
-		"payments",                             // TopIssueNS in the "Highest Priority" bf-item
-	}
-	for _, want := range wantSubstrings {
+		"Cluster information",
+		"Configured retention:",
+		"Storage:",
+		"Cluster posture at a glance",
+		"Nodes",
+		"Namespaces",
+		"Security",
+		"Cost",
+		"Waste &amp; Drift",
+		"Node Optimization",
+		"In development",
+	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("rendered output missing %q", want)
 		}
 	}
 }
 
-// TestOverviewTemplate_IncidentScoreUsesHigherIsBetterColors guards the
-// score-color semantics: calcIncidentScore defines a higher score as healthier,
-// so low scores must render red and high scores green. The template previously
-// applied the inverse classes even though the adjacent Security Score used the
-// correct ordering.
-func TestOverviewTemplate_IncidentScoreUsesHigherIsBetterColors(t *testing.T) {
-	tests := []struct {
-		name      string
-		score     int
-		wantClass string
-	}{
-		{name: "low score is bad", score: 30, wantClass: "bad"},
-		{name: "middle score is warning", score: 62, wantClass: "warn"},
-		{name: "high score is good", score: 90, wantClass: "good"},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
+// TestOverviewTemplate_PriorityHeroSeverityStyles protects the semantic
+// severity classes used by the redesigned top-priority hero.
+func TestOverviewTemplate_PriorityHeroSeverityStyles(t *testing.T) {
+	for _, severity := range []string{"critical", "high", "medium", "low"} {
+		t.Run(severity, func(t *testing.T) {
 			data := fullyPopulatedOverviewData()
-			data.IncidentScore = tt.score
+			data.TopIssues = data.TopIssues[:1]
+			data.TopIssues[0].Severity = severity
+			data.TopIssues[0].SeverityLbl = strings.ToUpper(severity)
 
 			var buf strings.Builder
 			if err := getOverviewTmpl().Execute(&buf, data); err != nil {
 				t.Fatalf("template execution failed: %v", err)
 			}
-
-			want := fmt.Sprintf(`<div class="bottom-val n %s">%d/100</div>`, tt.wantClass, tt.score)
-			if !strings.Contains(buf.String(), want) {
-				t.Fatalf("incident score %d did not render class %q", tt.score, tt.wantClass)
+			if !strings.Contains(buf.String(), `class="sev-badge `+severity+`"`) {
+				t.Fatalf("top issue did not render semantic severity class %q", severity)
 			}
 		})
 	}
 }
 
-// TestOverviewTemplate_IncidentScoreDeltaUsesImprovementColors guards the
-// delta direction: a positive score delta is an improvement and a negative
-// delta is a regression. html/template escapes the plus sign in text output.
-func TestOverviewTemplate_IncidentScoreDeltaUsesImprovementColors(t *testing.T) {
+// TestOverviewTemplate_CompactPostureLinksPreserveCluster verifies that each
+// currently actionable posture card links to its detailed page in the active cluster.
+func TestOverviewTemplate_CompactPostureLinksPreserveCluster(t *testing.T) {
+	data := fullyPopulatedOverviewData()
+	var buf strings.Builder
+	if err := getOverviewTmpl().Execute(&buf, data); err != nil {
+		t.Fatalf("template execution failed: %v", err)
+	}
+	out := buf.String()
+	for _, href := range []string{
+		data.InfraHref,
+		data.NsHref,
+		data.SecurityHref,
+		data.CostsHref,
+		data.WasteHref,
+	} {
+		if href == "" {
+			t.Fatalf("fixture has empty posture href")
+		}
+		if !strings.Contains(out, `class="posture-card" href="`+href+`"`) {
+			t.Errorf("overview posture missing link %q", href)
+		}
+		if !strings.Contains(href, "cluster=prod-eastus") {
+			t.Errorf("posture link did not preserve active cluster: %q", href)
+		}
+	}
+	if !strings.Contains(out, `class="posture-card posture-card-muted node-optimization-card"`) {
+		t.Errorf("expected non-actionable Node Optimization status card")
+	}
+}
+
+func TestOverviewTemplate_CostRequiresPricingAvailability(t *testing.T) {
+	t.Run("unavailable pricing never falls back to zero", func(t *testing.T) {
+		data := fullyPopulatedOverviewData()
+		data.MonthlyCost = 0
+		data.CostAvailable = false
+		data.CostCoverage = "0 of 3 nodes priced"
+
+		var buf strings.Builder
+		if err := getOverviewTmpl().Execute(&buf, data); err != nil {
+			t.Fatalf("template execution failed: %v", err)
+		}
+		out := buf.String()
+		if !strings.Contains(out, `<div class="posture-value unavailable">Unavailable</div>`) {
+			t.Fatalf("expected unavailable cost state")
+		}
+		if strings.Contains(out, "$0/mo") {
+			t.Fatalf("unavailable pricing rendered a zero-dollar fallback")
+		}
+		if !strings.Contains(out, "0 of 3 nodes priced") {
+			t.Fatalf("expected pricing coverage evidence")
+		}
+	})
+
+	t.Run("available pricing renders reported amount", func(t *testing.T) {
+		data := fullyPopulatedOverviewData()
+
+		var buf strings.Builder
+		if err := getOverviewTmpl().Execute(&buf, data); err != nil {
+			t.Fatalf("template execution failed: %v", err)
+		}
+		if !strings.Contains(buf.String(), "$1,235/mo") {
+			t.Fatalf("available provider pricing did not render reported amount")
+		}
+	})
+}
+
+func TestBuildOverviewData_CostAvailabilityUsesPricingEvidence(t *testing.T) {
 	tests := []struct {
 		name      string
-		delta     string
-		wantClass string
-		wantText  string
+		scan      *clusterScan
+		available bool
 	}{
-		{name: "increase is good", delta: "+10", wantClass: "good", wantText: "&#43;10"},
-		{name: "decrease is bad", delta: "-10", wantClass: "bad", wantText: "-10"},
+		{name: "no report", scan: &clusterScan{}, available: false},
+		{name: "unpriced pool", scan: &clusterScan{report: &models.CloudCostReport{
+			NodePoolCosts: []models.NodePoolCost{{Name: "workers", NodeCount: 3, PricingAvailable: false}},
+		}}, available: false},
+		{name: "provider-priced pool", scan: &clusterScan{report: &models.CloudCostReport{
+			NodePoolCosts: []models.NodePoolCost{{Name: "workers", NodeCount: 3, PricingAvailable: true}},
+		}}, available: true},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			data := fullyPopulatedOverviewData()
-			data.IncidentScoreDeltaText = tt.delta
-
-			var buf strings.Builder
-			if err := getOverviewTmpl().Execute(&buf, data); err != nil {
-				t.Fatalf("template execution failed: %v", err)
-			}
-
-			want := fmt.Sprintf(`<div class="bottom-delta %s">%s from last scan</div>`, tt.wantClass, tt.wantText)
-			if !strings.Contains(buf.String(), want) {
-				t.Fatalf("incident score delta %q did not render class %q", tt.delta, tt.wantClass)
+			data := buildOverviewData(tt.scan, "test-cluster", []string{"test-cluster"}, nil, time.Now())
+			if data.CostAvailable != tt.available {
+				t.Fatalf("CostAvailable = %v, want %v", data.CostAvailable, tt.available)
 			}
 		})
+	}
+}
+
+func TestOverviewTemplate_NodeOptimizationIsConservative(t *testing.T) {
+	data := fullyPopulatedOverviewData()
+	var buf strings.Builder
+	if err := getOverviewTmpl().Execute(&buf, data); err != nil {
+		t.Fatalf("template execution failed: %v", err)
+	}
+	out := buf.String()
+	for _, want := range []string{"In development", "Simulation foundation exists", "No operator action yet"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("Node Optimization card missing %q", want)
+		}
+	}
+	for _, forbidden := range []string{"simulation-backed node efficiency analysis", "Open optimization →"} {
+		if strings.Contains(out, forbidden) {
+			t.Errorf("Node Optimization card overstates availability with %q", forbidden)
+		}
 	}
 }
 
@@ -729,13 +814,10 @@ func TestOverviewTemplate_RendersEmptyData(t *testing.T) {
 	}
 }
 
-// TestOverviewTemplate_FeedsCapAtFive drives getOverviewTmpl with more than
-// five ChangesSinceLastView/RecentEvents rows and asserts the rendered
-// output shows exactly five rows per feed — the display cap the limitSlice
-// FuncMap helper enforces, independent of how many rows were fetched.
-func TestOverviewTemplate_FeedsCapAtFive(t *testing.T) {
+// TestOverviewTemplate_RecentChangesCapAtFive verifies the redesigned single
+// recent-changes feed is capped at exactly five entries.
+func TestOverviewTemplate_RecentChangesCapAtFive(t *testing.T) {
 	data := fullyPopulatedOverviewData()
-
 	makeEvents := func(n int) []changeLine {
 		raw := make([]store.RecentEvent, n)
 		for i := 0; i < n; i++ {
@@ -749,17 +831,12 @@ func TestOverviewTemplate_FeedsCapAtFive(t *testing.T) {
 	}
 	data.ChangesSinceLastView = makeEvents(9)
 	data.RecentEvents = makeEvents(7)
-
 	var buf strings.Builder
 	if err := getOverviewTmpl().Execute(&buf, data); err != nil {
 		t.Fatalf("template execution failed: %v", err)
 	}
-
-	out := buf.String()
-	// One feed now (What's Changed was removed); it caps at 10, and the
-	// fixture supplies 7, so all 7 render.
-	if got := strings.Count(out, `class="change-row"`); got != 7 {
-		t.Fatalf("expected 7 change-row entries from the single Recent Events feed, got %d", got)
+	if got := strings.Count(buf.String(), `class="change-row"`); got != 5 {
+		t.Fatalf("expected 5 Recent Changes rows, got %d", got)
 	}
 }
 
@@ -1137,89 +1214,82 @@ func TestEnrichTopIssues_NilDBOrEmptyIssues(t *testing.T) {
 	}
 }
 
-// TestOverviewTemplate_BriefingClassByCriticalCount covers Fix 3: the
-// Situation Briefing card is danger-tinted ("briefing") when there's an
-// active critical issue, success-tinted ("briefing-ok") otherwise.
-func TestOverviewTemplate_BriefingClassByCriticalCount(t *testing.T) {
-	t.Run("critical issues present uses briefing (danger tint)", func(t *testing.T) {
+// TestOverviewTemplate_PriorityStates covers both states of the War Room-first
+// hierarchy: a ranked hero when an issue exists and a calm state otherwise.
+func TestOverviewTemplate_PriorityStates(t *testing.T) {
+	t.Run("top issue renders prioritized state", func(t *testing.T) {
 		data := fullyPopulatedOverviewData()
-		data.CriticalCount = 2
-
 		var buf strings.Builder
 		if err := getOverviewTmpl().Execute(&buf, data); err != nil {
 			t.Fatalf("template execution failed: %v", err)
 		}
 		out := buf.String()
-		if !strings.Contains(out, `class="section-card briefing"`) {
-			t.Errorf("expected briefing class when CriticalCount>0")
+		if !strings.Contains(out, "Highest priority") {
+			t.Errorf("expected populated priority state")
 		}
-		if strings.Contains(out, `class="section-card briefing-ok"`) {
-			t.Errorf("did not expect briefing-ok class when CriticalCount>0")
+		if !strings.Contains(out, "Open in War Room") {
+			t.Errorf("expected direct War Room action")
 		}
 	})
-
-	t.Run("no critical issues uses briefing-ok (success tint)", func(t *testing.T) {
+	t.Run("no top issue renders calm empty state", func(t *testing.T) {
 		data := fullyPopulatedOverviewData()
+		data.TopIssues = nil
+		data.HasTopIssue = false
 		data.CriticalCount = 0
-
 		var buf strings.Builder
 		if err := getOverviewTmpl().Execute(&buf, data); err != nil {
 			t.Fatalf("template execution failed: %v", err)
 		}
 		out := buf.String()
-		if !strings.Contains(out, `class="section-card briefing-ok"`) {
-			t.Errorf("expected briefing-ok class when CriticalCount==0")
+		if !strings.Contains(out, "No urgent priorities") {
+			t.Errorf("expected no-priority state")
 		}
-		if strings.Contains(out, `class="section-card briefing"`) {
-			t.Errorf("did not expect plain briefing class when CriticalCount==0")
+		if !strings.Contains(out, "No active issues need immediate attention.") {
+			t.Errorf("expected explicit healthy priority message")
 		}
 	})
 }
 
-// TestOverviewTemplate_HealthCardsCapAndShowViewAll covers Fix 5: the
-// Namespace Health list and Cluster Health's Workload Health dot strip are
-// capped, with a "View all" link appearing once content exceeds the cap.
-func TestOverviewTemplate_HealthCardsCapAndShowViewAll(t *testing.T) {
+// TestOverviewTemplate_DoesNotDuplicateDetailedHealthGrids verifies detailed
+// namespace/workload presentations stay on their dedicated pages.
+func TestOverviewTemplate_DoesNotDuplicateDetailedHealthGrids(t *testing.T) {
 	data := fullyPopulatedOverviewData()
-
 	nsList := make([]namespaceHealth, 9)
 	for i := range nsList {
 		nsList[i] = namespaceHealth{Name: fmt.Sprintf("ns-%d", i), Ready: i, Total: i + 1}
 	}
 	data.NamespaceHealthList = nsList
-
 	whList := make([]workloadHealthCell, 45)
 	for i := range whList {
 		whList[i] = workloadHealthCell{Name: fmt.Sprintf("wl-%d", i)}
 	}
 	data.WorkloadHealthGrid = whList
-
 	var buf strings.Builder
 	if err := getOverviewTmpl().Execute(&buf, data); err != nil {
 		t.Fatalf("template execution failed: %v", err)
 	}
 	out := buf.String()
-
-	if got := strings.Count(out, `class="ns-health-row"`); got != 6 {
-		t.Errorf("expected 6 namespace health rows (capped from 9), got %d", got)
+	if strings.Contains(out, `class="ns-health-row"`) {
+		t.Errorf("did not expect detailed namespace health rows on redesigned Overview")
 	}
-	if !strings.Contains(out, "View all 9 namespaces") {
-		t.Errorf("expected a 'View all 9 namespaces' link")
+	if strings.Contains(out, `class="wh-dot`) {
+		t.Errorf("did not expect workload health dot grid on redesigned Overview")
 	}
-
-	// 40 strip dots (capped from 45) + 3 legend dots in the label line.
-	if got := strings.Count(out, `class="wh-dot`); got != 43 {
-		t.Errorf("expected 43 wh-dot occurrences (40 strip + 3 legend), got %d", got)
+	for _, forbidden := range []string{"Namespace Health", "Workload Health"} {
+		if strings.Contains(out, forbidden) {
+			t.Errorf("did not expect removed Overview section %q", forbidden)
+		}
 	}
-	if !strings.Contains(out, "View all 45 workloads") {
-		t.Errorf("expected a 'View all 45 workloads' link")
+	for _, want := range []string{"Nodes", "Namespaces", "Security", "Cost", "Waste &amp; Drift", "Node Optimization"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("expected compact posture card %q", want)
+		}
 	}
 }
 
-// TestOverviewTemplate_HealthCardsNoViewAllUnderCap proves the "View all"
-// links only appear once content actually exceeds the cap — fullyPopulated
-// OverviewData's fixture has 3 namespaces and 4 workloads, both under it.
-func TestOverviewTemplate_HealthCardsNoViewAllUnderCap(t *testing.T) {
+// TestOverviewTemplate_RemovedPresentationStaysAbsent prevents the obsolete
+// Overview banner, briefing, score strip, and large health cards returning.
+func TestOverviewTemplate_RemovedPresentationStaysAbsent(t *testing.T) {
 	data := fullyPopulatedOverviewData()
 
 	var buf strings.Builder
@@ -1228,11 +1298,83 @@ func TestOverviewTemplate_HealthCardsNoViewAllUnderCap(t *testing.T) {
 	}
 	out := buf.String()
 
-	if strings.Contains(out, "View all 3 namespaces") {
-		t.Errorf("did not expect a namespaces View all link under the cap")
+	for _, forbidden := range []string{
+		"If you only fix one thing today",
+		"Situation Briefing",
+		`class="bottom-strip"`,
+		`class="bottom-val`,
+		"Namespace Health",
+		"Workload Health",
+	} {
+		if strings.Contains(out, forbidden) {
+			t.Errorf("removed Overview presentation returned: %q", forbidden)
+		}
 	}
-	if strings.Contains(out, "View all 4 workloads") {
-		t.Errorf("did not expect a workloads View all link under the cap")
+}
+
+func TestSidebarTemplate_NewTaxonomyAndClusterPropagation(t *testing.T) {
+	const clusterQuery = "?cluster=prod-eastus"
+	data := sidebarData{
+		DashHref:        "/" + clusterQuery,
+		WrHref:          "/warroom" + clusterQuery,
+		IncidentsHref:   "/incidents" + clusterQuery,
+		InfraHref:       "/infrastructure" + clusterQuery,
+		NsHref:          "/namespaces" + clusterQuery,
+		CostsHref:       "/costs" + clusterQuery,
+		OptHref:         "/optimizations" + clusterQuery,
+		WasteHref:       "/waste" + clusterQuery,
+		SecurityHref:    "/security" + clusterQuery,
+		DiagnosticsHref: "/settings/diagnostics" + clusterQuery,
+		SettingsHref:    "/settings" + clusterQuery,
+		ActivePage:      "dashboard",
+		ClusterName:     "prod-eastus",
+		CriticalCount:   2,
+		Clusters: []sidebarCluster{{
+			Href:     "/?cluster=staging-west",
+			Label:    "staging-west",
+			IsActive: false,
+		}},
+	}
+
+	var buf strings.Builder
+	if err := getSidebarTmpl().Execute(&buf, data); err != nil {
+		t.Fatalf("sidebar template execution failed: %v", err)
+	}
+	out := buf.String()
+
+	labels := []string{
+		"Operations", "Overview", "War Room", "Incidents", "Nodes", "Namespaces",
+		"Efficiency", "Cost", "Node Optimization", "Waste &amp; Drift",
+		"Risk", "Security", "System", "Diagnostics", "Settings",
+	}
+	last := -1
+	for _, label := range labels {
+		pos := strings.Index(out, label)
+		if pos < 0 {
+			t.Fatalf("sidebar missing taxonomy label %q", label)
+		}
+		if pos < last {
+			t.Fatalf("sidebar label %q rendered out of contract order", label)
+		}
+		last = pos
+	}
+
+	for _, href := range []string{
+		data.DashHref, data.WrHref, data.IncidentsHref, data.InfraHref, data.NsHref,
+		data.CostsHref, data.OptHref, data.WasteHref, data.SecurityHref,
+		data.DiagnosticsHref, data.SettingsHref,
+	} {
+		if !strings.Contains(out, `href="`+href+`"`) {
+			t.Errorf("sidebar missing cluster-scoped link %q", href)
+		}
+	}
+	if !strings.Contains(out, `href="/?cluster=staging-west"`) {
+		t.Errorf("sidebar missing cluster switch link")
+	}
+	for _, obsolete := range []string{"Cost Intelligence", "Security Posture", "> Infrastructure<"} {
+		if strings.Contains(out, obsolete) {
+			t.Errorf("sidebar rendered obsolete label %q", obsolete)
+		}
 	}
 }
 
