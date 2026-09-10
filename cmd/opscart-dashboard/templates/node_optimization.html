@@ -11,8 +11,8 @@
 .no-readonly-dot{width:6px;height:6px;border-radius:50%;background:var(--info)}
 .no-summary-table{overflow-x:auto;border:1px solid var(--border);border-radius:var(--radius-sm);margin-bottom:1.5rem}
 .no-summary-table table{width:100%;border-collapse:collapse}
-.no-summary-table th{background:rgba(0,0,0,0.35);padding:0.6rem 0.85rem;text-align:left;font-size:0.67rem;text-transform:uppercase;letter-spacing:0.8px;color:var(--text-muted);font-weight:600;border-bottom:1px solid var(--border);white-space:nowrap}
-.no-summary-table td{padding:0.7rem 0.85rem;border-bottom:1px solid var(--border);font-size:0.85rem;vertical-align:middle}
+.no-summary-table th{background:rgba(0,0,0,0.35);padding:0.55rem 0.85rem;text-align:left;font-size:0.67rem;text-transform:uppercase;letter-spacing:0.8px;color:var(--text-muted);font-weight:600;border-bottom:1px solid var(--border);white-space:nowrap}
+.no-summary-table td{padding:0.55rem 0.85rem;border-bottom:1px solid var(--border);font-size:0.83rem;vertical-align:middle;white-space:nowrap}
 .no-summary-table tbody tr:last-child td{border-bottom:none}
 .no-summary-table tbody tr:hover td{background:rgba(99,102,241,0.03)}
 .no-summary-table a{color:inherit;text-decoration:none}
@@ -24,7 +24,8 @@
 .no-status-observation{background:rgba(148,163,184,0.1);color:var(--text-secondary);border:1px solid var(--border)}
 .no-status-candidate{background:rgba(6,182,212,0.1);color:var(--info);border:1px solid rgba(6,182,212,0.3)}
 .no-status-precheck{background:rgba(6,182,212,0.1);color:var(--info);border:1px solid rgba(6,182,212,0.3)}
-.no-pool-card{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:1.5rem;margin-bottom:1.5rem;scroll-margin-top:1rem}
+.no-pool-card{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:1.5rem;margin-bottom:1.5rem;scroll-margin-top:1rem;transition:border-color .2s,box-shadow .2s}
+.no-pool-card:target{border-color:var(--primary-light);box-shadow:0 0 0 1px var(--primary-light) inset}
 .no-pool-hdr{display:flex;justify-content:space-between;align-items:flex-start;gap:1rem;margin-bottom:1.25rem;flex-wrap:wrap}
 .no-pool-name{font-size:1.05rem;font-weight:700}
 .no-pool-name span{color:var(--text-muted);font-weight:500;font-size:0.8rem;margin-left:0.5rem}
@@ -33,24 +34,33 @@
 .no-hero-blocked{border-color:rgba(239,68,68,0.32);background:rgba(239,68,68,0.035)}
 .no-hero-partial{border-color:rgba(245,158,11,0.32);background:rgba(245,158,11,0.04)}
 .no-hero-neutral{background:rgba(148,163,184,0.04)}
-.no-hero-summary{font-size:0.85rem;color:var(--text-secondary);margin:0.6rem 0 0.9rem}
+.no-hero-summary{font-size:0.85rem;color:var(--text-secondary);margin:0 0 0.9rem}
 .no-hero-metrics{display:flex;gap:2rem;flex-wrap:wrap;margin-bottom:0.4rem}
 .no-metric-val{font-size:1.6rem;font-weight:800;line-height:1.1}
 .no-metric-lbl{font-size:0.68rem;color:var(--text-muted);text-transform:uppercase;letter-spacing:0.6px;margin-top:0.15rem}
-.no-hero-note{font-size:0.76rem;color:var(--text-muted);margin-top:0.5rem}
+.no-metric-single{margin-top:0.9rem}
+.no-metric-single .no-metric-val{font-size:1.2rem}
+.no-hero-footer{display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:0.5rem;background:rgba(16,185,129,0.045);border:1px solid rgba(16,185,129,0.25);border-radius:var(--radius-sm);padding:0.75rem 1.1rem;margin-bottom:1.25rem}
+.no-hero-footer-count{font-size:0.85rem;font-weight:700}
+.no-hero-note{font-size:0.76rem;color:var(--text-muted)}
 .no-hero-note strong{color:var(--text-secondary)}
+.no-hero-primary-blocker{font-size:0.8rem;color:var(--text-secondary);margin-top:0.75rem;padding-top:0.75rem;border-top:1px solid rgba(148,163,184,0.18)}
+.no-hero-primary-blocker strong{color:var(--text-secondary)}
 .no-headroom-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:0.85rem;margin-bottom:1.25rem}
 .no-headroom-card{background:rgba(0,0,0,0.18);border:1px solid var(--border);border-radius:var(--radius-sm);padding:0.9rem 1rem}
 .no-headroom-val{font-size:1.3rem;font-weight:800}
 .no-headroom-lbl{font-size:0.68rem;color:var(--text-muted);text-transform:uppercase;letter-spacing:0.5px;margin-top:0.15rem}
 .no-headroom-sub{font-size:0.72rem;color:var(--text-muted);margin-top:0.35rem}
-.no-savings-card{background:rgba(16,185,129,0.06);border:1px solid rgba(16,185,129,0.3);border-radius:var(--radius-sm);padding:0.9rem 1rem;margin-bottom:1.25rem}
+.no-savings-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:0.85rem;margin-bottom:1.25rem}
+.no-savings-card{background:rgba(16,185,129,0.06);border:1px solid rgba(16,185,129,0.3);border-radius:var(--radius-sm);padding:0.9rem 1rem}
 .no-savings-val{font-size:1.3rem;font-weight:800;color:var(--success)}
+.no-savings-val.no-savings-secondary{font-size:1.05rem}
 .no-savings-lbl{font-size:0.68rem;color:var(--text-muted);text-transform:uppercase;letter-spacing:0.5px;margin-top:0.15rem}
-.no-savings-sub{font-size:0.72rem;color:var(--text-muted);margin-top:0.35rem}
-.no-savings-unavailable{background:rgba(148,163,184,0.06);border:1px solid var(--border);border-radius:var(--radius-sm);padding:0.9rem 1rem;margin-bottom:1.25rem;font-size:0.78rem;color:var(--text-muted)}
+.no-savings-note{font-size:0.76rem;color:var(--text-muted);grid-column:1/-1;align-self:center}
+.no-savings-unavailable{background:rgba(148,163,184,0.06);border:1px solid var(--border);border-radius:var(--radius-sm);padding:0.9rem 1rem;font-size:0.78rem;color:var(--text-muted)}
 .no-section{margin-bottom:1.1rem}
 .no-section-title{font-size:0.78rem;font-weight:700;text-transform:uppercase;letter-spacing:0.5px;color:var(--text-secondary);margin-bottom:0.6rem}
+.no-section-note{font-size:0.74rem;color:var(--text-muted);margin:-0.3rem 0 0.6rem}
 .no-check-list{display:flex;flex-wrap:wrap;gap:0.5rem}
 .no-check-chip{display:inline-flex;align-items:center;gap:0.4rem;font-size:0.75rem;color:var(--text-secondary);border:1px solid rgba(16,185,129,0.3);background:rgba(16,185,129,0.06);border-radius:999px;padding:0.3rem 0.7rem}
 .no-check-chip svg{width:12px;height:12px;color:var(--success);flex-shrink:0}
@@ -76,7 +86,7 @@
 details.no-evidence summary{cursor:pointer;list-style:none;font-size:0.78rem;font-weight:700;color:var(--primary-light);text-transform:uppercase;letter-spacing:0.5px;margin-bottom:0.75rem}
 details.no-evidence summary::-webkit-details-marker{display:none}
 details.no-evidence[open] summary{margin-bottom:0.75rem}
-@media(max-width:900px){.no-hero-metrics{gap:1.25rem}.no-pool-hdr{flex-direction:column}}
+@media(max-width:900px){.no-hero-metrics{gap:1.25rem}.no-pool-hdr{flex-direction:column}.no-summary-table{overflow-x:auto}}
 </style>
 </head>
 <body>
@@ -92,7 +102,7 @@ details.no-evidence[open] summary{margin-bottom:0.75rem}
     </div>
     <div class="page-meta">
       <div>{{.ClusterName}}</div>
-      <div>Last scanned: <strong id="no-age">just now</strong></div>
+      <div>Evidence captured <strong id="no-age">just now</strong></div>
       <a class="back-link" href="{{.DashURL}}">← Back to Dashboard</a>
     </div>
   </div>
@@ -109,15 +119,16 @@ details.no-evidence[open] summary{margin-bottom:0.75rem}
   {{if .MultiplePools}}
   <div class="no-summary-table">
     <table>
-      <thead><tr><th>Pool</th><th style="text-align:center">Current</th><th style="text-align:center">Candidate</th><th>Status</th><th>Savings</th></tr></thead>
+      <thead><tr><th>Pool</th><th>Status</th><th style="text-align:center">Current</th><th style="text-align:center">Candidate</th><th>Savings</th><th>Headroom / posture</th></tr></thead>
       <tbody>
         {{range .Pools}}
         <tr>
           <td><a href="#{{.AnchorID}}"><span class="no-pool-link">{{.PoolName}}</span></a></td>
+          <td><span class="no-status-badge no-status-{{.StatusClass}}">{{.StatusLabel}}</span></td>
           <td style="text-align:center">{{if .HasCandidate}}{{.CurrentNodeCount}}{{else}}—{{end}}</td>
           <td style="text-align:center">{{if .HasCandidate}}{{.CandidateNodeCount}}{{else}}—{{end}}</td>
-          <td><span class="no-status-badge no-status-{{.StatusClass}}">{{.StatusLabel}}</span></td>
           <td>{{.SavingsSummaryText}}</td>
+          <td>{{.PostureSummaryText}}</td>
         </tr>
         {{end}}
       </tbody>
@@ -134,14 +145,42 @@ details.no-evidence[open] summary{margin-bottom:0.75rem}
 
     {{if .IsSimulationPassed}}
     <div class="no-hero no-hero-passed">
-      <div class="no-hero-metrics">
-        <div><div class="no-metric-val">{{.CurrentNodeCount}} nodes</div><div class="no-metric-lbl">Current</div></div>
-        <div><div class="no-metric-val">{{.CandidateNodeCount}} nodes</div><div class="no-metric-lbl">Candidate</div></div>
-        <div><div class="no-metric-val">{{.CandidateRemovedNode}}</div><div class="no-metric-lbl">Candidate removal</div></div>
-        <div><div class="no-metric-val">{{.PodsAssigned}} / {{.PodsConsidered}}</div><div class="no-metric-lbl">Workloads reassigned</div></div>
-      </div>
       <p class="no-hero-summary">{{.Summary}}</p>
-      <div class="no-hero-note"><strong>No cluster changes were made.</strong> Execution readiness was not evaluated.</div>
+      <div class="no-hero-metrics">
+        <div><div class="no-metric-val">{{.CurrentNodeCount}}</div><div class="no-metric-lbl">Current nodes</div></div>
+        <div><div class="no-metric-val">{{.CandidateNodeCount}}</div><div class="no-metric-lbl">Candidate nodes</div></div>
+      </div>
+      <div class="no-metric-single"><div class="no-metric-val">{{.CandidateRemovedNode}}</div><div class="no-metric-lbl">Candidate removal</div></div>
+    </div>
+
+    <div class="no-section">
+      <div class="no-section-title">Estimated savings</div>
+      {{if .SavingsAvailable}}
+      <div class="no-savings-grid">
+        <div class="no-savings-card">
+          <div class="no-savings-val">{{.EstimatedMonthlySavings}}</div>
+          <div class="no-savings-lbl">Estimated savings</div>
+        </div>
+        {{if .HasMonthlyCostTotals}}
+        <div class="no-savings-card">
+          <div class="no-savings-val no-savings-secondary">{{.CurrentMonthlyCostText}}</div>
+          <div class="no-savings-lbl">Current pool cost</div>
+        </div>
+        <div class="no-savings-card">
+          <div class="no-savings-val no-savings-secondary">{{.CandidateMonthlyCostText}}</div>
+          <div class="no-savings-lbl">Candidate pool cost</div>
+        </div>
+        <div class="no-savings-card">
+          <div class="no-savings-val no-savings-secondary">{{.PricingCoverageText}}</div>
+          <div class="no-savings-lbl">Pricing coverage</div>
+        </div>
+        {{else}}
+        <div class="no-savings-note">Only the exact price of the removed node is known; current and candidate pool totals are unavailable.</div>
+        {{end}}
+      </div>
+      {{else}}
+      <div class="no-savings-unavailable">Pricing unavailable{{if .PricingUnavailableReason}}: {{.PricingUnavailableReason}}{{end}}</div>
+      {{end}}
     </div>
 
     {{if .HasHeadroom}}
@@ -162,29 +201,20 @@ details.no-evidence[open] summary{margin-bottom:0.75rem}
     </div>
     {{end}}
 
-    <div class="no-section">
-      <div class="no-section-title">Estimated savings</div>
-      {{if .SavingsAvailable}}
-      <div class="no-savings-card">
-        <div class="no-savings-val">{{.EstimatedMonthlySavings}}</div>
-        <div class="no-savings-lbl">Estimated monthly savings</div>
-        {{if .HasMonthlyCostTotals}}
-        <div class="no-savings-sub">{{.CurrentMonthlyCostText}} current → {{.CandidateMonthlyCostText}} candidate</div>
-        {{else}}
-        <div class="no-savings-sub">Current/candidate pool totals are unavailable; this is the exact price of the removed node only.</div>
-        {{end}}
-      </div>
-      {{else}}
-      <div class="no-savings-unavailable">Pricing unavailable{{if .PricingUnavailableReason}}: {{.PricingUnavailableReason}}{{end}}</div>
-      {{end}}
+    <div class="no-hero-footer">
+      <div class="no-hero-footer-count">{{.PodsAssigned}} / {{.PodsConsidered}} workloads assigned</div>
+      <div class="no-hero-note"><strong>No cluster changes were made.</strong> Execution readiness was not evaluated.</div>
     </div>
 
     {{else if .IsBlocked}}
     <div class="no-hero no-hero-blocked">
-      <p class="no-hero-summary" style="margin-top:0">OpsCart found a supported hard constraint that prevents this consolidation candidate.</p>
+      <p class="no-hero-summary" style="margin-top:0">A supported hard constraint prevents this consolidation candidate.</p>
       <div class="no-hero-metrics">
         {{if .HasCandidate}}<div><div class="no-metric-val">{{.CandidateRemovedNode}}</div><div class="no-metric-lbl">Candidate node</div></div>{{end}}
       </div>
+      {{if .PrimaryBlockerText}}
+      <div class="no-hero-primary-blocker"><strong>Most useful blocker:</strong> {{.PrimaryBlockerText}}</div>
+      {{end}}
     </div>
 
     {{else if .IsPartial}}
@@ -195,6 +225,14 @@ details.no-evidence[open] summary{margin-bottom:0.75rem}
         <div><div class="no-metric-val">{{.CandidateRemovedNode}}</div><div class="no-metric-lbl">Candidate node</div></div>
       </div>
       {{end}}
+      {{if .PrimaryBlockerText}}
+      <div class="no-hero-primary-blocker"><strong>Why:</strong> {{.PrimaryBlockerText}}</div>
+      {{end}}
+    </div>
+
+    {{else if .IsObservation}}
+    <div class="no-hero no-hero-neutral">
+      <p class="no-hero-summary" style="margin-top:0">No proven N-1 consolidation candidate is available for this pool.</p>
     </div>
 
     {{else}}
@@ -225,13 +263,15 @@ details.no-evidence[open] summary{margin-bottom:0.75rem}
         </div>
         {{end}}
       </div>
-      {{if .BlockersTruncated}}<div class="no-reason-scope" style="margin-top:0.5rem">Showing {{len .Blockers}} of {{.BlockersTotal}} reasons.</div>{{end}}
+      {{if .BlockersTruncated}}<div class="no-reason-scope" style="margin-top:0.5rem">Showing {{len .Blockers}} of {{.BlockersGroupCount}} reason categories ({{.BlockersTotal}} reasons total).</div>
+      {{else if ne .BlockersGroupCount .BlockersTotal}}<div class="no-reason-scope" style="margin-top:0.5rem">{{.BlockersTotal}} reasons total, grouped into {{.BlockersGroupCount}} categories above.</div>{{end}}
     </div>
     {{end}}
 
     {{if .HasCaveats}}
     <div class="no-section">
       <div class="no-section-title">Caveats</div>
+      <div class="no-section-note">Limitations of this specific proof.</div>
       <ul class="no-caveat-list">
         {{range .Caveats}}<li>{{.}}</li>{{end}}
       </ul>
@@ -241,7 +281,7 @@ details.no-evidence[open] summary{margin-bottom:0.75rem}
     <div class="no-section">
       <div class="no-section-title">Not evaluated</div>
       <div class="no-notevaluated">
-        <p>Simulation proof is not execution readiness. OpsCart did not evaluate:</p>
+        <p>Execution concerns intentionally outside this read-only simulator. Simulation proof is not execution readiness:</p>
         <ul>
           {{range .NotEvaluated}}<li>{{.}}</li>{{end}}
         </ul>
@@ -249,7 +289,7 @@ details.no-evidence[open] summary{margin-bottom:0.75rem}
     </div>
 
     {{if .AssignmentTotal}}
-    <details class="no-evidence" open>
+    <details class="no-evidence"{{if .AssignmentAutoOpen}} open{{end}}>
       <summary>Placement evidence ({{.AssignmentTotal}})</summary>
       <div class="no-assign-summary"><span class="muted" style="font-size:0.75rem;color:var(--text-muted)">Total assignments: {{.AssignmentTotal}}</span></div>
       <div class="no-assign-wrap"><table class="no-assign-table">

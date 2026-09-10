@@ -282,7 +282,8 @@
     <a class="posture-card node-optimization-card" href="{{.OptHref}}">
       <div class="posture-name">Node Optimization</div>
       <div class="posture-value">Available</div>
-      <div class="posture-copy">Read-only consolidation simulation</div>
+      <div class="posture-copy">Read-only consolidation simulation{{if .NodeOptimizationHasProvenCandidate}} · {{.NodeOptimizationProvenCount}} proven consolidation candidate{{if ne .NodeOptimizationProvenCount 1}}s{{end}}{{end}}</div>
+      {{if .NodeOptimizationHasAggregateSavings}}<div class="posture-copy">Estimated savings {{.NodeOptimizationAggregateSavingsText}}</div>{{end}}
       <div class="posture-state">Open simulation →</div>
     </a>
     {{else}}

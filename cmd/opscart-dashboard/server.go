@@ -708,6 +708,14 @@ type overviewPageData struct {
 	NonRootNotExplicitlyEnforced int
 	UnprotectedNamespaceCount    int
 	NodeOptimizationAvailable    bool
+	// NodeOptimizationProvenCount and NodeOptimizationAggregateSavingsText are
+	// optional enrichments of the connected-copy card: they only read the
+	// already-computed Status/SavingsProjection fields (see
+	// buildOverviewData), never re-derive simulation or pricing logic.
+	NodeOptimizationHasProvenCandidate   bool
+	NodeOptimizationProvenCount          int
+	NodeOptimizationHasAggregateSavings  bool
+	NodeOptimizationAggregateSavingsText string
 
 	// Incident Score
 	IncidentScore      int
@@ -895,6 +903,33 @@ func buildOverviewData(scan *clusterScan, activeCtx string, clusterList []string
 	// real recommendation contract data (see runFullScan), not a stub or
 	// placeholder — the overview card only claims availability when true.
 	nodeOptimizationAvailable := scan != nil && len(scan.nodeOptimization) > 0
+
+	// provenCount/aggregateSavings only read the already-computed Status and
+	// SavingsProjection fields produced during the scan (see
+	// BuildNodeOptimizationRecommendations and
+	// BuildNodeOptimizationSavingsProjections) — this never re-derives
+	// simulation feasibility or pricing itself. The aggregate is shown only
+	// when every proven pool's savings projection is Available; otherwise no
+	// aggregate figure is shown at all, so a partially priced fleet never
+	// implies a partial (and therefore misleading) total.
+	var provenCount int
+	var aggregateSavings float64
+	allProvenPriced := true
+	if scan != nil {
+		for i, rec := range scan.nodeOptimization {
+			if rec.Status != analyzer.NodeOptimizationRecommendationSimulationPassed {
+				continue
+			}
+			provenCount++
+			if i < len(scan.nodeOptimizationSavings) && scan.nodeOptimizationSavings[i].Available &&
+				scan.nodeOptimizationSavings[i].EstimatedMonthlySavings != nil {
+				aggregateSavings += *scan.nodeOptimizationSavings[i].EstimatedMonthlySavings
+			} else {
+				allProvenPriced = false
+			}
+		}
+	}
+	hasAggregateSavings := provenCount > 0 && allProvenPriced
 	incidentScore, incidentScoreColor, incidentScoreLabel := calcIncidentScore(scan)
 	_ = secFailed // reserved for future use
 
@@ -963,59 +998,63 @@ func buildOverviewData(scan *clusterScan, activeCtx string, clusterList []string
 	}
 
 	return overviewPageData{
-		ClusterName:                  clusterName,
-		ActiveCtx:                    activeCtx,
-		ClusterList:                  clusters,
-		DashURL:                      "/" + q,
-		InfraURL:                     "/infrastructure" + q,
-		NSsURL:                       "/namespaces" + q,
-		OptURL:                       "/optimizations" + q,
-		WrURL:                        "/warroom" + q,
-		CostsURL:                     "/costs" + q,
-		ScannedAtMS:                  time.Now().UnixMilli(),
-		CriticalCount:                criticalCount,
-		SavingsPotential:             savings,
-		SecurityScore:                securityScore,
-		PrivilegedContainers:         privilegedContainers,
-		NonRootNotExplicitlyEnforced: runningAsRoot,
-		UnprotectedNamespaceCount:    unprotectedNamespaces,
-		WasteCount:                   wasteCount,
-		NodeOptimizationAvailable:    nodeOptimizationAvailable,
-		MonthlyCost:                  monthlyCost,
-		CostAvailable:                costAvailable,
-		CostCoverage:                 costCoverage,
-		TopIssues:                    topIssues,
-		HasTopIssue:                  hasTopIssue,
-		TopIssueName:                 topIssueName,
-		TopIssueNS:                   topIssueNS,
-		TopIssueTrend:                topIssueTrend,
-		TopIssueReopen:               topIssueReopen,
-		FeaturedIssues:               featuredIssues,
-		HasFeatured:                  len(featuredIssues) > 0,
-		NodePoolCount:                nodePoolCount,
-		PodCount:                     podCount,
-		CPUUtilization:               cpuUtil,
-		MemUtilization:               memUtil,
-		UtilizationStatus:            utilizationStatus(cpuUtil, memUtil),
-		NamespaceCount:               nsCount,
-		Version:                      Version,
-		DashHref:                     "/" + q,
-		CostsHref:                    "/costs" + q,
-		InfraHref:                    "/infrastructure" + q,
-		NsHref:                       "/namespaces" + q,
-		OptHref:                      "/node-optimization" + q,
-		WrHref:                       "/warroom" + q,
-		IncidentsHref:                "/incidents" + q,
-		SecurityHref:                 "/security" + q,
-		WasteHref:                    "/waste" + q,
-		DiagnosticsHref:              "/settings/diagnostics" + q,
-		SettingsHref:                 "/settings" + q,
-		ActivePage:                   "dashboard",
-		Clusters:                     convertToSidebarClusters(clusterList, activeCtx, "/"),
-		IncidentScore:                incidentScore,
-		IncidentScoreColor:           incidentScoreColor,
-		IncidentScoreLabel:           incidentScoreLabel,
-		Trend:                        trend,
+		ClusterName:                          clusterName,
+		ActiveCtx:                            activeCtx,
+		ClusterList:                          clusters,
+		DashURL:                              "/" + q,
+		InfraURL:                             "/infrastructure" + q,
+		NSsURL:                               "/namespaces" + q,
+		OptURL:                               "/optimizations" + q,
+		WrURL:                                "/warroom" + q,
+		CostsURL:                             "/costs" + q,
+		ScannedAtMS:                          time.Now().UnixMilli(),
+		CriticalCount:                        criticalCount,
+		SavingsPotential:                     savings,
+		SecurityScore:                        securityScore,
+		PrivilegedContainers:                 privilegedContainers,
+		NonRootNotExplicitlyEnforced:         runningAsRoot,
+		UnprotectedNamespaceCount:            unprotectedNamespaces,
+		WasteCount:                           wasteCount,
+		NodeOptimizationAvailable:            nodeOptimizationAvailable,
+		NodeOptimizationHasProvenCandidate:   provenCount > 0,
+		NodeOptimizationProvenCount:          provenCount,
+		NodeOptimizationHasAggregateSavings:  hasAggregateSavings,
+		NodeOptimizationAggregateSavingsText: formatNodeOptimizationMonthly(aggregateSavings),
+		MonthlyCost:                          monthlyCost,
+		CostAvailable:                        costAvailable,
+		CostCoverage:                         costCoverage,
+		TopIssues:                            topIssues,
+		HasTopIssue:                          hasTopIssue,
+		TopIssueName:                         topIssueName,
+		TopIssueNS:                           topIssueNS,
+		TopIssueTrend:                        topIssueTrend,
+		TopIssueReopen:                       topIssueReopen,
+		FeaturedIssues:                       featuredIssues,
+		HasFeatured:                          len(featuredIssues) > 0,
+		NodePoolCount:                        nodePoolCount,
+		PodCount:                             podCount,
+		CPUUtilization:                       cpuUtil,
+		MemUtilization:                       memUtil,
+		UtilizationStatus:                    utilizationStatus(cpuUtil, memUtil),
+		NamespaceCount:                       nsCount,
+		Version:                              Version,
+		DashHref:                             "/" + q,
+		CostsHref:                            "/costs" + q,
+		InfraHref:                            "/infrastructure" + q,
+		NsHref:                               "/namespaces" + q,
+		OptHref:                              "/node-optimization" + q,
+		WrHref:                               "/warroom" + q,
+		IncidentsHref:                        "/incidents" + q,
+		SecurityHref:                         "/security" + q,
+		WasteHref:                            "/waste" + q,
+		DiagnosticsHref:                      "/settings/diagnostics" + q,
+		SettingsHref:                         "/settings" + q,
+		ActivePage:                           "dashboard",
+		Clusters:                             convertToSidebarClusters(clusterList, activeCtx, "/"),
+		IncidentScore:                        incidentScore,
+		IncidentScoreColor:                   incidentScoreColor,
+		IncidentScoreLabel:                   incidentScoreLabel,
+		Trend:                                trend,
 
 		CostDeltaText:          costDeltaText,
 		IncidentScoreDeltaText: incidentScoreDeltaText,

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -115,8 +116,8 @@ func TestNodeOptimizationPage_SimulationPassed(t *testing.T) {
 	out := renderNodeOptimizationPage(scanWithRecommendations(simulationPassedRecommendation()), "prod-eastus", []string{"prod-eastus"})
 	for _, want := range []string{
 		"SIMULATION PASSED",
-		"6 nodes",
-		"5 nodes",
+		`<div class="no-metric-val">6</div><div class="no-metric-lbl">Current nodes</div>`,
+		`<div class="no-metric-val">5</div><div class="no-metric-lbl">Candidate nodes</div>`,
 		"node-3",
 		"18 / 18",
 		"Scheduling feasibility proved under the supported model.",
@@ -135,7 +136,7 @@ func TestNodeOptimizationPage_Blocked(t *testing.T) {
 	out := renderNodeOptimizationPage(scanWithRecommendations(blockedRecommendation()), "prod-eastus", []string{"prod-eastus"})
 	for _, want := range []string{
 		"BLOCKED",
-		"OpsCart found a supported hard constraint that prevents this consolidation candidate.",
+		"A supported hard constraint prevents this consolidation candidate.",
 		"insufficient CPU after consolidation",
 		"no eligible destination for pod payments/worker-6f49",
 	} {
@@ -168,7 +169,7 @@ func TestNodeOptimizationPage_Partial(t *testing.T) {
 // 4. OBSERVATION rendering.
 func TestNodeOptimizationPage_Observation(t *testing.T) {
 	out := renderNodeOptimizationPage(scanWithRecommendations(observationRecommendation("system")), "prod-eastus", []string{"prod-eastus"})
-	if !strings.Contains(out, "No same-shape N-1 candidate was evaluated.") {
+	if !strings.Contains(out, "No proven N-1 consolidation candidate is available for this pool.") {
 		t.Error("OBSERVATION page missing calm summary text")
 	}
 	for _, forbidden := range []string{"error", "Error", "failed"} {
@@ -207,6 +208,31 @@ func TestNodeOptimizationPage_NotEvaluatedAlwaysRenders(t *testing.T) {
 		if !strings.Contains(out, "Not evaluated") || !strings.Contains(out, "drain or eviction execution") {
 			t.Errorf("%s: expected Not Evaluated section to always render", name)
 		}
+	}
+}
+
+// 6b. Caveats (limitations of this specific proof) and Not Evaluated
+// (execution concerns intentionally outside the read-only simulator) render
+// as visually and textually distinct sections, never merged.
+func TestNodeOptimizationPage_CaveatsDistinctFromNotEvaluated(t *testing.T) {
+	out := renderNodeOptimizationPage(scanWithRecommendations(simulationPassedRecommendation()), "prod-eastus", []string{"prod-eastus"})
+
+	caveatsIdx := strings.Index(out, `<div class="no-section-title">Caveats</div>`)
+	notEvaluatedIdx := strings.Index(out, `<div class="no-section-title">Not evaluated</div>`)
+	if caveatsIdx == -1 || notEvaluatedIdx == -1 {
+		t.Fatalf("expected both a Caveats and a Not evaluated section title, got caveatsIdx=%d notEvaluatedIdx=%d", caveatsIdx, notEvaluatedIdx)
+	}
+	if !strings.Contains(out, "read-only simulation; execution safety was not evaluated") {
+		t.Error("expected the analyzer-reported caveat to render under Caveats")
+	}
+	if !strings.Contains(out, "drain or eviction execution") {
+		t.Error("expected drain/eviction execution to render under Not evaluated")
+	}
+	// The caveat text must not appear inside the Not Evaluated list, and vice
+	// versa — they are conceptually separate and must stay in their own box.
+	notEvaluatedBox := out[notEvaluatedIdx:]
+	if strings.Contains(notEvaluatedBox[:min(len(notEvaluatedBox), 400)], "read-only simulation; execution safety was not evaluated") {
+		t.Error("caveat text leaked into the Not Evaluated box")
 	}
 }
 
@@ -429,4 +455,153 @@ func TestOverviewNodeOptimizationCard_UpdatesOnlyWhenConnected(t *testing.T) {
 			t.Error("expected NodeOptimizationAvailable=true when the scan produced recommendation data")
 		}
 	})
+}
+
+// 14b. The Overview card's optional proven-candidate count and aggregate
+// savings only read already-computed Status/SavingsProjection fields, and
+// the aggregate is withheld the moment any proven pool lacks exact pricing.
+func TestOverviewNodeOptimizationCard_ProvenCandidateAndAggregateSavings(t *testing.T) {
+	t.Run("proven candidate count and aggregate savings shown when every proven pool is priced", func(t *testing.T) {
+		scan := scanWithRecommendationsAndSavings(
+			[]analyzer.NodeOptimizationRecommendation{simulationPassedRecommendation(), simulationPassedRecommendation(), partialRecommendation()},
+			[]analyzer.NodeOptimizationSavingsProjection{
+				{Available: true, EstimatedMonthlySavings: f64ptr(182)},
+				{Available: true, EstimatedMonthlySavings: f64ptr(50)},
+				{},
+			},
+		)
+		data := buildOverviewData(scan, "test", []string{"test"}, nil, time.Now())
+		if data.NodeOptimizationProvenCount != 2 {
+			t.Fatalf("NodeOptimizationProvenCount = %d, want 2", data.NodeOptimizationProvenCount)
+		}
+		if !data.NodeOptimizationHasAggregateSavings {
+			t.Fatal("expected aggregate savings to be shown when every proven pool is priced")
+		}
+		if !strings.Contains(data.NodeOptimizationAggregateSavingsText, "232") {
+			t.Errorf("NodeOptimizationAggregateSavingsText = %q, want it to reflect 182+50=232", data.NodeOptimizationAggregateSavingsText)
+		}
+	})
+
+	t.Run("aggregate savings withheld when any proven pool is unpriced", func(t *testing.T) {
+		scan := scanWithRecommendationsAndSavings(
+			[]analyzer.NodeOptimizationRecommendation{simulationPassedRecommendation(), simulationPassedRecommendation()},
+			[]analyzer.NodeOptimizationSavingsProjection{
+				{Available: true, EstimatedMonthlySavings: f64ptr(182)},
+				{}, // second proven pool has no exact price
+			},
+		)
+		data := buildOverviewData(scan, "test", []string{"test"}, nil, time.Now())
+		if data.NodeOptimizationProvenCount != 2 {
+			t.Fatalf("NodeOptimizationProvenCount = %d, want 2", data.NodeOptimizationProvenCount)
+		}
+		if data.NodeOptimizationHasAggregateSavings {
+			t.Error("expected aggregate savings to be withheld when not every proven pool is priced")
+		}
+	})
+}
+
+// 15. A large number of near-duplicate evidence-gap reasons is grouped for
+// display (one line per distinct Code, with an exact occurrence count), the
+// exact raw total is preserved, and a materially distinct reason is never
+// folded into that group.
+func TestNodeOptimizationPage_LargeReasonListGroupedWithExactTotal(t *testing.T) {
+	rec := partialRecommendation()
+	var blockers []analyzer.NodeOptimizationRecommendationReason
+	for i := 0; i < 38; i++ {
+		blockers = append(blockers, analyzer.NodeOptimizationRecommendationReason{
+			Code:    "incomplete_scheduling_evidence",
+			Message: fmt.Sprintf("Pod ns/pod-%d could not be mapped to a canonical node pool", i),
+		})
+	}
+	blockers = append(blockers, analyzer.NodeOptimizationRecommendationReason{
+		Code:    "pvc_storage_mobility_unproven",
+		Message: "CSI storage mobility not modeled",
+	})
+	rec.Blockers = blockers
+
+	out := renderNodeOptimizationPage(scanWithRecommendations(rec), "prod-eastus", []string{"prod-eastus"})
+
+	if !strings.Contains(out, "38 Pods could not be mapped to a canonical node pool") {
+		t.Error("expected the 38 near-duplicate reasons to be grouped into one summarized line")
+	}
+	if !strings.Contains(out, "CSI storage mobility not modeled") {
+		t.Error("expected the materially distinct reason to remain visible, not hidden by grouping")
+	}
+	if strings.Contains(out, "pod-37") {
+		t.Error("expected individual pod identifiers to be dropped once grouped, not leaked into the summarized line")
+	}
+	if !strings.Contains(out, "39 reasons total, grouped into 2 categories above.") {
+		t.Error("expected the exact raw total (39) to be preserved alongside the grouped category count (2)")
+	}
+}
+
+// 16. BLOCKED and PARTIAL pools surface their single most useful reason in
+// the hero, ahead of the full diagnostic list below.
+func TestNodeOptimizationPage_PrimaryBlockerSurfacedInHero(t *testing.T) {
+	blocked := renderNodeOptimizationPage(scanWithRecommendations(blockedRecommendation()), "prod-eastus", []string{"prod-eastus"})
+	if !strings.Contains(blocked, "Most useful blocker:") {
+		t.Error("expected BLOCKED hero to surface a primary blocker line")
+	}
+
+	partial := renderNodeOptimizationPage(scanWithRecommendations(partialRecommendation()), "prod-eastus", []string{"prod-eastus"})
+	if !strings.Contains(partial, "Why:") {
+		t.Error("expected PARTIAL hero to surface a concise Why line")
+	}
+}
+
+// 17. A large placement-evidence table renders collapsed by default (native
+// <details>, no JS) so it does not dominate the initial viewport, while a
+// small one still auto-expands and every row remains present in the page.
+func TestNodeOptimizationPage_LargeAssignmentTableCollapsedByDefault(t *testing.T) {
+	rec := simulationPassedRecommendation()
+	rec.Assignments = nil
+	rec.PodsAssigned = 0
+	for i := 0; i < nodeOptimizationAssignmentAutoOpenLimit+5; i++ {
+		rec.Assignments = append(rec.Assignments, analyzer.NodeOptimizationRecommendationAssignment{
+			Namespace: "orders", PodName: fmt.Sprintf("pod-%d", i), SourceNode: "node-3", DestinationNode: "node-1",
+		})
+		rec.PodsAssigned++
+	}
+	out := renderNodeOptimizationPage(scanWithRecommendations(rec), "prod-eastus", []string{"prod-eastus"})
+
+	if !strings.Contains(out, fmt.Sprintf("Placement evidence (%d)", nodeOptimizationAssignmentAutoOpenLimit+5)) {
+		t.Error("expected the exact assignment total to remain visible even when collapsed")
+	}
+	if strings.Contains(out, `<details class="no-evidence" open>`) {
+		t.Error("expected a large assignment table to render collapsed by default")
+	}
+	if !strings.Contains(out, "pod-24") {
+		t.Error("expected every assignment row to remain present in the page, not truncated")
+	}
+
+	small := renderNodeOptimizationPage(scanWithRecommendations(simulationPassedRecommendation()), "prod-eastus", []string{"prod-eastus"})
+	if !strings.Contains(small, `<details class="no-evidence" open>`) {
+		t.Error("expected a small assignment table to remain auto-expanded")
+	}
+}
+
+// 18. The multi-pool summary table's Headroom/posture column reflects a
+// proven candidate's headroom and shows a neutral placeholder otherwise.
+func TestNodeOptimizationPage_PostureColumnReflectsHeadroom(t *testing.T) {
+	out := renderNodeOptimizationPage(scanWithRecommendations(
+		simulationPassedRecommendation(),
+		partialRecommendation(),
+	), "prod-eastus", []string{"prod-eastus"})
+
+	if !strings.Contains(out, "34% CPU / 29% Mem headroom") {
+		t.Error("expected the posture column to show headroom for the proven candidate")
+	}
+}
+
+// 19. /optimizations is a separate, preserved page (RI/waste/right-sizing)
+// that this Node Optimization UX pass must not regress.
+func TestOptimizationsPage_StillRendersAlongsideNodeOptimization(t *testing.T) {
+	scan := scanWithRecommendations(simulationPassedRecommendation())
+	out := renderOptimizationsPage(scan, "prod-eastus", []string{"prod-eastus"})
+	if out == "" {
+		t.Fatal("expected /optimizations to render non-empty output")
+	}
+	if !strings.Contains(out, "<html") {
+		t.Error("expected /optimizations to render a full HTML page")
+	}
 }
