@@ -246,15 +246,23 @@ type nodeOptimizationEvidencePageData struct {
 	StatusLabel string
 	StatusClass string
 	ReasonTotal int
-	Groups      []nodeOptimizationReasonView
+	Groups      []nodeOptimizationEvidenceGroupView
 	Evidence    []nodeOptimizationEvidenceRow
 }
 
+type nodeOptimizationEvidenceGroupView struct {
+	Count       int
+	Category    string
+	Reason      string
+	AccentClass string
+}
+
 type nodeOptimizationEvidenceRow struct {
-	Category string
-	Evidence string
-	Pod      string
-	Node     string
+	Category    string
+	AccentClass string
+	Evidence    string
+	Pod         string
+	Node        string
 }
 
 func renderNodeOptimizationEvidencePage(
@@ -298,14 +306,26 @@ func renderNodeOptimizationEvidencePage(
 		data.StatusLabel, data.StatusClass = nodeOptimizationStatusView(recommendation.Status)
 		reasons := expandNodeOptimizationReasons(recommendation.Blockers)
 		data.ReasonTotal = len(reasons)
-		data.Groups = groupNodeOptimizationReasons(reasons)
+		grouped := groupNodeOptimizationReasons(reasons)
+		data.Groups = make([]nodeOptimizationEvidenceGroupView, 0, len(grouped))
+		for _, group := range grouped {
+			category := nodeOptimizationEvidenceCategory(group.Message)
+			data.Groups = append(data.Groups, nodeOptimizationEvidenceGroupView{
+				Count:       group.Count,
+				Category:    category.GroupLabel,
+				Reason:      nodeOptimizationEvidenceGroupReason(group),
+				AccentClass: category.AccentClass,
+			})
+		}
 		data.Evidence = make([]nodeOptimizationEvidenceRow, 0, len(reasons))
 		for _, reason := range reasons {
+			category := nodeOptimizationEvidenceCategory(reason.Message)
 			data.Evidence = append(data.Evidence, nodeOptimizationEvidenceRow{
-				Category: nodeOptimizationEvidenceCategory(reason),
-				Evidence: reason.Message,
-				Pod:      reason.Pod,
-				Node:     reason.Node,
+				Category:    category.ChipLabel,
+				AccentClass: category.AccentClass,
+				Evidence:    reason.Message,
+				Pod:         reason.Pod,
+				Node:        reason.Node,
 			})
 		}
 	}
@@ -599,23 +619,60 @@ func nodeOptimizationReasonGroup(reason analyzer.NodeOptimizationRecommendationR
 	}
 }
 
-func nodeOptimizationEvidenceCategory(reason analyzer.NodeOptimizationRecommendationReason) string {
-	normalized := strings.ToLower(reason.Message)
+type nodeOptimizationEvidenceCategoryView struct {
+	GroupLabel  string
+	ChipLabel   string
+	AccentClass string
+}
+
+func nodeOptimizationEvidenceCategory(message string) nodeOptimizationEvidenceCategoryView {
+	normalized := strings.ToLower(message)
 	switch {
 	case strings.Contains(normalized, "required node affinity matchfields"):
-		return "Required node affinity matchFields"
+		return nodeOptimizationEvidenceCategoryView{"Required node affinity", "Node affinity", "amber"}
 	case strings.Contains(normalized, "required node affinity operator notin"):
-		return "Required node affinity NotIn"
+		return nodeOptimizationEvidenceCategoryView{"Required node affinity NotIn", "Node affinity NotIn", "orange"}
 	case strings.Contains(normalized, "persistentvolume"),
 		strings.Contains(normalized, "persistentvolumeclaim"),
 		strings.Contains(normalized, "pvc"),
 		strings.Contains(normalized, "csi"),
 		strings.Contains(normalized, "storage"),
 		strings.Contains(normalized, "volume"):
-		return "Storage / volume scheduling"
+		return nodeOptimizationEvidenceCategoryView{"Storage / volume scheduling", "Storage topology", "cyan"}
+	case strings.Contains(normalized, "topology"):
+		return nodeOptimizationEvidenceCategoryView{"Topology scheduling", "Topology", "indigo"}
+	case strings.Contains(normalized, "insufficient cpu"),
+		strings.Contains(normalized, "insufficient memory"),
+		strings.Contains(normalized, "capacity"),
+		strings.Contains(normalized, "resource request"),
+		strings.Contains(normalized, "exceed single-node"):
+		return nodeOptimizationEvidenceCategoryView{"Resource / capacity", "Capacity", "red"}
+	case strings.Contains(normalized, "affinity"),
+		strings.Contains(normalized, "scheduling constraint"),
+		strings.Contains(normalized, "node selector"),
+		strings.Contains(normalized, "nodeselector"),
+		strings.Contains(normalized, "taint"),
+		strings.Contains(normalized, "toleration"),
+		strings.Contains(normalized, "eligible destination"):
+		return nodeOptimizationEvidenceCategoryView{"Scheduling constraint", "Scheduling", "amber"}
 	default:
-		return "Other evidence"
+		return nodeOptimizationEvidenceCategoryView{"Other evidence", "Other evidence", "slate"}
 	}
+}
+
+func nodeOptimizationEvidenceGroupReason(group nodeOptimizationReasonView) string {
+	normalized := strings.ToLower(group.Message)
+	switch {
+	case strings.Contains(normalized, "required node affinity matchfields"):
+		return "matchFields not modeled"
+	case strings.Contains(normalized, "required node affinity operator notin"):
+		return "NotIn operator not modeled"
+	case strings.Contains(normalized, "volume attachment/driver scheduling semantics"):
+		return "Attachment and driver-specific constraints not modeled"
+	case strings.Contains(normalized, "canonical node pool"):
+		return "Canonical node-pool mapping unavailable"
+	}
+	return strings.TrimPrefix(group.Message, fmt.Sprintf("%d ", group.Count))
 }
 
 // nodeOptimizationWorkloadReason removes only the stable analyzer prefixes

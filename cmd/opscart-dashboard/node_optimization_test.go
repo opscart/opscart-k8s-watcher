@@ -649,7 +649,13 @@ func TestNodeOptimizationPage_ConcatenatedEvidenceGroupedPerPool(t *testing.T) {
 		for _, want := range []string{
 			fmt.Sprintf("%d reasons total", total),
 			`href="/node-optimization?cluster=prod-eastus"`,
-			"Required node affinity matchFields",
+			`noe-group noe-accent-amber`,
+			`noe-group noe-accent-orange`,
+			`noe-group noe-accent-cyan`,
+			`noe-chip noe-accent-amber`,
+			`noe-chip noe-accent-orange`,
+			`noe-chip noe-accent-cyan`,
+			"Required node affinity",
 			"Required node affinity NotIn",
 			"Storage / volume scheduling",
 			"affinity-0: required node affinity matchFields are not modeled yet",
@@ -660,9 +666,39 @@ func TestNodeOptimizationPage_ConcatenatedEvidenceGroupedPerPool(t *testing.T) {
 				t.Errorf("pool %d evidence page missing %q", index, want)
 			}
 		}
+		statusClass := "partial"
+		if recommendations[index].Status == analyzer.NodeOptimizationRecommendationBlocked {
+			statusClass = "blocked"
+		}
+		if !strings.Contains(evidence, `class="noe-head noe-head-`+statusClass+`"`) {
+			t.Errorf("pool %d evidence header missing %s status accent", index, statusClass)
+		}
 		if rows := strings.Count(evidence, `<tr>`); rows != total+1 {
 			t.Errorf("pool %d evidence table rows = %d, want %d (header plus every raw reason)", index, rows, total+1)
 		}
+	}
+}
+
+func TestNodeOptimizationEvidenceCategorySemanticAccents(t *testing.T) {
+	for _, test := range []struct {
+		name        string
+		message     string
+		groupLabel  string
+		chipLabel   string
+		accentClass string
+	}{
+		{"affinity", "pod apps/api: required Pod affinity is unsatisfied", "Scheduling constraint", "Scheduling", "amber"},
+		{"storage", "PersistentVolume data uses CSI storage", "Storage / volume scheduling", "Storage topology", "cyan"},
+		{"topology", "hard topology spread constraint cannot be modeled", "Topology scheduling", "Topology", "indigo"},
+		{"capacity", "insufficient CPU after consolidation", "Resource / capacity", "Capacity", "red"},
+		{"generic", "pool evidence is incomplete", "Other evidence", "Other evidence", "slate"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			got := nodeOptimizationEvidenceCategory(test.message)
+			if got.GroupLabel != test.groupLabel || got.ChipLabel != test.chipLabel || got.AccentClass != test.accentClass {
+				t.Fatalf("category = %+v, want group=%q chip=%q accent=%q", got, test.groupLabel, test.chipLabel, test.accentClass)
+			}
+		})
 	}
 }
 
