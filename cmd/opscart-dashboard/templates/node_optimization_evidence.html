@@ -1,0 +1,52 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1.0">
+<title>Node Optimization Evidence — {{.ClusterName}}</title>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+{{template "base" .}}
+<style>
+.noe-back{display:inline-flex;color:var(--primary-light);font-size:.78rem;font-weight:700;text-decoration:none;margin-bottom:1rem}.noe-back:hover{text-decoration:underline}
+.noe-head{display:flex;justify-content:space-between;align-items:flex-start;gap:1rem;flex-wrap:wrap;margin-bottom:1.25rem}
+.noe-pool{font-size:1.2rem;font-weight:800}.noe-meta{display:flex;align-items:center;gap:.65rem;flex-wrap:wrap;margin-top:.45rem}
+.noe-status{display:inline-flex;padding:3px 11px;border-radius:20px;font-size:.68rem;font-weight:700;letter-spacing:.4px}.noe-status-partial{color:var(--warning);border:1px solid rgba(245,158,11,.32);background:rgba(245,158,11,.12)}.noe-status-blocked{color:var(--danger);border:1px solid rgba(239,68,68,.32);background:rgba(239,68,68,.1)}.noe-status-passed{color:var(--success);border:1px solid rgba(16,185,129,.35);background:rgba(16,185,129,.12)}.noe-status-observation,.noe-status-candidate,.noe-status-precheck{color:var(--text-secondary);border:1px solid var(--border);background:rgba(148,163,184,.1)}
+.noe-count{font-size:.78rem;color:var(--text-secondary);font-weight:700}.noe-section{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:1.25rem;margin-bottom:1.25rem}.noe-title{font-size:.78rem;font-weight:700;text-transform:uppercase;letter-spacing:.5px;color:var(--text-secondary);margin-bottom:.75rem}
+.noe-groups{display:flex;flex-direction:column;gap:.45rem}.noe-group{font-size:.8rem;color:var(--text-secondary);border-left:3px solid var(--warning);padding:.4rem .75rem;background:rgba(0,0,0,.14);border-radius:0 6px 6px 0}
+.noe-table-wrap{overflow-x:auto;border:1px solid var(--border);border-radius:var(--radius-sm)}.noe-table{width:100%;border-collapse:collapse}.noe-table th{background:rgba(0,0,0,.35);padding:.55rem .8rem;text-align:left;font-size:.65rem;text-transform:uppercase;letter-spacing:.7px;color:var(--text-muted);font-weight:600;border-bottom:1px solid var(--border);white-space:nowrap}.noe-table td{padding:.65rem .8rem;border-bottom:1px solid var(--border);font-size:.76rem;color:var(--text-secondary);vertical-align:top}.noe-table tbody tr:last-child td{border-bottom:none}.noe-category{white-space:nowrap;font-weight:650}.noe-evidence{line-height:1.45;overflow-wrap:anywhere}.noe-scope{font-size:.68rem;color:var(--text-muted);margin-top:.2rem}.noe-empty{padding:1.5rem;text-align:center;color:var(--text-muted);font-size:.82rem}
+</style>
+</head>
+<body>
+<div class="layout">
+{{.Sidebar}}
+<main class="main">
+  <a class="noe-back" href="{{.BackURL}}">← Back to Node Optimization</a>
+  {{if .Found}}
+  <div class="noe-head">
+    <div><div class="noe-pool">{{.PoolName}}</div><div class="noe-meta"><span class="noe-status noe-status-{{.StatusClass}}">{{.StatusLabel}}</span><span class="noe-count">{{.ReasonTotal}} reason{{if ne .ReasonTotal 1}}s{{end}} total</span></div></div>
+    <div class="page-meta"><div>{{.ClusterName}}</div></div>
+  </div>
+
+  {{if .Evidence}}
+  <section class="noe-section">
+    <div class="noe-title">Grouped reason summary</div>
+    <div class="noe-groups">{{range .Groups}}<div class="noe-group">{{.Message}}</div>{{end}}</div>
+  </section>
+  <section class="noe-section">
+    <div class="noe-title">Complete raw evidence</div>
+    <div class="noe-table-wrap"><table class="noe-table">
+      <thead><tr><th>Category</th><th>Evidence</th></tr></thead>
+      <tbody>{{range .Evidence}}<tr><td class="noe-category">{{.Category}}</td><td class="noe-evidence">{{.Evidence}}{{if or .Pod .Node}}<div class="noe-scope">{{if .Pod}}Pod: {{.Pod}}{{end}}{{if .Node}} · Node: {{.Node}}{{end}}</div>{{end}}</td></tr>{{end}}</tbody>
+    </table></div>
+  </section>
+  {{else}}
+  <div class="noe-section noe-empty">No detailed evidence was reported for this pool.</div>
+  {{end}}
+  {{else}}
+  <div class="noe-head"><div><div class="noe-pool">Evidence unavailable</div><div class="noe-meta"><span class="noe-count">Unknown node pool{{if .PoolName}}: {{.PoolName}}{{end}}</span></div></div></div>
+  <div class="noe-section noe-empty">This pool is not present in the current Node Optimization results.</div>
+  {{end}}
+</main>
+</div>
+</body>
+</html>

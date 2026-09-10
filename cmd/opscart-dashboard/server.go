@@ -249,6 +249,7 @@ func (srv *server) newMux() http.Handler {
 	mux.HandleFunc("/namespaces", srv.handleNamespacesPage)
 	mux.HandleFunc("/optimizations", srv.handleOptimizationsPage)
 	mux.HandleFunc("/node-optimization", srv.handleNodeOptimizationPage)
+	mux.HandleFunc("/node-optimization/evidence", srv.handleNodeOptimizationEvidencePage)
 	mux.HandleFunc("/investigate", srv.handleInvestigationPage)
 	mux.HandleFunc("/api/investigation/logs", srv.handleInvestigationLogs)
 	mux.HandleFunc("/incidents", srv.handleIncidentsPage)

@@ -2,6 +2,8 @@ package main
 
 import (
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
@@ -124,15 +126,6 @@ func nodeOptimizationPoolCard(t *testing.T, html string, index int) string {
 		card = card[:next]
 	}
 	return card
-}
-
-func nodeOptimizationVisibleReasonBody(t *testing.T, card string) string {
-	t.Helper()
-	details := strings.Index(card, `<details class="no-evidence no-reason-evidence">`)
-	if details < 0 {
-		t.Fatal("detailed evidence disclosure was not rendered")
-	}
-	return card[:details]
 }
 
 // 1. SIMULATION_PASSED rendering.
@@ -552,15 +545,18 @@ func TestNodeOptimizationPage_LargeReasonListGroupedWithExactTotal(t *testing.T)
 		t.Error("expected the materially distinct reason to remain visible, not hidden by grouping")
 	}
 	card := nodeOptimizationPoolCard(t, out, 0)
-	visible := nodeOptimizationVisibleReasonBody(t, card)
-	if strings.Contains(visible, "pod-37") {
-		t.Error("expected individual pod identifiers to be absent from the default-visible grouped explanation")
+	if strings.Contains(card, "pod-37") {
+		t.Error("expected individual pod identifiers to be absent from the compact main page")
 	}
-	if !strings.Contains(visible, "39 reasons total") {
+	if !strings.Contains(card, "39 reasons total") {
 		t.Error("expected the exact raw total (39) to be preserved alongside the grouped explanation")
 	}
-	if !strings.Contains(card[strings.Index(card, `<details class="no-evidence no-reason-evidence">`):], "pod-37") {
-		t.Error("expected raw per-Pod evidence to remain inside the collapsed disclosure")
+	if !strings.Contains(card, `href="/node-optimization/evidence?cluster=prod-eastus&amp;pool=gpu-workers"`) {
+		t.Error("expected the compact main page to link to the pool evidence drill-down")
+	}
+	evidence, found := renderNodeOptimizationEvidencePage(scanWithRecommendations(rec), "prod-eastus", []string{"prod-eastus"}, "gpu-workers")
+	if !found || !strings.Contains(evidence, "pod-37") {
+		t.Error("expected raw per-Pod evidence on the dedicated evidence page")
 	}
 }
 
@@ -580,16 +576,19 @@ func TestNodeOptimizationPage_BlockerNotDuplicatedInHero(t *testing.T) {
 
 // 16b. Real analyzer warnings can arrive as one pool-level string containing
 // dozens of semicolon-separated per-Pod reasons. Every PARTIAL pool must show
-// only semantic category counts by default, retain the exact total, and keep
-// all raw reasons in native collapsed evidence. BLOCKED uses the same path.
+// only semantic category counts and an evidence link, while the dedicated
+// forensic page retains all raw reasons. BLOCKED uses the same path.
 func TestNodeOptimizationPage_ConcatenatedEvidenceGroupedPerPool(t *testing.T) {
-	makeRecommendation := func(pool string, status analyzer.NodeOptimizationRecommendationStatus, affinityCount, storageCount int) analyzer.NodeOptimizationRecommendation {
-		reasons := make([]string, 0, affinityCount+storageCount)
+	makeRecommendation := func(pool string, status analyzer.NodeOptimizationRecommendationStatus, affinityCount, storageCount, notInCount int) analyzer.NodeOptimizationRecommendation {
+		reasons := make([]string, 0, affinityCount+storageCount+notInCount)
 		for i := 0; i < affinityCount; i++ {
 			reasons = append(reasons, fmt.Sprintf("DaemonSet pod kube-system/affinity-%d: required node affinity matchFields are not modeled yet", i))
 		}
 		for i := 0; i < storageCount; i++ {
 			reasons = append(reasons, fmt.Sprintf("pod apps/storage-%d: PersistentVolume pv-%d uses a volume source whose attachment and driver-specific scheduling constraints are not modeled", i, i))
+		}
+		for i := 0; i < notInCount; i++ {
+			reasons = append(reasons, fmt.Sprintf("pod apps/not-in-%d: required node affinity operator NotIn is not modeled yet", i))
 		}
 		rawSummary := strings.Join(reasons, "; ")
 		return analyzer.NodeOptimizationRecommendation{
@@ -602,48 +601,105 @@ func TestNodeOptimizationPage_ConcatenatedEvidenceGroupedPerPool(t *testing.T) {
 	}
 
 	recommendations := []analyzer.NodeOptimizationRecommendation{
-		makeRecommendation("systempool", analyzer.NodeOptimizationRecommendationPartial, 38, 22),
-		makeRecommendation("userpool", analyzer.NodeOptimizationRecommendationPartial, 31, 20),
-		makeRecommendation("blockedpool", analyzer.NodeOptimizationRecommendationBlocked, 30, 21),
+		makeRecommendation("systempool", analyzer.NodeOptimizationRecommendationPartial, 38, 22, 2),
+		makeRecommendation("userpool", analyzer.NodeOptimizationRecommendationPartial, 77, 107, 3),
+		makeRecommendation("blockedpool", analyzer.NodeOptimizationRecommendationBlocked, 30, 21, 3),
 	}
-	out := renderNodeOptimizationPage(scanWithRecommendations(recommendations...), "prod-eastus", []string{"prod-eastus"})
+	scan := scanWithRecommendations(recommendations...)
+	out := renderNodeOptimizationPage(scan, "prod-eastus", []string{"prod-eastus"})
 
 	for index, counts := range []struct {
 		affinity int
 		storage  int
-	}{{38, 22}, {31, 20}, {30, 21}} {
+		notIn    int
+	}{{38, 22, 2}, {77, 107, 3}, {30, 21, 3}} {
 		card := nodeOptimizationPoolCard(t, out, index)
-		visible := nodeOptimizationVisibleReasonBody(t, card)
-		details := card[len(visible):]
-		total := counts.affinity + counts.storage
+		total := counts.affinity + counts.storage + counts.notIn
 
 		for _, want := range []string{
 			fmt.Sprintf("%d Pods use required node affinity matchFields, which are not modeled", counts.affinity),
 			fmt.Sprintf("%d Pods use volume attachment/driver scheduling semantics that are not modeled", counts.storage),
+			fmt.Sprintf("%d Pods use required node affinity operator NotIn, which is not modeled", counts.notIn),
 			fmt.Sprintf("%d reasons total", total),
 		} {
-			if !strings.Contains(visible, want) {
+			if !strings.Contains(card, want) {
 				t.Errorf("pool %d default-visible body missing %q", index, want)
 			}
 		}
-		if !strings.Contains(details, fmt.Sprintf("View detailed evidence (%d)", total)) {
-			t.Errorf("pool %d missing exact detailed-evidence count", index)
+		poolName := recommendations[index].PoolKey.PoolName
+		if !strings.Contains(card, `href="/node-optimization/evidence?cluster=prod-eastus&amp;pool=`+poolName+`"`) {
+			t.Errorf("pool %d missing cluster-aware evidence link", index)
 		}
-		for _, raw := range []string{"affinity-0: required node affinity matchFields are not modeled yet", "storage-0: PersistentVolume pv-0 uses a volume source whose attachment and driver-specific scheduling constraints are not modeled"} {
-			if strings.Contains(visible, raw) {
-				t.Errorf("pool %d leaked raw evidence into the default-visible body: %q", index, raw)
-			}
-			if !strings.Contains(details, raw) {
-				t.Errorf("pool %d did not retain raw evidence inside details: %q", index, raw)
+		for _, raw := range []string{"affinity-0: required node affinity matchFields are not modeled yet", "storage-0: PersistentVolume pv-0 uses a volume source whose attachment and driver-specific scheduling constraints are not modeled", "not-in-0: required node affinity operator NotIn is not modeled yet"} {
+			if strings.Contains(card, raw) {
+				t.Errorf("pool %d leaked raw evidence into the main page: %q", index, raw)
 			}
 		}
-		if strings.Contains(visible, "pool "+recommendations[index].PoolKey.PoolName+" skipped because") {
+		if strings.Contains(card, "pool "+poolName+" skipped because") {
 			t.Errorf("pool %d leaked the concatenated backend warning envelope into the visible body", index)
 		}
 		if strings.Contains(card, recommendations[index].Summary) {
 			t.Errorf("pool %d rendered the raw recommendation Summary", index)
 		}
+
+		evidence, found := renderNodeOptimizationEvidencePage(scan, "prod-eastus", []string{"prod-eastus"}, poolName)
+		if !found {
+			t.Fatalf("pool %d evidence page did not resolve %q", index, poolName)
+		}
+		for _, want := range []string{
+			fmt.Sprintf("%d reasons total", total),
+			`href="/node-optimization?cluster=prod-eastus"`,
+			"Required node affinity matchFields",
+			"Required node affinity NotIn",
+			"Storage / volume scheduling",
+			"affinity-0: required node affinity matchFields are not modeled yet",
+			"storage-0: PersistentVolume pv-0 uses a volume source whose attachment and driver-specific scheduling constraints are not modeled",
+			"not-in-0: required node affinity operator NotIn is not modeled yet",
+		} {
+			if !strings.Contains(evidence, want) {
+				t.Errorf("pool %d evidence page missing %q", index, want)
+			}
+		}
+		if rows := strings.Count(evidence, `<tr>`); rows != total+1 {
+			t.Errorf("pool %d evidence table rows = %d, want %d (header plus every raw reason)", index, rows, total+1)
+		}
 	}
+}
+
+func TestNodeOptimizationEvidencePage_InvalidAndZeroEvidence(t *testing.T) {
+	t.Run("unknown pool returns a clean 404 page", func(t *testing.T) {
+		srv := &server{
+			clusterList: []string{"prod-eastus"},
+			states: map[string]*dashboardState{
+				"prod-eastus": {ctx: "prod-eastus", scan: scanWithRecommendations(partialRecommendation())},
+			},
+		}
+		req := httptest.NewRequest(http.MethodGet, "/node-optimization/evidence?cluster=prod-eastus&pool=unknown", nil)
+		res := httptest.NewRecorder()
+		srv.handleNodeOptimizationEvidencePage(res, req)
+		if res.Code != http.StatusNotFound {
+			t.Fatalf("status = %d, want 404", res.Code)
+		}
+		for _, want := range []string{"Evidence unavailable", "Unknown node pool: unknown", "Back to Node Optimization"} {
+			if !strings.Contains(res.Body.String(), want) {
+				t.Errorf("unknown-pool page missing %q", want)
+			}
+		}
+	})
+
+	t.Run("known pool with zero evidence renders calmly", func(t *testing.T) {
+		rec := observationRecommendation("empty-pool")
+		rec.Blockers = nil
+		out, found := renderNodeOptimizationEvidencePage(scanWithRecommendations(rec), "prod-eastus", []string{"prod-eastus"}, "empty-pool")
+		if !found {
+			t.Fatal("known zero-evidence pool was not found")
+		}
+		for _, want := range []string{"empty-pool", "0 reasons total", "No detailed evidence was reported for this pool."} {
+			if !strings.Contains(out, want) {
+				t.Errorf("zero-evidence page missing %q", want)
+			}
+		}
+	})
 }
 
 // 17. A large placement-evidence table renders collapsed by default (native

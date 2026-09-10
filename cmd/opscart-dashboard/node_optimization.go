@@ -45,6 +45,25 @@ func (srv *server) handleNodeOptimizationPage(w http.ResponseWriter, r *http.Req
 	fmt.Fprint(w, renderNodeOptimizationPage(scan, ctx, srv.clusterList))
 }
 
+// handleNodeOptimizationEvidencePage renders a forensic drill-down from the
+// recommendation already held in dashboard state. It deliberately does not
+// refresh the cluster or make any other API call.
+func (srv *server) handleNodeOptimizationEvidencePage(w http.ResponseWriter, r *http.Request) {
+	ctx := srv.activeCtx(r)
+	state := srv.getState(ctx)
+
+	state.mu.RLock()
+	scan := state.scan
+	state.mu.RUnlock()
+
+	body, found := renderNodeOptimizationEvidencePage(scan, ctx, srv.clusterList, r.URL.Query().Get("pool"))
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	if !found {
+		w.WriteHeader(http.StatusNotFound)
+	}
+	fmt.Fprint(w, body)
+}
+
 // nodeOptimizationPageData is the presentation-only projection handed to the
 // template. It never carries analyzer types directly.
 type nodeOptimizationPageData struct {
@@ -109,12 +128,11 @@ type nodeOptimizationPoolView struct {
 	VerifiedChecks    []string
 	HasVerifiedChecks bool
 
-	Blockers            []nodeOptimizationReasonView
-	HasBlockers         bool
-	BlockersTotal       int
-	BlockersGroupCount  int
-	DetailedBlockers    []nodeOptimizationReasonView
-	HasDetailedBlockers bool
+	Blockers           []nodeOptimizationReasonView
+	HasBlockers        bool
+	BlockersTotal      int
+	BlockersGroupCount int
+	EvidenceHref       string
 
 	Caveats    []string
 	HasCaveats bool
@@ -185,7 +203,13 @@ func renderNodeOptimizationPage(scan *clusterScan, activeCtx string, clusterList
 		if i < len(savings) {
 			projection = savings[i]
 		}
-		pools = append(pools, buildNodeOptimizationPoolView(i, rec, projection))
+		view := buildNodeOptimizationPoolView(i, rec, projection)
+		query := url.Values{"pool": {view.PoolName}}
+		if activeCtx != "" {
+			query.Set("cluster", activeCtx)
+		}
+		view.EvidenceHref = "/node-optimization/evidence?" + query.Encode()
+		pools = append(pools, view)
 	}
 
 	data := nodeOptimizationPageData{
@@ -210,6 +234,94 @@ var getNodeOptimizationTmpl = sync.OnceValue(func() *template.Template {
 	return template.Must(
 		template.New("node_optimization.html").
 			ParseFS(templateFS, "templates/base.html", "templates/node_optimization.html"),
+	)
+})
+
+type nodeOptimizationEvidencePageData struct {
+	ClusterName string
+	Sidebar     template.HTML
+	BackURL     string
+	Found       bool
+	PoolName    string
+	StatusLabel string
+	StatusClass string
+	ReasonTotal int
+	Groups      []nodeOptimizationReasonView
+	Evidence    []nodeOptimizationEvidenceRow
+}
+
+type nodeOptimizationEvidenceRow struct {
+	Category string
+	Evidence string
+	Pod      string
+	Node     string
+}
+
+func renderNodeOptimizationEvidencePage(
+	scan *clusterScan,
+	activeCtx string,
+	clusterList []string,
+	requestedPool string,
+) (string, bool) {
+	clusterName := displayName(activeCtx)
+	if scan != nil && scan.report != nil {
+		clusterName = scan.report.ClusterName
+	}
+
+	backQuery := url.Values{}
+	if activeCtx != "" {
+		backQuery.Set("cluster", activeCtx)
+	}
+	backURL := "/node-optimization"
+	if encoded := backQuery.Encode(); encoded != "" {
+		backURL += "?" + encoded
+	}
+
+	data := nodeOptimizationEvidencePageData{
+		ClusterName: clusterName,
+		Sidebar:     template.HTML(buildSidebar("node-optimization", activeCtx, clusterName, clusterList, countCriticalIssues(scan))),
+		BackURL:     backURL,
+		PoolName:    requestedPool,
+	}
+
+	var recommendation *analyzer.NodeOptimizationRecommendation
+	if scan != nil {
+		for i := range scan.nodeOptimization {
+			if nodeOptimizationPoolDisplayName(scan.nodeOptimization[i].PoolKey) == requestedPool {
+				recommendation = &scan.nodeOptimization[i]
+				break
+			}
+		}
+	}
+	if recommendation != nil {
+		data.Found = true
+		data.StatusLabel, data.StatusClass = nodeOptimizationStatusView(recommendation.Status)
+		reasons := expandNodeOptimizationReasons(recommendation.Blockers)
+		data.ReasonTotal = len(reasons)
+		data.Groups = groupNodeOptimizationReasons(reasons)
+		data.Evidence = make([]nodeOptimizationEvidenceRow, 0, len(reasons))
+		for _, reason := range reasons {
+			data.Evidence = append(data.Evidence, nodeOptimizationEvidenceRow{
+				Category: nodeOptimizationEvidenceCategory(reason),
+				Evidence: reason.Message,
+				Pod:      reason.Pod,
+				Node:     reason.Node,
+			})
+		}
+	}
+
+	var buf strings.Builder
+	if err := getNodeOptimizationEvidenceTmpl().Execute(&buf, data); err != nil {
+		log.Printf("node optimization evidence template: %v", err)
+		return "", data.Found
+	}
+	return buf.String(), data.Found
+}
+
+var getNodeOptimizationEvidenceTmpl = sync.OnceValue(func() *template.Template {
+	return template.Must(
+		template.New("node_optimization_evidence.html").
+			ParseFS(templateFS, "templates/base.html", "templates/node_optimization_evidence.html"),
 	)
 })
 
@@ -250,8 +362,6 @@ func buildNodeOptimizationPoolView(
 
 	detailedBlockers := expandNodeOptimizationReasons(rec.Blockers)
 	view.BlockersTotal = len(detailedBlockers)
-	view.DetailedBlockers = nodeOptimizationReasonViews(detailedBlockers)
-	view.HasDetailedBlockers = len(view.DetailedBlockers) > 1
 	grouped := groupNodeOptimizationReasons(detailedBlockers)
 	view.BlockersGroupCount = len(grouped)
 	if len(grouped) > nodeOptimizationReasonDisplayLimit {
@@ -348,12 +458,14 @@ var nodeOptimizationReasonGroupLabels = map[string]string{
 
 const (
 	nodeOptimizationReasonAffinityMatchFields = "required_node_affinity_match_fields"
+	nodeOptimizationReasonAffinityNotIn       = "required_node_affinity_not_in"
 	nodeOptimizationReasonVolumeAttachment    = "volume_attachment_driver_scheduling"
 	nodeOptimizationReasonPoolMapping         = "canonical_node_pool_mapping"
 )
 
 var nodeOptimizationSemanticReasonLabels = map[string]string{
 	nodeOptimizationReasonAffinityMatchFields: "Pods use required node affinity matchFields, which are not modeled",
+	nodeOptimizationReasonAffinityNotIn:       "Pods use required node affinity operator NotIn, which is not modeled",
 	nodeOptimizationReasonVolumeAttachment:    "Pods use volume attachment/driver scheduling semantics that are not modeled",
 	nodeOptimizationReasonPoolMapping:         "Pods could not be mapped to a canonical node pool",
 }
@@ -395,19 +507,6 @@ func expandNodeOptimizationReasons(reasons []analyzer.NodeOptimizationRecommenda
 		}
 	}
 	return expanded
-}
-
-func nodeOptimizationReasonViews(reasons []analyzer.NodeOptimizationRecommendationReason) []nodeOptimizationReasonView {
-	views := make([]nodeOptimizationReasonView, 0, len(reasons))
-	for _, reason := range reasons {
-		views = append(views, nodeOptimizationReasonView{
-			Message: reason.Message,
-			Pod:     reason.Pod,
-			Node:    reason.Node,
-			Count:   1,
-		})
-	}
-	return views
 }
 
 // groupNodeOptimizationReasons collapses near-duplicate blocker/evidence-gap
@@ -474,6 +573,8 @@ func nodeOptimizationReasonGroup(reason analyzer.NodeOptimizationRecommendationR
 	switch {
 	case strings.Contains(normalized, "required node affinity matchfields"):
 		return nodeOptimizationReasonAffinityMatchFields, nodeOptimizationSemanticReasonLabels[nodeOptimizationReasonAffinityMatchFields]
+	case strings.Contains(normalized, "required node affinity operator notin"):
+		return nodeOptimizationReasonAffinityNotIn, nodeOptimizationSemanticReasonLabels[nodeOptimizationReasonAffinityNotIn]
 	case strings.Contains(normalized, "uses a volume source whose attachment and driver-specific scheduling constraints are not modeled"):
 		return nodeOptimizationReasonVolumeAttachment, nodeOptimizationSemanticReasonLabels[nodeOptimizationReasonVolumeAttachment]
 	case strings.Contains(normalized, "could not be mapped to a canonical node pool"):
@@ -495,6 +596,25 @@ func nodeOptimizationReasonGroup(reason analyzer.NodeOptimizationRecommendationR
 		return reason.Message, ""
 	default:
 		return reason.Code, ""
+	}
+}
+
+func nodeOptimizationEvidenceCategory(reason analyzer.NodeOptimizationRecommendationReason) string {
+	normalized := strings.ToLower(reason.Message)
+	switch {
+	case strings.Contains(normalized, "required node affinity matchfields"):
+		return "Required node affinity matchFields"
+	case strings.Contains(normalized, "required node affinity operator notin"):
+		return "Required node affinity NotIn"
+	case strings.Contains(normalized, "persistentvolume"),
+		strings.Contains(normalized, "persistentvolumeclaim"),
+		strings.Contains(normalized, "pvc"),
+		strings.Contains(normalized, "csi"),
+		strings.Contains(normalized, "storage"),
+		strings.Contains(normalized, "volume"):
+		return "Storage / volume scheduling"
+	default:
+		return "Other evidence"
 	}
 }
 
