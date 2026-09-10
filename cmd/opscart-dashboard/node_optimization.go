@@ -87,6 +87,17 @@ type nodeOptimizationPoolView struct {
 	RequestedCPUText      string
 	RequestedMemoryText   string
 
+	// SavingsSummaryText is a short value for the multi-pool summary table:
+	// either a formatted monthly amount or "Unavailable". It is always set.
+	SavingsSummaryText string
+
+	SavingsAvailable         bool
+	EstimatedMonthlySavings  string
+	HasMonthlyCostTotals     bool
+	CurrentMonthlyCostText   string
+	CandidateMonthlyCostText string
+	PricingUnavailableReason string
+
 	VerifiedChecks    []string
 	HasVerifiedChecks bool
 
@@ -144,9 +155,18 @@ func renderNodeOptimizationPage(scan *clusterScan, activeCtx string, clusterList
 		q = "?cluster=" + url.QueryEscape(activeCtx)
 	}
 
+	var savings []analyzer.NodeOptimizationSavingsProjection
+	if scan != nil {
+		savings = scan.nodeOptimizationSavings
+	}
+
 	pools := make([]nodeOptimizationPoolView, 0, len(recommendations))
 	for i, rec := range recommendations {
-		pools = append(pools, buildNodeOptimizationPoolView(i, rec))
+		var projection analyzer.NodeOptimizationSavingsProjection
+		if i < len(savings) {
+			projection = savings[i]
+		}
+		pools = append(pools, buildNodeOptimizationPoolView(i, rec, projection))
 	}
 
 	data := nodeOptimizationPageData{
@@ -174,7 +194,11 @@ var getNodeOptimizationTmpl = sync.OnceValue(func() *template.Template {
 	)
 })
 
-func buildNodeOptimizationPoolView(index int, rec analyzer.NodeOptimizationRecommendation) nodeOptimizationPoolView {
+func buildNodeOptimizationPoolView(
+	index int,
+	rec analyzer.NodeOptimizationRecommendation,
+	savings analyzer.NodeOptimizationSavingsProjection,
+) nodeOptimizationPoolView {
 	label, class := nodeOptimizationStatusView(rec.Status)
 
 	view := nodeOptimizationPoolView{
@@ -232,6 +256,20 @@ func buildNodeOptimizationPoolView(index int, rec analyzer.NodeOptimizationRecom
 		view.RetainedMemoryText = formatNodeOptimizationMemoryGB(rec.RetainedMemoryCapacityBytes)
 		view.RequestedCPUText = formatNodeOptimizationCPU(rec.AggregateCPURequestedMilli)
 		view.RequestedMemoryText = formatNodeOptimizationMemoryGB(rec.AggregateMemoryRequestedBytes)
+	}
+
+	view.SavingsAvailable = savings.Available
+	if savings.Available && savings.EstimatedMonthlySavings != nil {
+		view.EstimatedMonthlySavings = fmt.Sprintf("$%s/mo", formatMoney(*savings.EstimatedMonthlySavings))
+		view.SavingsSummaryText = view.EstimatedMonthlySavings
+		if savings.CurrentMonthlyCost != nil && savings.CandidateMonthlyCost != nil {
+			view.HasMonthlyCostTotals = true
+			view.CurrentMonthlyCostText = fmt.Sprintf("$%s/mo", formatMoney(*savings.CurrentMonthlyCost))
+			view.CandidateMonthlyCostText = fmt.Sprintf("$%s/mo", formatMoney(*savings.CandidateMonthlyCost))
+		}
+	} else {
+		view.SavingsSummaryText = "Unavailable"
+		view.PricingUnavailableReason = savings.ReasonUnavailable
 	}
 
 	view.AssignmentTotal = len(rec.Assignments)

@@ -99,6 +99,17 @@ func scanWithRecommendations(recs ...analyzer.NodeOptimizationRecommendation) *c
 	}
 }
 
+func scanWithRecommendationsAndSavings(
+	recs []analyzer.NodeOptimizationRecommendation,
+	savings []analyzer.NodeOptimizationSavingsProjection,
+) *clusterScan {
+	return &clusterScan{
+		report:                  &models.CloudCostReport{ClusterName: "prod-eastus"},
+		nodeOptimization:        recs,
+		nodeOptimizationSavings: savings,
+	}
+}
+
 // 1. SIMULATION_PASSED rendering.
 func TestNodeOptimizationPage_SimulationPassed(t *testing.T) {
 	out := renderNodeOptimizationPage(scanWithRecommendations(simulationPassedRecommendation()), "prod-eastus", []string{"prod-eastus"})
@@ -244,13 +255,62 @@ func TestNodeOptimizationPage_NoActionableWording(t *testing.T) {
 	}
 }
 
-// 9. No monetary savings rendered without pricing data.
-func TestNodeOptimizationPage_NoMonetarySavingsWithoutPricing(t *testing.T) {
+// 9. No fabricated monetary value rendered without connected pricing data;
+// the page must say pricing is unavailable rather than show a dollar figure
+// (never $0, never any invented amount) when no NodeOptimizationSavingsProjection
+// is wired in for a pool.
+func TestNodeOptimizationPage_NoFabricatedMonetaryValueWithoutPricing(t *testing.T) {
 	out := renderNodeOptimizationPage(scanWithRecommendations(simulationPassedRecommendation(), blockedRecommendation(), partialRecommendation()), "prod-eastus", []string{"prod-eastus"})
-	for _, forbidden := range []string{"$0", "$", "savings", "Savings", "/mo"} {
+	for _, forbidden := range []string{"$0", "$", "/mo"} {
 		if strings.Contains(out, forbidden) {
-			t.Errorf("page rendered monetary content %q without connected pricing data", forbidden)
+			t.Errorf("page rendered monetary value %q without connected pricing data", forbidden)
 		}
+	}
+	if !strings.Contains(out, "Pricing unavailable") {
+		t.Error("expected the page to state pricing is unavailable rather than omit it silently")
+	}
+	if !strings.Contains(out, "Unavailable") {
+		t.Error("expected the multi-pool summary table to show Unavailable savings rather than omit the column")
+	}
+}
+
+// 9b. Estimated savings render when a NodeOptimizationSavingsProjection is
+// connected for a SIMULATION_PASSED pool, and stay "Unavailable" for a pool
+// with no connected projection — proving pricing is joined per-pool, not
+// applied blanket across the page.
+func TestNodeOptimizationPage_RendersConnectedSavings(t *testing.T) {
+	savings := f64ptr(182)
+	current := f64ptr(1092)
+	candidate := f64ptr(910)
+	unpricedPassed := simulationPassedRecommendation()
+	unpricedPassed.PoolKey = analyzer.CostPoolKey{PoolName: "system"}
+	scan := scanWithRecommendationsAndSavings(
+		[]analyzer.NodeOptimizationRecommendation{simulationPassedRecommendation(), unpricedPassed},
+		[]analyzer.NodeOptimizationSavingsProjection{
+			{
+				Available:               true,
+				EstimatedMonthlySavings: savings,
+				CurrentMonthlyCost:      current,
+				CandidateMonthlyCost:    candidate,
+				Currency:                "USD",
+				PricingCoverage:         analyzer.NodeOptimizationPricingCoverageExact,
+				Provider:                "azure",
+			},
+			{
+				PricingCoverage:   analyzer.NodeOptimizationPricingCoverageUnavailable,
+				ReasonUnavailable: "no priced Cost Intelligence pool matches this pool identity",
+			},
+		},
+	)
+	out := renderNodeOptimizationPage(scan, "prod-eastus", []string{"prod-eastus"})
+
+	for _, want := range []string{"$182/mo", "$1,092/mo", "$910/mo"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("expected connected savings pool to render %q", want)
+		}
+	}
+	if !strings.Contains(out, "no priced Cost Intelligence pool matches this pool identity") {
+		t.Error("expected the unpriced pool to surface its pricing-unavailable reason")
 	}
 }
 

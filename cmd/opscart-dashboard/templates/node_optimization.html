@@ -44,6 +44,11 @@
 .no-headroom-val{font-size:1.3rem;font-weight:800}
 .no-headroom-lbl{font-size:0.68rem;color:var(--text-muted);text-transform:uppercase;letter-spacing:0.5px;margin-top:0.15rem}
 .no-headroom-sub{font-size:0.72rem;color:var(--text-muted);margin-top:0.35rem}
+.no-savings-card{background:rgba(16,185,129,0.06);border:1px solid rgba(16,185,129,0.3);border-radius:var(--radius-sm);padding:0.9rem 1rem;margin-bottom:1.25rem}
+.no-savings-val{font-size:1.3rem;font-weight:800;color:var(--success)}
+.no-savings-lbl{font-size:0.68rem;color:var(--text-muted);text-transform:uppercase;letter-spacing:0.5px;margin-top:0.15rem}
+.no-savings-sub{font-size:0.72rem;color:var(--text-muted);margin-top:0.35rem}
+.no-savings-unavailable{background:rgba(148,163,184,0.06);border:1px solid var(--border);border-radius:var(--radius-sm);padding:0.9rem 1rem;margin-bottom:1.25rem;font-size:0.78rem;color:var(--text-muted)}
 .no-section{margin-bottom:1.1rem}
 .no-section-title{font-size:0.78rem;font-weight:700;text-transform:uppercase;letter-spacing:0.5px;color:var(--text-secondary);margin-bottom:0.6rem}
 .no-check-list{display:flex;flex-wrap:wrap;gap:0.5rem}
@@ -104,7 +109,7 @@ details.no-evidence[open] summary{margin-bottom:0.75rem}
   {{if .MultiplePools}}
   <div class="no-summary-table">
     <table>
-      <thead><tr><th>Pool</th><th style="text-align:center">Current</th><th style="text-align:center">Candidate</th><th>Status</th></tr></thead>
+      <thead><tr><th>Pool</th><th style="text-align:center">Current</th><th style="text-align:center">Candidate</th><th>Status</th><th>Savings</th></tr></thead>
       <tbody>
         {{range .Pools}}
         <tr>
@@ -112,6 +117,7 @@ details.no-evidence[open] summary{margin-bottom:0.75rem}
           <td style="text-align:center">{{if .HasCandidate}}{{.CurrentNodeCount}}{{else}}—{{end}}</td>
           <td style="text-align:center">{{if .HasCandidate}}{{.CandidateNodeCount}}{{else}}—{{end}}</td>
           <td><span class="no-status-badge no-status-{{.StatusClass}}">{{.StatusLabel}}</span></td>
+          <td>{{.SavingsSummaryText}}</td>
         </tr>
         {{end}}
       </tbody>
@@ -155,6 +161,23 @@ details.no-evidence[open] summary{margin-bottom:0.75rem}
       </div>
     </div>
     {{end}}
+
+    <div class="no-section">
+      <div class="no-section-title">Estimated savings</div>
+      {{if .SavingsAvailable}}
+      <div class="no-savings-card">
+        <div class="no-savings-val">{{.EstimatedMonthlySavings}}</div>
+        <div class="no-savings-lbl">Estimated monthly savings</div>
+        {{if .HasMonthlyCostTotals}}
+        <div class="no-savings-sub">{{.CurrentMonthlyCostText}} current → {{.CandidateMonthlyCostText}} candidate</div>
+        {{else}}
+        <div class="no-savings-sub">Current/candidate pool totals are unavailable; this is the exact price of the removed node only.</div>
+        {{end}}
+      </div>
+      {{else}}
+      <div class="no-savings-unavailable">Pricing unavailable{{if .PricingUnavailableReason}}: {{.PricingUnavailableReason}}{{end}}</div>
+      {{end}}
+    </div>
 
     {{else if .IsBlocked}}
     <div class="no-hero no-hero-blocked">

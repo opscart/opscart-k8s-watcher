@@ -2125,6 +2125,9 @@ func runFullScan(ctx string, scanCounters *apiCounters) (*clusterScan, error) {
 		nodeInfos, noPods, schedulingEvidence, storageEvidence,
 	)
 	scan.nodeOptimization = analyzer.BuildNodeOptimizationRecommendations(noSummary, noPods)
+	scan.nodeOptimizationSavings = analyzer.BuildNodeOptimizationSavingsProjections(
+		scan.nodeOptimization, poolCosts, scan.report.Currency,
+	)
 
 	return scan, nil
 }
