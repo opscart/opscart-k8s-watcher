@@ -109,16 +109,12 @@ type nodeOptimizationPoolView struct {
 	VerifiedChecks    []string
 	HasVerifiedChecks bool
 
-	// PrimaryBlockerText is the single most useful blocker/evidence-gap
-	// message, surfaced in the hero for BLOCKED and PARTIAL pools so the
-	// result is not buried under the full diagnostic list below it.
-	PrimaryBlockerText string
-
-	Blockers           []nodeOptimizationReasonView
-	HasBlockers        bool
-	BlockersTotal      int
-	BlockersGroupCount int
-	BlockersTruncated  bool
+	Blockers            []nodeOptimizationReasonView
+	HasBlockers         bool
+	BlockersTotal       int
+	BlockersGroupCount  int
+	DetailedBlockers    []nodeOptimizationReasonView
+	HasDetailedBlockers bool
 
 	Caveats    []string
 	HasCaveats bool
@@ -137,6 +133,7 @@ type nodeOptimizationReasonView struct {
 	Message string
 	Pod     string
 	Node    string
+	Count   int
 }
 
 // nodeOptimizationAssignmentView is one Pod's placement evidence row.
@@ -147,13 +144,11 @@ type nodeOptimizationAssignmentView struct {
 	DestinationNode string
 }
 
-// nodeOptimizationReasonDisplayLimit caps how many blocker/evidence-gap
-// reason groups render per pool. The analyzer contract can emit one warning
-// per affected Pod (e.g. every Pod on a node with unresolved cost-pool
-// identity); groupNodeOptimizationReasons collapses those into one line
-// before this cap is applied, so the cap is rarely hit in practice. The
-// exact total is always shown alongside the capped list.
-const nodeOptimizationReasonDisplayLimit = 12
+// nodeOptimizationReasonDisplayLimit caps the default-visible explanation at
+// three short operator-facing rows. When more semantic categories exist, the
+// final row reports the exact number of reasons represented by the remaining
+// categories. Every raw reason remains available in the collapsed evidence.
+const nodeOptimizationReasonDisplayLimit = 3
 
 // nodeOptimizationAssignmentAutoOpenLimit is the largest assignment count the
 // placement-evidence <details> element auto-expands for. Above this, the
@@ -253,15 +248,27 @@ func buildNodeOptimizationPoolView(
 	}
 	view.HasVerifiedChecks = len(view.VerifiedChecks) > 0
 
-	view.BlockersTotal = len(rec.Blockers)
-	grouped := groupNodeOptimizationReasons(rec.Blockers)
+	detailedBlockers := expandNodeOptimizationReasons(rec.Blockers)
+	view.BlockersTotal = len(detailedBlockers)
+	view.DetailedBlockers = nodeOptimizationReasonViews(detailedBlockers)
+	view.HasDetailedBlockers = len(view.DetailedBlockers) > 1
+	grouped := groupNodeOptimizationReasons(detailedBlockers)
 	view.BlockersGroupCount = len(grouped)
-	if len(grouped) > 0 {
-		view.PrimaryBlockerText = grouped[0].Message
-	}
 	if len(grouped) > nodeOptimizationReasonDisplayLimit {
-		grouped = grouped[:nodeOptimizationReasonDisplayLimit]
-		view.BlockersTruncated = true
+		visible := append([]nodeOptimizationReasonView(nil), grouped[:nodeOptimizationReasonDisplayLimit-1]...)
+		remaining := 0
+		for _, reason := range grouped[nodeOptimizationReasonDisplayLimit-1:] {
+			remaining += reason.Count
+		}
+		label := "evidence gaps"
+		if view.IsBlocked {
+			label = "blockers"
+		}
+		visible = append(visible, nodeOptimizationReasonView{
+			Message: fmt.Sprintf("%d additional %s", remaining, label),
+			Count:   remaining,
+		})
+		grouped = visible
 	}
 	view.Blockers = grouped
 	view.HasBlockers = len(view.Blockers) > 0
@@ -339,31 +346,92 @@ var nodeOptimizationReasonGroupLabels = map[string]string{
 	"incomplete_or_unsupported_evidence":     "pool evidence was incomplete or unsupported",
 }
 
+const (
+	nodeOptimizationReasonAffinityMatchFields = "required_node_affinity_match_fields"
+	nodeOptimizationReasonVolumeAttachment    = "volume_attachment_driver_scheduling"
+	nodeOptimizationReasonPoolMapping         = "canonical_node_pool_mapping"
+)
+
+var nodeOptimizationSemanticReasonLabels = map[string]string{
+	nodeOptimizationReasonAffinityMatchFields: "Pods use required node affinity matchFields, which are not modeled",
+	nodeOptimizationReasonVolumeAttachment:    "Pods use volume attachment/driver scheduling semantics that are not modeled",
+	nodeOptimizationReasonPoolMapping:         "Pods could not be mapped to a canonical node pool",
+}
+
+// expandNodeOptimizationReasons reverses the analyzer's presentation-oriented
+// pool warning envelope when it contains a semicolon-separated reason list.
+// This lets the dashboard count and group the underlying reasons without
+// changing analyzer semantics. The exact reason text is retained for the
+// collapsed evidence list.
+func expandNodeOptimizationReasons(reasons []analyzer.NodeOptimizationRecommendationReason) []analyzer.NodeOptimizationRecommendationReason {
+	constraintsMarkers := []string{
+		" skipped because scheduling constraints are not fully modeled: ",
+		" skipped because scheduling constraints are unsupported or lack evidence: ",
+	}
+	expanded := make([]analyzer.NodeOptimizationRecommendationReason, 0, len(reasons))
+	for _, reason := range reasons {
+		payload := ""
+		for _, marker := range constraintsMarkers {
+			if markerIndex := strings.Index(reason.Message, marker); markerIndex >= 0 {
+				payload = reason.Message[markerIndex+len(marker):]
+				break
+			}
+		}
+		if payload == "" {
+			expanded = append(expanded, reason)
+			continue
+		}
+		parts := strings.Split(payload, "; ")
+		for _, part := range parts {
+			part = strings.TrimSpace(part)
+			if part == "" {
+				continue
+			}
+			item := reason
+			item.Message = part
+			item.Pod = ""
+			item.Node = ""
+			expanded = append(expanded, item)
+		}
+	}
+	return expanded
+}
+
+func nodeOptimizationReasonViews(reasons []analyzer.NodeOptimizationRecommendationReason) []nodeOptimizationReasonView {
+	views := make([]nodeOptimizationReasonView, 0, len(reasons))
+	for _, reason := range reasons {
+		views = append(views, nodeOptimizationReasonView{
+			Message: reason.Message,
+			Pod:     reason.Pod,
+			Node:    reason.Node,
+			Count:   1,
+		})
+	}
+	return views
+}
+
 // groupNodeOptimizationReasons collapses near-duplicate blocker/evidence-gap
-// reasons (the analyzer can emit one per affected Pod) into one line per
-// distinct Code, with an exact occurrence count. A reason with an empty Code
-// groups by its exact Message instead. Pod/Node scope is only shown for a
+// reasons into semantic categories with exact occurrence counts. Broad reason
+// codes are not enough to establish semantic equivalence, so those warnings
+// use the conservative classifier below. Pod/Node scope is only shown for a
 // group of exactly one, since it would misrepresent the other members of a
 // larger group. This is presentation-only grouping: it never changes the
-// analyzer's Blockers slice, its Code taxonomy, or its counts — the raw
-// length of the input is always recoverable by the caller.
+// analyzer's recommendation contract.
 func groupNodeOptimizationReasons(reasons []analyzer.NodeOptimizationRecommendationReason) []nodeOptimizationReasonView {
 	type group struct {
-		message string
-		pod     string
-		node    string
-		count   int
+		message    string
+		groupLabel string
+		pod        string
+		node       string
+		count      int
 	}
 	order := make([]string, 0, len(reasons))
 	groups := make(map[string]*group, len(reasons))
 	for _, r := range reasons {
-		key := r.Code
-		if key == "" {
-			key = r.Message
-		}
+		key, categoryLabel := nodeOptimizationReasonGroup(r)
 		g, ok := groups[key]
 		if !ok {
-			g = &group{message: r.Message, pod: r.Pod, node: r.Node}
+			g = &group{message: r.Message, groupLabel: categoryLabel, pod: r.Pod, node: r.Node}
 			groups[key] = g
 			order = append(order, key)
 		} else {
@@ -382,16 +450,72 @@ func groupNodeOptimizationReasons(reasons []analyzer.NodeOptimizationRecommendat
 		g := groups[key]
 		message, pod, node := g.message, g.pod, g.node
 		if g.count > 1 {
-			if label, ok := nodeOptimizationReasonGroupLabels[key]; ok {
+			if g.groupLabel != "" {
+				message = fmt.Sprintf("%d %s", g.count, g.groupLabel)
+			} else if label, ok := nodeOptimizationReasonGroupLabels[key]; ok {
 				message = fmt.Sprintf("%d %s", g.count, label)
 			} else {
 				message = fmt.Sprintf("%s (×%d)", g.message, g.count)
 			}
 			pod, node = "", ""
 		}
-		views = append(views, nodeOptimizationReasonView{Message: message, Pod: pod, Node: node})
+		views = append(views, nodeOptimizationReasonView{Message: message, Pod: pod, Node: node, Count: g.count})
 	}
 	return views
+}
+
+// nodeOptimizationReasonGroup assigns only well-understood warning shapes to
+// semantic categories. Broad backend codes such as
+// unsupported_hard_scheduling_constraint cover materially different causes,
+// so unknown messages under those codes group only when their exact text is
+// identical.
+func nodeOptimizationReasonGroup(reason analyzer.NodeOptimizationRecommendationReason) (key, label string) {
+	normalized := strings.ToLower(reason.Message)
+	switch {
+	case strings.Contains(normalized, "required node affinity matchfields"):
+		return nodeOptimizationReasonAffinityMatchFields, nodeOptimizationSemanticReasonLabels[nodeOptimizationReasonAffinityMatchFields]
+	case strings.Contains(normalized, "uses a volume source whose attachment and driver-specific scheduling constraints are not modeled"):
+		return nodeOptimizationReasonVolumeAttachment, nodeOptimizationSemanticReasonLabels[nodeOptimizationReasonVolumeAttachment]
+	case strings.Contains(normalized, "could not be mapped to a canonical node pool"):
+		return nodeOptimizationReasonPoolMapping, nodeOptimizationSemanticReasonLabels[nodeOptimizationReasonPoolMapping]
+	case strings.Contains(normalized, "has no resolved cost pool identity"):
+		return nodeOptimizationReasonPoolMapping, nodeOptimizationSemanticReasonLabels[nodeOptimizationReasonPoolMapping]
+	}
+	if workloadKind, reasonText, ok := nodeOptimizationWorkloadReason(reason.Message); ok {
+		return reason.Code + "\x00" + strings.ToLower(reasonText), workloadKind + ": " + reasonText
+	}
+
+	switch reason.Code {
+	case "unsupported_hard_scheduling_constraint",
+		"incomplete_scheduling_evidence",
+		"pvc_storage_mobility_unproven",
+		"incomplete_or_unsupported_evidence":
+		return reason.Code + "\x00" + reason.Message, ""
+	case "":
+		return reason.Message, ""
+	default:
+		return reason.Code, ""
+	}
+}
+
+// nodeOptimizationWorkloadReason removes only the stable analyzer prefixes
+// that identify a Pod. The remaining text must still match exactly before two
+// reasons group, which keeps materially different constraints separate.
+func nodeOptimizationWorkloadReason(message string) (workloadKind, reasonText string, ok bool) {
+	normalized := strings.ToLower(message)
+	workloadKind = "Pods"
+	switch {
+	case strings.HasPrefix(normalized, "daemonset pod "):
+		workloadKind = "DaemonSet Pods"
+	case strings.HasPrefix(normalized, "pod "):
+	default:
+		return "", "", false
+	}
+	separator := strings.Index(message, ": ")
+	if separator < 0 || separator+2 >= len(message) {
+		return "", "", false
+	}
+	return workloadKind, message[separator+2:], true
 }
 
 func nodeOptimizationPoolDisplayName(key analyzer.CostPoolKey) string {
