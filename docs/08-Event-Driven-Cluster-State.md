@@ -2,7 +2,7 @@
 
 **Status:** FROZEN  
 **Branch:** `feature/event-driven-cluster-state`  
-**Current phase:** Phase 0 — Architecture Audit and Baseline  
+**Current phase:** Phase 1 — Time-Based Incident Resolution  
 **Target duration:** 13–20 focused engineering days  
 **Primary goal:** Replace repeated Kubernetes polling with informer-driven shared cluster state while preserving OpsCart correctness, temporal semantics, and read-only behavior.
 
@@ -304,26 +304,26 @@ type ClusterSnapshot struct {
 }
 ```
 
-Likely resources include:
+Final resource set, from the Phase 0 analyzer audit:
 
 ```text
 Nodes
 Pods
 Namespaces
-PVCs
-PVs
+PersistentVolumeClaims
+PersistentVolumes
 Deployments
 StatefulSets
-DaemonSets
+ReplicaSets
 Services
+Ingresses
+NetworkPolicies
 Jobs
 CronJobs
-ReplicaSets
-Events
-StorageClasses
+HorizontalPodAutoscalers
+EndpointSlices
+Pod Warning Events (filtered)
 ```
-
-The final resource set must come from actual analyzer usage.
 
 ---
 
@@ -626,8 +626,12 @@ Ownership semantics are frozen:
 
 - one acquisition owner per cluster
 - analyzers do not own clients/watchers
-- dashboard handlers do not acquire Kubernetes state
+- recurring dashboard analysis does not acquire Kubernetes state outside the shared acquisition layer
+- interactive investigation/drill-down reads remain a separate on-demand boundary for this migration
 - store does not acquire Kubernetes state
+
+This rule governs the recurring analysis pipeline. Interactive investigation/drill-down
+reads remain a separate on-demand boundary for this migration.
 
 ---
 
@@ -730,6 +734,51 @@ Phase 0 completes only when we can answer:
 4. What is the current API-call baseline?
 5. What is the current scan/runtime baseline?
 6. What resources belong in the shared state?
+
+### Phase 0 findings
+
+Representative baseline, default cluster-wide configuration:
+
+```text
+Kubernetes API calls per normal scan   19
+Scan interval                          60s
+Response data per scan                 ~16–26 MB
+Kubernetes API time per scan           ~0.9–1.7s
+Total scan duration                    ~1.5–4.0s
+API errors / throttling                none observed
+```
+
+19 is the unconditional floor. Conditional additions: one Pod LIST when an unhealthy Node
+condition is present, one EndpointSlice LIST per Ingress backend reference, an
+autoscaling/v1 HPA LIST only when the v2 LIST fails, and an altered call pattern when a
+namespace filter is set.
+
+Structural duplication within one scan:
+
+```text
+Nodes       3 unconditional LISTs
+Pods        2 unconditional LISTs, plus conditional paths
+Namespaces  2 unconditional LISTs
+```
+
+Pods are already shared from a single snapshot by the Security, Waste and Network
+analyzers. Nodes and Namespaces are not shared.
+
+The final shared snapshot resource set is recorded in section 6.
+
+#### Scope decisions
+
+- Scan-cycle Waste event evidence uses a filtered informer over Pod-involved Warning
+  events, not an unfiltered Event cache.
+- Interactive investigation/drill-down reads stay outside this recurring scan-cycle
+  migration and remain on-demand.
+- The `opscart-scan` CLI stays outside this migration: it is independent and one-shot,
+  and contributes no steady-state acquisition load.
+- The Azure pricing provider's cache lifetime must be corrected before Cost moves to
+  generation-driven execution in Phase 4; the cache is currently rebuilt per scan, so its
+  TTL cannot survive a change of execution cadence.
+- DaemonSets, StorageClasses, ConfigMaps and Secrets are excluded until a dashboard
+  analyzer requires them.
 
 ---
 
@@ -1046,7 +1095,7 @@ The target should remain approximately three focused engineering weeks, with a f
 
 | Phase | Status |
 |---|---|
-| Phase 0 — Audit + baseline | NOT STARTED |
+| Phase 0 — Audit + baseline | COMPLETE |
 | Phase 1 — Time-based incident resolution | NOT STARTED |
 | Phase 2 — Cluster state contract | NOT STARTED |
 | Phase 3 — Shared informer acquisition | NOT STARTED |
