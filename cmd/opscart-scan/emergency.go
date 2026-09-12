@@ -272,11 +272,13 @@ var criticalDebounceReasons = []string{
 
 // applyCriticalDebounce is this task's fix: consult operational memory
 // before letting a pod's severity drop below CRITICAL for this run's
-// display. It mirrors what ResolveMissing's 3-consecutive-scan
-// missing_scans counter already does for the dashboard (pkg/store/
-// sqlite.go) — treat a single contradicting live snapshot as noise, not
-// truth, when memory disagrees — applied here to the CLI's classification
-// step instead of the store's resolve step.
+// display. It mirrors what ResolveMissing's absence-duration debounce
+// already does for the dashboard (pkg/store/incident_resolution.go) — an
+// active incident resolves only after resolveAfter elapses since its first
+// observed absence, not on a single contradicting live snapshot — treat
+// that one snapshot as noise, not truth, when memory disagrees, applied
+// here to the CLI's classification step instead of the store's resolve
+// step.
 //
 // For every issue about to display below CRITICAL, it checks whether an
 // active CRITICAL incident already exists in memory for the same pod

@@ -551,7 +551,8 @@ func TestPersistFindingsCombinesWorkloadAndNodeBeforeSingleLifecyclePass(t *test
 }
 
 func TestPersistFindingsCombinedSetKeepsCategoriesPresentAndHealthyNodesAgeNormally(t *testing.T) {
-	db, err := store.OpenSQLite(filepath.Join(t.TempDir(), "combined.db"))
+	dbPath := filepath.Join(t.TempDir(), "combined.db")
+	db, err := store.OpenSQLite(dbPath)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -575,18 +576,41 @@ func TestPersistFindingsCombinedSetKeepsCategoriesPresentAndHealthyNodesAgeNorma
 	// A successful node-health observation with no findings is confirmed
 	// absence. It ages only the node incident while the present workload is
 	// refreshed in the same complete batch.
-	for scan := 1; scan <= 2; scan++ {
-		persistFindings(db, cluster, fmt.Sprintf("scan-healthy-%d", scan), issues, nil)
-		rec, _ := db.GetIncidentHistory(cluster, nodeFP)
-		if rec.Status != "active" {
-			t.Fatalf("node resolved before existing three-scan threshold on scan %d", scan)
-		}
+	persistFindings(db, cluster, "scan-healthy-1", issues, nil)
+	if rec, _ := db.GetIncidentHistory(cluster, nodeFP); rec.Status != "active" {
+		t.Fatalf("node resolved before resolveAfter elapsed: %+v", rec)
 	}
-	persistFindings(db, cluster, "scan-healthy-3", issues, nil)
+	// Long enough for resolution regardless of pkg/store's exact resolveAfter
+	// value; this test only cares that one category's absence duration never
+	// affects the other's.
+	backdateAbsentSince(t, dbPath, cluster, nodeFP, 5*time.Minute)
+	persistFindings(db, cluster, "scan-healthy-2", issues, nil)
 	nodeRec, _ := db.GetIncidentHistory(cluster, nodeFP)
 	workloadRec, _ := db.GetIncidentHistory(cluster, workloadFP)
 	if nodeRec.Status != "resolved" || workloadRec.Status != "active" {
 		t.Fatalf("healthy-node lifecycle mismatch: node=%s workload=%s", nodeRec.Status, workloadRec.Status)
+	}
+}
+
+// backdateAbsentSince establishes an incident's absence as having started
+// age ago, without sleeping in tests. pkg/store measures resolution from
+// the incidents.absent_since column (the first-observed-absence timestamp,
+// distinct from last_seen), so setting it directly is equivalent to the
+// incident having already been absent for age of real time. A separate raw
+// connection is used because store.Store exposes no such seam by design —
+// see pkg/store/incident_resolution.go.
+func backdateAbsentSince(t *testing.T, dbPath, cluster, fingerprint string, age time.Duration) {
+	t.Helper()
+	raw, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("open raw db: %v", err)
+	}
+	defer raw.Close()
+	if _, err := raw.Exec(
+		`UPDATE incidents SET absent_since = ? WHERE cluster=? AND fingerprint=?`,
+		time.Now().Add(-age).Unix(), cluster, fingerprint,
+	); err != nil {
+		t.Fatalf("backdate absent_since: %v", err)
 	}
 }
 

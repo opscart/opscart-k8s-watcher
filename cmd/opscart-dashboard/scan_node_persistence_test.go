@@ -1,14 +1,37 @@
 package main
 
 import (
-	"fmt"
+	"database/sql"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/opscart/opscart-k8s-watcher/pkg/models"
 	"github.com/opscart/opscart-k8s-watcher/pkg/scanner"
 	"github.com/opscart/opscart-k8s-watcher/pkg/store"
 )
+
+// backdateAbsentSince establishes an incident's absence as having started
+// age ago, without sleeping in tests. pkg/store measures resolution from
+// the incidents.absent_since column (the first-observed-absence timestamp,
+// distinct from last_seen), so setting it directly is equivalent to the
+// incident having already been absent for age of real time. A separate raw
+// connection is used because store.Store exposes no such seam by design —
+// see pkg/store/incident_resolution.go.
+func backdateAbsentSince(t *testing.T, dbPath, cluster, fingerprint string, age time.Duration) {
+	t.Helper()
+	raw, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("open raw db: %v", err)
+	}
+	defer raw.Close()
+	if _, err := raw.Exec(
+		`UPDATE incidents SET absent_since = ? WHERE cluster=? AND fingerprint=?`,
+		time.Now().Add(-age).Unix(), cluster, fingerprint,
+	); err != nil {
+		t.Fatalf("backdate absent_since: %v", err)
+	}
+}
 
 type incidentPersistenceSpy struct {
 	store.NullStore
@@ -73,7 +96,8 @@ func TestCompleteScanBatchCategoriesDoNotAgeEachOther(t *testing.T) {
 		{"workload absence preserves node", []store.IncidentData{node}, workload.Fingerprint, node.Fingerprint},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			db, err := store.OpenSQLite(filepath.Join(t.TempDir(), "complete-batch.db"))
+			dbPath := filepath.Join(t.TempDir(), "complete-batch.db")
+			db, err := store.OpenSQLite(dbPath)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -81,10 +105,12 @@ func TestCompleteScanBatchCategoriesDoNotAgeEachOther(t *testing.T) {
 			if _, err := persistCompleteIncidentBatch(db, "cluster-a", "scan-initial", []store.IncidentData{workload, node}); err != nil {
 				t.Fatal(err)
 			}
-			for scan := 1; scan <= 3; scan++ {
-				if _, err := persistCompleteIncidentBatch(db, "cluster-a", fmt.Sprintf("scan-%d", scan), tc.present); err != nil {
-					t.Fatal(err)
-				}
+			// Long enough for resolution regardless of pkg/store's exact
+			// resolveAfter value; this test only cares that one category's
+			// absence duration never affects the other's.
+			backdateAbsentSince(t, dbPath, "cluster-a", tc.resolvedFP, 5*time.Minute)
+			if _, err := persistCompleteIncidentBatch(db, "cluster-a", "scan-resolve", tc.present); err != nil {
+				t.Fatal(err)
 			}
 			resolved, _ := db.GetIncidentHistory("cluster-a", tc.resolvedFP)
 			active, _ := db.GetIncidentHistory("cluster-a", tc.stillActiveFP)
