@@ -43,6 +43,13 @@ type ClusterState struct {
 	acquisition    AcquisitionState
 	resources      ClusterResources
 	resourceStates map[ResourceKind]ResourceState
+
+	// latest is the most recently published snapshot, and publications
+	// signals that it changed — see Latest and Publications. Together they
+	// are the entire generation-notification boundary a Coordinator needs:
+	// one fixed channel, one cached value, no subscription registry.
+	latest       *ClusterSnapshot
+	publications chan struct{}
 }
 
 // NewClusterState creates the state owner for one cluster. A freshly
@@ -53,6 +60,7 @@ func NewClusterState(clusterID string) *ClusterState {
 		clusterID:      clusterID,
 		acquisition:    AcquisitionStale,
 		resourceStates: make(map[ResourceKind]ResourceState),
+		publications:   make(chan struct{}, 1),
 	}
 }
 
@@ -106,6 +114,14 @@ func (s *ClusterState) SetResourceState(kind ResourceKind, state ResourceState) 
 // already-private clone), so handing a snapshot the same slices is safe.
 // The copy consumers actually need happens lazily, in
 // ClusterSnapshot.Resources, only when someone asks for the data.
+//
+// Publish is called synchronously from informer event-handler goroutines
+// (pkg/acquisition), so it must never block on a slow or absent consumer.
+// After recording the snapshot as Latest, it signals publications without
+// blocking — a full channel (the coordinator hasn't caught up to the
+// previous signal yet) is dropped, not queued, which is safe precisely
+// because the coordinator always re-reads Latest rather than expecting the
+// channel to carry every generation.
 func (s *ClusterState) Publish() *ClusterSnapshot {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -116,7 +132,7 @@ func (s *ClusterState) Publish() *ClusterSnapshot {
 		states[kind] = state
 	}
 
-	return &ClusterSnapshot{
+	snapshot := &ClusterSnapshot{
 		clusterID:      s.clusterID,
 		generation:     s.generation,
 		publishedAt:    time.Now(),
@@ -124,4 +140,40 @@ func (s *ClusterState) Publish() *ClusterSnapshot {
 		resources:      s.resources,
 		resourceStates: states,
 	}
+	s.latest = snapshot
+
+	select {
+	case s.publications <- struct{}{}:
+	default:
+	}
+
+	return snapshot
+}
+
+// Publications returns the channel Publish signals on every time it
+// produces a new generation.
+//
+// This is a single-consumer publication signal for the per-cluster
+// Coordinator (pkg/clusterstate/coordinator.go) — not a subscription API
+// or event bus. There is exactly one channel per ClusterState, meant to be
+// drained by exactly one reader; it supports no registration, no fan-out,
+// and no per-subscriber delivery. A signal carries no payload: it only
+// ever means "call Latest," never "here is the generation," because a
+// burst of Publish calls collapses into a single buffered signal (see
+// Publish). Multiple concurrent readers would race over which one
+// receives a given signal and are not a supported use of this channel.
+func (s *ClusterState) Publications() <-chan struct{} {
+	return s.publications
+}
+
+// Latest returns the most recently published snapshot, or nil if Publish
+// has never been called. Unlike Publish, this never advances the
+// generation counter or signals publications — it is a pure read, the
+// correct way for the coordinator to catch up to the current generation
+// after waking on Publications without itself acting as a second
+// publisher.
+func (s *ClusterState) Latest() *ClusterSnapshot {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.latest
 }

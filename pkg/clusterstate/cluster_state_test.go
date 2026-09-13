@@ -161,3 +161,92 @@ func TestSnapshotViewsAreDeterministic(t *testing.T) {
 		t.Fatalf("Resources() did not preserve input order: %+v", first.Pods)
 	}
 }
+
+// ── Publications / Latest — the generation-notification boundary
+// Coordinator consumes (see coordinator.go) ─────────────────────────────────
+
+func TestLatestIsNilBeforeFirstPublish(t *testing.T) {
+	state := NewClusterState("cluster-a")
+	if got := state.Latest(); got != nil {
+		t.Fatalf("Latest() = %+v before any Publish, want nil", got)
+	}
+}
+
+func TestLatestReflectsMostRecentPublish(t *testing.T) {
+	state := NewClusterState("cluster-a")
+	first := state.Publish()
+	second := state.Publish()
+
+	if got := state.Latest(); got != second {
+		t.Fatalf("Latest() did not return the most recent Publish result")
+	}
+	if state.Latest() == first {
+		t.Fatal("Latest() returned a stale (first) snapshot")
+	}
+}
+
+func TestLatestDoesNotAdvanceGenerationOrPublications(t *testing.T) {
+	state := NewClusterState("cluster-a")
+	state.Publish()
+	<-state.Publications() // drain the signal from the Publish above
+
+	before := state.Latest().Generation()
+	for i := 0; i < 5; i++ {
+		_ = state.Latest()
+	}
+	after := state.Latest().Generation()
+	if before != after {
+		t.Fatalf("Latest() calls alone changed the generation: %d -> %d", before, after)
+	}
+
+	select {
+	case <-state.Publications():
+		t.Fatal("Latest() produced a publication signal — it must be a pure read")
+	default:
+	}
+}
+
+func TestPublishSignalsPublicationsWithoutBlocking(t *testing.T) {
+	state := NewClusterState("cluster-a")
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		// No one ever drains Publications() here — Publish must never
+		// block regardless, since it runs on informer callback goroutines.
+		for i := 0; i < 10; i++ {
+			state.Publish()
+		}
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Publish blocked with no Publications() consumer draining the channel")
+	}
+
+	select {
+	case <-state.Publications():
+	default:
+		t.Fatal("expected a buffered publication signal after multiple Publish calls")
+	}
+}
+
+func TestPublicationsCoalescesBurstIntoOneBufferedSignal(t *testing.T) {
+	state := NewClusterState("cluster-a")
+
+	for i := 0; i < 4; i++ {
+		state.Publish()
+	}
+
+	select {
+	case <-state.Publications():
+	default:
+		t.Fatal("expected a buffered publication signal after a burst of Publish calls")
+	}
+	select {
+	case <-state.Publications():
+		t.Fatal("expected only one buffered publication signal after a burst, got a second")
+	default:
+	}
+}
