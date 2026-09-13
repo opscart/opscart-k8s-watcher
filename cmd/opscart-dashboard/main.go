@@ -133,16 +133,22 @@ func runDashboard(_ *cobra.Command, _ []string) error {
 	}()
 	srv := newServer(cl, db, retentionDays, dbPersistent)
 
-	log.Printf("Scanning cluster %q ...", displayName(cl[0]))
-	if err := srv.getState(cl[0]).refresh(cl); err != nil {
-		return fmt.Errorf("initial scan: %w", err)
-	}
-
 	backgroundCtx, stopBackground := context.WithCancel(context.Background())
 	defer func() {
 		stopBackground()
 		srv.backgroundWG.Wait()
 	}()
+
+	// Phase 4A: start each configured cluster's informer-backed acquisition
+	// runtime (docs/08). This runs alongside the existing scan below —
+	// intentional, transitional coexistence; see dashboardState.acquisition.
+	srv.startAcquisitionRuntimes(backgroundCtx)
+
+	log.Printf("Scanning cluster %q ...", displayName(cl[0]))
+	if err := srv.getState(cl[0]).refresh(cl); err != nil {
+		return fmt.Errorf("initial scan: %w", err)
+	}
+
 	srv.startBackgroundRefresh(backgroundCtx, dashboardScanInterval)
 
 	addr := ":" + port

@@ -10,6 +10,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/opscart/opscart-k8s-watcher/pkg/acquisition"
 	"github.com/opscart/opscart-k8s-watcher/pkg/analyzer"
 	"github.com/opscart/opscart-k8s-watcher/pkg/models"
 	"github.com/opscart/opscart-k8s-watcher/pkg/scanner"
@@ -66,6 +67,18 @@ type dashboardState struct {
 	db            store.Store
 	retentionDays int
 	observation   scanObservation
+
+	// acquisition is this cluster's informer-backed acquisition runtime
+	// (docs/08 Phase 3/4A). It is set once during dashboard startup (see
+	// acquisition_runtime.go) before any concurrent reader could observe
+	// it, and never reassigned afterward, so — like ctx/db/retentionDays
+	// above — reading it needs no lock. It is nil if that cluster's
+	// Kubernetes client could not be constructed at startup.
+	//
+	// Phase 4A only starts it; nothing yet reads scan or analysis data
+	// from it. Analysis continues to come entirely from runFullScan below,
+	// unchanged.
+	acquisition *acquisition.Runtime
 }
 
 func (s *dashboardState) refresh(clusterList []string) error {
