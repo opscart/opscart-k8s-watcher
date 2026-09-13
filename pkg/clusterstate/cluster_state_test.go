@@ -9,6 +9,28 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
+// TestUpdateMergesPerKindWithoutClobberingOthers proves the nil-means-unset
+// contract ClusterResources already documented in Phase 2: an informer
+// event handler for one resource kind must be able to call Update with
+// only that kind populated, without erasing every other kind already
+// observed.
+func TestUpdateMergesPerKindWithoutClobberingOthers(t *testing.T) {
+	state := NewClusterState("cluster-a")
+	node := &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "node-a"}}
+	state.Update(ClusterResources{Nodes: []*corev1.Node{node}})
+
+	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "pod-a"}}
+	state.Update(ClusterResources{Pods: []*corev1.Pod{pod}})
+
+	resources := state.Publish().Resources()
+	if len(resources.Nodes) != 1 || resources.Nodes[0] != node {
+		t.Fatalf("a Pods-only Update erased previously observed Nodes: %+v", resources.Nodes)
+	}
+	if len(resources.Pods) != 1 || resources.Pods[0] != pod {
+		t.Fatalf("expected the Pods-only Update to be reflected: %+v", resources.Pods)
+	}
+}
+
 func TestNewClusterStateStartsStale(t *testing.T) {
 	state := NewClusterState("cluster-a")
 	snapshot := state.Publish()

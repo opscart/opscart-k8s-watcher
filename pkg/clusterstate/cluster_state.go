@@ -60,20 +60,22 @@ func NewClusterState(clusterID string) *ClusterState {
 func (s *ClusterState) ClusterID() string { return s.clusterID }
 
 // Update replaces the observed resources for whichever kinds resources has
-// populated (see ClusterResources' nil-means-unset convention). It takes
-// its own copy of the []*T slices so the caller's copy of resources is
-// safe to reuse or discard immediately afterward — but it does not copy
-// the Kubernetes objects the pointers reference; those are shared with the
-// caller's originals and must already be treated as read-only by the time
-// they reach Update, matching Phase 3's informer-cache objects exactly.
-// Phase 2 only supports full-batch replacement, matching how every current
-// acquisition call site works today (a one-shot List per scan); per-kind
-// incremental updates are a Phase 3 concern once informers exist to drive
-// them, deliberately not invented here ahead of that need.
+// populated, leaving every other kind exactly as it was (see
+// ClusterResources' nil-means-unset convention, implemented by
+// mergeClusterResources). This is what lets an informer event handler for
+// one resource kind — the normal Phase 3 caller — update only that kind
+// without clobbering the other 15.
+//
+// Update takes its own copy of the []*T slices so the caller's copy of
+// resources is safe to reuse or discard immediately afterward — but it
+// does not copy the Kubernetes objects the pointers reference; those are
+// shared with the caller's originals and must already be treated as
+// read-only by the time they reach Update, matching informer-cache objects
+// exactly.
 func (s *ClusterState) Update(resources ClusterResources) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.resources = resources.clone()
+	s.resources = mergeClusterResources(s.resources, resources)
 }
 
 // SetAcquisitionState records the cluster's current overall acquisition

@@ -73,6 +73,65 @@ func cloneSlice[T any](in []T) []T {
 	return append([]T(nil), in...)
 }
 
+// mergeClusterResources applies update onto existing one field at a time:
+// a nil field in update leaves the corresponding field in existing
+// untouched; a non-nil field replaces it (after its own clone, so the
+// caller's slice is never aliased into ClusterState). This is what lets an
+// informer event handler for one resource kind update only that kind
+// without clobbering the other 15 — see ClusterState.Update.
+func mergeClusterResources(existing, update ClusterResources) ClusterResources {
+	merged := existing
+	if update.Nodes != nil {
+		merged.Nodes = cloneSlice(update.Nodes)
+	}
+	if update.Pods != nil {
+		merged.Pods = cloneSlice(update.Pods)
+	}
+	if update.Namespaces != nil {
+		merged.Namespaces = cloneSlice(update.Namespaces)
+	}
+	if update.PersistentVolumeClaims != nil {
+		merged.PersistentVolumeClaims = cloneSlice(update.PersistentVolumeClaims)
+	}
+	if update.PersistentVolumes != nil {
+		merged.PersistentVolumes = cloneSlice(update.PersistentVolumes)
+	}
+	if update.Deployments != nil {
+		merged.Deployments = cloneSlice(update.Deployments)
+	}
+	if update.StatefulSets != nil {
+		merged.StatefulSets = cloneSlice(update.StatefulSets)
+	}
+	if update.ReplicaSets != nil {
+		merged.ReplicaSets = cloneSlice(update.ReplicaSets)
+	}
+	if update.Services != nil {
+		merged.Services = cloneSlice(update.Services)
+	}
+	if update.Ingresses != nil {
+		merged.Ingresses = cloneSlice(update.Ingresses)
+	}
+	if update.NetworkPolicies != nil {
+		merged.NetworkPolicies = cloneSlice(update.NetworkPolicies)
+	}
+	if update.Jobs != nil {
+		merged.Jobs = cloneSlice(update.Jobs)
+	}
+	if update.CronJobs != nil {
+		merged.CronJobs = cloneSlice(update.CronJobs)
+	}
+	if update.HorizontalPodAutoscalers != nil {
+		merged.HorizontalPodAutoscalers = cloneSlice(update.HorizontalPodAutoscalers)
+	}
+	if update.EndpointSlices != nil {
+		merged.EndpointSlices = cloneSlice(update.EndpointSlices)
+	}
+	if update.PodWarningEvents != nil {
+		merged.PodWarningEvents = cloneSlice(update.PodWarningEvents)
+	}
+	return merged
+}
+
 func (r ClusterResources) clone() ClusterResources {
 	return ClusterResources{
 		Nodes:                    cloneSlice(r.Nodes),
