@@ -33,6 +33,7 @@ rules:
       - services
       - endpoints
       - persistentvolumeclaims
+      - persistentvolumes
       - replicationcontrollers
       - events
     verbs: ["get", "list"]
@@ -119,7 +120,7 @@ spec:
 
       containers:
         - name: dashboard
-          image: ghcr.io/opscart/opscart-dashboard:v1.13.0
+          image: ghcr.io/opscart/opscart-dashboard:v1.14.0
           imagePullPolicy: Always
           args:
             - "--port=8080"

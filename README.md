@@ -42,18 +42,20 @@ OpsCart    →  shows what deserves attention first
 
 ![Current OpsCart architecture](docs/opscart-architecture-current.png)
 
-OpsCart currently has two independent scan paths:
+OpsCart has two operational paths:
 
 - The CLI performs a one-shot scan whenever `opscart-scan triage` is invoked.
-- The dashboard performs scans from its own periodic timer loop.
+- The dashboard uses an event-driven Kubernetes acquisition pipeline built on client-go shared informers.
 
-Each path acquires Kubernetes state independently and maintains operational history within its own execution environment. The paths now share canonical components: `pkg/classify` for deterministic pod-failure verdicts, issue-type and workload-identity contracts, common models, and the store implementation. This keeps priority and multi-container handling consistent for crash loops, OOM kills, probe failures, image-pull failures, and restart signals.
+For the dashboard, Kubernetes state is maintained in local informer caches, published through `ClusterState` as immutable cluster snapshots, and analyzed after coalesced resource changes.
 
-Resource-specific detectors, scan timing, grouping, scoring, rendering, and retained history remain path-specific. The CLI and dashboard can therefore present or group findings differently even though they use the same pod-failure classification contract.
+During healthy steady-state operation, the dashboard does not perform an application-level recurring full Kubernetes LIST cycle. Initial synchronization and watch recovery are handled by client-go, while recurring analysis runs against cached cluster state.
 
-The target architecture is to move more resource acquisition and normalization into a shared pipeline while preserving separate triggers, renderers, and operational-history environments. A shared database is not required or planned; scan timing and retained history may legitimately differ.
+A clock-driven analysis trigger also re-evaluates the latest snapshot for time-dependent behavior such as incident resolution, resource age, and pricing-cache expiry. This reevaluation does not re-query Kubernetes.
 
-Neither path uses a continuous Kubernetes watch. Bounded snapshot scans keep OpsCart read-only and operationally simple, with the tradeoff that it provides triage at scan time rather than real-time event alerting.
+Interactive Investigation remains intentionally separate from the recurring analysis path and may perform targeted Kubernetes API reads when an operator requests deeper evidence.
+
+The CLI and dashboard still have separate execution environments and presentation paths, but they share common classification, models, and storage contracts where appropriate.
 
 ---
 
@@ -63,7 +65,7 @@ A healthy dashboard does not always mean a healthy cluster.
 
 Metrics show whether services are meeting their SLOs. OpsCart surfaces operational conditions that can remain hidden or fragmented across dashboards—crash-looping workloads, image pull failures, privileged containers, missing NetworkPolicies, unattached storage, and resource waste.
 
-This is not another alert aggregator. OpsCart preserves operational memory across scans: when an incident was first detected, whether it resolved and later reoccurred, how restart behavior changed, and which pod currently represents the incident. A replacement pod may be only five minutes old while the workload incident has existed for weeks. OpsCart keeps that workload-level history without presenting the new pod as the identity of the incident.
+This is not another alert aggregator. OpsCart preserves operational memory over time: when an incident was first detected, whether it resolved and later reoccurred, how restart behavior changed, and which pod currently represents the incident. A replacement pod may be only five minutes old while the workload incident has existed for weeks. OpsCart keeps that workload-level history without presenting the new pod as the identity of the incident.
 
 Instead of requiring operators to correlate several dashboards during triage, OpsCart presents a prioritized view of what deserves attention, the observed evidence behind it, and read-only investigation commands for the next step.
 
@@ -187,7 +189,7 @@ The entry point isn't a KPI grid — it's a written assessment. **Situation Brie
 - **Top 5 Things To Fix** — ranked by severity and restart rate, each with a memory line (first detected, reopen count, trend) and a direct link to investigate
 - **Cluster Health, Namespace Health, and Security Status** at a glance
 
-No competitor in this space — Grafana, Lens, k9s — can produce any of this, because none of them remember anything between scans.
+No competitor in this space — Grafana, Lens, k9s — can produce any of this, because none of them preserve this operational history over time.
 
 ### Operational Triage
 
@@ -233,14 +235,13 @@ Node/workload relationships are labeled **correlated by node placement — not a
 
 ### Platform
 
-**Operational Memory** — OpsCart remembers what happened. A lightweight local database tracks cluster snapshots, incident lifecycle (detected → milestones → resolved → reopened) as an append-only event journal, and scan metadata. Powers trend arrows, sparklines, incident age, and the per-incident timeline. Backed by SQLite, persisted on a PVC that survives pod restarts and `helm uninstall`. Configurable retention (90 days by default) keeps the database from growing unbounded.
+**Operational Memory** — OpsCart remembers what happened. A lightweight local database tracks cluster snapshots, incident lifecycle (detected → milestones → resolved → reopened) as an append-only event journal, and analysis metadata. Powers trend arrows, sparklines, incident age, and the per-incident timeline. Backed by SQLite, persisted on a PVC that survives pod restarts and `helm uninstall`. Configurable retention (90 days by default) keeps the database from growing unbounded.
 
 **Authentication** — Basic auth on by default with no disable path: environment variables, a Kubernetes Secret, or an auto-generated password logged at startup. For teams, front it with oauth2-proxy for Azure AD / Google / GitHub / OIDC — see [First Login](#first-login) above.
 
 **Helm Chart** — Full Helm chart with configurable values, PVC-backed persistence, read-only RBAC, and non-root security context. See the [chart README](helm/opscart-watcher/README.md) for persistence options, minikube notes, and all values.
 
-**Agentless** — Runs as a single container. No sidecars, no DaemonSets, and no node access. Core scanning needs no cloud credentials; optional AWS API pricing uses workload identity.
-
+**Agentless** — Runs as a single container. No sidecars, no DaemonSets, and no node access. Core analysis needs no cloud credentials; optional AWS API pricing uses workload identity.
 ---
 
 ## Security
