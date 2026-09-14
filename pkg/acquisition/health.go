@@ -33,14 +33,14 @@ func (r *Runtime) watchErrorHandler(kind clusterstate.ResourceKind) cache.WatchE
 
 // markDegraded records that kind's most recent LIST attempt failed and
 // recomputes the cluster's aggregate acquisition state. Unlike a resource
-// update, a health transition is significant on its own, so it publishes
-// immediately rather than waiting for the next resource event.
+// update, a health transition is significant on its own — recomputeHealth
+// publishes immediately when it actually changes the aggregate state,
+// rather than waiting for the next resource event.
 func (r *Runtime) markDegraded(kind clusterstate.ResourceKind) {
 	r.healthMu.Lock()
 	r.degradedKinds[kind] = struct{}{}
 	r.healthMu.Unlock()
 	r.recomputeHealth()
-	r.state.Publish()
 }
 
 // markRecovered records direct, positive evidence that kind's informer
@@ -48,8 +48,11 @@ func (r *Runtime) markDegraded(kind clusterstate.ResourceKind) {
 // every successful sync (see syncResource), not only ones following a
 // known failure: clearing an absent key is a harmless no-op, and tying
 // recovery to the same single path keeps the model simple. syncResource
-// publishes the resulting generation itself, so this does not publish on
-// its own.
+// always publishes the resulting generation itself regardless, so this
+// call's own recomputeHealth-triggered publish (if the health transition
+// happened to be the one that flips the aggregate state) is at most
+// redundant here, never load-bearing — see WaitForSync for the path where
+// it is.
 func (r *Runtime) markRecovered(kind clusterstate.ResourceKind) {
 	r.healthMu.Lock()
 	delete(r.degradedKinds, kind)
@@ -84,17 +87,33 @@ func (r *Runtime) allSynced() bool {
 // this is a diagnostic choice — "still starting up" is a more useful label
 // than "degraded" for a kind that has simply never synced yet — not a
 // correctness one.
+//
+// When the resulting state actually changes ClusterState's externally
+// observable trustworthiness, this publishes immediately. This is what
+// closes the gap WaitForSync's success path would otherwise leave open: an
+// idle, fully-synced cluster whose most recent resource-triggered publish
+// happened to occur while sync was still incomplete would otherwise stay
+// stamped RESYNCING forever, since nothing else would ever publish again
+// on an idle cluster. SetAcquisitionState's own changed result — not a
+// separate cache of "the last state we published" — is what decides this,
+// so a call that leaves the state unchanged (e.g. a second markDegraded
+// for an already-degraded kind) correctly produces no publish.
 func (r *Runtime) recomputeHealth() {
-	if !r.allSynced() {
-		r.state.SetAcquisitionState(clusterstate.AcquisitionResyncing)
-		return
+	var changed bool
+	switch {
+	case !r.allSynced():
+		changed = r.state.SetAcquisitionState(clusterstate.AcquisitionResyncing)
+	default:
+		r.healthMu.Lock()
+		degraded := len(r.degradedKinds) > 0
+		r.healthMu.Unlock()
+		if degraded {
+			changed = r.state.SetAcquisitionState(clusterstate.AcquisitionDegraded)
+		} else {
+			changed = r.state.SetAcquisitionState(clusterstate.AcquisitionHealthy)
+		}
 	}
-	r.healthMu.Lock()
-	degraded := len(r.degradedKinds) > 0
-	r.healthMu.Unlock()
-	if degraded {
-		r.state.SetAcquisitionState(clusterstate.AcquisitionDegraded)
-		return
+	if changed {
+		r.state.Publish()
 	}
-	r.state.SetAcquisitionState(clusterstate.AcquisitionHealthy)
 }

@@ -43,6 +43,8 @@ func (srv *server) startAcquisition(ctx context.Context, clusterCtx string) {
 
 	rt := acquisition.NewRuntime(clusterCtx, client)
 	rt.Start(ctx)
-	srv.getState(clusterCtx).acquisition = rt
+	state := srv.getState(clusterCtx)
+	state.acquisition = rt
+	startNodeOptimizationCoordinator(ctx, state, rt)
 	log.Printf("[%s] acquisition runtime started", displayName(clusterCtx))
 }

@@ -12,6 +12,7 @@ import (
 
 	"github.com/opscart/opscart-k8s-watcher/pkg/acquisition"
 	"github.com/opscart/opscart-k8s-watcher/pkg/analyzer"
+	"github.com/opscart/opscart-k8s-watcher/pkg/clusterstate"
 	"github.com/opscart/opscart-k8s-watcher/pkg/models"
 	"github.com/opscart/opscart-k8s-watcher/pkg/scanner"
 	"github.com/opscart/opscart-k8s-watcher/pkg/store"
@@ -54,6 +55,16 @@ type clusterScan struct {
 	// to project the monthly savings of that pool's recommendation, when an
 	// exact price can be joined. See pkg/analyzer/node_optimization_savings.go.
 	nodeOptimizationSavings []analyzer.NodeOptimizationSavingsProjection
+
+	// nodeOptimizationGeneration is the ClusterSnapshot generation that
+	// produced nodeOptimization/nodeOptimizationSavings when they came from
+	// the coordinator-driven path (node_optimization_runtime.go), or 0 for
+	// results from the legacy runFullScan path below. It exists purely as a
+	// defensive, provenance-documenting guard: Coordinator's single-threaded
+	// loop already makes an older generation overwriting a newer one
+	// structurally impossible (see pkg/clusterstate/coordinator.go), so this
+	// field is never relied on to paper over a real ordering bug.
+	nodeOptimizationGeneration uint64
 }
 
 // ── Per-cluster state ─────────────────────────────────────────────────────────
@@ -79,6 +90,40 @@ type dashboardState struct {
 	// from it. Analysis continues to come entirely from runFullScan below,
 	// unchanged.
 	acquisition *acquisition.Runtime
+
+	// coordinator is this cluster's Phase 4B coalescing coordinator, driving
+	// the Phase 4C Node Optimization migration (node_optimization_runtime.go)
+	// off acquisition's ClusterState instead of a direct Kubernetes call. Set
+	// once at startup alongside acquisition, before any concurrent reader
+	// could observe it, and never reassigned afterward — same no-lock
+	// convention as acquisition above.
+	coordinator *clusterstate.Coordinator
+}
+
+// preserveNewerCoordinatorNodeOptimization guards refresh's wholesale
+// *clusterScan replacement (below) against clobbering a newer,
+// coordinator-published Node Optimization result (docs/08 Phase 4C) with
+// the legacy scan's own — always generation-less — step 6 computation.
+//
+// previous is the *clusterScan refresh is about to replace; next is the
+// one legacy runFullScan just built and is about to publish. The legacy
+// computation itself is intentionally still run every cycle regardless
+// (node_optimization_runtime.go documents why disabling it is unsafe); this
+// only decides which result the swap actually publishes. previous may be
+// nil (the very first scan for this cluster).
+//
+// The coordinator's own publishNodeOptimization already guards the
+// opposite direction (an older coordinator generation can never overwrite
+// a newer one, nor a legacy result that arrived after it — see its
+// generation check), so this is the one remaining place a newer result can
+// be lost: refresh does not go through publishNodeOptimization at all.
+func preserveNewerCoordinatorNodeOptimization(previous, next *clusterScan) {
+	if previous == nil || previous.nodeOptimizationGeneration == 0 {
+		return
+	}
+	next.nodeOptimization = previous.nodeOptimization
+	next.nodeOptimizationSavings = previous.nodeOptimizationSavings
+	next.nodeOptimizationGeneration = previous.nodeOptimizationGeneration
 }
 
 func (s *dashboardState) refresh(clusterList []string) error {
@@ -101,6 +146,7 @@ func (s *dashboardState) refresh(clusterList []string) error {
 	page := renderHTML(scan, s.ctx, clusterList)
 
 	s.mu.Lock()
+	preserveNewerCoordinatorNodeOptimization(s.scan, scan)
 	s.scan = scan
 	s.htmlPage = page
 	s.mu.Unlock()

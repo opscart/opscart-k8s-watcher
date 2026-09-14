@@ -87,13 +87,22 @@ func (s *ClusterState) Update(resources ClusterResources) {
 }
 
 // SetAcquisitionState records the cluster's current overall acquisition
-// trustworthiness. It is independent of Update: acquisition health can
-// change without new resources arriving (e.g. a freshness boundary
-// crossed) or resources can change without acquisition health changing.
-func (s *ClusterState) SetAcquisitionState(state AcquisitionState) {
+// trustworthiness and reports whether it actually changed. It is
+// independent of Update: acquisition health can change without new
+// resources arriving (e.g. a freshness boundary crossed) or resources can
+// change without acquisition health changing.
+//
+// The returned bool exists so a caller whose only externally observable
+// effect is an acquisition-state transition (pkg/acquisition's health
+// model — see recomputeHealth) can tell whether that transition needs its
+// own Publish: setting the same state again is not a meaningful change and
+// must not manufacture a new generation or publications signal.
+func (s *ClusterState) SetAcquisitionState(state AcquisitionState) (changed bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	changed = s.acquisition != state
 	s.acquisition = state
+	return changed
 }
 
 // SetResourceState records acquisition metadata for one resource kind.

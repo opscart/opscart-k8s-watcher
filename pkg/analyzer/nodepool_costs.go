@@ -377,8 +377,24 @@ func (b *nodePoolBuilder) build(npa *NodePoolCostAnalyzer) models.NodePoolCost {
 	}
 }
 
-// extractNodeInfo reads node labels/metadata to populate NodeInfo
-func (npa *NodePoolCostAnalyzer) extractNodeInfo(node corev1.Node) models.NodeInfo {
+// NodeInfoFromNode derives cost/scheduling identity and capacity for a
+// single Kubernetes Node from its labels, status, and allocatable
+// resources — no clientset, cluster-wide state, or pricing-provider
+// lookup. It is a pure function of node, so callers outside this analyzer
+// (e.g. docs/08 Phase 4C's Node Optimization migration, which needs this
+// same evidence sourced from a ClusterSnapshot generation rather than a
+// live List call) can reuse it directly instead of reimplementing label
+// parsing that must otherwise be kept in sync by hand in two places.
+//
+// It intentionally leaves two things to the caller, exactly as
+// AnalyzeNodePoolCosts already does below:
+//   - CPURequested/MemGBRequested, which are pod-derived (a cluster-wide
+//     Pod list, not anything reachable from a single Node).
+//   - A manual cloud-provider override, which is analyzer configuration —
+//     not evidence observable on the Node itself — and gets applied by the
+//     caller afterward (see AnalyzeNodePoolCosts' own providerOverride
+//     step).
+func NodeInfoFromNode(node corev1.Node) models.NodeInfo {
 	labels := node.Labels
 
 	info := models.NodeInfo{
@@ -437,6 +453,11 @@ func (npa *NodePoolCostAnalyzer) extractNodeInfo(node corev1.Node) models.NodeIn
 	info.MemGBCapacity = float64(memQ.Value()) / (1024 * 1024 * 1024)
 
 	return info
+}
+
+// extractNodeInfo reads node labels/metadata to populate NodeInfo.
+func (npa *NodePoolCostAnalyzer) extractNodeInfo(node corev1.Node) models.NodeInfo {
+	return NodeInfoFromNode(node)
 }
 
 // extractRegion gets region from any node

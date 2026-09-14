@@ -107,6 +107,20 @@ func TestAcquisitionStatePropagatesToSnapshot(t *testing.T) {
 	}
 }
 
+func TestSetAcquisitionStateReportsWhetherItChanged(t *testing.T) {
+	state := NewClusterState("cluster-a") // starts STALE
+
+	if changed := state.SetAcquisitionState(AcquisitionHealthy); !changed {
+		t.Fatal("STALE -> HEALTHY must report changed = true")
+	}
+	if changed := state.SetAcquisitionState(AcquisitionHealthy); changed {
+		t.Fatal("setting the same state again must report changed = false")
+	}
+	if changed := state.SetAcquisitionState(AcquisitionDegraded); !changed {
+		t.Fatal("HEALTHY -> DEGRADED must report changed = true")
+	}
+}
+
 func TestResourceStatePropagatesToSnapshot(t *testing.T) {
 	state := NewClusterState("cluster-a")
 	observedAt := time.Now().Truncate(time.Second)
