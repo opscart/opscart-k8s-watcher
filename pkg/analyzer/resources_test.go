@@ -5,6 +5,7 @@ import (
 
 	"github.com/opscart/opscart-k8s-watcher/pkg/models"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
@@ -159,5 +160,98 @@ func TestPodWorkloadMap(t *testing.T) {
 	}
 	if len(got) != 2 {
 		t.Errorf("expected 2 entries (bare pod excluded), got %d: %+v", len(got), got)
+	}
+}
+
+// ── AnalyzeResources: docs/08 Phase 4D.1's acquisition/analysis split.
+// AnalyzeClusterResources (client-based, CLI + legacy dashboard scan) now
+// delegates to AnalyzeResources after its own LIST calls — these tests
+// prove that extraction preserved the original algorithm's behavior
+// ("existing Resource Analyzer outputs remain equivalent for identical
+// inputs"), since there is only one analysis implementation to test now. ──
+
+func podWithRequest(namespace, name, ownerKind, ownerName, cpu, memory string) corev1.Pod {
+	return corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      name,
+			Namespace: namespace,
+			OwnerReferences: []metav1.OwnerReference{
+				{Kind: ownerKind, Name: ownerName, Controller: boolPtr(true)},
+			},
+		},
+		Spec: corev1.PodSpec{
+			Containers: []corev1.Container{{
+				Resources: corev1.ResourceRequirements{
+					Requests: corev1.ResourceList{
+						corev1.ResourceCPU:    resource.MustParse(cpu),
+						corev1.ResourceMemory: resource.MustParse(memory),
+					},
+				},
+			}},
+		},
+	}
+}
+
+func TestAnalyzeResourcesComputesCapacityWorkloadsAndNamespaceUsage(t *testing.T) {
+	nodes := []corev1.Node{
+		{
+			ObjectMeta: metav1.ObjectMeta{Name: "node-a"},
+			Status: corev1.NodeStatus{
+				Allocatable: corev1.ResourceList{
+					corev1.ResourceCPU:    resource.MustParse("4"),
+					corev1.ResourceMemory: resource.MustParse("16Gi"),
+				},
+			},
+		},
+	}
+	pods := []corev1.Pod{
+		podWithRequest("payments", "payments-api-7d8f9c6b5-abc12", "ReplicaSet", "payments-api-7d8f9c6b5", "1", "2Gi"),
+	}
+
+	analysis := AnalyzeResources(pods, nodes, "")
+
+	if analysis.TotalCPUCores != 4 {
+		t.Fatalf("TotalCPUCores = %v, want 4", analysis.TotalCPUCores)
+	}
+	if analysis.TotalMemoryGB != 16 {
+		t.Fatalf("TotalMemoryGB = %v, want 16", analysis.TotalMemoryGB)
+	}
+	if analysis.TotalCPURequested != 1 {
+		t.Fatalf("TotalCPURequested = %v, want 1", analysis.TotalCPURequested)
+	}
+	if len(analysis.Workloads) != 1 || analysis.Workloads[0].Name != "payments-api" {
+		t.Fatalf("Workloads = %+v, want one payments-api workload", analysis.Workloads)
+	}
+	if len(analysis.PodWorkloads) != 1 {
+		t.Fatalf("PodWorkloads = %+v, want one entry", analysis.PodWorkloads)
+	}
+	if len(analysis.Namespaces) != 1 || analysis.Namespaces[0].PodCount != 1 {
+		t.Fatalf("Namespaces = %+v, want one namespace with 1 pod", analysis.Namespaces)
+	}
+}
+
+func TestAnalyzeResourcesFiltersPodsByNamespace(t *testing.T) {
+	pods := []corev1.Pod{
+		{ObjectMeta: metav1.ObjectMeta{Name: "a", Namespace: "payments"}},
+		{ObjectMeta: metav1.ObjectMeta{Name: "b", Namespace: "checkout"}},
+	}
+
+	analysis := AnalyzeResources(pods, nil, "payments")
+
+	if len(analysis.Namespaces) != 1 || analysis.Namespaces[0].Name != "payments" {
+		t.Fatalf("Namespaces = %+v, want only payments", analysis.Namespaces)
+	}
+}
+
+func TestAnalyzeResourcesEmptyNamespaceIsClusterWide(t *testing.T) {
+	pods := []corev1.Pod{
+		{ObjectMeta: metav1.ObjectMeta{Name: "a", Namespace: "payments"}},
+		{ObjectMeta: metav1.ObjectMeta{Name: "b", Namespace: "checkout"}},
+	}
+
+	analysis := AnalyzeResources(pods, nil, "")
+
+	if len(analysis.Namespaces) != 2 {
+		t.Fatalf("Namespaces = %+v, want both payments and checkout with an empty namespace filter", analysis.Namespaces)
 	}
 }

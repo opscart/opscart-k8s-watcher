@@ -1,9 +1,6 @@
 package main
 
 import (
-	"context"
-
-	"github.com/opscart/opscart-k8s-watcher/pkg/acquisition"
 	"github.com/opscart/opscart-k8s-watcher/pkg/analyzer"
 	"github.com/opscart/opscart-k8s-watcher/pkg/clusterstate"
 	"github.com/opscart/opscart-k8s-watcher/pkg/models"
@@ -12,10 +9,14 @@ import (
 
 // This file is docs/08 Phase 4C: the first analyzer migrated off direct
 // Kubernetes acquisition onto the shared ClusterSnapshot pipeline built in
-// Phases 2-4B. Only Node Optimization moves here — every other analyzer
-// (Cost, Node Health, Resource Analyzer, Waste, Security, Network,
+// Phases 2-4B. Only Node Optimization's own analysis logic lives here —
+// every other analyzer (Cost, Node Health, Waste, Security, Network,
 // incidents) keeps acquiring Kubernetes state directly via runFullScan
-// (server.go), unchanged.
+// (server.go), unchanged. Resource Analyzer moved to the shared coordinator
+// too in Phase 4D.1 (resource_analysis_runtime.go), but that is a separate
+// file: the coordinator-construction glue that calls both now lives in
+// acquisition_runtime.go (see runCoordinatedAnalysis/startAnalysisCoordinator
+// there) rather than in either analyzer's own file.
 //
 // The legacy Node Optimization block inside runFullScan (step 6) is
 // deliberately left in place, not disabled: runFullScan's caller (refresh,
@@ -174,22 +175,4 @@ func publishNodeOptimization(
 	updated.nodeOptimizationSavings = savings
 	updated.nodeOptimizationGeneration = generation
 	state.scan = &updated
-}
-
-// newNodeOptimizationAnalysis adapts runNodeOptimization into the
-// clusterstate.AnalysisFunc shape Coordinator calls.
-func newNodeOptimizationAnalysis(state *dashboardState) clusterstate.AnalysisFunc {
-	return func(snapshot *clusterstate.ClusterSnapshot) {
-		runNodeOptimization(state, snapshot)
-	}
-}
-
-// startNodeOptimizationCoordinator creates and starts this cluster's Phase 4B
-// coordinator over rt's ClusterState, wired to the Node Optimization analysis
-// above. Exactly one coordinator exists per cluster, matching rt's
-// ClusterState one-to-one (docs/08 §13).
-func startNodeOptimizationCoordinator(ctx context.Context, state *dashboardState, rt *acquisition.Runtime) {
-	coordinator := clusterstate.NewCoordinator(rt.ClusterState(), newNodeOptimizationAnalysis(state))
-	state.coordinator = coordinator
-	go coordinator.Run(ctx)
 }

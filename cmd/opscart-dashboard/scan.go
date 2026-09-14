@@ -29,9 +29,12 @@ type clusterScan struct {
 	nodeHealth []models.NodeConditionFinding
 
 	// AllWorkloads is every Deployment/StatefulSet/DaemonSet the scan
-	// observed, regardless of the --breakdown flag — retained from the pod
-	// enumeration ResourceAnalyzer.AnalyzeClusterResources already performs
-	// for cost allocation, not a second cluster fetch.
+	// observed, regardless of the --breakdown flag. Written by either the
+	// legacy pod enumeration ResourceAnalyzer.AnalyzeClusterResources already
+	// performs for cost allocation (not a second cluster fetch), or — since
+	// docs/08 Phase 4D.1 — the coordinator-driven path
+	// (resource_analysis_runtime.go), whichever last published a newer
+	// generation; see resourceAnalysisGeneration.
 	AllWorkloads []models.WorkloadRef
 
 	// PodWorkloads is the confirmed pod -> owning workload map from the
@@ -41,6 +44,15 @@ type clusterScan struct {
 	// which cannot distinguish a real StatefulSet replica from an
 	// unrelated pod sharing its naming pattern.
 	PodWorkloads map[string]models.WorkloadRef
+
+	// resourceAnalysisGeneration is the ClusterSnapshot generation that
+	// produced AllWorkloads/PodWorkloads when they came from the
+	// coordinator-driven path (resource_analysis_runtime.go), or 0 for
+	// results from the legacy runFullScan path. Same defense-in-depth
+	// provenance guard as nodeOptimizationGeneration below — see its
+	// comment for why this is never relied on to paper over a real
+	// ordering bug.
+	resourceAnalysisGeneration uint64
 
 	// nodeOptimization is the read-only consolidation-simulation
 	// recommendation contract (see pkg/analyzer/node_optimization_recommendation.go),
@@ -86,13 +98,13 @@ type dashboardState struct {
 	// above — reading it needs no lock. It is nil if that cluster's
 	// Kubernetes client could not be constructed at startup.
 	//
-	// Phase 4A only starts it; nothing yet reads scan or analysis data
-	// from it. Analysis continues to come entirely from runFullScan below,
-	// unchanged.
+	// Phase 4A only starts it; runFullScan below still acquires and analyzes
+	// independently. Its ClusterState is read only via coordinator below.
 	acquisition *acquisition.Runtime
 
 	// coordinator is this cluster's Phase 4B coalescing coordinator, driving
-	// the Phase 4C Node Optimization migration (node_optimization_runtime.go)
+	// every Phase 4C/4D-migrated analyzer (currently Node Optimization and
+	// Resource Analyzer — see acquisition_runtime.go's runCoordinatedAnalysis)
 	// off acquisition's ClusterState instead of a direct Kubernetes call. Set
 	// once at startup alongside acquisition, before any concurrent reader
 	// could observe it, and never reassigned afterward — same no-lock
@@ -126,6 +138,24 @@ func preserveNewerCoordinatorNodeOptimization(previous, next *clusterScan) {
 	next.nodeOptimizationGeneration = previous.nodeOptimizationGeneration
 }
 
+// preserveNewerCoordinatorResourceAnalysis is
+// preserveNewerCoordinatorNodeOptimization's exact counterpart for Resource
+// Analyzer (docs/08 Phase 4D.1): guards refresh's wholesale *clusterScan
+// replacement against clobbering a newer, coordinator-published
+// AllWorkloads/PodWorkloads result with the legacy scan's own —
+// always generation-less — computation. See
+// preserveNewerCoordinatorNodeOptimization for the full reasoning; this is
+// the same pattern applied to a second, independent analyzer, not a new
+// versioning system.
+func preserveNewerCoordinatorResourceAnalysis(previous, next *clusterScan) {
+	if previous == nil || previous.resourceAnalysisGeneration == 0 {
+		return
+	}
+	next.AllWorkloads = previous.AllWorkloads
+	next.PodWorkloads = previous.PodWorkloads
+	next.resourceAnalysisGeneration = previous.resourceAnalysisGeneration
+}
+
 func (s *dashboardState) refresh(clusterList []string) error {
 	if !s.scanning.CompareAndSwap(false, true) {
 		return nil
@@ -147,6 +177,7 @@ func (s *dashboardState) refresh(clusterList []string) error {
 
 	s.mu.Lock()
 	preserveNewerCoordinatorNodeOptimization(s.scan, scan)
+	preserveNewerCoordinatorResourceAnalysis(s.scan, scan)
 	s.scan = scan
 	s.htmlPage = page
 	s.mu.Unlock()

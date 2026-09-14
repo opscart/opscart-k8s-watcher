@@ -5,6 +5,7 @@ import (
 	"log"
 
 	"github.com/opscart/opscart-k8s-watcher/pkg/acquisition"
+	"github.com/opscart/opscart-k8s-watcher/pkg/clusterstate"
 )
 
 // startAcquisitionRuntimes starts one informer-backed acquisition runtime
@@ -45,6 +46,34 @@ func (srv *server) startAcquisition(ctx context.Context, clusterCtx string) {
 	rt.Start(ctx)
 	state := srv.getState(clusterCtx)
 	state.acquisition = rt
-	startNodeOptimizationCoordinator(ctx, state, rt)
+	startAnalysisCoordinator(ctx, state, rt)
 	log.Printf("[%s] acquisition runtime started", displayName(clusterCtx))
+}
+
+// runCoordinatedAnalysis is the single per-cluster Coordinator callback
+// (docs/08 §2.5: "one coalesced generation → run all migrated analyzers").
+// Every Phase 4C/4D-migrated analyzer's entry point is called here, in this
+// one function — not via a second Coordinator, dependency routing, or
+// dirty-resource tracking. Each entry point independently gates on
+// snapshot.Trustworthy() and its own generation guard (see
+// runNodeOptimization/runResourceAnalysis), so a skip in one never blocks
+// another, and neither can overwrite a newer result the other's guard
+// already protects.
+func runCoordinatedAnalysis(state *dashboardState, snapshot *clusterstate.ClusterSnapshot) {
+	runNodeOptimization(state, snapshot)
+	runResourceAnalysis(state, snapshot)
+}
+
+// startAnalysisCoordinator creates and starts this cluster's Phase 4B
+// coordinator over rt's ClusterState, wired to runCoordinatedAnalysis.
+// Exactly one Coordinator exists per cluster, matching rt's ClusterState
+// one-to-one (docs/08 §13) — adding another migrated analyzer means adding
+// its call to runCoordinatedAnalysis above, not creating a second
+// Coordinator here.
+func startAnalysisCoordinator(ctx context.Context, state *dashboardState, rt *acquisition.Runtime) {
+	coordinator := clusterstate.NewCoordinator(rt.ClusterState(), func(snapshot *clusterstate.ClusterSnapshot) {
+		runCoordinatedAnalysis(state, snapshot)
+	})
+	state.coordinator = coordinator
+	go coordinator.Run(ctx)
 }

@@ -1,19 +1,15 @@
 package main
 
 import (
-	"context"
 	"reflect"
 	"testing"
-	"time"
 
-	"github.com/opscart/opscart-k8s-watcher/pkg/acquisition"
 	"github.com/opscart/opscart-k8s-watcher/pkg/analyzer"
 	"github.com/opscart/opscart-k8s-watcher/pkg/clusterstate"
 	"github.com/opscart/opscart-k8s-watcher/pkg/models"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/client-go/kubernetes/fake"
 )
 
 func TestSnapshotResourceCopyDereferencesIndependently(t *testing.T) {
@@ -362,55 +358,6 @@ func TestRunNodeOptimizationEndToEndOnTrustworthySnapshot(t *testing.T) {
 	if len(state.scan.nodeOptimizationSavings) != len(state.scan.nodeOptimization) {
 		t.Fatal("expected nodeOptimizationSavings aligned 1:1 with nodeOptimization")
 	}
-}
-
-// TestStartNodeOptimizationCoordinatorDrivesPublishEndToEnd proves the actual
-// wiring in acquisition_runtime.go: a Coordinator created by
-// startNodeOptimizationCoordinator against a real acquisition.Runtime's
-// ClusterState eventually calls runNodeOptimization and publishes a result,
-// through the real coalescing window (pkg/clusterstate.coalesceWindow), not
-// a test seam.
-func TestStartNodeOptimizationCoordinatorDrivesPublishEndToEnd(t *testing.T) {
-	state := &dashboardState{scan: &clusterScan{report: &models.CloudCostReport{Currency: "USD"}}}
-
-	client := fake.NewSimpleClientset(&corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "node-a"}})
-	rt := acquisition.NewRuntime("cluster-a", client)
-
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	rt.Start(ctx)
-	startNodeOptimizationCoordinator(ctx, state, rt)
-
-	if state.coordinator == nil {
-		t.Fatal("expected startNodeOptimizationCoordinator to set state.coordinator")
-	}
-	if !rt.WaitForSync(ctx) {
-		t.Fatal("runtime did not reach initial sync")
-	}
-
-	// WaitForSync's own recomputeHealth call (pkg/acquisition/runtime.go)
-	// updates ClusterState's acquisition field to HEALTHY but does not
-	// itself Publish a new generation — the snapshot already published
-	// during initial sync may still be stamped RESYNCING. Creating one more
-	// object forces a genuine informer event, which syncResource turns into
-	// a fresh Publish carrying the now-HEALTHY state, giving this test a
-	// deterministic trustworthy snapshot instead of racing that transition.
-	if _, err := client.CoreV1().Nodes().Create(ctx, &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "node-b"}}, metav1.CreateOptions{}); err != nil {
-		t.Fatalf("failed to create trigger node: %v", err)
-	}
-
-	deadline := time.Now().Add(5 * time.Second)
-	for time.Now().Before(deadline) {
-		state.mu.RLock()
-		got := state.scan.nodeOptimizationGeneration
-		state.mu.RUnlock()
-		if got > 0 {
-			return
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-	t.Fatal("coordinator did not publish a Node Optimization result within 5s of a trustworthy initial sync")
 }
 
 // ── Audit point 3: legacy full-scan vs. coordinator publish ordering ──────

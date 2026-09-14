@@ -6,6 +6,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/opscart/opscart-k8s-watcher/pkg/acquisition"
+	"github.com/opscart/opscart-k8s-watcher/pkg/clusterstate"
+	"github.com/opscart/opscart-k8s-watcher/pkg/models"
 	"github.com/opscart/opscart-k8s-watcher/pkg/store"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -134,6 +137,105 @@ func TestShutdownStopsAcquisitionBeforeSyncCompletes(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("WaitForSync did not respect shutdown cancellation within 2s — informer loop may not be stopping")
+	}
+}
+
+// ── Phase 4D.1: one Coordinator drives every migrated analyzer ────────────
+
+// TestRunCoordinatedAnalysisRunsBothAnalyzers proves runCoordinatedAnalysis
+// invokes Node Optimization and Resource Analyzer from the same snapshot —
+// "one coalesced generation -> all migrated analyzers run" (docs/08 §2.5) —
+// without needing a real Coordinator or informer wiring to prove it.
+func TestRunCoordinatedAnalysisRunsBothAnalyzers(t *testing.T) {
+	state := &dashboardState{scan: &clusterScan{report: &models.CloudCostReport{Currency: "USD"}}}
+
+	cs := clusterstate.NewClusterState("cluster-a")
+	cs.Update(clusterstate.ClusterResources{
+		Nodes: []*corev1.Node{{ObjectMeta: metav1.ObjectMeta{Name: "node-a"}}},
+		Pods:  []*corev1.Pod{deploymentPod("payments", "payments-api-abc12", "payments-api")},
+	})
+	cs.SetAcquisitionState(clusterstate.AcquisitionHealthy)
+	snapshot := cs.Publish()
+
+	runCoordinatedAnalysis(state, snapshot)
+
+	if state.scan.nodeOptimizationGeneration != snapshot.Generation() {
+		t.Fatalf("nodeOptimizationGeneration = %d, want %d", state.scan.nodeOptimizationGeneration, snapshot.Generation())
+	}
+	if state.scan.resourceAnalysisGeneration != snapshot.Generation() {
+		t.Fatalf("resourceAnalysisGeneration = %d, want %d", state.scan.resourceAnalysisGeneration, snapshot.Generation())
+	}
+}
+
+// TestStartAnalysisCoordinatorDrivesBothAnalyzersEndToEnd proves the actual
+// production wiring: a Coordinator created by startAnalysisCoordinator
+// against a real acquisition.Runtime's ClusterState eventually publishes
+// both Node Optimization and Resource Analyzer results, through the real
+// coalescing window (pkg/clusterstate.coalesceWindow) — "latest generation
+// wins after coalescing" for both analyzers at once, not a test seam.
+func TestStartAnalysisCoordinatorDrivesBothAnalyzersEndToEnd(t *testing.T) {
+	state := &dashboardState{scan: &clusterScan{report: &models.CloudCostReport{Currency: "USD"}}}
+
+	client := fake.NewSimpleClientset(&corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "node-a"}})
+	rt := acquisition.NewRuntime("cluster-a", client)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	rt.Start(ctx)
+	startAnalysisCoordinator(ctx, state, rt)
+
+	if state.coordinator == nil {
+		t.Fatal("expected startAnalysisCoordinator to set state.coordinator")
+	}
+	if !rt.WaitForSync(ctx) {
+		t.Fatal("runtime did not reach initial sync")
+	}
+
+	// WaitForSync's own recomputeHealth call (pkg/acquisition/runtime.go)
+	// updates ClusterState's acquisition field to HEALTHY but does not
+	// itself Publish a new generation — the snapshot already published
+	// during initial sync may still be stamped RESYNCING. Creating one more
+	// object forces a genuine informer event, which syncResource turns into
+	// a fresh Publish carrying the now-HEALTHY state, giving this test a
+	// deterministic trustworthy snapshot instead of racing that transition.
+	if _, err := client.CoreV1().Nodes().Create(ctx, &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "node-b"}}, metav1.CreateOptions{}); err != nil {
+		t.Fatalf("failed to create trigger node: %v", err)
+	}
+
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		state.mu.RLock()
+		nodeOptGen := state.scan.nodeOptimizationGeneration
+		resourceGen := state.scan.resourceAnalysisGeneration
+		state.mu.RUnlock()
+		if nodeOptGen > 0 && resourceGen > 0 {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatal("coordinator did not publish both Node Optimization and Resource Analyzer results within 5s of a trustworthy initial sync")
+}
+
+// TestAnalysisCoordinatorsAreClusterSpecific proves each cluster gets its
+// own Coordinator instance — no shared coordinator, no cross-cluster leakage.
+func TestAnalysisCoordinatorsAreClusterSpecific(t *testing.T) {
+	srv := newServer([]string{"cluster-a", "cluster-b"}, store.NullStore{}, 0, false)
+	srv.kubeClientFor = func(string, *apiCounters) (kubernetes.Interface, error) {
+		return fake.NewSimpleClientset(), nil
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	srv.startAcquisitionRuntimes(ctx)
+
+	coordA := srv.getState("cluster-a").coordinator
+	coordB := srv.getState("cluster-b").coordinator
+	if coordA == nil || coordB == nil {
+		t.Fatalf("expected a coordinator for both clusters, got a=%v b=%v", coordA, coordB)
+	}
+	if coordA == coordB {
+		t.Fatal("cluster-a and cluster-b share the same *clusterstate.Coordinator instance")
 	}
 }
 
