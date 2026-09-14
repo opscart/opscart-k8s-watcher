@@ -26,14 +26,17 @@ import (
 // observation) avoids that; this file only ever updates what the dashboard
 // displays.
 //
-// The legacy Node Health call inside runFullScan (scanner.FindNodeHealthConditions)
-// is deliberately left in place, not disabled: it is the sole writer of the
-// incident batch's Node Health evidence, and its retained Node snapshot
-// (Scanner.NodeSnapshot()) is still the sole Node source for Node
-// Optimization's legacy duplicate execution — neither migrates in this
-// slice. Duplicate execution for the DISPLAY value is tolerated the same
-// way Phase 4C/4D.1 established: whichever publishes last wins the
-// display, guarded by publishNodeHealth's generation check below.
+// The legacy scan cycle (legacy_analysis.go's runLegacyAnalysis, since
+// docs/08 Phase 4E) calls this same buildNodeHealth directly — not
+// disabled: it is the sole writer of the incident batch's Node Health
+// evidence, and neither it nor Node Optimization's legacy duplicate
+// execution migrates away in this slice. Duplicate execution for the
+// DISPLAY value is tolerated the same way Phase 4C/4D.1 established:
+// whichever publishes last wins the display, guarded by publishNodeHealth's
+// generation check below. Before Phase 4E, the legacy pass called
+// scanner.NewScannerWithClientset(clientset, ctx).FindNodeHealthConditions()
+// directly; it now shares this file's Kubernetes-free implementation
+// instead, sourced from the same ClusterSnapshot the Coordinator reads.
 
 // buildNodeHealth runs the same detection+correlation algorithm
 // FindNodeHealthConditions uses (scanner.AnalyzeNodeHealth), sourced from

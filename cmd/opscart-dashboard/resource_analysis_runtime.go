@@ -14,19 +14,16 @@ import (
 // invoked from the same coalesced generation, and its doc comment for why
 // that combining logic lives there rather than in either analyzer's file.
 //
-// The legacy Resource Analyzer call inside runFullScan
-// (analyzer.NewResourceAnalyzer + AnalyzeClusterResources, server.go step
-// after Cost) is deliberately left in place, not disabled: its retained Pod
-// snapshot (ResourceAnalyzer.PodSnapshot()) is still the sole Pod-acquisition
-// path for Security, Waste, Network, and Node Optimization's legacy
-// duplicate execution — none of which migrate in this slice — and its full
-// *models.ClusterResourceAnalysis output still feeds the temporary legacy
-// Cost report synchronously in the same function. The coordinator-owned Cost
-// report independently derives equivalent resource analysis from its shared
-// snapshot (cost_runtime.go). Disabling this legacy call before Phase 4E
-// would break the remaining legacy consumers. Duplicate execution is
-// temporary; generation preservation keeps coordinator output authoritative
-// once one has been published.
+// The legacy scan cycle (legacy_analysis.go's runLegacyAnalysis, since
+// docs/08 Phase 4E) calls this same buildResourceAnalysis directly — not
+// disabled: duplicate execution for the DISPLAY value is tolerated the same
+// way Phase 4C established, generation preservation keeps coordinator
+// output authoritative once one has been published. Before Phase 4E, the
+// legacy pass called analyzer.NewResourceAnalyzer(clientset) +
+// AnalyzeClusterResources directly, and its retained Pod snapshot
+// (ResourceAnalyzer.PodSnapshot()) was the sole Pod-acquisition path
+// Security/Waste/Network's legacy duplicate execution reused; all four now
+// read resources.Pods from the same ClusterSnapshot instead.
 
 // buildResourceAnalysis runs analyzer.AnalyzeResources — the same resource
 // analysis algorithm AnalyzeClusterResources itself now delegates to

@@ -270,27 +270,62 @@ func TestAnalysisCoordinatorsAreClusterSpecific(t *testing.T) {
 	}
 }
 
-// TestLegacyRefreshUnaffectedByAcquisitionStartup proves the existing scan
-// path's behavior is unchanged by also starting that cluster's acquisition
-// runtime — the Phase 4A coexistence requirement.
-func TestLegacyRefreshUnaffectedByAcquisitionStartup(t *testing.T) {
-	srv := newServer([]string{bogusClusterCtx}, store.NullStore{}, 0, false)
-	srv.kubeClientFor = func(string, *apiCounters) (kubernetes.Interface, error) {
-		return fake.NewSimpleClientset(), nil
-	}
+// TestLegacyRefreshRequiresTrustworthyAcquisition proves docs/08 Phase 4E:
+// refresh (scan.go) now sources its evidence entirely from the cluster's
+// ClusterSnapshot rather than its own direct Kubernetes call. It must fail
+// with no acquisition runtime at all, fail before that runtime's informers
+// have completed their initial sync, and succeed once they have.
+func TestLegacyRefreshRequiresTrustworthyAcquisition(t *testing.T) {
+	t.Run("no acquisition runtime", func(t *testing.T) {
+		srv := newServer([]string{"cluster-a"}, store.NullStore{}, 0, false)
+		srv.kubeClientFor = func(string, *apiCounters) (kubernetes.Interface, error) {
+			return nil, fmt.Errorf("no kubeconfig context named %q", "cluster-a")
+		}
+		srv.startAcquisitionRuntimes(context.Background())
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	srv.startAcquisitionRuntimes(ctx)
+		if srv.getState("cluster-a").acquisition != nil {
+			t.Fatal("expected no acquisition runtime for a cluster whose client failed")
+		}
+		if err := srv.getState("cluster-a").refresh([]string{"cluster-a"}); err == nil {
+			t.Fatal("expected refresh() to fail with no acquisition runtime")
+		}
+	})
 
-	if srv.getState(bogusClusterCtx).acquisition == nil {
-		t.Fatal("expected an acquisition runtime even for the cluster refresh() will fail against")
-	}
+	t.Run("not yet synced", func(t *testing.T) {
+		client := fake.NewSimpleClientset()
+		release := make(chan struct{})
+		client.PrependReactor("list", "pods", func(k8stesting.Action) (bool, runtime.Object, error) {
+			<-release
+			return false, nil, nil
+		})
+		defer close(release)
 
-	// runFullScan builds its own client via kubeClientWithCounters, not
-	// srv.kubeClientFor — bogusClusterCtx fails deterministically without
-	// touching the network, exactly as it did before acquisition existed.
-	if err := srv.getState(bogusClusterCtx).refresh([]string{bogusClusterCtx}); err == nil {
-		t.Fatal("expected refresh() to fail for a nonexistent kubeconfig context, as before Phase 4A")
-	}
+		srv := newServer([]string{"cluster-a"}, store.NullStore{}, 0, false)
+		srv.kubeClientFor = func(string, *apiCounters) (kubernetes.Interface, error) { return client, nil }
+		srv.startAcquisitionRuntimes(context.Background()) // Pods' LIST is blocked: this cluster never finishes syncing
+
+		if err := srv.getState("cluster-a").refresh([]string{"cluster-a"}); err == nil {
+			t.Fatal("expected refresh() to fail before informers have synced")
+		}
+	})
+
+	t.Run("synced", func(t *testing.T) {
+		srv := newServer([]string{"cluster-a"}, store.NullStore{}, 0, false)
+		srv.kubeClientFor = func(string, *apiCounters) (kubernetes.Interface, error) {
+			return fake.NewSimpleClientset(&corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "node-a"}}), nil
+		}
+
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		srv.startAcquisitionRuntimes(ctx)
+
+		rt := srv.getState("cluster-a").acquisition
+		if !rt.WaitForSync(ctx) {
+			t.Fatal("WaitForSync returned false, want true")
+		}
+
+		if err := srv.getState("cluster-a").refresh([]string{"cluster-a"}); err != nil {
+			t.Fatalf("refresh() failed after successful sync: %v", err)
+		}
+	})
 }

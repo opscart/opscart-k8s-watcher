@@ -23,10 +23,15 @@ import (
 // The full models.CloudCostReport is coordinator-owned: pool pricing,
 // canonical namespace allocation, and optimization scenarios are all derived
 // from the same snapshot generation and published atomically. The legacy
-// runFullScan path still builds the same report during Phase 4 coexistence,
-// but refresh's generation-preservation guard prevents it from replacing a
-// coordinator-published report. Phase 4E can therefore remove legacy
-// acquisition without another Cost analyzer migration.
+// scan cycle (legacy_analysis.go's runLegacyAnalysis, since docs/08 Phase
+// 4E) still builds the same report by calling buildCostAnalysis directly —
+// the same function this file exposes to the Coordinator — but refresh's
+// generation-preservation guard prevents that legacy result from replacing
+// a coordinator-published one. Phase 4E removed the legacy path's own
+// Kubernetes acquisition (it used to call
+// analyzer.NodePoolCostAnalyzer.AnalyzeNodePoolCostResult(clientset)
+// directly) without requiring another Cost analyzer migration, exactly as
+// anticipated when this file was written.
 //
 // Both the legacy and coordinator paths call into the SAME persistent,
 // per-cluster analyzer.NodePoolCostAnalyzer (dashboardState.costAnalyzer,

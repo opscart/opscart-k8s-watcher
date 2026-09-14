@@ -21,24 +21,28 @@ import (
 // incident batch), and how the two coexist without becoming two
 // independent incident writers or making incident aging generation-driven.
 //
-// The legacy Network call inside runFullScan (analyzer.NewNetworkPolicyAuditor
-// + AuditNetworkPolicies/AuditNetworkPoliciesWithPods, server.go step 4) is
-// deliberately left in place, not disabled: its result feeds
-// CalculateCISScore synchronously in the same function, and Security (which
-// owns that score) is out of scope for this slice. Duplicate execution for
-// the DISPLAY value is tolerated the same way Phase 4C/4D.1/4D.2
-// established: whichever publishes last wins the display, guarded by
-// publishNetworkAnalysis's generation check below.
+// The legacy scan cycle (legacy_analysis.go's runLegacyAnalysis, since
+// docs/08 Phase 4E) calls this same buildNetworkAnalysis directly — not
+// disabled: its result feeds CalculateCISScore synchronously in that same
+// pass, and Security/Network's shared CIS-scoring boundary is out of scope
+// for this slice (see clusterScan.cisResult's doc comment in scan.go).
+// Duplicate execution for the DISPLAY value is tolerated the same way Phase
+// 4C/4D.1/4D.2 established: whichever publishes last wins the display,
+// guarded by publishNetworkAnalysis's generation check below. Before Phase
+// 4E, the legacy pass called analyzer.NewNetworkPolicyAuditor(clientset) +
+// AuditNetworkPolicies/AuditNetworkPoliciesWithPods directly; it now shares
+// this file's Kubernetes-free implementation instead.
 //
-// filterNamespace is always "" here, matching the legacy call site exactly:
-// server.go passes "" to both AuditNetworkPolicies and
-// AuditNetworkPoliciesWithPods regardless of the --namespace flag — that
-// flag only decides which Pod-acquisition strategy runFullScan uses
-// internally (reuse ResourceAnalyzer's snapshot vs. list live), never
-// namespace-scopes the Network audit's own result. skipNamespaces is nil,
-// matching that no dashboard call site configures
-// NetworkPolicyAuditor.WithSkipNamespaces — shouldSkipNamespace's built-in
-// infra-pattern/label strategies are the only skip behavior in play.
+// filterNamespace is always "" here, matching the legacy call site's
+// historical behavior exactly: before Phase 4E, server.go passed "" to both
+// AuditNetworkPolicies and AuditNetworkPoliciesWithPods regardless of the
+// --namespace flag — that flag only ever decided which Pod-acquisition
+// strategy the legacy pass used internally (reuse ResourceAnalyzer's
+// snapshot vs. list live), never namespace-scoped the Network audit's own
+// result. skipNamespaces is nil, matching that no dashboard call site
+// configures NetworkPolicyAuditor.WithSkipNamespaces — shouldSkipNamespace's
+// built-in infra-pattern/label strategies are the only skip behavior in
+// play.
 func buildNetworkAnalysis(resources clusterstate.ClusterResources) *analyzer.NetworkPolicyAudit {
 	namespaces := snapshotResourceCopy(resources.Namespaces)
 	pods := snapshotResourceCopy(resources.Pods)

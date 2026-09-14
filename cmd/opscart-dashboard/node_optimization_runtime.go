@@ -16,26 +16,29 @@ import (
 // This file is docs/08 Phase 4C: the first analyzer migrated off direct
 // Kubernetes acquisition onto the shared ClusterSnapshot pipeline built in
 // Phases 2-4B. Only Node Optimization's own analysis logic lives here —
-// every other analyzer (Cost, Node Health, Waste, Security, Network,
-// incidents) keeps acquiring Kubernetes state directly via runFullScan
-// (server.go), unchanged. Resource Analyzer moved to the shared coordinator
-// too in Phase 4D.1 (resource_analysis_runtime.go), but that is a separate
-// file: the coordinator-construction glue that calls both now lives in
-// acquisition_runtime.go (see runCoordinatedAnalysis/startAnalysisCoordinator
-// there) rather than in either analyzer's own file.
+// every analyzer this pipeline drives (Cost, Resource Analyzer, Node
+// Health, Waste, Security, Network) has its own similarly-named
+// *_runtime.go file; the coordinator-construction glue that calls all seven
+// lives in acquisition_runtime.go (see
+// runCoordinatedAnalysis/startAnalysisCoordinator) rather than in any one
+// analyzer's own file.
 //
-// The legacy Node Optimization block inside runFullScan (step 6) is
-// deliberately left in place, not disabled: runFullScan's caller (refresh,
-// scan.go) replaces dashboardState.scan wholesale every scan cycle, so if
-// the legacy block stopped populating nodeOptimization/nodeOptimizationSavings,
-// the very next legacy scan would silently wipe out this coordinator's more
-// recent result. Avoiding that would require teaching refresh/runFullScan to
-// carry coordinator-owned fields forward across an unrelated scan cycle —
-// exactly the broad runFullScan refactor this migration slice is scoped to
-// avoid. Duplicate execution (legacy scan and coordinator both compute Node
-// Optimization) is tolerated instead; whichever publishes last wins the
-// display, and publishNodeOptimization's generation guard below prevents an
-// older coordinator generation from clobbering a newer one.
+// The legacy scan cycle (legacy_analysis.go's runLegacyAnalysis, since
+// docs/08 Phase 4E) calls this same buildNodeOptimization directly — not
+// disabled: refresh (scan.go) replaces dashboardState.scan wholesale every
+// scan cycle, so if the legacy pass stopped populating
+// nodeOptimization/nodeOptimizationSavings, the very next legacy scan would
+// silently wipe out this coordinator's more recent result. Avoiding that
+// would require teaching refresh to carry coordinator-owned fields forward
+// across an unrelated scan cycle — a broader refactor than either the 4C or
+// 4E migration slice is scoped to. Duplicate execution (legacy pass and
+// coordinator both compute Node Optimization) is tolerated instead;
+// whichever publishes last wins the display, and publishNodeOptimization's
+// generation guard below prevents an older coordinator generation from
+// clobbering a newer one. Before Phase 4E, the legacy pass sourced its own
+// Nodes/Pods/PVCs/PVs via live Kubernetes calls made by Cost/Node
+// Health/Waste's own legacy acquisition; it now reads them from the same
+// ClusterSnapshot the Coordinator reads, via this file's buildNodeOptimization.
 
 // snapshotResourceCopy dereferences a ClusterResources pointer slice into the
 // value slice Node Optimization's existing pkg/analyzer functions expect
@@ -92,13 +95,13 @@ func buildNodeInfosFromSnapshot(nodes []*corev1.Node, report *models.CloudCostRe
 	return infos
 }
 
-// buildNodeOptimization runs the same Node Optimization pipeline runFullScan's
-// legacy step 6 runs, sourced entirely from one ClusterSnapshot generation's
-// resources plus report — the coordinator's own same-generation full Cost
-// result (docs/08 Phase 4D.6; see runCoordinatedAnalysis's Cost-before-Node-
-// Optimization ordering, acquisition_runtime.go). report may be nil if the
-// coordinator has not published one for this cluster yet; both helpers below
-// tolerate that.
+// buildNodeOptimization runs the Node Optimization pipeline both the
+// Coordinator and the legacy scan cycle (legacy_analysis.go) call, sourced
+// entirely from one ClusterSnapshot generation's resources plus report —
+// the same-generation full Cost result (docs/08 Phase 4D.6; see
+// runCoordinatedAnalysis's Cost-before-Node-Optimization ordering,
+// acquisition_runtime.go). report may be nil if Cost has not published one
+// for this cluster yet; both helpers below tolerate that.
 func buildNodeOptimization(
 	resources clusterstate.ClusterResources,
 	report *models.CloudCostReport,

@@ -15,7 +15,8 @@ import (
 // ── Node Optimization page ("Explainable consolidation simulation") ──────────
 //
 // This page renders analyzer.NodeOptimizationRecommendation values already
-// computed during the scan (see runFullScan in server.go). It performs no
+// computed during the scan (see legacy_analysis.go/node_optimization_runtime.go).
+// It performs no
 // Kubernetes, cloud, or pricing calls, and reimplements no scheduling or
 // placement logic — it only projects the analyzer's read-only recommendation
 // contract into presentation-only fields for the template. Near-duplicate

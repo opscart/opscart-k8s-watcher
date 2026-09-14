@@ -139,10 +139,14 @@ func runDashboard(_ *cobra.Command, _ []string) error {
 		srv.backgroundWG.Wait()
 	}()
 
-	// Phase 4A: start each configured cluster's informer-backed acquisition
-	// runtime (docs/08). This runs alongside the existing scan below —
-	// intentional, transitional coexistence; see dashboardState.acquisition.
+	// Phase 3/4A: start each configured cluster's informer-backed
+	// acquisition runtime (docs/08). Since Phase 4E, refresh (scan.go)
+	// depends on this: it reads the latest ClusterSnapshot instead of
+	// calling Kubernetes directly, so every cluster's informers must reach
+	// their initial sync before the first refresh below can produce a
+	// trustworthy scan.
 	srv.startAcquisitionRuntimes(backgroundCtx)
+	srv.waitForAcquisitionSync(backgroundCtx, cl)
 
 	log.Printf("Scanning cluster %q ...", displayName(cl[0]))
 	if err := srv.getState(cl[0]).refresh(cl); err != nil {

@@ -24,14 +24,17 @@ import (
 // incident batch), and how the two coexist without becoming two
 // independent incident writers.
 //
-// The legacy Waste call inside runFullScan (analyzer.NewWasteAuditor +
-// AuditWaste, server.go step 3) is deliberately left in place, not
-// disabled: WasteAuditor.PVCSnapshot() is still the sole PVC-acquisition
-// path for Node Optimization's legacy duplicate storage evidence
-// (server.go's step 6), which does not migrate in this slice. Duplicate
-// execution for the DISPLAY value is tolerated the same way
-// Phase 4C/4D.1-4D.4 established: whichever publishes last wins the
-// display, guarded by publishWasteAnalysis's generation check below.
+// The legacy scan cycle (legacy_analysis.go's runLegacyAnalysis, since
+// docs/08 Phase 4E) calls this same buildWasteAnalysis directly — not
+// disabled: incident persistence still needs its own synchronous result
+// (above). Duplicate execution for the DISPLAY value is tolerated the same
+// way Phase 4C/4D.1-4D.4 established: whichever publishes last wins the
+// display, guarded by publishWasteAnalysis's generation check below. Before
+// Phase 4E, the legacy pass called analyzer.NewWasteAuditor(clientset) +
+// AuditWaste directly, and Node Optimization's legacy storage evidence
+// (node_optimization_runtime.go) reused WasteAuditor.PVCSnapshot() as its
+// sole PVC-acquisition path; both now read resources.PersistentVolumeClaims
+// from the same ClusterSnapshot instead — see buildNodeOptimization.
 //
 // Time semantics: most Waste rules are clock-driven age gates (see docs/08
 // Phase 4D.5's audit), meaning an age threshold can be crossed by elapsed

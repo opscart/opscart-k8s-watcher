@@ -19,10 +19,7 @@ import (
 	awspricing "github.com/aws/aws-sdk-go-v2/service/pricing"
 	"github.com/opscart/opscart-k8s-watcher/pkg/analyzer"
 	"github.com/opscart/opscart-k8s-watcher/pkg/models"
-	"github.com/opscart/opscart-k8s-watcher/pkg/scanner"
 	"github.com/opscart/opscart-k8s-watcher/pkg/store"
-	corev1 "k8s.io/api/core/v1"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
@@ -917,8 +914,8 @@ func buildOverviewData(scan *clusterScan, activeCtx string, clusterList []string
 		}
 	}
 	// NodeOptimizationAvailable reflects whether the scan actually produced
-	// real recommendation contract data (see runFullScan), not a stub or
-	// placeholder — the overview card only claims availability when true.
+	// real recommendation contract data (see legacy_analysis.go), not a stub
+	// or placeholder — the overview card only claims availability when true.
 	nodeOptimizationAvailable := scan != nil && len(scan.nodeOptimization) > 0
 
 	// provenCount/aggregateSavings only read the already-computed Status and
@@ -1991,123 +1988,11 @@ func formatMoney(amount float64) string {
 }
 
 // ── Full scan pipeline ────────────────────────────────────────────────────────
-
-// runFullScan runs all five analyzers against a cluster. The cost analysis is
-// required (returns error on failure). Security, waste, network, and CIS are
-// best-effort — failures are logged and leave the corresponding field nil.
-func runFullScan(ctx string, scanCounters *apiCounters, costAnalyzer *analyzer.NodePoolCostAnalyzer) (*clusterScan, error) {
-	clientset, err := kubeClientWithCounters(ctx, scanCounters)
-	if err != nil {
-		return nil, err
-	}
-
-	scan := &clusterScan{}
-	nodeScanner := scanner.NewScannerWithClientset(clientset, ctx)
-	nodeHealth, err := nodeScanner.FindNodeHealthConditions()
-	if err != nil {
-		return nil, fmt.Errorf("node health analysis: %w", err)
-	}
-	scan.nodeHealth = nodeHealth
-
-	// ── 1. Cost analysis (required) ───────────────────────────────────
-	// costAnalyzer is this cluster's persistent Cost/pricing runtime (see
-	// getState) — reused across every scan cycle rather than reconstructed,
-	// which is what lets its pricing providers' own caches (e.g. the Azure
-	// Retail Prices provider's 24h TTL) actually survive between calls.
-	npCostAnalyzer := costAnalyzer
-	costResult, err := npCostAnalyzer.AnalyzeNodePoolCostResult(clientset)
-	if err != nil {
-		return nil, fmt.Errorf("node pool analysis: %w", err)
-	}
-	poolCosts := costResult.PoolCosts
-	nodeInfos := costResult.NodeInfos
-
-	ra := analyzer.NewResourceAnalyzer(clientset)
-	resourceAnalysis, err := ra.AnalyzeClusterResources(namespace)
-	if err != nil {
-		return nil, fmt.Errorf("resource analysis: %w", err)
-	}
-	// Retained regardless of --breakdown — this is the same pod enumeration
-	// already fetched above, not a second cluster call.
-	scan.AllWorkloads = resourceAnalysis.Workloads
-	scan.PodWorkloads = resourceAnalysis.PodWorkloads
-
-	scan.report = buildCloudCostReport(ctx, costResult, resourceAnalysis, ra.PodSnapshot())
-
-	// ── 2. Security audit (best effort) ──────────────────────────────
-	sa := analyzer.NewSecurityAuditor(clientset)
-	if secAudit, err := sa.AuditClusterSecurityWithPodSnapshot("", ra.PodSnapshot(), namespace == ""); err == nil {
-		scan.secAudit = secAudit
-	} else {
-		log.Printf("[%s] security audit skipped: %v", displayName(ctx), err)
-	}
-
-	// ── 3. Waste audit (best effort) ──────────────────────────────────
-	wasteAuditor, cancel := analyzer.NewWasteAuditor(clientset, dashboardWasteMinAgeDays)
-	defer cancel()
-	wasteAuditor.WithPodSnapshot(ra.PodSnapshot(), namespace == "")
-	if wasteAudit, err := wasteAuditor.AuditWaste(""); err == nil {
-		scan.wasteAudit = wasteAudit
-	} else {
-		log.Printf("[%s] waste audit skipped: %v", displayName(ctx), err)
-	}
-
-	// ── 4. Network policy audit (best effort) ─────────────────────────
-	netAuditor := analyzer.NewNetworkPolicyAuditor(clientset)
-	var netAudit *analyzer.NetworkPolicyAudit
-	var netErr error
-	if namespace == "" {
-		netAudit, netErr = netAuditor.AuditNetworkPoliciesWithPods("", ra.PodSnapshot())
-	} else {
-		// ResourceAnalyzer honored a namespace filter, so its snapshot is not
-		// cluster-wide and cannot preserve the network audit's all-namespace scope.
-		netAudit, netErr = netAuditor.AuditNetworkPolicies("")
-	}
-	if netErr == nil {
-		scan.netAudit = netAudit
-	} else {
-		log.Printf("[%s] network audit skipped: %v", displayName(ctx), netErr)
-	}
-
-	// ── 5. CIS score (derived from security + network audits) ─────────
-	if scan.secAudit != nil {
-		result := analyzer.CalculateCISScore(scan.secAudit, scan.netAudit)
-		scan.cisResult = &result
-	}
-
-	// ── 6. Node Optimization (best effort) ─────────────────────────────
-	// Reuses snapshots already acquired above: NodeInfo/Pods from cost
-	// analysis (step 1), raw Nodes from the node-health scan (top of this
-	// function), and PVCs from the waste audit (step 3). No Node or Pod API
-	// call is repeated for this. PersistentVolumes are not acquired by any
-	// existing scan step, so — per the evidence contract's need for PV
-	// evidence — one new cluster-wide PersistentVolume list is added here as
-	// a first-class scan snapshot, not a page-handler-side fetch.
-	noPods := ra.PodSnapshot()
-	schedulingEvidence := analyzer.BuildNodeOptimizationSchedulingEvidence(nodeInfos, nodeScanner.NodeSnapshot())
-
-	var pvcSnapshot []corev1.PersistentVolumeClaim
-	if scan.wasteAudit != nil {
-		pvcSnapshot = wasteAuditor.PVCSnapshot()
-	}
-	var pvSnapshot []corev1.PersistentVolume
-	if pvList, err := clientset.CoreV1().PersistentVolumes().List(context.Background(), metav1.ListOptions{}); err == nil {
-		pvSnapshot = pvList.Items
-	} else {
-		log.Printf("[%s] persistent volume list skipped: %v", displayName(ctx), err)
-	}
-	storageEvidence := analyzer.BuildNodeOptimizationStorageEvidence(pvcSnapshot, pvSnapshot)
-
-	noSummary := analyzer.BuildNMinusOneNodeOptimizationScenariosWithSchedulingAndStorageEvidence(
-		nodeInfos, noPods, schedulingEvidence, storageEvidence,
-	)
-	scan.nodeOptimization = analyzer.BuildNodeOptimizationRecommendations(noSummary, noPods)
-	scan.nodeOptimizationSavings = analyzer.BuildNodeOptimizationSavingsProjections(
-		scan.nodeOptimization, poolCosts, scan.report.Currency,
-	)
-
-	return scan, nil
-}
+//
+// The legacy scan's own Kubernetes acquisition (formerly runFullScan here)
+// was removed in docs/08 Phase 4E — see legacy_analysis.go's
+// runLegacyAnalysis, scan.go's refresh, and each cmd/opscart-dashboard
+// *_runtime.go file for where the seven analyzers it used to drive now live.
 
 func providerScopeExclusions(provider analyzer.CloudProvider) []string {
 	switch provider {

@@ -15,9 +15,9 @@ package main
 // analyzer should read as one more paragraph here, not a new abstraction.
 //
 // Every function here follows the same shape: previous is the *clusterScan
-// refresh is about to replace; next is the one legacy runFullScan just
-// built and is about to publish. previous may be nil (the very first scan
-// for a cluster). Each coordinator's own publishX (see e.g.
+// refresh is about to replace; next is the one runLegacyAnalysis
+// (legacy_analysis.go) just built and is about to publish. previous may be
+// nil (the very first scan for a cluster). Each coordinator's own publishX (see e.g.
 // node_optimization_runtime.go) already guards the opposite direction — an
 // older coordinator generation can never overwrite a newer one, nor a
 // legacy result that arrived after it — so these are the one remaining
@@ -30,7 +30,7 @@ package main
 // the legacy scan's own — always generation-less — step 6 computation.
 //
 // previous is the *clusterScan refresh is about to replace; next is the
-// one legacy runFullScan just built and is about to publish. The legacy
+// one runLegacyAnalysis just built and is about to publish. The legacy
 // computation itself is intentionally still run every cycle regardless
 // (node_optimization_runtime.go documents why disabling it is unsafe); this
 // only decides which result the swap actually publishes. previous may be

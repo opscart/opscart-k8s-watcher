@@ -52,8 +52,8 @@ func TestNodeOptimizationConsumesClusterSnapshot(t *testing.T) {
 
 	// From here on, every input is snapshot-derived (via derefAll — see its
 	// doc comment for why). This is the analyzer's real pipeline (see
-	// cmd/opscart-dashboard/server.go's runFullScan), unchanged — only its
-	// data source has moved.
+	// cmd/opscart-dashboard/node_optimization_runtime.go's
+	// buildNodeOptimization), unchanged — only its data source has moved.
 	resources := snapshot.Resources()
 	nodes := derefAll(resources.Nodes)
 	pods := derefAll(resources.Pods)

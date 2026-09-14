@@ -21,15 +21,17 @@ import (
 // collectWarRoomIssues, part of that same incident batch), and how the two
 // coexist without becoming two independent incident writers.
 //
-// The legacy Security call inside runFullScan (analyzer.NewSecurityAuditor
-// + AuditClusterSecurityWithPodSnapshot, server.go step 2) is deliberately
-// left in place, not disabled: its result feeds CalculateCISScore
-// synchronously in the same function (see clusterScan.cisResult's doc
-// comment in scan.go for the full CIS boundary), and CIS scoring stays
-// entirely legacy-owned in this slice. Duplicate execution for the DISPLAY
-// value is tolerated the same way Phase 4C/4D.1/4D.2/4D.3 established:
-// whichever publishes last wins the display, guarded by
-// publishSecurityAnalysis's generation check below.
+// The legacy scan cycle (legacy_analysis.go's runLegacyAnalysis, since
+// docs/08 Phase 4E) calls this same buildSecurityAnalysis directly — not
+// disabled: its result feeds CalculateCISScore synchronously in that same
+// pass (see clusterScan.cisResult's doc comment in scan.go for the full CIS
+// boundary), and CIS scoring stays entirely legacy-owned in this slice.
+// Duplicate execution for the DISPLAY value is tolerated the same way Phase
+// 4C/4D.1/4D.2/4D.3 established: whichever publishes last wins the display,
+// guarded by publishSecurityAnalysis's generation check below. Before Phase
+// 4E, the legacy pass called analyzer.NewSecurityAuditor(clientset) +
+// AuditClusterSecurityWithPodSnapshot directly; it now shares this file's
+// Kubernetes-free implementation instead.
 func buildSecurityAnalysis(resources clusterstate.ClusterResources) *models.SecurityAudit {
 	pods := snapshotResourceCopy(resources.Pods)
 	return analyzer.AnalyzeSecurity(pods)

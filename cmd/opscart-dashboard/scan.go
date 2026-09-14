@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"log"
 	"sync"
 	"sync/atomic"
@@ -48,7 +49,7 @@ type clusterScan struct {
 
 	// secAuditGeneration is the ClusterSnapshot generation that produced
 	// secAudit when it came from the coordinator-driven path
-	// (security_runtime.go), or 0 for results from the legacy runFullScan
+	// (security_runtime.go), or 0 for results from the legacy runLegacyAnalysis
 	// path. Same defense-in-depth provenance guard as
 	// nodeOptimizationGeneration below — see its comment for why this is
 	// never relied on to paper over a real ordering bug. This governs the
@@ -57,9 +58,10 @@ type clusterScan struct {
 	secAuditGeneration uint64
 
 	// cisResult is derived from secAudit and netAudit, but ONLY from
-	// whichever values runFullScan itself fetched synchronously in this
-	// same legacy scan cycle (server.go step 5, computed immediately after
-	// steps 2 and 4) — never from the coordinator-published secAudit/netAudit
+	// whichever values runLegacyAnalysis itself computed synchronously in
+	// this same legacy scan cycle (legacy_analysis.go, immediately after
+	// building secAudit and netAudit) — never from the coordinator-published
+	// secAudit/netAudit
 	// this clusterScan may otherwise be carrying by the time a reader sees
 	// it. docs/08 Phase 4D.4 deliberately leaves this boundary as-is: CIS
 	// scoring is a derived, correctness-sensitive combination of two
@@ -89,7 +91,7 @@ type clusterScan struct {
 
 	// wasteAuditGeneration is the ClusterSnapshot generation that produced
 	// wasteAudit when it came from the coordinator-driven path
-	// (waste_runtime.go), or 0 for results from the legacy runFullScan
+	// (waste_runtime.go), or 0 for results from the legacy runLegacyAnalysis
 	// path. Same defense-in-depth provenance guard as
 	// nodeOptimizationGeneration below — see its comment for why this is
 	// never relied on to paper over a real ordering bug. This governs the
@@ -108,7 +110,7 @@ type clusterScan struct {
 
 	// netAuditGeneration is the ClusterSnapshot generation that produced
 	// netAudit when it came from the coordinator-driven path
-	// (network_runtime.go), or 0 for results from the legacy runFullScan
+	// (network_runtime.go), or 0 for results from the legacy runLegacyAnalysis
 	// path. Same defense-in-depth provenance guard as
 	// nodeOptimizationGeneration below — see its comment for why this is
 	// never relied on to paper over a real ordering bug. This governs the
@@ -127,7 +129,7 @@ type clusterScan struct {
 
 	// nodeHealthGeneration is the ClusterSnapshot generation that produced
 	// nodeHealth when it came from the coordinator-driven path
-	// (node_health_runtime.go), or 0 for results from the legacy runFullScan
+	// (node_health_runtime.go), or 0 for results from the legacy runLegacyAnalysis
 	// path. Same defense-in-depth provenance guard as
 	// nodeOptimizationGeneration below — see its comment for why this is
 	// never relied on to paper over a real ordering bug. This governs the
@@ -155,7 +157,7 @@ type clusterScan struct {
 	// resourceAnalysisGeneration is the ClusterSnapshot generation that
 	// produced AllWorkloads/PodWorkloads when they came from the
 	// coordinator-driven path (resource_analysis_runtime.go), or 0 for
-	// results from the legacy runFullScan path. Same defense-in-depth
+	// results from the legacy runLegacyAnalysis path. Same defense-in-depth
 	// provenance guard as nodeOptimizationGeneration below — see its
 	// comment for why this is never relied on to paper over a real
 	// ordering bug.
@@ -178,7 +180,7 @@ type clusterScan struct {
 	// nodeOptimizationGeneration is the ClusterSnapshot generation that
 	// produced nodeOptimization/nodeOptimizationSavings when they came from
 	// the coordinator-driven path (node_optimization_runtime.go), or 0 for
-	// results from the legacy runFullScan path below. It exists purely as a
+	// results from the legacy runLegacyAnalysis path below. It exists purely as a
 	// defensive, provenance-documenting guard: Coordinator's single-threaded
 	// loop already makes an older generation overwriting a newer one
 	// structurally impossible (see pkg/clusterstate/coordinator.go), so this
@@ -203,17 +205,19 @@ type dashboardState struct {
 	// acquisition_runtime.go) before any concurrent reader could observe
 	// it, and never reassigned afterward, so — like ctx/db/retentionDays
 	// above — reading it needs no lock. It is nil if that cluster's
-	// Kubernetes client could not be constructed at startup.
+	// Kubernetes client could not be constructed at startup, in which case
+	// refresh below can never produce a scan for this cluster.
 	//
-	// Phase 4A only starts it; runFullScan below still acquires and analyzes
-	// independently. Its ClusterState is read only via coordinator below.
+	// Since docs/08 Phase 4E, refresh below reads this runtime's
+	// ClusterState directly (via runLegacyAnalysis, legacy_analysis.go) —
+	// the same ClusterState the coordinator below also reads.
 	acquisition *acquisition.Runtime
 
 	// coordinator is this cluster's Phase 4B coalescing coordinator, driving
-	// every Phase 4C/4D-migrated analyzer (currently Node Optimization,
-	// Resource Analyzer, and Node Health — see acquisition_runtime.go's
-	// runCoordinatedAnalysis) off acquisition's ClusterState instead of a
-	// direct Kubernetes call. Set
+	// every Phase 4C/4D-migrated analyzer (Cost, Node Optimization, Resource
+	// Analyzer, Node Health, Network, Security, Waste — see
+	// acquisition_runtime.go's runCoordinatedAnalysis) off acquisition's
+	// ClusterState instead of a direct Kubernetes call. Set
 	// once at startup alongside acquisition, before any concurrent reader
 	// could observe it, and never reassigned afterward — same no-lock
 	// convention as acquisition above.
@@ -221,8 +225,8 @@ type dashboardState struct {
 
 	// costAnalyzer is this cluster's persistent Cost/pricing runtime (docs/08
 	// Phase 4D.6) — one *analyzer.NodePoolCostAnalyzer reused by both the
-	// legacy scan cycle (runFullScan, server.go) and the coordinator-driven
-	// path (cost_runtime.go), so a pricing provider's own cache (e.g. the
+	// legacy scan cycle (runLegacyAnalysis, legacy_analysis.go) and the
+	// coordinator-driven path (cost_runtime.go), so a pricing provider's own cache (e.g. the
 	// Azure Retail Prices provider's 24h TTL) survives across scans/
 	// generations instead of being discarded with a freshly-constructed
 	// analyzer every cycle. Constructed once in getState, before this
@@ -250,11 +254,25 @@ func (s *dashboardState) refresh(clusterList []string) error {
 	// the recorded duration measured only the persistence block below.
 	start := time.Now()
 
-	scanCounters := newAPICounters()
-	scan, err := runFullScan(s.ctx, scanCounters, s.costAnalyzer)
-	if err != nil {
-		return err
+	// docs/08 Phase 4E: this pass's evidence now comes from the same
+	// ClusterSnapshot the Coordinator reads (runLegacyAnalysis,
+	// legacy_analysis.go), not a direct Kubernetes call. A snapshot that
+	// isn't Trustworthy (RESYNCING/DEGRADED/STALE, or none published yet)
+	// must not be analyzed — the acquisition-health invariant every
+	// Coordinator-facing runX already enforces (docs/08 §4) now also
+	// governs this synchronous, incident-writing pass, which previously had
+	// no such gate at all. main.go's startup sequence waits for initial
+	// sync before ever calling refresh, so this only actually triggers for
+	// a cluster whose acquisition never started or is still recovering.
+	if s.acquisition == nil {
+		return fmt.Errorf("acquisition unavailable for %s", displayName(s.ctx))
 	}
+	snapshot := s.acquisition.ClusterState().Latest()
+	if snapshot == nil || !snapshot.Trustworthy() {
+		return fmt.Errorf("cluster state not yet trustworthy for %s", displayName(s.ctx))
+	}
+
+	scan := runLegacyAnalysis(s, snapshot)
 	// legacyScan is a shallow copy of this cycle's own synchronous scan
 	// result, taken before any coordinator-preserve mutation below.
 	// Incident persistence (calcIncidentScore/collectWarRoomIssues and
@@ -340,8 +358,12 @@ func (s *dashboardState) refresh(clusterList []string) error {
 		})
 	}
 
+	// API is always zero-valued now: this pass makes no direct Kubernetes
+	// calls (docs/08 Phase 4E) — an honest "no API traffic this cycle", not
+	// a measurement gap. Cumulative API traffic (informer LIST/WATCH,
+	// investigation reads) remains visible via processAPICounters.
 	s.mu.Lock()
-	s.observation = scanObservation{CompletedAt: time.Now(), Duration: time.Since(start), API: scanCounters.snapshot()}
+	s.observation = scanObservation{CompletedAt: time.Now(), Duration: time.Since(start)}
 	s.mu.Unlock()
 
 	log.Printf("[%s] scan complete: %d namespaces, $%s/month, %d critical issues", displayName(s.ctx), len(scan.report.NamespaceCosts), formatMoney(scan.report.TotalMonthlyCost), countCriticalIssues(scan))
