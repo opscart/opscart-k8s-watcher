@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"reflect"
+	"sort"
 	"strings"
 	"testing"
 
@@ -719,5 +720,215 @@ func TestAuditNetworkPoliciesNoPolicyCountsEveryObservedPodAsUncovered(t *testin
 	if !strings.Contains(status.RiskReason, "no NetworkPolicy was observed") ||
 		strings.Contains(status.RiskReason, "communicate freely") {
 		t.Fatalf("risk reason exceeded observed evidence: %q", status.RiskReason)
+	}
+}
+
+// ── AnalyzeNetworkPolicies: docs/08 Phase 4D.3's Kubernetes-free
+// counterpart to auditNetworkPolicies. auditorAndSnapshotFrom builds both a
+// fake-clientset-backed auditor AND the equivalent already-observed value
+// slices from the SAME fixture objects, so tests below can run both paths
+// against identical underlying data and compare results directly. ─────────
+
+func auditorAndSnapshotFrom(objs ...interface{}) (*NetworkPolicyAuditor, []corev1.Namespace, []corev1.Pod, []networkingv1.NetworkPolicy) {
+	auditor := newTestNetworkAuditor(objs...)
+	var namespaces []corev1.Namespace
+	var pods []corev1.Pod
+	var policies []networkingv1.NetworkPolicy
+	for _, o := range objs {
+		switch v := o.(type) {
+		case *corev1.Namespace:
+			namespaces = append(namespaces, *v)
+		case *corev1.Pod:
+			pods = append(pods, *v)
+		case *networkingv1.NetworkPolicy:
+			policies = append(policies, *v)
+		}
+	}
+	// The fake clientset's List() returns items in its own (name-sorted)
+	// order, independent of the order objects were registered in. Sorting
+	// here too means a test's DeepEqual against the live-client path isn't
+	// sensitive to the order its own object literals happened to be written
+	// in — a fixture-ordering detail, not a real behavioral distinction
+	// AnalyzeNetworkPolicies must preserve.
+	sort.Slice(policies, func(i, j int) bool {
+		if policies[i].Namespace != policies[j].Namespace {
+			return policies[i].Namespace < policies[j].Namespace
+		}
+		return policies[i].Name < policies[j].Name
+	})
+	return auditor, namespaces, pods, policies
+}
+
+// TestAnalyzeNetworkPoliciesRequiresNoKubernetesClient proves the snapshot
+// path performs zero Kubernetes API calls — it is a plain function over
+// value slices, with no clientset or context reachable from it at all.
+func TestAnalyzeNetworkPoliciesRequiresNoKubernetesClient(t *testing.T) {
+	namespaces := []corev1.Namespace{*nsObj("payments")}
+	pods := []corev1.Pod{*podWithLabels("payments", "api-1", map[string]string{"app": "api"})}
+
+	got := AnalyzeNetworkPolicies(namespaces, pods, nil, "", nil)
+
+	if got.TotalNamespaces != 1 {
+		t.Fatalf("TotalNamespaces = %d, want 1", got.TotalNamespaces)
+	}
+	if len(got.Warnings) != 0 {
+		t.Fatalf("Warnings = %+v, want none — the snapshot path never manufactures API-failure warnings", got.Warnings)
+	}
+}
+
+// TestAnalyzeNetworkPoliciesMatchesAuditNetworkPolicies runs the exact
+// partial-selector-coverage fixture from
+// TestAuditNetworkPoliciesPartialSelectorCoverageIsUnprotected through both
+// the live-client path and the snapshot path and requires identical
+// results — "same input produces equivalent audit results".
+func TestAnalyzeNetworkPoliciesMatchesAuditNetworkPolicies(t *testing.T) {
+	auditor, namespaces, pods, policies := auditorAndSnapshotFrom(
+		nsObj("payments"),
+		podWithLabels("payments", "api-1", map[string]string{"app": "api"}),
+		podWithLabels("payments", "worker-1", map[string]string{"app": "worker"}),
+		podWithLabels("payments", "worker-2", map[string]string{"app": "worker"}),
+		policy("payments", "api-policy",
+			metav1.LabelSelector{MatchLabels: map[string]string{"app": "api"}},
+			[]networkingv1.PolicyType{"Ingress", "Egress"},
+			[]networkingv1.NetworkPolicyIngressRule{{From: []networkingv1.NetworkPolicyPeer{{}}}},
+			[]networkingv1.NetworkPolicyEgressRule{{To: []networkingv1.NetworkPolicyPeer{{}}}},
+		),
+	)
+
+	legacy, err := auditor.AuditNetworkPolicies("")
+	if err != nil {
+		t.Fatalf("AuditNetworkPolicies: %v", err)
+	}
+	got := AnalyzeNetworkPolicies(namespaces, pods, policies, "", nil)
+
+	if !reflect.DeepEqual(got, legacy) {
+		t.Fatalf("AnalyzeNetworkPolicies diverged from AuditNetworkPolicies:\ngot:    %+v\nlegacy: %+v", got, legacy)
+	}
+}
+
+func TestAnalyzeNetworkPoliciesFilterNamespace(t *testing.T) {
+	namespaces := []corev1.Namespace{*nsObj("payments"), *nsObj("checkout")}
+	pods := []corev1.Pod{
+		*podWithLabels("payments", "api-1", nil),
+		*podWithLabels("checkout", "api-1", nil),
+	}
+
+	got := AnalyzeNetworkPolicies(namespaces, pods, nil, "payments", nil)
+
+	if got.TotalNamespaces != 1 {
+		t.Fatalf("TotalNamespaces = %d, want 1 (filtered to payments)", got.TotalNamespaces)
+	}
+	if _, ok := findStatus(got.UnprotectedNamespaces, "checkout"); ok {
+		t.Fatal("filterNamespace did not exclude checkout")
+	}
+}
+
+func TestAnalyzeNetworkPoliciesSkipsUserProvidedNamespaces(t *testing.T) {
+	namespaces := []corev1.Namespace{*nsObj("payments"), *nsObj("scratch")}
+	pods := []corev1.Pod{*podWithLabels("scratch", "debug", nil)}
+
+	got := AnalyzeNetworkPolicies(namespaces, pods, nil, "", []string{"scratch"})
+
+	if got.TotalNamespaces != 1 {
+		t.Fatalf("TotalNamespaces = %d, want 1 (scratch skipped)", got.TotalNamespaces)
+	}
+	if _, ok := findStatus(got.ProtectedNamespaces, "scratch"); ok {
+		t.Fatal("user-provided skip namespace was not excluded")
+	}
+}
+
+func TestAnalyzeNetworkPoliciesSkipsSystemNamespaceByPattern(t *testing.T) {
+	namespaces := []corev1.Namespace{*nsObj("payments"), *nsObj("kube-system")}
+
+	got := AnalyzeNetworkPolicies(namespaces, nil, nil, "", nil)
+
+	if got.TotalNamespaces != 1 {
+		t.Fatalf("TotalNamespaces = %d, want 1 (kube-system skipped by infra pattern)", got.TotalNamespaces)
+	}
+}
+
+// TestAnalyzeNetworkPoliciesNoPolicyNamespaceRecordsAbsenceNotFailure
+// proves the semantic distinction the task requires: a namespace with zero
+// NetworkPolicy objects gets PolicyCount == 0 (a successful observation of
+// absence) and zero Warnings — never conflated with "failed to retrieve
+// policies", which only a live LIST failure (auditNetworkPolicies' own
+// path) can produce.
+func TestAnalyzeNetworkPoliciesNoPolicyNamespaceRecordsAbsenceNotFailure(t *testing.T) {
+	namespaces := []corev1.Namespace{*nsObj("apps")}
+	pods := []corev1.Pod{*podWithLabels("apps", "api-1", map[string]string{"app": "api"})}
+
+	got := AnalyzeNetworkPolicies(namespaces, pods, nil, "", nil)
+
+	status, ok := findStatus(got.UnprotectedNamespaces, "apps")
+	if !ok {
+		t.Fatalf("namespace without policies disappeared from findings: %+v", got)
+	}
+	if status.PolicyCount != 0 {
+		t.Fatalf("PolicyCount = %d, want 0", status.PolicyCount)
+	}
+	if len(got.Warnings) != 0 {
+		t.Fatalf("Warnings = %+v, want none — absence of policies is not a retrieval failure", got.Warnings)
+	}
+}
+
+func TestAnalyzeNetworkPoliciesDefaultDenyDetectionMatchesLegacy(t *testing.T) {
+	auditor, namespaces, pods, policies := auditorAndSnapshotFrom(
+		nsObj("locked-down"),
+		podWithLabels("locked-down", "api-1", map[string]string{"app": "api"}),
+		policy("locked-down", "deny-all", metav1.LabelSelector{},
+			[]networkingv1.PolicyType{"Ingress", "Egress"}, nil, nil),
+	)
+
+	legacy, err := auditor.AuditNetworkPolicies("")
+	if err != nil {
+		t.Fatalf("AuditNetworkPolicies: %v", err)
+	}
+	got := AnalyzeNetworkPolicies(namespaces, pods, policies, "", nil)
+
+	if !reflect.DeepEqual(got, legacy) {
+		t.Fatalf("default-deny detection diverged:\ngot:    %+v\nlegacy: %+v", got, legacy)
+	}
+	status, _ := findStatus(got.ProtectedNamespaces, "locked-down")
+	if !status.HasDefaultDenyIngress || !status.HasDefaultDenyEgress {
+		t.Fatalf("expected both directional default-deny flags set: %+v", status)
+	}
+}
+
+// TestAnalyzeNetworkPoliciesAllowAllAdditiveOverrideMatchesLegacy proves
+// NetworkPolicies' additive semantics (one allow-all policy makes that
+// direction unrestricted for a pod regardless of other, more restrictive
+// policies also selecting it) survive unchanged.
+func TestAnalyzeNetworkPoliciesAllowAllAdditiveOverrideMatchesLegacy(t *testing.T) {
+	restrictive := policy("payments", "restrictive",
+		metav1.LabelSelector{MatchLabels: map[string]string{"app": "api"}},
+		[]networkingv1.PolicyType{"Ingress"},
+		[]networkingv1.NetworkPolicyIngressRule{{From: []networkingv1.NetworkPolicyPeer{{PodSelector: &metav1.LabelSelector{}}}}},
+		nil,
+	)
+	allowAll := policy("payments", "allow-all",
+		metav1.LabelSelector{MatchLabels: map[string]string{"app": "api"}},
+		[]networkingv1.PolicyType{"Ingress"},
+		[]networkingv1.NetworkPolicyIngressRule{{}},
+		nil,
+	)
+	auditor, namespaces, pods, policies := auditorAndSnapshotFrom(
+		nsObj("payments"),
+		podWithLabels("payments", "api-1", map[string]string{"app": "api"}),
+		restrictive,
+		allowAll,
+	)
+
+	legacy, err := auditor.AuditNetworkPolicies("")
+	if err != nil {
+		t.Fatalf("AuditNetworkPolicies: %v", err)
+	}
+	got := AnalyzeNetworkPolicies(namespaces, pods, policies, "", nil)
+
+	if !reflect.DeepEqual(got, legacy) {
+		t.Fatalf("additive allow-all override diverged:\ngot:    %+v\nlegacy: %+v", got, legacy)
+	}
+	status, ok := findStatus(got.UnprotectedNamespaces, "payments")
+	if !ok || status.IngressCoveredPods != 0 {
+		t.Fatalf("expected the allow-all policy to make ingress unrestricted despite the restrictive policy: %+v", status)
 	}
 }

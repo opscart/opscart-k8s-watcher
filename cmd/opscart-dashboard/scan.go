@@ -25,12 +25,31 @@ type clusterScan struct {
 	secAudit   *models.SecurityAudit
 	cisResult  *analyzer.CISResult
 	wasteAudit *analyzer.WasteAudit
-	netAudit   *analyzer.NetworkPolicyAudit
+
+	// netAudit is displayed by pages.go/investigation.go/warroom.go and is
+	// also an input to this scan cycle's incident batch
+	// (collectWarRoomIssues' "unprotected_namespace" issues, refresh below)
+	// — like nodeHealth, one of clusterScan's coordinator-migrated fields
+	// incident persistence reads. See netAuditGeneration and refresh's
+	// legacyScan capture for why that persistence use deliberately does not
+	// go through the coordinator-preserved value this field may hold.
+	netAudit *analyzer.NetworkPolicyAudit
+
+	// netAuditGeneration is the ClusterSnapshot generation that produced
+	// netAudit when it came from the coordinator-driven path
+	// (network_runtime.go), or 0 for results from the legacy runFullScan
+	// path. Same defense-in-depth provenance guard as
+	// nodeOptimizationGeneration below — see its comment for why this is
+	// never relied on to paper over a real ordering bug. This governs the
+	// DISPLAY value only; see netAudit's comment for the incident-batch
+	// distinction.
+	netAuditGeneration uint64
+
 	// nodeHealth is displayed by pages.go/investigation.go/warroom.go and is
 	// also the DIRECT input to this scan cycle's incident batch
 	// (completeIncidentBatch, refresh below) — the only one of clusterScan's
 	// coordinator-migrated fields incident persistence reads. See
-	// nodeHealthGeneration and refresh's legacyNodeHealth capture for why
+	// nodeHealthGeneration and refresh's legacyScan capture for why
 	// that persistence use deliberately does NOT go through the
 	// coordinator-preserved value this field may hold.
 	nodeHealth []models.NodeConditionFinding
@@ -180,28 +199,48 @@ func preserveNewerCoordinatorResourceAnalysis(previous, next *clusterScan) {
 // against clobbering a newer, coordinator-published Node Health DISPLAY
 // result with the legacy scan's own — always generation-less — computation.
 //
-// This affects the DISPLAY field only. refresh captures legacyNodeHealth
-// from next BEFORE calling this function specifically so incident
-// persistence (tallySnapshotCounts/completeIncidentBatch, further down in
-// refresh) always uses this legacy scan cycle's own synchronous
+// This affects the DISPLAY field only. refresh takes a legacyScan snapshot
+// of next BEFORE calling this function (and preserveNewerCoordinatorNetworkAnalysis
+// below) specifically so incident persistence
+// (calcIncidentScore/collectWarRoomIssues/completeIncidentBatch, further
+// down in refresh) always uses this legacy scan cycle's own synchronous
 // observation, never a coordinator-sourced one — docs/08 Phase 4D.2's
 // incident-lifecycle decision (Option A: analysis-only migration).
 //
 // Why persistence cannot simply follow the coordinator's fresher value:
 // ResolveMissing(cluster, scanID) treats every ACTIVE incident for cluster
 // not refreshed by scanID as absent — for every issue type, not just Node
-// Health. If a coordinator-timed Node Health batch were upserted under its
-// own scanID, every other (still-legacy) incident type would incorrectly
-// look "missing" to that call and start or advance its own absence clock,
-// on the coordinator's cadence rather than the legacy scan's. Keeping
-// exactly one incident writer (the legacy scan, using its own evidence)
-// avoids that; this function only ever changes what the dashboard shows.
+// Health. If a coordinator-timed batch were upserted under its own scanID,
+// every other (still-legacy) incident type would incorrectly look
+// "missing" to that call and start or advance its own absence clock, on
+// the coordinator's cadence rather than the legacy scan's. Keeping exactly
+// one incident writer (the legacy scan, using its own evidence) avoids
+// that; this function only ever changes what the dashboard shows.
 func preserveNewerCoordinatorNodeHealth(previous, next *clusterScan) {
 	if previous == nil || previous.nodeHealthGeneration == 0 {
 		return
 	}
 	next.nodeHealth = previous.nodeHealth
 	next.nodeHealthGeneration = previous.nodeHealthGeneration
+}
+
+// preserveNewerCoordinatorNetworkAnalysis is
+// preserveNewerCoordinatorNodeHealth's counterpart for the Network analyzer
+// (docs/08 Phase 4D.3): guards refresh's wholesale *clusterScan replacement
+// against clobbering a newer, coordinator-published Network audit DISPLAY
+// result with the legacy scan's own — always generation-less — computation.
+//
+// netAudit feeds the incident batch too (collectWarRoomIssues' HIGH-risk
+// "unprotected_namespace" issues, further down in refresh), so exactly the
+// same DISPLAY-vs-incident-persistence split applies as
+// preserveNewerCoordinatorNodeHealth — see its doc comment and refresh's
+// legacyScan capture.
+func preserveNewerCoordinatorNetworkAnalysis(previous, next *clusterScan) {
+	if previous == nil || previous.netAuditGeneration == 0 {
+		return
+	}
+	next.netAudit = previous.netAudit
+	next.netAuditGeneration = previous.netAuditGeneration
 }
 
 func (s *dashboardState) refresh(clusterList []string) error {
@@ -221,11 +260,16 @@ func (s *dashboardState) refresh(clusterList []string) error {
 	if err != nil {
 		return err
 	}
-	// Captured before any coordinator-preserve mutation below: incident
-	// persistence must always derive from this legacy scan cycle's own
-	// synchronous Node Health observation, never a coordinator-published one
-	// — see preserveNewerCoordinatorNodeHealth's doc comment.
-	legacyNodeHealth := scan.nodeHealth
+	// legacyScan is a shallow copy of this cycle's own synchronous scan
+	// result, taken before any coordinator-preserve mutation below.
+	// Incident persistence (calcIncidentScore/collectWarRoomIssues and
+	// everything derived from them, further down) must always read every
+	// coordinator-migrated field (nodeHealth, netAudit, ...) from this
+	// legacy scan cycle's own observation, never a coordinator-published
+	// one — see preserveNewerCoordinatorNodeHealth's doc comment. A shallow
+	// copy is enough: only the top-level *clusterScan fields the guards
+	// below reassign (never mutated in place) need to diverge from scan.
+	legacyScan := *scan
 
 	page := renderHTML(scan, s.ctx, clusterList)
 
@@ -233,6 +277,7 @@ func (s *dashboardState) refresh(clusterList []string) error {
 	preserveNewerCoordinatorNodeOptimization(s.scan, scan)
 	preserveNewerCoordinatorResourceAnalysis(s.scan, scan)
 	preserveNewerCoordinatorNodeHealth(s.scan, scan)
+	preserveNewerCoordinatorNetworkAnalysis(s.scan, scan)
 	s.scan = scan
 	s.htmlPage = page
 	s.mu.Unlock()
@@ -241,10 +286,10 @@ func (s *dashboardState) refresh(clusterList []string) error {
 	if s.db != nil {
 		scanID := newScanID()
 
-		incScore, _, _ := calcIncidentScore(scan)
-		issues := collectWarRoomIssues(scan, 0)
+		incScore, _, _ := calcIncidentScore(&legacyScan)
+		issues := collectWarRoomIssues(&legacyScan, 0)
 
-		critical, warnings := tallySnapshotCounts(issues, legacyNodeHealth)
+		critical, warnings := tallySnapshotCounts(issues, legacyScan.nodeHealth)
 		var incidents []store.IncidentData
 		for _, is := range issues {
 			details, _ := json.Marshal(map[string]any{
@@ -267,16 +312,16 @@ func (s *dashboardState) refresh(clusterList []string) error {
 			IncidentScore: incScore,
 			CriticalCount: critical,
 			WarningCount:  warnings,
-			SecurityScore: scan.securityScore(),
-			WasteCount:    scan.wasteTotal(),
-			MonthlyCost:   scan.report.TotalMonthlyCost,
-			PodCount:      scan.monthlyPodCount(),
+			SecurityScore: legacyScan.securityScore(),
+			WasteCount:    legacyScan.wasteTotal(),
+			MonthlyCost:   legacyScan.report.TotalMonthlyCost,
+			PodCount:      legacyScan.monthlyPodCount(),
 		}
 
 		if err := s.db.WriteSnapshot(s.ctx, scanID, snap); err != nil {
 			log.Printf("[%s] store snapshot: %v", displayName(s.ctx), err)
 		}
-		incidents = completeIncidentBatch(incidents, legacyNodeHealth)
+		incidents = completeIncidentBatch(incidents, legacyScan.nodeHealth)
 		resolved, persistErr := persistCompleteIncidentBatch(s.db, s.ctx, scanID, incidents)
 		if persistErr != nil {
 			log.Printf("[%s] store incidents: %v", displayName(s.ctx), persistErr)

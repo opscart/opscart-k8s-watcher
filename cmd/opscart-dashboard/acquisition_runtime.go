@@ -56,13 +56,14 @@ func (srv *server) startAcquisition(ctx context.Context, clusterCtx string) {
 // one function — not via a second Coordinator, dependency routing, or
 // dirty-resource tracking. Each entry point independently gates on
 // snapshot.Trustworthy() and its own generation guard (see
-// runNodeOptimization/runResourceAnalysis/runNodeHealth), so a skip in one
-// never blocks another, and neither can overwrite a newer result the
-// other's guard already protects.
+// runNodeOptimization/runResourceAnalysis/runNodeHealth/runNetworkAnalysis),
+// so a skip in one never blocks another, and neither can overwrite a newer
+// result the other's guard already protects.
 func runCoordinatedAnalysis(state *dashboardState, snapshot *clusterstate.ClusterSnapshot) {
 	runNodeOptimization(state, snapshot)
 	runResourceAnalysis(state, snapshot)
 	runNodeHealth(state, snapshot)
+	runNetworkAnalysis(state, snapshot)
 }
 
 // startAnalysisCoordinator creates and starts this cluster's Phase 4B
