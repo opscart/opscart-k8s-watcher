@@ -56,11 +56,22 @@ func (srv *server) startAcquisition(ctx context.Context, clusterCtx string) {
 // one function — not via a second Coordinator, dependency routing, or
 // dirty-resource tracking. Each entry point independently gates on
 // snapshot.Trustworthy() and its own generation guard (see
-// runNodeOptimization/runResourceAnalysis/runNodeHealth/runNetworkAnalysis/
-// runSecurityAnalysis/runWasteAnalysis), so a skip in one never blocks
-// another, and neither can overwrite a newer result the other's guard
-// already protects.
+// runCostAnalysis/runNodeOptimization/runResourceAnalysis/runNodeHealth/
+// runNetworkAnalysis/runSecurityAnalysis/runWasteAnalysis), so a skip in one
+// never blocks another (except the one explicit ordering dependency below),
+// and neither can overwrite a newer result the other's guard already
+// protects.
+//
+// runCostAnalysis must run before runNodeOptimization: Node Optimization's
+// savings enrichment joins against this same generation's Cost-owned pool
+// identity (docs/08 Phase 4D.6), and runNodeOptimization's own gate
+// (scan.costGeneration == snapshot.Generation()) requires Cost to have
+// already published for this generation by the time it runs. This is one
+// explicit, justified sequence — not a general analyzer dependency
+// DAG/router — and every other analyzer below remains independent of
+// ordering.
 func runCoordinatedAnalysis(state *dashboardState, snapshot *clusterstate.ClusterSnapshot) {
+	runCostAnalysis(state, snapshot)
 	runNodeOptimization(state, snapshot)
 	runResourceAnalysis(state, snapshot)
 	runNodeHealth(state, snapshot)

@@ -112,21 +112,21 @@ func TestBuildNodeInfosFromSnapshotOmitsNodesRemovedFromLiveList(t *testing.T) {
 	}
 }
 
-func TestBuildNodeInfosFromSnapshotIncludesNewNodeWithNoLegacyReport(t *testing.T) {
-	newNode := liveNodeFixture("node-new", 2, 8, nil) // just joined; no legacy scan has ever seen it
+func TestBuildNodeInfosFromSnapshotIncludesNewNodeWithNoCoordinatorCostYet(t *testing.T) {
+	newNode := liveNodeFixture("node-new", 2, 8, nil) // just joined; no coordinator Cost result has ever seen it
 
-	infos := buildNodeInfosFromSnapshot([]*corev1.Node{newNode}, nil) // report nil: no legacy scan at all
+	infos := buildNodeInfosFromSnapshot([]*corev1.Node{newNode}, nil) // cost nil: no coordinator Cost result at all
 
 	if len(infos) != 1 || infos[0].Name != "node-new" {
-		t.Fatalf("buildNodeInfosFromSnapshot = %+v, want node-new present even with no legacy NodeInfo/report", infos)
+		t.Fatalf("buildNodeInfosFromSnapshot = %+v, want node-new present even with no coordinator Cost result", infos)
 	}
 }
 
 func TestBuildNodeInfosFromSnapshotLeavesProviderAloneWithoutManualOverride(t *testing.T) {
 	node := liveNodeFixture("node-a", 2, 8, nil) // no Spec.ProviderID: DetectNodeProvider -> unknown
-	report := &models.CloudCostReport{ProviderDetectionMode: "detected", EffectiveProvider: "azure"}
+	cost := &models.CloudCostReport{ProviderDetectionMode: "detected", EffectiveProvider: "azure"}
 
-	infos := buildNodeInfosFromSnapshot([]*corev1.Node{node}, report)
+	infos := buildNodeInfosFromSnapshot([]*corev1.Node{node}, cost)
 
 	if infos[0].Provider != string(analyzer.CloudProviderUnknown) {
 		t.Fatalf("Provider = %q, want the node's own detected provider (%q) untouched when detection mode is not manual",
@@ -134,23 +134,23 @@ func TestBuildNodeInfosFromSnapshotLeavesProviderAloneWithoutManualOverride(t *t
 	}
 }
 
-func TestBuildNodeInfosFromSnapshotAppliesManualProviderOverrideFromReport(t *testing.T) {
+func TestBuildNodeInfosFromSnapshotAppliesManualProviderOverrideFromCost(t *testing.T) {
 	node := liveNodeFixture("node-a", 2, 8, nil) // no Spec.ProviderID: would auto-detect as unknown
-	report := &models.CloudCostReport{ProviderDetectionMode: "manual", EffectiveProvider: "aws"}
+	cost := &models.CloudCostReport{ProviderDetectionMode: "manual", EffectiveProvider: "aws"}
 
-	infos := buildNodeInfosFromSnapshot([]*corev1.Node{node}, report)
+	infos := buildNodeInfosFromSnapshot([]*corev1.Node{node}, cost)
 
 	if infos[0].Provider != "aws" {
-		t.Fatalf("Provider = %q, want the manually overridden provider %q from the legacy scan's CloudCostReport", infos[0].Provider, "aws")
+		t.Fatalf("Provider = %q, want the manually overridden provider %q from the coordinator's Cost result", infos[0].Provider, "aws")
 	}
 }
 
-// TestBuildNodeOptimizationFeasibilityIsUnaffectedByReportPoolPricing proves
-// report's pool pricing/currency (legacy-scan-age, Cost-owned enrichment)
-// can differ or be entirely absent without changing which nodes/pools are
-// feasible to consolidate — feasibility depends only on resources, never on
+// TestBuildNodeOptimizationFeasibilityIsUnaffectedByCostPoolPricing proves
+// cost's pool pricing/currency (Cost-owned enrichment) can differ or be
+// entirely absent without changing which nodes/pools are feasible to
+// consolidate — feasibility depends only on resources, never on
 // poolCosts/currency.
-func TestBuildNodeOptimizationFeasibilityIsUnaffectedByReportPoolPricing(t *testing.T) {
+func TestBuildNodeOptimizationFeasibilityIsUnaffectedByCostPoolPricing(t *testing.T) {
 	resources := clusterstate.ClusterResources{
 		Nodes: []*corev1.Node{liveNodeFixture("node-a", 4, 16, map[string]string{
 			"node.kubernetes.io/instance-type": "Standard_D4",
@@ -160,8 +160,8 @@ func TestBuildNodeOptimizationFeasibilityIsUnaffectedByReportPoolPricing(t *test
 		Pods: []*corev1.Pod{},
 	}
 
-	recsWithoutReport, savingsWithoutReport := buildNodeOptimization(resources, nil)
-	recsWithReport, _ := buildNodeOptimization(resources, &models.CloudCostReport{
+	recsWithoutCost, savingsWithoutCost := buildNodeOptimization(resources, nil)
+	recsWithCost, _ := buildNodeOptimization(resources, &models.CloudCostReport{
 		Currency: "USD",
 		NodePoolCosts: []models.NodePoolCost{{
 			Name: "default", VMSize: "Standard_D4", Region: "eastus", OS: "linux",
@@ -169,28 +169,28 @@ func TestBuildNodeOptimizationFeasibilityIsUnaffectedByReportPoolPricing(t *test
 		}},
 	})
 
-	if !reflect.DeepEqual(recsWithoutReport, recsWithReport) {
-		t.Fatalf("report's pool pricing changed feasibility recommendations:\nwithout report: %+v\nwith report:    %+v",
-			recsWithoutReport, recsWithReport)
+	if !reflect.DeepEqual(recsWithoutCost, recsWithCost) {
+		t.Fatalf("cost's pool pricing changed feasibility recommendations:\nwithout cost: %+v\nwith cost:    %+v",
+			recsWithoutCost, recsWithCost)
 	}
-	if len(savingsWithoutReport) == 0 || savingsWithoutReport[0].Available {
-		t.Fatalf("expected no priced savings with no report at all, got %+v", savingsWithoutReport)
+	if len(savingsWithoutCost) == 0 || savingsWithoutCost[0].Available {
+		t.Fatalf("expected no priced savings with no cost result at all, got %+v", savingsWithoutCost)
 	}
 }
 
-// TestNodeOptimizationSavingsJoinManualProviderOverrideFromReport is the
+// TestNodeOptimizationSavingsJoinManualProviderOverrideFromCost is the
 // "manual provider override still joins savings correctly" regression: the
 // override applied in buildNodeInfosFromSnapshot must flow all the way into
 // the pool identity BuildNodeOptimizationSavingsProjection matches against
 // report.NodePoolCosts.
-func TestNodeOptimizationSavingsJoinManualProviderOverrideFromReport(t *testing.T) {
+func TestNodeOptimizationSavingsJoinManualProviderOverrideFromCost(t *testing.T) {
 	node := liveNodeFixture("node-a", 4, 16, map[string]string{
 		"node.kubernetes.io/instance-type": "Standard_D4",
 		"topology.kubernetes.io/region":    "eastus",
 		"kubernetes.io/os":                 "linux",
 		"kubernetes.io/arch":               "amd64",
 	})
-	report := &models.CloudCostReport{
+	cost := &models.CloudCostReport{
 		Currency:              "USD",
 		ProviderDetectionMode: "manual",
 		EffectiveProvider:     "aws",
@@ -200,7 +200,7 @@ func TestNodeOptimizationSavingsJoinManualProviderOverrideFromReport(t *testing.
 		}},
 	}
 
-	infos := buildNodeInfosFromSnapshot([]*corev1.Node{node}, report)
+	infos := buildNodeInfosFromSnapshot([]*corev1.Node{node}, cost)
 	evidence := analyzer.BuildNodeOptimizationSchedulingEvidence(infos, []corev1.Node{*node})
 	schedulingNode, ok := evidence.Nodes["node-a"]
 	if !ok {
@@ -217,7 +217,7 @@ func TestNodeOptimizationSavingsJoinManualProviderOverrideFromReport(t *testing.
 		CandidateRemovedNode: "node-a",
 		CurrentNodeCount:     1,
 	}
-	projection := analyzer.BuildNodeOptimizationSavingsProjection(rec, report.NodePoolCosts, report.Currency)
+	projection := analyzer.BuildNodeOptimizationSavingsProjection(rec, cost.NodePoolCosts, cost.Currency)
 	if !projection.Available {
 		t.Fatalf("savings projection = %+v, want Available=true — the manual provider override must still let pool identity join against report.NodePoolCosts", projection)
 	}
@@ -236,6 +236,7 @@ func TestRunNodeOptimizationRequiresNoKubernetesClient(t *testing.T) {
 	cs := clusterstate.NewClusterState("cluster-a")
 	cs.SetAcquisitionState(clusterstate.AcquisitionHealthy)
 	snapshot := cs.Publish()
+	state.scan.costGeneration = snapshot.Generation()
 
 	runNodeOptimization(state, snapshot)
 
@@ -272,8 +273,8 @@ func TestRunNodeOptimizationSkipsWhenNoLegacyScanYet(t *testing.T) {
 	}
 }
 
-func TestRunNodeOptimizationSkipsWhenScanReportNil(t *testing.T) {
-	original := &clusterScan{} // report is nil: cost data never populated
+func TestRunNodeOptimizationSkipsWhenCostNotYetPublishedForThisGeneration(t *testing.T) {
+	original := &clusterScan{} // cost is nil, costGeneration is 0: never populated
 	state := &dashboardState{scan: original}
 
 	cs := clusterstate.NewClusterState("cluster-a")
@@ -283,7 +284,7 @@ func TestRunNodeOptimizationSkipsWhenScanReportNil(t *testing.T) {
 	runNodeOptimization(state, snapshot)
 
 	if state.scan != original {
-		t.Fatal("a scan with no cost report must not be replaced")
+		t.Fatal("a scan with no same-generation Cost result must not be replaced")
 	}
 }
 
@@ -349,6 +350,7 @@ func TestRunNodeOptimizationEndToEndOnTrustworthySnapshot(t *testing.T) {
 	})
 	cs.SetAcquisitionState(clusterstate.AcquisitionHealthy)
 	snapshot := cs.Publish()
+	state.scan.costGeneration = snapshot.Generation()
 
 	runNodeOptimization(state, snapshot)
 
@@ -399,7 +401,7 @@ func TestNodeOptimizationOrderingCoordinatorThenLegacyScan(t *testing.T) {
 		nodeOptimization: []analyzer.NodeOptimizationRecommendation{{Summary: "legacy-own-computation"}},
 	}
 	preserveNewerCoordinatorNodeOptimization(state.scan, legacyScan) // the exact call refresh() makes
-	state.scan = legacyScan                                         // the exact swap refresh() makes
+	state.scan = legacyScan                                          // the exact swap refresh() makes
 
 	if state.scan.nodeOptimizationGeneration != 5 {
 		t.Fatalf("nodeOptimizationGeneration = %d after a legacy scan publish, want 5 preserved", state.scan.nodeOptimizationGeneration)

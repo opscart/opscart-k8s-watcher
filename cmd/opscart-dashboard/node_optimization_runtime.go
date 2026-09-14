@@ -7,6 +7,12 @@ import (
 	corev1 "k8s.io/api/core/v1"
 )
 
+// Cost dependency: docs/08 Phase 4D.6 changed buildNodeOptimization/
+// buildNodeInfosFromSnapshot below to join against cost_runtime.go's
+// full CloudCostReport from the same coordinator generation — see
+// runNodeOptimization's gate and runCoordinatedAnalysis's Cost-before-Node-
+// Optimization ordering (acquisition_runtime.go).
+
 // This file is docs/08 Phase 4C: the first analyzer migrated off direct
 // Kubernetes acquisition onto the shared ClusterSnapshot pipeline built in
 // Phases 2-4B. Only Node Optimization's own analysis logic lives here —
@@ -62,11 +68,13 @@ func snapshotResourceCopy[T any](in []*T) []T {
 // The one legitimate exception is a configured manual cloud-provider
 // override: that is Cost-analyzer configuration, not Kubernetes-observed
 // evidence, and does not go stale the way node topology does. It is
-// reapplied here from report — the legacy scan's already-computed
-// CloudCostReport — exactly mirroring AnalyzeNodePoolCosts' own identical
-// step, so pool identity still joins correctly against report.NodePoolCosts
-// in BuildNodeOptimizationSavingsProjections. report may be nil (no legacy
-// scan yet); nothing here requires it beyond this override check.
+// reapplied here from report — the coordinator's own same-generation Cost
+// result (docs/08 Phase 4D.6; see cost_runtime.go) —
+// exactly mirroring AnalyzeNodePoolCosts' own identical step, so pool
+// identity still joins correctly against report.NodePoolCosts in
+// BuildNodeOptimizationSavingsProjections. report may be nil (no coordinator
+// Cost result published yet); nothing here requires it beyond this override
+// check.
 //
 // CPURequested/MemGBRequested are deliberately left unset: confirmed by
 // inspection that no pkg/analyzer Node Optimization function reads either
@@ -86,10 +94,10 @@ func buildNodeInfosFromSnapshot(nodes []*corev1.Node, report *models.CloudCostRe
 
 // buildNodeOptimization runs the same Node Optimization pipeline runFullScan's
 // legacy step 6 runs, sourced entirely from one ClusterSnapshot generation's
-// resources plus report — the existing published Cost Intelligence result
-// this migration slice does not itself acquire (docs/08 Phase 4C scope;
-// Cost stays unmigrated). report may be nil if no legacy scan has completed
-// yet; buildNodeInfosFromSnapshot and the savings projection below both
+// resources plus report — the coordinator's own same-generation full Cost
+// result (docs/08 Phase 4D.6; see runCoordinatedAnalysis's Cost-before-Node-
+// Optimization ordering, acquisition_runtime.go). report may be nil if the
+// coordinator has not published one for this cluster yet; both helpers below
 // tolerate that.
 func buildNodeOptimization(
 	resources clusterstate.ClusterResources,
@@ -119,9 +127,10 @@ func buildNodeOptimization(
 }
 
 // runNodeOptimization is the Coordinator-facing analysis step for one
-// cluster: it gates on acquisition trustworthiness and on a legacy scan
-// having published at least once (for report — see buildNodeOptimization),
-// then computes and publishes a new Node Optimization result.
+// cluster: it gates on acquisition trustworthiness and on this same
+// generation's Cost result having just been published (see cost_runtime.go
+// and runCoordinatedAnalysis's ordering), then computes and publishes a new
+// Node Optimization result.
 //
 // A DEGRADED/RESYNCING/STALE snapshot is not analyzed — state.scan keeps
 // showing whatever Node Optimization result (coordinator- or legacy-produced)
@@ -135,10 +144,12 @@ func runNodeOptimization(state *dashboardState, snapshot *clusterstate.ClusterSn
 	state.mu.RLock()
 	scan := state.scan
 	state.mu.RUnlock()
-	if scan == nil || scan.report == nil {
-		// No legacy scan has published a CloudCostReport yet — there is no
-		// pool pricing/currency or provider-override decision to join
-		// against.
+	if scan == nil || scan.costGeneration != snapshot.Generation() {
+		// Either no legacy scan has ever published a *clusterScan yet, or
+		// Cost has not published a result for this exact generation (e.g.
+		// it skipped for the same reason this call would) — there is no
+		// same-generation pool pricing/currency/provider-override decision
+		// to join against.
 		return
 	}
 

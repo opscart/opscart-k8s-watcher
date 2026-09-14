@@ -3,15 +3,15 @@ package main
 // This file holds refresh's (scan.go) coordinator-vs-legacy publication-
 // ordering guards — one preserveNewerCoordinatorX function per Phase
 // 4C/4D-migrated analyzer (Node Optimization, Resource Analyzer, Node
-// Health, Network, Security). Each guards refresh's wholesale *clusterScan
-// replacement against clobbering that analyzer's newer, coordinator-
-// published DISPLAY result with the legacy scan's own — always
+// Health, Network, Security, Waste, Cost). Each guards refresh's wholesale
+// *clusterScan replacement against clobbering that analyzer's newer,
+// coordinator-published DISPLAY result with the legacy scan's own — always
 // generation-less — computation for the same field.
 //
 // These are deliberately explicit, analyzer-specific functions, not a
 // generic registry or reflection-driven loop: each analyzer's fields differ
 // (some pair a result with a savings/workload-map sibling, some feed the
-// incident batch and some don't), and the guard for a sixth migrated
+// incident batch and some don't), and the guard for one more migrated
 // analyzer should read as one more paragraph here, not a new abstraction.
 //
 // Every function here follows the same shape: previous is the *clusterScan
@@ -159,4 +159,18 @@ func preserveNewerCoordinatorWasteAnalysis(previous, next *clusterScan) {
 	}
 	next.wasteAudit = previous.wasteAudit
 	next.wasteAuditGeneration = previous.wasteAuditGeneration
+}
+
+// preserveNewerCoordinatorCostAnalysis is preserveNewerCoordinatorWasteAnalysis's
+// counterpart for Cost (docs/08 Phase 4D.6): guards refresh's wholesale
+// *clusterScan replacement against clobbering a newer, coordinator-published
+// full CloudCostReport with the legacy scan's own generation-less report.
+// report is preserved as one unit so pool pricing, allocation, scenarios,
+// and provider metadata cannot come from different analysis passes.
+func preserveNewerCoordinatorCostAnalysis(previous, next *clusterScan) {
+	if previous == nil || previous.costGeneration == 0 {
+		return
+	}
+	next.report = previous.report
+	next.costGeneration = previous.costGeneration
 }

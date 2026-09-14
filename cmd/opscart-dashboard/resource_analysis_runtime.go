@@ -20,12 +20,13 @@ import (
 // snapshot (ResourceAnalyzer.PodSnapshot()) is still the sole Pod-acquisition
 // path for Security, Waste, Network, and Node Optimization's legacy
 // duplicate execution — none of which migrate in this slice — and its full
-// *models.ClusterResourceAnalysis output feeds CostAnalyzer.AnalyzeCosts
-// synchronously in the same function; Cost is out of scope here too.
-// Disabling the legacy call would break those still-legacy consumers,
-// exactly the risk Phase 4C already found for Node Optimization. Duplicate
-// execution is tolerated the same way: whichever publishes last wins the
-// display, guarded by publishResourceAnalysis's generation check below.
+// *models.ClusterResourceAnalysis output still feeds the temporary legacy
+// Cost report synchronously in the same function. The coordinator-owned Cost
+// report independently derives equivalent resource analysis from its shared
+// snapshot (cost_runtime.go). Disabling this legacy call before Phase 4E
+// would break the remaining legacy consumers. Duplicate execution is
+// temporary; generation preservation keeps coordinator output authoritative
+// once one has been published.
 
 // buildResourceAnalysis runs analyzer.AnalyzeResources — the same resource
 // analysis algorithm AnalyzeClusterResources itself now delegates to

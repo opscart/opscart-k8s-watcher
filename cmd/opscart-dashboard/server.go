@@ -134,6 +134,22 @@ func (srv *server) getState(ctx string) *dashboardState {
 		return s
 	}
 	s = &dashboardState{ctx: ctx, db: srv.db, retentionDays: srv.retentionDays}
+
+	// costAnalyzer is this cluster's persistent Cost/pricing runtime (docs/08
+	// Phase 4D.6) — constructed once here, before s is published to
+	// srv.states below, and never reassigned afterward (same no-lock
+	// convention as acquisition/coordinator in dashboardState's doc
+	// comments). SetCloudProviderOverride/SetPricingProvider are configured
+	// here, exactly once, for the same reason: both are documented as
+	// construction-time-only calls that must complete before this analyzer
+	// is shared across the legacy scan loop and the Coordinator.
+	s.costAnalyzer = analyzer.NewNodePoolCostAnalyzer(region)
+	providerOverride, _ := analyzer.ParseCloudProviderOverride(cloudProvider)
+	s.costAnalyzer.SetCloudProviderOverride(providerOverride)
+	if pricingSource == "aws-api" {
+		s.costAnalyzer.SetPricingProvider(getAWSPricingProvider())
+	}
+
 	srv.states[ctx] = s
 	return s
 }
@@ -1979,7 +1995,7 @@ func formatMoney(amount float64) string {
 // runFullScan runs all five analyzers against a cluster. The cost analysis is
 // required (returns error on failure). Security, waste, network, and CIS are
 // best-effort — failures are logged and leave the corresponding field nil.
-func runFullScan(ctx string, scanCounters *apiCounters) (*clusterScan, error) {
+func runFullScan(ctx string, scanCounters *apiCounters, costAnalyzer *analyzer.NodePoolCostAnalyzer) (*clusterScan, error) {
 	clientset, err := kubeClientWithCounters(ctx, scanCounters)
 	if err != nil {
 		return nil, err
@@ -1994,17 +2010,17 @@ func runFullScan(ctx string, scanCounters *apiCounters) (*clusterScan, error) {
 	scan.nodeHealth = nodeHealth
 
 	// ── 1. Cost analysis (required) ───────────────────────────────────
-	npCostAnalyzer := analyzer.NewNodePoolCostAnalyzer(clientset, region)
-	providerOverride, _ := analyzer.ParseCloudProviderOverride(cloudProvider)
-	npCostAnalyzer.SetCloudProviderOverride(providerOverride)
-	if pricingSource == "aws-api" {
-		npCostAnalyzer.SetPricingProvider(getAWSPricingProvider())
-	}
-	poolCosts, nodeInfos, err := npCostAnalyzer.AnalyzeNodePoolCosts()
+	// costAnalyzer is this cluster's persistent Cost/pricing runtime (see
+	// getState) — reused across every scan cycle rather than reconstructed,
+	// which is what lets its pricing providers' own caches (e.g. the Azure
+	// Retail Prices provider's 24h TTL) actually survive between calls.
+	npCostAnalyzer := costAnalyzer
+	costResult, err := npCostAnalyzer.AnalyzeNodePoolCostResult(clientset)
 	if err != nil {
 		return nil, fmt.Errorf("node pool analysis: %w", err)
 	}
-	totalNodeCost := analyzer.TotalClusterCostFromPools(poolCosts)
+	poolCosts := costResult.PoolCosts
+	nodeInfos := costResult.NodeInfos
 
 	ra := analyzer.NewResourceAnalyzer(clientset)
 	resourceAnalysis, err := ra.AnalyzeClusterResources(namespace)
@@ -2016,86 +2032,7 @@ func runFullScan(ctx string, scanCounters *apiCounters) (*clusterScan, error) {
 	scan.AllWorkloads = resourceAnalysis.Workloads
 	scan.PodWorkloads = resourceAnalysis.PodWorkloads
 
-	canonicalAllocation := analyzer.BuildCanonicalAllocationFromSnapshots(
-		poolCosts,
-		nodeInfos,
-		ra.PodSnapshot(),
-	)
-	nsCosts := canonicalAllocation.Namespaces
-
-	ca := analyzer.NewCostAnalyzer(resourceAnalysis)
-	costEstimate, _ := ca.AnalyzeCosts(totalNodeCost)
-
-	detectedRegion := region
-	if detectedRegion == "" {
-		detectedRegion = npCostAnalyzer.Region()
-	}
-	if region == "" && npCostAnalyzer.Provider() == analyzer.CloudProviderMixed {
-		detectedRegion = "Multiple regions"
-	}
-	if detectedRegion == "" {
-		detectedRegion = "Not detected"
-	}
-	provider := string(npCostAnalyzer.Provider())
-	matchedNodes, totalNodes := 0, 0
-	for _, pool := range poolCosts {
-		totalNodes += pool.NodeCount
-		if pool.PricingAvailable {
-			matchedNodes += pool.NodeCount
-		}
-	}
-	coverage := fmt.Sprintf("%d of %d nodes priced", matchedNodes, totalNodes)
-	source := "Pricing unavailable"
-	switch npCostAnalyzer.Provider() {
-	case analyzer.CloudProviderAzure:
-		source = analyzer.NewAzurePricingProvider().SourceDescription()
-	case analyzer.CloudProviderAWS:
-		if pricingSource == "aws-api" {
-			source = "AWS Price List Query API public EC2 On-Demand pricing"
-		}
-	case analyzer.CloudProviderMixed:
-		source = "Provider-specific sources; unsupported nodes remain unavailable"
-	}
-	if npCostAnalyzer.Provider() != analyzer.CloudProviderAzure {
-		costEstimate.OptimizationScenarios = nil
-		costEstimate.TotalSavingsPotential = models.CostRange{}
-	}
-	exclusions := providerScopeExclusions(npCostAnalyzer.Provider())
-
-	scan.report = &models.CloudCostReport{
-		Timestamp:                time.Now(),
-		ClusterName:              displayName(ctx),
-		Region:                   detectedRegion,
-		Provider:                 provider,
-		DetectedProvider:         string(npCostAnalyzer.DetectedProvider()),
-		EffectiveProvider:        provider,
-		ProviderDetectionMode:    npCostAnalyzer.ProviderDetectionMode(),
-		ProviderWarning:          npCostAnalyzer.ProviderWarning(),
-		NodePoolCosts:            poolCosts,
-		TotalNodeCost:            totalNodeCost,
-		NamespaceCosts:           nsCosts,
-		AllocatedNodeCost:        canonicalAllocation.AllocatedMonthly,
-		IdleNodeCost:             canonicalAllocation.IdleMonthly,
-		UnallocatedNodeCost:      canonicalAllocation.UnallocatedMonthly,
-		AllocationExcludedPods:   canonicalAllocation.ExcludedPodCount,
-		AllocationUnresolvedPods: canonicalAllocation.UnresolvedPodCount,
-		TotalMonthlyCost:         totalNodeCost,
-		TotalAnnualCost:          totalNodeCost * 12,
-		CostBreakdown:            models.CostBreakdown{Compute: totalNodeCost},
-		OptimizationScenarios:    costEstimate.OptimizationScenarios,
-		TotalSavingsPotential:    costEstimate.TotalSavingsPotential,
-		PricingSource:            source,
-		PricingCoverage:          coverage,
-		PricingWarnings: pricingCoverageWarnings(
-			append(npCostAnalyzer.PricingWarnings(), canonicalAllocation.Warnings...),
-			matchedNodes, totalNodes),
-		PricingCapabilities: npCostAnalyzer.PricingCapabilities(),
-		Currency:            "USD",
-		ScopeExclusions:     exclusions,
-		LastPriceRefresh:    npCostAnalyzer.LastPriceRefresh(),
-		Assumptions:         []string{"Resolved worker-node compute is allocated from observed Pod CPU/memory requests; unused capacity remains explicit idle cost."},
-		Disclaimers:         []string{"Public/list pricing estimates are not invoice values."},
-	}
+	scan.report = buildCloudCostReport(ctx, costResult, resourceAnalysis, ra.PodSnapshot())
 
 	// ── 2. Security audit (best effort) ──────────────────────────────
 	sa := analyzer.NewSecurityAuditor(clientset)

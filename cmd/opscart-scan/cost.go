@@ -84,7 +84,7 @@ func runCloudCostsScan(clusterContext string) error {
 	}
 
 	// ── Step 1: Analyze node pools and compute real VM costs ──────────────
-	npa := analyzer.NewNodePoolCostAnalyzer(clientset, region)
+	npa := analyzer.NewNodePoolCostAnalyzer(region)
 	npa.SetCloudProviderOverride(providerOverride)
 	if pricingSource == "aws-api" {
 		cfg, cfgErr := awsconfig.LoadDefaultConfig(context.Background(), awsconfig.WithRegion("us-east-1"))
@@ -92,7 +92,7 @@ func runCloudCostsScan(clusterContext string) error {
 			npa.SetPricingProvider(analyzer.NewAWSPricingProvider(awspricing.NewFromConfig(cfg), 24*time.Hour))
 		}
 	}
-	poolCosts, _, err := npa.AnalyzeNodePoolCosts()
+	poolCosts, _, err := npa.AnalyzeNodePoolCosts(clientset)
 	if err != nil {
 		return fmt.Errorf("analyzing node pool costs: %w", err)
 	}

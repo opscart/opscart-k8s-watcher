@@ -21,7 +21,21 @@ import (
 // clusterScan holds results from all analyzers for a single cluster scan.
 // Fields other than report may be nil if the audit failed (RBAC, timeout, etc.).
 type clusterScan struct {
+	// report is the full Cost Intelligence composite for one internally
+	// consistent analysis pass (pool costs, namespace allocation,
+	// optimization scenarios, and provider metadata). In normal healthy
+	// operation it is coordinator-published from one ClusterSnapshot
+	// generation. The legacy scan still produces the same unit during Phase
+	// 4 coexistence, but preserveNewerCoordinatorCostAnalysis prevents that
+	// generation-less result from replacing coordinator-owned evidence.
 	report *models.CloudCostReport
+
+	// costGeneration is the ClusterSnapshot generation that produced report,
+	// or 0 if the coordinator has never published one for this cluster yet.
+	// Same defense-in-depth provenance guard as nodeOptimizationGeneration
+	// below — see its comment for why this is never relied on to paper
+	// over a real ordering bug.
+	costGeneration uint64
 
 	// secAudit is displayed by pages.go/server.go's overview and is also an
 	// input to this scan cycle's incident batch (collectWarRoomIssues'
@@ -204,6 +218,19 @@ type dashboardState struct {
 	// could observe it, and never reassigned afterward — same no-lock
 	// convention as acquisition above.
 	coordinator *clusterstate.Coordinator
+
+	// costAnalyzer is this cluster's persistent Cost/pricing runtime (docs/08
+	// Phase 4D.6) — one *analyzer.NodePoolCostAnalyzer reused by both the
+	// legacy scan cycle (runFullScan, server.go) and the coordinator-driven
+	// path (cost_runtime.go), so a pricing provider's own cache (e.g. the
+	// Azure Retail Prices provider's 24h TTL) survives across scans/
+	// generations instead of being discarded with a freshly-constructed
+	// analyzer every cycle. Constructed once in getState, before this
+	// dashboardState is published to srv.states, and never reassigned
+	// afterward — same no-lock convention as acquisition/coordinator above.
+	// The type's own mutex protects it against the concurrent access this
+	// sharing introduces (see NodePoolCostAnalyzer's doc comment).
+	costAnalyzer *analyzer.NodePoolCostAnalyzer
 }
 
 // The preserveNewerCoordinatorX family used by refresh below — one guard
@@ -224,7 +251,7 @@ func (s *dashboardState) refresh(clusterList []string) error {
 	start := time.Now()
 
 	scanCounters := newAPICounters()
-	scan, err := runFullScan(s.ctx, scanCounters)
+	scan, err := runFullScan(s.ctx, scanCounters, s.costAnalyzer)
 	if err != nil {
 		return err
 	}
@@ -242,6 +269,7 @@ func (s *dashboardState) refresh(clusterList []string) error {
 	page := renderHTML(scan, s.ctx, clusterList)
 
 	s.mu.Lock()
+	preserveNewerCoordinatorCostAnalysis(s.scan, scan)
 	preserveNewerCoordinatorNodeOptimization(s.scan, scan)
 	preserveNewerCoordinatorResourceAnalysis(s.scan, scan)
 	preserveNewerCoordinatorNodeHealth(s.scan, scan)

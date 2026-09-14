@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/opscart/opscart-k8s-watcher/pkg/acquisition"
+	"github.com/opscart/opscart-k8s-watcher/pkg/analyzer"
 	"github.com/opscart/opscart-k8s-watcher/pkg/clusterstate"
 	"github.com/opscart/opscart-k8s-watcher/pkg/models"
 	"github.com/opscart/opscart-k8s-watcher/pkg/store"
@@ -149,7 +150,10 @@ func TestShutdownStopsAcquisitionBeforeSyncCompletes(t *testing.T) {
 // all migrated analyzers run" (docs/08 §2.5) — without needing a real
 // Coordinator or informer wiring to prove it.
 func TestRunCoordinatedAnalysisRunsBothAnalyzers(t *testing.T) {
-	state := &dashboardState{scan: &clusterScan{report: &models.CloudCostReport{Currency: "USD"}}}
+	state := &dashboardState{
+		scan:         &clusterScan{report: &models.CloudCostReport{Currency: "USD"}},
+		costAnalyzer: analyzer.NewNodePoolCostAnalyzer(""),
+	}
 
 	cs := clusterstate.NewClusterState("cluster-a")
 	cs.Update(clusterstate.ClusterResources{
@@ -162,6 +166,9 @@ func TestRunCoordinatedAnalysisRunsBothAnalyzers(t *testing.T) {
 
 	runCoordinatedAnalysis(state, snapshot)
 
+	if state.scan.costGeneration != snapshot.Generation() {
+		t.Fatalf("costGeneration = %d, want %d", state.scan.costGeneration, snapshot.Generation())
+	}
 	if state.scan.nodeOptimizationGeneration != snapshot.Generation() {
 		t.Fatalf("nodeOptimizationGeneration = %d, want %d", state.scan.nodeOptimizationGeneration, snapshot.Generation())
 	}
@@ -185,12 +192,15 @@ func TestRunCoordinatedAnalysisRunsBothAnalyzers(t *testing.T) {
 // TestStartAnalysisCoordinatorDrivesBothAnalyzersEndToEnd proves the actual
 // production wiring: a Coordinator created by startAnalysisCoordinator
 // against a real acquisition.Runtime's ClusterState eventually publishes
-// Node Optimization, Resource Analyzer, Node Health, Network, Security, and
-// Waste results, through the real coalescing window
+// Cost, Node Optimization, Resource Analyzer, Node Health, Network,
+// Security, and Waste results, through the real coalescing window
 // (pkg/clusterstate.coalesceWindow) — "latest generation wins after
 // coalescing" for every migrated analyzer at once, not a test seam.
 func TestStartAnalysisCoordinatorDrivesBothAnalyzersEndToEnd(t *testing.T) {
-	state := &dashboardState{scan: &clusterScan{report: &models.CloudCostReport{Currency: "USD"}}}
+	state := &dashboardState{
+		scan:         &clusterScan{report: &models.CloudCostReport{Currency: "USD"}},
+		costAnalyzer: analyzer.NewNodePoolCostAnalyzer(""),
+	}
 
 	client := fake.NewSimpleClientset(&corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "node-a"}})
 	rt := acquisition.NewRuntime("cluster-a", client)
@@ -222,6 +232,7 @@ func TestStartAnalysisCoordinatorDrivesBothAnalyzersEndToEnd(t *testing.T) {
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
 		state.mu.RLock()
+		costGen := state.scan.costGeneration
 		nodeOptGen := state.scan.nodeOptimizationGeneration
 		resourceGen := state.scan.resourceAnalysisGeneration
 		nodeHealthGen := state.scan.nodeHealthGeneration
@@ -229,12 +240,12 @@ func TestStartAnalysisCoordinatorDrivesBothAnalyzersEndToEnd(t *testing.T) {
 		secAuditGen := state.scan.secAuditGeneration
 		wasteAuditGen := state.scan.wasteAuditGeneration
 		state.mu.RUnlock()
-		if nodeOptGen > 0 && resourceGen > 0 && nodeHealthGen > 0 && netAuditGen > 0 && secAuditGen > 0 && wasteAuditGen > 0 {
+		if costGen > 0 && nodeOptGen > 0 && resourceGen > 0 && nodeHealthGen > 0 && netAuditGen > 0 && secAuditGen > 0 && wasteAuditGen > 0 {
 			return
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
-	t.Fatal("coordinator did not publish Node Optimization, Resource Analyzer, Node Health, Network, Security, and Waste results within 5s of a trustworthy initial sync")
+	t.Fatal("coordinator did not publish Cost, Node Optimization, Resource Analyzer, Node Health, Network, Security, and Waste results within 5s of a trustworthy initial sync")
 }
 
 // TestAnalysisCoordinatorsAreClusterSpecific proves each cluster gets its
