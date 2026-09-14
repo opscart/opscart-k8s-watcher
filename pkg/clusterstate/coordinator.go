@@ -24,23 +24,37 @@ type AnalysisFunc func(*ClusterSnapshot)
 // count treated as elapsed time. Exactly one Coordinator exists per
 // cluster, matching its ClusterState (docs/08 §13): nothing here is safe
 // to share across clusters.
+//
+// clockInterval (docs/08 Phase 5) optionally adds a second trigger source:
+// a periodic wall-clock tick that also calls analyze against the latest
+// snapshot even when no new ClusterState publication has occurred. This is
+// required for rules that can change meaning purely from elapsed time on an
+// otherwise-unchanged snapshot (Waste age gates, Cost pricing TTL) — see
+// docs/08 Phase 5's clock-driven behavior audit. A clock tick never causes
+// a new ClusterState generation and never touches Kubernetes; it only
+// re-invokes analyze with whatever ClusterState.Latest() already holds.
+// Zero disables it, preserving the event-only behavior every pre-Phase-5
+// caller relies on.
 type Coordinator struct {
-	state   *ClusterState
-	analyze AnalysisFunc
-	window  time.Duration
+	state         *ClusterState
+	analyze       AnalysisFunc
+	window        time.Duration
+	clockInterval time.Duration
 }
 
 // NewCoordinator creates the coordinator for one cluster's ClusterState.
-func NewCoordinator(state *ClusterState, analyze AnalysisFunc) *Coordinator {
-	return newCoordinator(state, analyze, coalesceWindow)
+// clockInterval is the wall-clock re-analysis cadence (0 disables it —
+// see Coordinator's doc comment).
+func NewCoordinator(state *ClusterState, analyze AnalysisFunc, clockInterval time.Duration) *Coordinator {
+	return newCoordinator(state, analyze, coalesceWindow, clockInterval)
 }
 
 // newCoordinator is NewCoordinator with an explicit window, so tests can
 // use a millisecond-scale window instead of waiting out coalesceWindow —
 // the smallest seam that keeps timing tests fast without a clock
 // abstraction.
-func newCoordinator(state *ClusterState, analyze AnalysisFunc, window time.Duration) *Coordinator {
-	return &Coordinator{state: state, analyze: analyze, window: window}
+func newCoordinator(state *ClusterState, analyze AnalysisFunc, window, clockInterval time.Duration) *Coordinator {
+	return &Coordinator{state: state, analyze: analyze, window: window, clockInterval: clockInterval}
 }
 
 // Run processes generation notifications until ctx is done, then returns.
@@ -50,16 +64,26 @@ func newCoordinator(state *ClusterState, analyze AnalysisFunc, window time.Durat
 // notifications for up to window without extending that deadline (a fixed
 // window from the first event, not a reset-per-event debounce — this
 // bounds worst-case trigger latency to window even under a sustained
-// stream), then call analyze once against ClusterState.Latest.
+// stream), then call analyze once against ClusterState.Latest. A clock
+// tick (docs/08 Phase 5) is a second, independent trigger into the exact
+// same call: it needs no coalescing window of its own — it is already one
+// deliberate, rate-limited signal, not a burst to absorb — so it falls
+// straight through to runOnce.
 //
 // Because this loop is single-threaded, a second analyze call can never
 // start before the previous one returns — overlap is impossible by
-// construction, not by locking. A notification that arrives while analyze
-// is running is not lost: Publications' channel already holds it (or
-// will, since a full channel only ever holds one pending signal), so the
-// next iteration's wait returns immediately and coalesces into one more
-// run, exactly the "remember work is pending, run once more" behavior —
-// with no queue, counter, or extra goroutine needed to implement it.
+// construction, not by locking, regardless of which of the two trigger
+// sources caused it. A notification that arrives while analyze is running
+// is not lost: Publications' channel already holds it (or will, since a
+// full channel only ever holds one pending signal), so the next
+// iteration's wait returns immediately and coalesces into one more run,
+// exactly the "remember work is pending, run once more" behavior — with no
+// queue, counter, or extra goroutine needed to implement it. A clock tick
+// that arrives while an event notification is being coalesced or analyzed
+// is not queued either (time.Ticker holds at most one pending tick): at
+// worst it is observed one iteration late, on the very next return to this
+// select — bounded by window plus one analyze call, never starved
+// indefinitely under a continuous event stream.
 //
 // Coordinator is the sole intended reader of ClusterState.Publications for
 // this cluster — see that method's doc comment. Nothing here registers or
@@ -71,15 +95,22 @@ func newCoordinator(state *ClusterState, analyze AnalysisFunc, window time.Durat
 // currently-running analyze call is allowed to finish; Run then stops on
 // its next check rather than leaking.
 func (c *Coordinator) Run(ctx context.Context) {
+	var clockTicks <-chan time.Time
+	if c.clockInterval > 0 {
+		ticker := time.NewTicker(c.clockInterval)
+		defer ticker.Stop()
+		clockTicks = ticker.C
+	}
+
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-c.state.Publications():
-		}
-
-		if !c.waitForWindow(ctx) {
-			return
+			if !c.waitForWindow(ctx) {
+				return
+			}
+		case <-clockTicks:
 		}
 
 		c.runOnce()

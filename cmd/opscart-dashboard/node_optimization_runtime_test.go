@@ -223,125 +223,12 @@ func TestNodeOptimizationSavingsJoinManualProviderOverrideFromCost(t *testing.T)
 	}
 }
 
-// TestRunNodeOptimizationRequiresNoKubernetesClient proves this analysis path
-// needs nothing beyond a ClusterSnapshot and the retained scan fields —
-// there is no clientset, kubeClientFor, or other Kubernetes acquisition
-// reachable from runNodeOptimization at all (docs/08 Phase 4C scope: Node
-// Optimization must stop acquiring Kubernetes state directly).
-func TestRunNodeOptimizationRequiresNoKubernetesClient(t *testing.T) {
-	state := &dashboardState{
-		scan: &clusterScan{report: &models.CloudCostReport{Currency: "USD"}},
-	}
-
-	cs := clusterstate.NewClusterState("cluster-a")
-	cs.SetAcquisitionState(clusterstate.AcquisitionHealthy)
-	snapshot := cs.Publish()
-	state.scan.costGeneration = snapshot.Generation()
-
-	runNodeOptimization(state, snapshot)
-
-	if state.scan.nodeOptimizationGeneration != snapshot.Generation() {
-		t.Fatalf("nodeOptimizationGeneration = %d, want %d", state.scan.nodeOptimizationGeneration, snapshot.Generation())
-	}
-}
-
-func TestRunNodeOptimizationSkipsWhenSnapshotNotTrustworthy(t *testing.T) {
-	original := &clusterScan{report: &models.CloudCostReport{Currency: "USD"}}
-	state := &dashboardState{scan: original}
-
-	cs := clusterstate.NewClusterState("cluster-a") // starts STALE
-	snapshot := cs.Publish()
-
-	runNodeOptimization(state, snapshot)
-
-	if state.scan != original {
-		t.Fatal("an untrustworthy snapshot must not replace the currently displayed scan")
-	}
-}
-
-func TestRunNodeOptimizationSkipsWhenNoLegacyScanYet(t *testing.T) {
-	state := &dashboardState{} // scan is nil: no legacy scan has ever completed
-
-	cs := clusterstate.NewClusterState("cluster-a")
-	cs.SetAcquisitionState(clusterstate.AcquisitionHealthy)
-	snapshot := cs.Publish()
-
-	runNodeOptimization(state, snapshot) // must not panic
-
-	if state.scan != nil {
-		t.Fatal("expected scan to remain nil when no legacy scan has published cost data")
-	}
-}
-
-func TestRunNodeOptimizationSkipsWhenCostNotYetPublishedForThisGeneration(t *testing.T) {
-	original := &clusterScan{} // cost is nil, costGeneration is 0: never populated
-	state := &dashboardState{scan: original}
-
-	cs := clusterstate.NewClusterState("cluster-a")
-	cs.SetAcquisitionState(clusterstate.AcquisitionHealthy)
-	snapshot := cs.Publish()
-
-	runNodeOptimization(state, snapshot)
-
-	if state.scan != original {
-		t.Fatal("a scan with no same-generation Cost result must not be replaced")
-	}
-}
-
-func TestPublishNodeOptimizationGenerationGuardRejectsOlderOrEqualGeneration(t *testing.T) {
-	state := &dashboardState{scan: &clusterScan{}}
-
-	recsV1 := []analyzer.NodeOptimizationRecommendation{{Summary: "v1"}}
-	publishNodeOptimization(state, 5, recsV1, nil)
-	if state.scan.nodeOptimizationGeneration != 5 || len(state.scan.nodeOptimization) != 1 {
-		t.Fatalf("expected generation 5's result to publish, got generation=%d recs=%d",
-			state.scan.nodeOptimizationGeneration, len(state.scan.nodeOptimization))
-	}
-
-	recsStale := []analyzer.NodeOptimizationRecommendation{{Summary: "stale"}}
-	publishNodeOptimization(state, 3, recsStale, nil)
-	if state.scan.nodeOptimizationGeneration != 5 || state.scan.nodeOptimization[0].Summary != "v1" {
-		t.Fatal("an older generation must not overwrite a newer already-published result")
-	}
-
-	publishNodeOptimization(state, 5, recsStale, nil)
-	if state.scan.nodeOptimizationGeneration != 5 || state.scan.nodeOptimization[0].Summary != "v1" {
-		t.Fatal("an equal generation must not overwrite the already-published result for that generation")
-	}
-}
-
-// TestPublishNodeOptimizationCopyAndSwapPreservesPreviouslyPublishedScan
-// proves publishNodeOptimization never mutates an already-published
-// *clusterScan in place — every existing reader (pages.go, node_optimization.go)
-// captures state.scan once under RLock and reads its fields lock-free
-// afterward, so mutating a field on that pointer after handing it out would
-// race every such reader.
-func TestPublishNodeOptimizationCopyAndSwapPreservesPreviouslyPublishedScan(t *testing.T) {
-	state := &dashboardState{scan: &clusterScan{report: &models.CloudCostReport{Currency: "USD"}}}
-
-	previouslyRead := state.scan // simulates a reader that captured the pointer under RLock
-
-	publishNodeOptimization(state, 1, []analyzer.NodeOptimizationRecommendation{{Summary: "new"}}, nil)
-
-	if state.scan == previouslyRead {
-		t.Fatal("expected publishNodeOptimization to swap in a new *clusterScan, not reuse the existing pointer")
-	}
-	if len(previouslyRead.nodeOptimization) != 0 {
-		t.Fatal("publishNodeOptimization mutated a *clusterScan a reader already held a pointer to")
-	}
-	if state.scan.report.Currency != "USD" {
-		t.Fatal("copy-and-swap must preserve every other field from the previous scan")
-	}
-}
-
-// TestRunNodeOptimizationEndToEndOnTrustworthySnapshot exercises the full
-// path — snapshot resources joined with retained cost data — via a direct
-// call to runNodeOptimization (bypassing the real Coordinator's coalescing
-// window, which pkg/clusterstate already tests independently).
-func TestRunNodeOptimizationEndToEndOnTrustworthySnapshot(t *testing.T) {
-	state := &dashboardState{
-		scan: &clusterScan{report: &models.CloudCostReport{Currency: "USD"}},
-	}
+// TestNodeOptimizationEndToEndViaRunAnalysisPass exercises the full path —
+// snapshot resources joined with this same pass's Cost report, via
+// runAnalysisPass (the one analysis execution path since docs/08 Phase 5,
+// replacing the former runNodeOptimization/publishNodeOptimization split).
+func TestNodeOptimizationEndToEndViaRunAnalysisPass(t *testing.T) {
+	state := &dashboardState{costAnalyzer: analyzer.NewNodePoolCostAnalyzer("")}
 
 	cs := clusterstate.NewClusterState("cluster-a")
 	cs.Update(clusterstate.ClusterResources{
@@ -350,87 +237,13 @@ func TestRunNodeOptimizationEndToEndOnTrustworthySnapshot(t *testing.T) {
 	})
 	cs.SetAcquisitionState(clusterstate.AcquisitionHealthy)
 	snapshot := cs.Publish()
-	state.scan.costGeneration = snapshot.Generation()
 
-	runNodeOptimization(state, snapshot)
+	runAnalysisPass(state, snapshot, nil)
 
-	if state.scan.nodeOptimizationGeneration != snapshot.Generation() {
-		t.Fatalf("nodeOptimizationGeneration = %d, want %d", state.scan.nodeOptimizationGeneration, snapshot.Generation())
+	if state.scan.generation != snapshot.Generation() {
+		t.Fatalf("scan.generation = %d, want %d", state.scan.generation, snapshot.Generation())
 	}
 	if len(state.scan.nodeOptimizationSavings) != len(state.scan.nodeOptimization) {
 		t.Fatal("expected nodeOptimizationSavings aligned 1:1 with nodeOptimization")
-	}
-}
-
-// ── Audit point 3: legacy full-scan vs. coordinator publish ordering ──────
-
-func TestPreserveNewerCoordinatorNodeOptimizationHandlesNilPrevious(t *testing.T) {
-	next := &clusterScan{nodeOptimization: []analyzer.NodeOptimizationRecommendation{{Summary: "legacy"}}}
-
-	preserveNewerCoordinatorNodeOptimization(nil, next) // first-ever scan for this cluster
-
-	if len(next.nodeOptimization) != 1 || next.nodeOptimization[0].Summary != "legacy" {
-		t.Fatal("a nil previous scan must leave next's own computation untouched")
-	}
-}
-
-func TestPreserveNewerCoordinatorNodeOptimizationLeavesLegacyResultWhenNoCoordinatorYet(t *testing.T) {
-	previous := &clusterScan{nodeOptimization: []analyzer.NodeOptimizationRecommendation{{Summary: "old-legacy"}}} // generation 0: never coordinator-published
-	next := &clusterScan{nodeOptimization: []analyzer.NodeOptimizationRecommendation{{Summary: "new-legacy"}}}
-
-	preserveNewerCoordinatorNodeOptimization(previous, next)
-
-	if len(next.nodeOptimization) != 1 || next.nodeOptimization[0].Summary != "new-legacy" {
-		t.Fatal("with no coordinator publish yet, next's own freshly-computed legacy result must stand")
-	}
-}
-
-// TestNodeOptimizationOrderingCoordinatorThenLegacyScan is the audit-point-3
-// regression: a coordinator-published result for generation N must survive
-// a legacy full scan that completes and publishes afterward — reproducing
-// refresh()'s actual *clusterScan swap (scan.go), not just the guard
-// function in isolation.
-func TestNodeOptimizationOrderingCoordinatorThenLegacyScan(t *testing.T) {
-	state := &dashboardState{scan: &clusterScan{report: &models.CloudCostReport{Currency: "USD"}}}
-
-	coordinatorRecs := []analyzer.NodeOptimizationRecommendation{{Summary: "coordinator-gen-5"}}
-	publishNodeOptimization(state, 5, coordinatorRecs, nil)
-
-	legacyScan := &clusterScan{
-		report:           &models.CloudCostReport{Currency: "USD"},
-		nodeOptimization: []analyzer.NodeOptimizationRecommendation{{Summary: "legacy-own-computation"}},
-	}
-	preserveNewerCoordinatorNodeOptimization(state.scan, legacyScan) // the exact call refresh() makes
-	state.scan = legacyScan                                          // the exact swap refresh() makes
-
-	if state.scan.nodeOptimizationGeneration != 5 {
-		t.Fatalf("nodeOptimizationGeneration = %d after a legacy scan publish, want 5 preserved", state.scan.nodeOptimizationGeneration)
-	}
-	if len(state.scan.nodeOptimization) != 1 || state.scan.nodeOptimization[0].Summary != "coordinator-gen-5" {
-		t.Fatalf("legacy scan clobbered the newer coordinator result: %+v", state.scan.nodeOptimization)
-	}
-}
-
-// TestNodeOptimizationOrderingLegacyScanThenCoordinator is the inverse
-// ordering: a legacy scan publishing first must not block a subsequent
-// coordinator generation from winning.
-func TestNodeOptimizationOrderingLegacyScanThenCoordinator(t *testing.T) {
-	state := &dashboardState{}
-
-	legacyScan := &clusterScan{
-		report:           &models.CloudCostReport{Currency: "USD"},
-		nodeOptimization: []analyzer.NodeOptimizationRecommendation{{Summary: "legacy-own-computation"}},
-	}
-	preserveNewerCoordinatorNodeOptimization(state.scan, legacyScan) // previous is nil: first-ever scan
-	state.scan = legacyScan
-
-	coordinatorRecs := []analyzer.NodeOptimizationRecommendation{{Summary: "coordinator-gen-3"}}
-	publishNodeOptimization(state, 3, coordinatorRecs, nil)
-
-	if state.scan.nodeOptimizationGeneration != 3 {
-		t.Fatalf("nodeOptimizationGeneration = %d, want 3", state.scan.nodeOptimizationGeneration)
-	}
-	if len(state.scan.nodeOptimization) != 1 || state.scan.nodeOptimization[0].Summary != "coordinator-gen-3" {
-		t.Fatalf("expected the coordinator's generation 3 result to win: %+v", state.scan.nodeOptimization)
 	}
 }

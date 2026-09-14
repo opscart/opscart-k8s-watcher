@@ -9,11 +9,13 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/opscart/opscart-k8s-watcher/pkg/analyzer"
+	"github.com/opscart/opscart-k8s-watcher/pkg/clusterstate"
 	"github.com/opscart/opscart-k8s-watcher/pkg/models"
 	"github.com/opscart/opscart-k8s-watcher/pkg/store"
 )
@@ -101,30 +103,40 @@ func TestOpenDashboardStoreOptionalPersistenceFallsBack(t *testing.T) {
 	}
 }
 
-func TestBackgroundRefreshStopsAfterActiveScanCompletes(t *testing.T) {
+// TestAnalysisCoordinatorsStopAfterActiveAnalysisCompletes proves docs/08
+// Phase 5's shutdown-safety requirement: srv.backgroundWG (waited on by
+// runDashboard, main.go, before closing the store) tracks every cluster's
+// Coordinator goroutine, so shutdown cannot proceed to closing the database
+// while a Coordinator-triggered analysis/persistence pass is still in
+// flight. This replaces the pre-Phase-5 background-ticker version of the
+// same proof (startBackgroundRefresh/runBackgroundRefresh, since removed —
+// the Coordinator is now the sole recurring trigger, started by
+// startAnalysisCoordinators).
+func TestAnalysisCoordinatorsStopAfterActiveAnalysisCompletes(t *testing.T) {
 	srv := newServer([]string{"test-ctx"}, &store.NullStore{}, 90, false)
 	state := srv.getState("test-ctx")
-	state.mu.Lock()
-	state.scan = &clusterScan{}
-	state.mu.Unlock()
+
+	cs := clusterstate.NewClusterState("test-ctx")
+	cs.SetAcquisitionState(clusterstate.AcquisitionHealthy)
 
 	started := make(chan struct{})
 	release := make(chan struct{})
 	var calls atomic.Int32
-	srv.refreshState = func(_ *dashboardState, _ []string) error {
-		if calls.Add(1) == 1 {
-			close(started)
-		}
+	var once sync.Once
+	state.coordinator = clusterstate.NewCoordinator(cs, func(*clusterstate.ClusterSnapshot) {
+		calls.Add(1)
+		once.Do(func() { close(started) })
 		<-release
-		return nil
-	}
+	}, 0)
 
 	ctx, cancel := context.WithCancel(context.Background())
-	srv.startBackgroundRefresh(ctx, time.Millisecond)
+	srv.startAnalysisCoordinators(ctx)
+	cs.Publish() // one ClusterState generation change to trigger the Coordinator
+
 	select {
 	case <-started:
-	case <-time.After(time.Second):
-		t.Fatal("scheduled scan did not start")
+	case <-time.After(3 * time.Second): // must exceed pkg/clusterstate's real coalesceWindow (2s)
+		t.Fatal("scheduled analysis did not start")
 	}
 
 	cancel()
@@ -135,7 +147,7 @@ func TestBackgroundRefreshStopsAfterActiveScanCompletes(t *testing.T) {
 	}()
 	select {
 	case <-stopped:
-		t.Fatal("background worker stopped before its active scan completed")
+		t.Fatal("background worker stopped before its active analysis completed")
 	case <-time.After(20 * time.Millisecond):
 	}
 
@@ -143,10 +155,10 @@ func TestBackgroundRefreshStopsAfterActiveScanCompletes(t *testing.T) {
 	select {
 	case <-stopped:
 	case <-time.After(time.Second):
-		t.Fatal("background worker did not stop after active scan completed")
+		t.Fatal("background worker did not stop after active analysis completed")
 	}
 	if got := calls.Load(); got != 1 {
-		t.Fatalf("scheduled scans after cancellation = %d, want 1 total call", got)
+		t.Fatalf("analysis calls after cancellation = %d, want 1 total call", got)
 	}
 }
 

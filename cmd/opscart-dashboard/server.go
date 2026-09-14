@@ -85,7 +85,6 @@ type server struct {
 	retentionDays       int
 	dbPersistent        bool
 	auth                *authConfig
-	refreshState        func(*dashboardState, []string) error
 	backgroundWG        sync.WaitGroup
 	logsEnabled         bool
 	kubeClientFor       kubeClientFactory
@@ -112,9 +111,6 @@ func newServer(clusterList []string, db store.Store, retentionDays int, dbPersis
 			return kubeClientWithCounters(ctx, localCounters)
 		},
 		podLogReader: readPodLogs,
-		refreshState: func(state *dashboardState, clusters []string) error {
-			return state.refresh(clusters)
-		},
 	}
 }
 

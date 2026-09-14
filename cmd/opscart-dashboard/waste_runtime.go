@@ -8,44 +8,24 @@ import (
 )
 
 // This file is docs/08 Phase 4D.5: Waste analysis migrated off direct
-// Kubernetes acquisition onto the shared ClusterSnapshot pipeline — the
-// sixth analyzer (after Node Optimization Phase 4C, Resource Analyzer
-// Phase 4D.1, Node Health Phase 4D.2, Network Phase 4D.3, Security
-// Phase 4D.4) driven by the per-cluster Coordinator. See
-// acquisition_runtime.go's runCoordinatedAnalysis for where all six are
-// invoked from the same coalesced generation.
+// Kubernetes acquisition onto the shared ClusterSnapshot pipeline.
+// buildWasteAnalysis is called from analysis.go's buildClusterScan — the
+// one analysis path per cluster (docs/08 Phase 5) — not from a separate
+// Coordinator-facing entry point: Phase 5 removed the runWasteAnalysis/
+// publishWasteAnalysis split (and the per-analyzer wasteAuditGeneration
+// field it guarded) once there was no longer a second, independently-timed
+// analysis path to reconcile against. See acquisition_runtime.go's
+// runAnalysisPass and publishScan for the single ordering guard that
+// replaced it.
 //
-// This migration is DISPLAY-only, exactly like Node Health/Network/Security.
-// Incident persistence (UpsertIncidents/ResolveMissing) remains entirely
-// owned by the legacy scan cycle (refresh, scan.go) — see
-// preserveNewerCoordinatorWasteAnalysis's doc comment there for exactly why
-// (wasteAudit.StalePods/AbandonedNamespaces feed collectWarRoomIssues, and
-// wasteAudit.OrphanedPVCs feeds calcIncidentScore, part of that same
-// incident batch), and how the two coexist without becoming two
-// independent incident writers.
-//
-// The legacy scan cycle (legacy_analysis.go's runLegacyAnalysis, since
-// docs/08 Phase 4E) calls this same buildWasteAnalysis directly — not
-// disabled: incident persistence still needs its own synchronous result
-// (above). Duplicate execution for the DISPLAY value is tolerated the same
-// way Phase 4C/4D.1-4D.4 established: whichever publishes last wins the
-// display, guarded by publishWasteAnalysis's generation check below. Before
-// Phase 4E, the legacy pass called analyzer.NewWasteAuditor(clientset) +
-// AuditWaste directly, and Node Optimization's legacy storage evidence
-// (node_optimization_runtime.go) reused WasteAuditor.PVCSnapshot() as its
-// sole PVC-acquisition path; both now read resources.PersistentVolumeClaims
-// from the same ClusterSnapshot instead — see buildNodeOptimization.
-//
-// Time semantics: most Waste rules are clock-driven age gates (see docs/08
-// Phase 4D.5's audit), meaning an age threshold can be crossed by elapsed
-// wall-clock time alone, with no new Kubernetes event to trigger a fresh
-// coordinator generation. This does not regress correctness here: the
-// legacy 60-second scan loop above already re-evaluates every age-gated
-// rule on its own wall-clock cadence, independent of the coordinator, and
-// continues to do so unchanged. If that loop is ever removed (Phase 5),
-// age-gated Waste findings will need an explicit clock-driven
-// re-evaluation trigger — not solved here, and not to be solved by adding
-// a periodic Kubernetes read.
+// Time semantics: most Waste rules are clock-driven age gates, meaning an
+// age threshold can be crossed by elapsed wall-clock time alone, with no
+// new Kubernetes event to trigger a fresh ClusterState generation. now
+// below is always the actual call-time clock, so this stays correct as
+// long as SOMETHING re-invokes buildClusterScan periodically even on a
+// static cluster — docs/08 Phase 5's Coordinator clock trigger
+// (pkg/clusterstate/coordinator.go's clockInterval) is exactly that;
+// nothing here performs or requires a periodic Kubernetes read.
 func buildWasteAnalysis(resources clusterstate.ClusterResources) *analyzer.WasteAudit {
 	input := analyzer.WasteSnapshot{
 		Namespaces:               snapshotResourceCopy(resources.Namespaces),
@@ -63,53 +43,4 @@ func buildWasteAnalysis(resources clusterstate.ClusterResources) *analyzer.Waste
 		PodWarningEvents:         snapshotResourceCopy(resources.PodWarningEvents),
 	}
 	return analyzer.AnalyzeWaste(input, dashboardWasteMinAgeDays, time.Now())
-}
-
-// runWasteAnalysis is the Coordinator-facing analysis step for one
-// cluster: it gates on acquisition trustworthiness, then computes and
-// publishes a new Waste audit for display. It never touches incident
-// persistence — see this file's header comment.
-//
-// A DEGRADED/RESYNCING/STALE snapshot is not analyzed: state.scan keeps
-// showing whatever result (coordinator- or legacy-produced) was last
-// published. This is also what keeps an untrustworthy snapshot from ever
-// being treated as evidence a waste finding was resolved — the function
-// simply does not run, so it cannot feed a false transition into anything,
-// incident-related or not.
-func runWasteAnalysis(state *dashboardState, snapshot *clusterstate.ClusterSnapshot) {
-	if !snapshot.Trustworthy() {
-		return
-	}
-
-	state.mu.RLock()
-	hasScan := state.scan != nil
-	state.mu.RUnlock()
-	if !hasScan {
-		// No legacy scan has ever published a *clusterScan yet — there is
-		// nothing to copy-and-swap this result onto.
-		return
-	}
-
-	audit := buildWasteAnalysis(snapshot.Resources())
-	publishWasteAnalysis(state, snapshot.Generation(), audit)
-}
-
-// publishWasteAnalysis replaces state.scan.wasteAudit via copy-and-swap of
-// the whole *clusterScan pointer — the exact mechanism the other five
-// publishers use, for the same reasons: every existing reader treats an
-// already-published *clusterScan as immutable, and the generation check is
-// defense-in-depth documenting an invariant Coordinator's single-threaded
-// loop already guarantees structurally.
-func publishWasteAnalysis(state *dashboardState, generation uint64, audit *analyzer.WasteAudit) {
-	state.mu.Lock()
-	defer state.mu.Unlock()
-
-	if state.scan == nil || generation <= state.scan.wasteAuditGeneration {
-		return
-	}
-
-	updated := *state.scan
-	updated.wasteAudit = audit
-	updated.wasteAuditGeneration = generation
-	state.scan = &updated
 }

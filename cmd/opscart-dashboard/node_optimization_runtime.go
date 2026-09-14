@@ -7,38 +7,22 @@ import (
 	corev1 "k8s.io/api/core/v1"
 )
 
-// Cost dependency: docs/08 Phase 4D.6 changed buildNodeOptimization/
-// buildNodeInfosFromSnapshot below to join against cost_runtime.go's
-// full CloudCostReport from the same coordinator generation — see
-// runNodeOptimization's gate and runCoordinatedAnalysis's Cost-before-Node-
-// Optimization ordering (acquisition_runtime.go).
-
 // This file is docs/08 Phase 4C: the first analyzer migrated off direct
 // Kubernetes acquisition onto the shared ClusterSnapshot pipeline built in
 // Phases 2-4B. Only Node Optimization's own analysis logic lives here —
 // every analyzer this pipeline drives (Cost, Resource Analyzer, Node
 // Health, Waste, Security, Network) has its own similarly-named
-// *_runtime.go file; the coordinator-construction glue that calls all seven
-// lives in acquisition_runtime.go (see
-// runCoordinatedAnalysis/startAnalysisCoordinator) rather than in any one
-// analyzer's own file.
-//
-// The legacy scan cycle (legacy_analysis.go's runLegacyAnalysis, since
-// docs/08 Phase 4E) calls this same buildNodeOptimization directly — not
-// disabled: refresh (scan.go) replaces dashboardState.scan wholesale every
-// scan cycle, so if the legacy pass stopped populating
-// nodeOptimization/nodeOptimizationSavings, the very next legacy scan would
-// silently wipe out this coordinator's more recent result. Avoiding that
-// would require teaching refresh to carry coordinator-owned fields forward
-// across an unrelated scan cycle — a broader refactor than either the 4C or
-// 4E migration slice is scoped to. Duplicate execution (legacy pass and
-// coordinator both compute Node Optimization) is tolerated instead;
-// whichever publishes last wins the display, and publishNodeOptimization's
-// generation guard below prevents an older coordinator generation from
-// clobbering a newer one. Before Phase 4E, the legacy pass sourced its own
-// Nodes/Pods/PVCs/PVs via live Kubernetes calls made by Cost/Node
-// Health/Waste's own legacy acquisition; it now reads them from the same
-// ClusterSnapshot the Coordinator reads, via this file's buildNodeOptimization.
+// *_runtime.go file. buildNodeOptimization is called from analysis.go's
+// buildClusterScan — the one analysis path per cluster (docs/08 Phase 5) —
+// not from a separate Coordinator-facing entry point: Phase 5 removed the
+// runNodeOptimization/publishNodeOptimization split (and the per-analyzer
+// nodeOptimizationGeneration field, and the scan.costGeneration ==
+// snapshot.Generation() cross-analyzer check it used) once Cost's report
+// became a plain Go value threaded directly into this function within the
+// same buildClusterScan call, rather than something read back from
+// state.scan across two independently-timed publications. See
+// acquisition_runtime.go's runAnalysisPass and publishScan for the single
+// ordering guard that replaced both.
 
 // snapshotResourceCopy dereferences a ClusterResources pointer slice into the
 // value slice Node Optimization's existing pkg/analyzer functions expect
@@ -127,66 +111,4 @@ func buildNodeOptimization(
 	}
 	savings := analyzer.BuildNodeOptimizationSavingsProjections(recommendations, poolCosts, currency)
 	return recommendations, savings
-}
-
-// runNodeOptimization is the Coordinator-facing analysis step for one
-// cluster: it gates on acquisition trustworthiness and on this same
-// generation's Cost result having just been published (see cost_runtime.go
-// and runCoordinatedAnalysis's ordering), then computes and publishes a new
-// Node Optimization result.
-//
-// A DEGRADED/RESYNCING/STALE snapshot is not analyzed — state.scan keeps
-// showing whatever Node Optimization result (coordinator- or legacy-produced)
-// was last published, which is the required "continue displaying the last
-// trustworthy result" behavior with no second readiness model.
-func runNodeOptimization(state *dashboardState, snapshot *clusterstate.ClusterSnapshot) {
-	if !snapshot.Trustworthy() {
-		return
-	}
-
-	state.mu.RLock()
-	scan := state.scan
-	state.mu.RUnlock()
-	if scan == nil || scan.costGeneration != snapshot.Generation() {
-		// Either no legacy scan has ever published a *clusterScan yet, or
-		// Cost has not published a result for this exact generation (e.g.
-		// it skipped for the same reason this call would) — there is no
-		// same-generation pool pricing/currency/provider-override decision
-		// to join against.
-		return
-	}
-
-	recommendations, savings := buildNodeOptimization(snapshot.Resources(), scan.report)
-	publishNodeOptimization(state, snapshot.Generation(), recommendations, savings)
-}
-
-// publishNodeOptimization replaces state.scan's Node Optimization fields via
-// copy-and-swap of the whole *clusterScan pointer — never in-place field
-// mutation, since every existing reader treats an already-published
-// *clusterScan as immutable (see clusterScan's doc comment in scan.go).
-//
-// The generation <= check is defense-in-depth, not the mechanism that makes
-// ordering safe: Coordinator's single-threaded Run loop already makes an
-// older generation being analyzed after a newer one structurally impossible
-// (pkg/clusterstate/coordinator.go). It exists to document that invariant
-// here and to stay correct if a legacy scan cycle resets
-// nodeOptimizationGeneration to 0 in between coordinator runs.
-func publishNodeOptimization(
-	state *dashboardState,
-	generation uint64,
-	recommendations []analyzer.NodeOptimizationRecommendation,
-	savings []analyzer.NodeOptimizationSavingsProjection,
-) {
-	state.mu.Lock()
-	defer state.mu.Unlock()
-
-	if state.scan == nil || generation <= state.scan.nodeOptimizationGeneration {
-		return
-	}
-
-	updated := *state.scan
-	updated.nodeOptimization = recommendations
-	updated.nodeOptimizationSavings = savings
-	updated.nodeOptimizationGeneration = generation
-	state.scan = &updated
 }

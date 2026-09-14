@@ -9,7 +9,6 @@ import (
 	"github.com/opscart/opscart-k8s-watcher/pkg/acquisition"
 	"github.com/opscart/opscart-k8s-watcher/pkg/analyzer"
 	"github.com/opscart/opscart-k8s-watcher/pkg/clusterstate"
-	"github.com/opscart/opscart-k8s-watcher/pkg/models"
 	"github.com/opscart/opscart-k8s-watcher/pkg/store"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -141,19 +140,16 @@ func TestShutdownStopsAcquisitionBeforeSyncCompletes(t *testing.T) {
 	}
 }
 
-// ── Phase 4D.1/4D.2/4D.3/4D.4: one Coordinator drives every migrated
-// analyzer ─────────────────────────────────────────────────────────────────
+// ── docs/08 Phase 5: one analysis execution path per cluster ────────────────
 
-// TestRunCoordinatedAnalysisRunsBothAnalyzers proves runCoordinatedAnalysis
-// invokes Node Optimization, Resource Analyzer, Node Health, Network, and
-// Security analysis from the same snapshot — "one coalesced generation ->
-// all migrated analyzers run" (docs/08 §2.5) — without needing a real
-// Coordinator or informer wiring to prove it.
-func TestRunCoordinatedAnalysisRunsBothAnalyzers(t *testing.T) {
-	state := &dashboardState{
-		scan:         &clusterScan{report: &models.CloudCostReport{Currency: "USD"}},
-		costAnalyzer: analyzer.NewNodePoolCostAnalyzer(""),
-	}
+// TestRunAnalysisPassBuildsAllAnalyzersFromOneSnapshot proves runAnalysisPass
+// (the sole analysis entry point since Phase 5 removed the separate
+// Coordinator-driven runX/publishX split) populates every analyzer's result
+// — Cost, Node Optimization, Resource Analyzer, Node Health, Network,
+// Security, Waste — from one snapshot, and stamps the published scan with
+// that snapshot's generation.
+func TestRunAnalysisPassBuildsAllAnalyzersFromOneSnapshot(t *testing.T) {
+	state := &dashboardState{costAnalyzer: analyzer.NewNodePoolCostAnalyzer("")}
 
 	cs := clusterstate.NewClusterState("cluster-a")
 	cs.Update(clusterstate.ClusterResources{
@@ -164,43 +160,40 @@ func TestRunCoordinatedAnalysisRunsBothAnalyzers(t *testing.T) {
 	cs.SetAcquisitionState(clusterstate.AcquisitionHealthy)
 	snapshot := cs.Publish()
 
-	runCoordinatedAnalysis(state, snapshot)
+	runAnalysisPass(state, snapshot, nil)
 
-	if state.scan.costGeneration != snapshot.Generation() {
-		t.Fatalf("costGeneration = %d, want %d", state.scan.costGeneration, snapshot.Generation())
+	state.mu.RLock()
+	scan := state.scan
+	state.mu.RUnlock()
+	if scan == nil {
+		t.Fatal("expected runAnalysisPass to publish a *clusterScan")
 	}
-	if state.scan.nodeOptimizationGeneration != snapshot.Generation() {
-		t.Fatalf("nodeOptimizationGeneration = %d, want %d", state.scan.nodeOptimizationGeneration, snapshot.Generation())
+	if scan.generation != snapshot.Generation() {
+		t.Fatalf("scan.generation = %d, want %d", scan.generation, snapshot.Generation())
 	}
-	if state.scan.resourceAnalysisGeneration != snapshot.Generation() {
-		t.Fatalf("resourceAnalysisGeneration = %d, want %d", state.scan.resourceAnalysisGeneration, snapshot.Generation())
+	if scan.report == nil {
+		t.Error("report not populated")
 	}
-	if state.scan.nodeHealthGeneration != snapshot.Generation() {
-		t.Fatalf("nodeHealthGeneration = %d, want %d", state.scan.nodeHealthGeneration, snapshot.Generation())
+	if scan.AllWorkloads == nil {
+		t.Error("AllWorkloads not populated")
 	}
-	if state.scan.netAuditGeneration != snapshot.Generation() {
-		t.Fatalf("netAuditGeneration = %d, want %d", state.scan.netAuditGeneration, snapshot.Generation())
-	}
-	if state.scan.secAuditGeneration != snapshot.Generation() {
-		t.Fatalf("secAuditGeneration = %d, want %d", state.scan.secAuditGeneration, snapshot.Generation())
-	}
-	if state.scan.wasteAuditGeneration != snapshot.Generation() {
-		t.Fatalf("wasteAuditGeneration = %d, want %d", state.scan.wasteAuditGeneration, snapshot.Generation())
+	// nodeHealth/netAudit/secAudit/wasteAudit/nodeOptimization can be
+	// legitimately empty for this fixture (no unhealthy nodes, no policies,
+	// no privileged pods, no waste, no extra nodes to consolidate) — what
+	// matters is that buildClusterScan actually ran, proven by report/
+	// AllWorkloads above and by cisResult below (only set once secAudit is
+	// computed, never left nil by a skipped analyzer).
+	if scan.cisResult == nil {
+		t.Error("cisResult not populated — implies secAudit/netAudit were not both computed in this pass")
 	}
 }
 
-// TestStartAnalysisCoordinatorDrivesBothAnalyzersEndToEnd proves the actual
-// production wiring: a Coordinator created by startAnalysisCoordinator
-// against a real acquisition.Runtime's ClusterState eventually publishes
-// Cost, Node Optimization, Resource Analyzer, Node Health, Network,
-// Security, and Waste results, through the real coalescing window
-// (pkg/clusterstate.coalesceWindow) — "latest generation wins after
-// coalescing" for every migrated analyzer at once, not a test seam.
-func TestStartAnalysisCoordinatorDrivesBothAnalyzersEndToEnd(t *testing.T) {
-	state := &dashboardState{
-		scan:         &clusterScan{report: &models.CloudCostReport{Currency: "USD"}},
-		costAnalyzer: analyzer.NewNodePoolCostAnalyzer(""),
-	}
+// TestRunAnalysisPassEndToEndThroughRealCoordinator proves the actual
+// production wiring: a Coordinator driving runAnalysisPass against a real
+// acquisition.Runtime's ClusterState eventually publishes a *clusterScan,
+// through the real coalescing window (pkg/clusterstate.coalesceWindow).
+func TestRunAnalysisPassEndToEndThroughRealCoordinator(t *testing.T) {
+	state := &dashboardState{costAnalyzer: analyzer.NewNodePoolCostAnalyzer("")}
 
 	client := fake.NewSimpleClientset(&corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "node-a"}})
 	rt := acquisition.NewRuntime("cluster-a", client)
@@ -209,11 +202,11 @@ func TestStartAnalysisCoordinatorDrivesBothAnalyzersEndToEnd(t *testing.T) {
 	defer cancel()
 
 	rt.Start(ctx)
-	startAnalysisCoordinator(ctx, state, rt)
+	state.coordinator = clusterstate.NewCoordinator(rt.ClusterState(), func(snapshot *clusterstate.ClusterSnapshot) {
+		runAnalysisPass(state, snapshot, nil)
+	}, 0)
+	go state.coordinator.Run(ctx)
 
-	if state.coordinator == nil {
-		t.Fatal("expected startAnalysisCoordinator to set state.coordinator")
-	}
 	if !rt.WaitForSync(ctx) {
 		t.Fatal("runtime did not reach initial sync")
 	}
@@ -232,20 +225,14 @@ func TestStartAnalysisCoordinatorDrivesBothAnalyzersEndToEnd(t *testing.T) {
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
 		state.mu.RLock()
-		costGen := state.scan.costGeneration
-		nodeOptGen := state.scan.nodeOptimizationGeneration
-		resourceGen := state.scan.resourceAnalysisGeneration
-		nodeHealthGen := state.scan.nodeHealthGeneration
-		netAuditGen := state.scan.netAuditGeneration
-		secAuditGen := state.scan.secAuditGeneration
-		wasteAuditGen := state.scan.wasteAuditGeneration
+		scan := state.scan
 		state.mu.RUnlock()
-		if costGen > 0 && nodeOptGen > 0 && resourceGen > 0 && nodeHealthGen > 0 && netAuditGen > 0 && secAuditGen > 0 && wasteAuditGen > 0 {
+		if scan != nil && scan.generation > 0 {
 			return
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
-	t.Fatal("coordinator did not publish Cost, Node Optimization, Resource Analyzer, Node Health, Network, Security, and Waste results within 5s of a trustworthy initial sync")
+	t.Fatal("coordinator did not publish an analysis result within 5s of a trustworthy initial sync")
 }
 
 // TestAnalysisCoordinatorsAreClusterSpecific proves each cluster gets its

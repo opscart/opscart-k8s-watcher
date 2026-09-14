@@ -1096,11 +1096,11 @@ The target should remain approximately three focused engineering weeks, with a f
 | Phase | Status |
 |---|---|
 | Phase 0 — Audit + baseline | COMPLETE |
-| Phase 1 — Time-based incident resolution | NOT STARTED |
-| Phase 2 — Cluster state contract | NOT STARTED |
-| Phase 3 — Shared informer acquisition | NOT STARTED |
-| Phase 4 — Coordinator + analyzer migration | NOT STARTED |
-| Phase 5 — Remove polling + validation | NOT STARTED |
+| Phase 1 — Time-based incident resolution | COMPLETE |
+| Phase 2 — Cluster state contract | COMPLETE |
+| Phase 3 — Shared informer acquisition | COMPLETE |
+| Phase 4 — Coordinator + analyzer migration | COMPLETE |
+| Phase 5 — Remove polling + validation | COMPLETE |
 
 Update only this progress table as phases advance.
 

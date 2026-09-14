@@ -61,7 +61,7 @@ func TestCoordinatorOneGenerationProducesOneTrigger(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	c := newCoordinator(state, rec.analyze, testWindow)
+	c := newCoordinator(state, rec.analyze, testWindow, 0)
 	go c.Run(ctx)
 
 	state.Publish()
@@ -79,7 +79,7 @@ func TestCoordinatorBurstProducesOneCoalescedTrigger(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	c := newCoordinator(state, rec.analyze, testWindow)
+	c := newCoordinator(state, rec.analyze, testWindow, 0)
 	go c.Run(ctx)
 
 	for i := 0; i < 4; i++ {
@@ -99,7 +99,7 @@ func TestCoordinatorTriggerRepresentsLatestGeneration(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	c := newCoordinator(state, rec.analyze, testWindow)
+	c := newCoordinator(state, rec.analyze, testWindow, 0)
 	go c.Run(ctx)
 
 	var lastPublished *ClusterSnapshot
@@ -144,7 +144,7 @@ func TestCoordinatorGenerationsDuringAnalysisAreNotLost(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	c := newCoordinator(state, analyze, testWindow)
+	c := newCoordinator(state, analyze, testWindow, 0)
 	go c.Run(ctx)
 
 	gen1 := state.Publish()
@@ -205,7 +205,7 @@ func TestCoordinatorSlowConsumerNeverOverlaps(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	c := newCoordinator(state, analyze, 5*time.Millisecond)
+	c := newCoordinator(state, analyze, 5*time.Millisecond, 0)
 	go c.Run(ctx)
 
 	stop := time.Now().Add(200 * time.Millisecond)
@@ -232,7 +232,7 @@ func TestCoordinatorRepeatedBurstsRemainBounded(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	c := newCoordinator(state, rec.analyze, testWindow)
+	c := newCoordinator(state, rec.analyze, testWindow, 0)
 	go c.Run(ctx)
 
 	const bursts = 5
@@ -258,7 +258,7 @@ func TestCoordinatorCancellationStopsRun(t *testing.T) {
 	rec := &recordingAnalyzer{}
 	ctx, cancel := context.WithCancel(context.Background())
 
-	c := newCoordinator(state, rec.analyze, testWindow)
+	c := newCoordinator(state, rec.analyze, testWindow, 0)
 	done := make(chan struct{})
 	go func() {
 		c.Run(ctx)
@@ -279,7 +279,7 @@ func TestCoordinatorCancellationDuringCoalesceWindowStopsPromptly(t *testing.T) 
 	rec := &recordingAnalyzer{}
 	ctx, cancel := context.WithCancel(context.Background())
 
-	c := newCoordinator(state, rec.analyze, time.Hour) // window intentionally long
+	c := newCoordinator(state, rec.analyze, time.Hour, 0) // window intentionally long
 	done := make(chan struct{})
 	go func() {
 		c.Run(ctx)
@@ -306,8 +306,8 @@ func TestCoordinatorsAreIsolatedAcrossClusters(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	cA := newCoordinator(stateA, recA.analyze, testWindow)
-	cB := newCoordinator(stateB, recB.analyze, testWindow)
+	cA := newCoordinator(stateA, recA.analyze, testWindow, 0)
+	cB := newCoordinator(stateB, recB.analyze, testWindow, 0)
 	go cA.Run(ctx)
 	go cB.Run(ctx)
 
@@ -340,8 +340,8 @@ func TestSlowClusterDoesNotBlockAnother(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	cSlow := newCoordinator(stateSlow, slowAnalyze, testWindow)
-	cFast := newCoordinator(stateFast, fast.analyze, testWindow)
+	cSlow := newCoordinator(stateSlow, slowAnalyze, testWindow, 0)
+	cFast := newCoordinator(stateFast, fast.analyze, testWindow, 0)
 	go cSlow.Run(ctx)
 	go cFast.Run(ctx)
 
@@ -354,6 +354,136 @@ func TestSlowClusterDoesNotBlockAnother(t *testing.T) {
 	close(blockSlow)
 }
 
+// ── docs/08 Phase 5: clock-triggered analysis ───────────────────────────────
+
+// TestCoordinatorClockTriggersWithoutPublish proves a periodic clock tick
+// alone — with no ClusterState.Publish() ever called — still produces an
+// analyze call, against whatever Latest() already holds. This is the
+// mechanism age/TTL-based rules (Waste age gates, Cost pricing TTL) rely on
+// to reevaluate a genuinely static cluster.
+func TestCoordinatorClockTriggersWithoutPublish(t *testing.T) {
+	state := NewClusterState("cluster-a")
+	state.SetAcquisitionState(AcquisitionHealthy)
+	published := state.Publish() // one snapshot exists in Latest()...
+	<-state.Publications()       // ...but its own event signal is drained here, before Run
+	// ever starts, so Run's select cannot take the event branch for it —
+	// only the clock tick below can produce the analyze call this test
+	// checks for.
+
+	rec := &recordingAnalyzer{}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	const clockInterval = 20 * time.Millisecond
+	c := newCoordinator(state, rec.analyze, time.Hour, clockInterval) // window intentionally long: only the clock should fire
+	go c.Run(ctx)
+
+	waitForCount(t, rec, 1, time.Second)
+
+	got := rec.last()
+	if got == nil || got.Generation() != published.Generation() {
+		t.Fatalf("clock-triggered analyze saw %v, want generation %d", got, published.Generation())
+	}
+}
+
+// TestCoordinatorClockDisabledByZero proves clockInterval==0 (what every
+// pre-Phase-5 caller passes) never triggers analyze on its own — the
+// existing event-only behavior is unchanged.
+func TestCoordinatorClockDisabledByZero(t *testing.T) {
+	state := NewClusterState("cluster-a")
+	state.SetAcquisitionState(AcquisitionHealthy)
+	// Deliberately no Publish() call: the only question this test asks is
+	// whether the clock alone (clockInterval=0) ever fires analyze without
+	// any trigger at all.
+
+	rec := &recordingAnalyzer{}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	c := newCoordinator(state, rec.analyze, testWindow, 0)
+	go c.Run(ctx)
+
+	time.Sleep(100 * time.Millisecond)
+	if got := rec.count(); got != 0 {
+		t.Fatalf("analyze called %d times with clockInterval=0 and no Publish, want 0", got)
+	}
+}
+
+// TestCoordinatorClockDoesNotOverlapEventAnalysis proves the clock trigger
+// shares the same single-threaded no-overlap guarantee as the event
+// trigger: a slow analyze call in flight (from either source) blocks the
+// other source's next call until it returns.
+func TestCoordinatorClockDoesNotOverlapEventAnalysis(t *testing.T) {
+	state := NewClusterState("cluster-a")
+	state.SetAcquisitionState(AcquisitionHealthy)
+
+	var running int32
+	var mu sync.Mutex
+	var maxConcurrent int32
+	analyze := func(*ClusterSnapshot) {
+		mu.Lock()
+		running++
+		if running > maxConcurrent {
+			maxConcurrent = running
+		}
+		mu.Unlock()
+
+		time.Sleep(15 * time.Millisecond)
+
+		mu.Lock()
+		running--
+		mu.Unlock()
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	c := newCoordinator(state, analyze, 2*time.Millisecond, 3*time.Millisecond)
+	go c.Run(ctx)
+
+	stop := time.Now().Add(150 * time.Millisecond)
+	for time.Now().Before(stop) {
+		state.Publish()
+		time.Sleep(time.Millisecond)
+	}
+	time.Sleep(50 * time.Millisecond) // let any final in-flight call finish
+
+	mu.Lock()
+	defer mu.Unlock()
+	if maxConcurrent > 1 {
+		t.Fatalf("observed %d overlapping analyze calls mixing clock and event triggers, want at most 1", maxConcurrent)
+	}
+}
+
+// TestCoordinatorClockNotStarvedByContinuousEvents proves a sustained event
+// stream cannot indefinitely starve the clock trigger: a short clock
+// interval still produces multiple analyze calls even while events keep
+// arriving throughout.
+func TestCoordinatorClockNotStarvedByContinuousEvents(t *testing.T) {
+	state := NewClusterState("cluster-a")
+	state.SetAcquisitionState(AcquisitionHealthy)
+
+	rec := &recordingAnalyzer{}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	const clockInterval = 15 * time.Millisecond
+	c := newCoordinator(state, rec.analyze, 2*time.Millisecond, clockInterval)
+	go c.Run(ctx)
+
+	stop := time.Now().Add(200 * time.Millisecond)
+	for time.Now().Before(stop) {
+		state.Publish()
+		time.Sleep(time.Millisecond)
+	}
+
+	// ~200ms of continuous events at a 15ms clock interval should still
+	// have let the clock fire several times (event coalescing bounds each
+	// analyze-blocking window to ~2ms, far under 15ms).
+	if got := rec.count(); got < 3 {
+		t.Fatalf("only %d analyze calls under a continuous event stream for 200ms, clock trigger appears starved", got)
+	}
+}
+
 func TestCoordinatorStoppingOneDoesNotStopAnother(t *testing.T) {
 	stateA := NewClusterState("cluster-a")
 	stateB := NewClusterState("cluster-b")
@@ -364,8 +494,8 @@ func TestCoordinatorStoppingOneDoesNotStopAnother(t *testing.T) {
 	ctxB, cancelB := context.WithCancel(context.Background())
 	defer cancelB()
 
-	cA := newCoordinator(stateA, recA.analyze, testWindow)
-	cB := newCoordinator(stateB, recB.analyze, testWindow)
+	cA := newCoordinator(stateA, recA.analyze, testWindow, 0)
+	cB := newCoordinator(stateB, recB.analyze, testWindow, 0)
 	doneA := make(chan struct{})
 	go func() { cA.Run(ctxA); close(doneA) }()
 	go cB.Run(ctxB)

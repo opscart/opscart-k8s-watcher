@@ -120,10 +120,12 @@ func TestBuildCostAnalysisMatchesDirectAnalyzerCall(t *testing.T) {
 	}
 }
 
-// TestCompleteCoordinatorCostReportMatchesLegacyConstruction proves the
-// coordinator and temporary legacy paths assemble the same complete report
-// from equivalent Nodes, Pods, and provider evidence. The only intentionally
-// independent value is the wall-clock report timestamp.
+// TestCompleteCoordinatorCostReportMatchesLegacyConstruction proves
+// buildCostAnalysis's snapshot-sourced report assembly matches what the
+// still-live-client-capable AnalyzeNodePoolCostResult + buildCloudCostReport
+// path (cmd/opscart-scan's CLI, pkg/analyzer) produces from equivalent
+// Nodes, Pods, and provider evidence. The only intentionally independent
+// value is the wall-clock report timestamp.
 func TestCompleteCoordinatorCostReportMatchesLegacyConstruction(t *testing.T) {
 	refreshedAt := time.Date(2026, time.September, 14, 12, 0, 0, 0, time.UTC)
 	node := pricedCostNode("node-a", 8, 32)
@@ -161,7 +163,6 @@ func TestCompleteCoordinatorCostReportMatchesLegacyConstruction(t *testing.T) {
 func TestCompleteCostReportUsesOneSnapshotGeneration(t *testing.T) {
 	state := &dashboardState{
 		ctx:          "cluster-a",
-		scan:         &clusterScan{},
 		costAnalyzer: newDashboardCostAnalyzer(time.Now()),
 	}
 	cs := clusterstate.NewClusterState("cluster-a")
@@ -171,7 +172,7 @@ func TestCompleteCostReportUsesOneSnapshotGeneration(t *testing.T) {
 	})
 	cs.SetAcquisitionState(clusterstate.AcquisitionHealthy)
 	first := cs.Publish()
-	runCostAnalysis(state, first)
+	runAnalysisPass(state, first, nil)
 
 	firstReport := state.scan.report
 	if len(firstReport.NamespaceCosts) != 1 || firstReport.NamespaceCosts[0].Name != "team-a" {
@@ -186,11 +187,11 @@ func TestCompleteCostReportUsesOneSnapshotGeneration(t *testing.T) {
 		Pods:  []*corev1.Pod{costWorkloadPod("worker-0", "team-b", "node-a", 500, 1)},
 	})
 	second := cs.Publish()
-	runCostAnalysis(state, second)
+	runAnalysisPass(state, second, nil)
 
 	secondReport := state.scan.report
-	if state.scan.costGeneration != second.Generation() {
-		t.Fatalf("costGeneration = %d, want %d", state.scan.costGeneration, second.Generation())
+	if state.scan.generation != second.Generation() {
+		t.Fatalf("scan.generation = %d, want %d", state.scan.generation, second.Generation())
 	}
 	if len(secondReport.NamespaceCosts) != 1 || secondReport.NamespaceCosts[0].Name != "team-b" {
 		t.Fatalf("generation %d NamespaceCosts = %+v, want only team-b", second.Generation(), secondReport.NamespaceCosts)
@@ -286,195 +287,5 @@ func TestBuildCloudCostReportIncludesAllocationAndProviderMetadata(t *testing.T)
 	}
 	if len(report.Assumptions) == 0 || len(report.Disclaimers) == 0 {
 		t.Fatalf("report policy metadata missing: assumptions=%v disclaimers=%v", report.Assumptions, report.Disclaimers)
-	}
-}
-
-// TestRunCostAnalysisRequiresNoKubernetesClient proves this analysis path
-// needs nothing beyond a ClusterSnapshot (docs/08 Phase 4D.6 scope: Cost's
-// own recurring Kubernetes acquisition must stop here).
-func TestRunCostAnalysisRequiresNoKubernetesClient(t *testing.T) {
-	state := &dashboardState{scan: &clusterScan{}, costAnalyzer: analyzer.NewNodePoolCostAnalyzer("")}
-
-	cs := clusterstate.NewClusterState("cluster-a")
-	cs.Update(clusterstate.ClusterResources{Nodes: []*corev1.Node{costNode("node-a", 4, 16)}})
-	cs.SetAcquisitionState(clusterstate.AcquisitionHealthy)
-	snapshot := cs.Publish()
-
-	runCostAnalysis(state, snapshot)
-
-	if state.scan.costGeneration != snapshot.Generation() {
-		t.Fatalf("costGeneration = %d, want %d", state.scan.costGeneration, snapshot.Generation())
-	}
-	if state.scan.report == nil || len(state.scan.report.NodePoolCosts) != 1 {
-		t.Fatalf("report = %+v, want one pool", state.scan.report)
-	}
-}
-
-// TestRunCostAnalysisUsesSingleGenerationResources proves the Node evidence
-// used comes from one published ClusterSnapshot generation, merged by
-// ClusterState from two separate Update calls (as real informer event
-// handlers would produce), never a mix of generations.
-func TestRunCostAnalysisUsesSingleGenerationResources(t *testing.T) {
-	state := &dashboardState{scan: &clusterScan{}, costAnalyzer: analyzer.NewNodePoolCostAnalyzer("")}
-
-	cs := clusterstate.NewClusterState("cluster-a")
-	cs.Update(clusterstate.ClusterResources{Nodes: []*corev1.Node{costNode("node-a", 4, 16)}})
-	cs.Update(clusterstate.ClusterResources{Nodes: []*corev1.Node{costNode("node-a", 4, 16)}}) // second Update on the same kind, as a resync would produce
-	cs.SetAcquisitionState(clusterstate.AcquisitionHealthy)
-	snapshot := cs.Publish()
-
-	runCostAnalysis(state, snapshot)
-
-	if state.scan.report.NodePoolCosts[0].NodeCount != 1 {
-		t.Fatalf("report = %+v, want exactly one node from the single published generation", state.scan.report)
-	}
-}
-
-func TestRunCostAnalysisSkipsWhenSnapshotNotTrustworthy(t *testing.T) {
-	report := &models.CloudCostReport{
-		Currency:         "USD",
-		NodePoolCosts:    []models.NodePoolCost{{Name: "trusted"}},
-		NamespaceCosts:   []models.NamespaceCostInfo{{Name: "trusted"}},
-		TotalMonthlyCost: 42,
-	}
-	original := &clusterScan{report: report, costGeneration: 7}
-	state := &dashboardState{scan: original, costAnalyzer: analyzer.NewNodePoolCostAnalyzer("")}
-
-	cs := clusterstate.NewClusterState("cluster-a") // starts STALE
-	cs.Update(clusterstate.ClusterResources{Nodes: []*corev1.Node{costNode("node-a", 4, 16)}})
-	snapshot := cs.Publish()
-
-	runCostAnalysis(state, snapshot)
-
-	if state.scan != original {
-		t.Fatal("an untrustworthy snapshot must not replace the currently displayed scan")
-	}
-	if state.scan.report != report || state.scan.costGeneration != 7 {
-		t.Fatal("an untrustworthy snapshot must preserve the complete last trustworthy Cost report and generation")
-	}
-}
-
-func TestRunCostAnalysisSkipsWhenNoLegacyScanYet(t *testing.T) {
-	state := &dashboardState{costAnalyzer: analyzer.NewNodePoolCostAnalyzer("")} // scan is nil: no legacy scan has ever completed
-
-	cs := clusterstate.NewClusterState("cluster-a")
-	cs.SetAcquisitionState(clusterstate.AcquisitionHealthy)
-	snapshot := cs.Publish()
-
-	runCostAnalysis(state, snapshot) // must not panic
-
-	if state.scan != nil {
-		t.Fatal("expected scan to remain nil when no legacy scan has ever published a *clusterScan")
-	}
-}
-
-func TestPublishCostAnalysisGenerationGuardRejectsOlderOrEqualGeneration(t *testing.T) {
-	state := &dashboardState{scan: &clusterScan{}}
-
-	publishCostAnalysis(state, 5, &models.CloudCostReport{Currency: "gen5"})
-	if state.scan.costGeneration != 5 || state.scan.report.Currency != "gen5" {
-		t.Fatalf("expected generation 5's result to publish, got generation=%d report=%+v",
-			state.scan.costGeneration, state.scan.report)
-	}
-
-	publishCostAnalysis(state, 3, &models.CloudCostReport{Currency: "gen3-stale"})
-	if state.scan.costGeneration != 5 || state.scan.report.Currency != "gen5" {
-		t.Fatal("an older generation must not overwrite a newer already-published result")
-	}
-
-	publishCostAnalysis(state, 5, &models.CloudCostReport{Currency: "gen5-dup"})
-	if state.scan.costGeneration != 5 || state.scan.report.Currency != "gen5" {
-		t.Fatal("an equal generation must not overwrite the already-published result for that generation")
-	}
-}
-
-// TestPublishCostAnalysisCopyAndSwapPreservesPreviouslyPublishedScan proves
-// publishCostAnalysis never mutates an already-published *clusterScan in
-// place, exactly like the other six publishers.
-func TestPublishCostAnalysisCopyAndSwapPreservesPreviouslyPublishedScan(t *testing.T) {
-	state := &dashboardState{scan: &clusterScan{cisResult: &analyzer.CISResult{Score: 42}}}
-
-	previouslyRead := state.scan // simulates a reader that captured the pointer under RLock
-
-	publishCostAnalysis(state, 1, &models.CloudCostReport{Currency: "USD"})
-
-	if state.scan == previouslyRead {
-		t.Fatal("expected publishCostAnalysis to swap in a new *clusterScan, not reuse the existing pointer")
-	}
-	if previouslyRead.report != nil {
-		t.Fatal("publishCostAnalysis mutated a *clusterScan a reader already held a pointer to")
-	}
-	if state.scan.cisResult.Score != 42 {
-		t.Fatal("copy-and-swap must preserve every other field from the previous scan")
-	}
-}
-
-// ── legacy full-scan vs. coordinator publish ordering (Phase 4C's pattern,
-// reused for Cost) ─────────────────────────────────────────────────────────
-
-func TestCostAnalysisOrderingCoordinatorThenLegacyScan(t *testing.T) {
-	state := &dashboardState{scan: &clusterScan{}}
-
-	coordinatorReport := &models.CloudCostReport{
-		Currency:         "coordinator",
-		NodePoolCosts:    []models.NodePoolCost{{Name: "coordinator"}},
-		NamespaceCosts:   []models.NamespaceCostInfo{{Name: "coordinator"}},
-		TotalMonthlyCost: 55,
-	}
-	publishCostAnalysis(state, 5, coordinatorReport)
-
-	legacyScan := &clusterScan{report: &models.CloudCostReport{Currency: "legacy"}}
-	preserveNewerCoordinatorCostAnalysis(state.scan, legacyScan) // the exact call refresh() makes
-	state.scan = legacyScan                                      // the exact swap refresh() makes
-
-	if state.scan.costGeneration != 5 {
-		t.Fatalf("costGeneration = %d after a legacy scan publish, want 5 preserved", state.scan.costGeneration)
-	}
-	if state.scan.report != coordinatorReport {
-		t.Fatalf("legacy scan clobbered the newer coordinator result: %+v", state.scan.report)
-	}
-}
-
-func TestCostAnalysisOrderingLegacyScanThenCoordinator(t *testing.T) {
-	state := &dashboardState{}
-
-	legacyScan := &clusterScan{report: &models.CloudCostReport{Currency: "legacy"}}
-	preserveNewerCoordinatorCostAnalysis(state.scan, legacyScan) // previous is nil: first-ever scan
-	state.scan = legacyScan
-
-	publishCostAnalysis(state, 3, &models.CloudCostReport{Currency: "coordinator"})
-
-	if state.scan.costGeneration != 3 {
-		t.Fatalf("costGeneration = %d, want 3", state.scan.costGeneration)
-	}
-	if state.scan.report.Currency != "coordinator" {
-		t.Fatalf("expected the coordinator's generation 3 result to win: %+v", state.scan.report)
-	}
-}
-
-// TestCostAnalysisResultsAreClusterIsolated proves two clusters' Cost
-// results — and their underlying persistent NodePoolCostAnalyzer runtimes —
-// never leak into each other.
-func TestCostAnalysisResultsAreClusterIsolated(t *testing.T) {
-	stateA := &dashboardState{scan: &clusterScan{}, costAnalyzer: analyzer.NewNodePoolCostAnalyzer("")}
-	stateB := &dashboardState{scan: &clusterScan{}, costAnalyzer: analyzer.NewNodePoolCostAnalyzer("")}
-
-	csA := clusterstate.NewClusterState("cluster-a")
-	csA.Update(clusterstate.ClusterResources{Nodes: []*corev1.Node{costNode("node-a", 4, 16)}})
-	csA.SetAcquisitionState(clusterstate.AcquisitionHealthy)
-	snapshotA := csA.Publish()
-
-	csB := clusterstate.NewClusterState("cluster-b")
-	csB.SetAcquisitionState(clusterstate.AcquisitionHealthy)
-	snapshotB := csB.Publish()
-
-	runCostAnalysis(stateA, snapshotA)
-	runCostAnalysis(stateB, snapshotB)
-
-	if len(stateA.scan.report.NodePoolCosts) != 1 {
-		t.Fatalf("cluster-a report = %+v, want one pool", stateA.scan.report)
-	}
-	if len(stateB.scan.report.NodePoolCosts) != 0 {
-		t.Fatalf("cluster-b report = %+v, want zero — cluster-a's node leaked in", stateB.scan.report)
 	}
 }
