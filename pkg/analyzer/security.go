@@ -31,7 +31,7 @@ func (sa *SecurityAuditor) AuditClusterSecurity(namespace string) (*models.Secur
 	if err != nil {
 		return nil, fmt.Errorf("failed to list pods: %w", err)
 	}
-	return sa.auditPods(podList.Items), nil
+	return AnalyzeSecurity(podList.Items), nil
 }
 
 // AuditClusterSecurityWithPodSnapshot reuses Pods only when the caller
@@ -40,10 +40,16 @@ func (sa *SecurityAuditor) AuditClusterSecurityWithPodSnapshot(namespace string,
 	if !clusterWide {
 		return sa.AuditClusterSecurity(namespace)
 	}
-	return sa.auditPods(pods), nil
+	return AnalyzeSecurity(pods), nil
 }
 
-func (sa *SecurityAuditor) auditPods(pods []corev1.Pod) *models.SecurityAudit {
+// AnalyzeSecurity is auditPods' Kubernetes-free counterpart, and now the
+// only implementation: AuditClusterSecurity/AuditClusterSecurityWithPodSnapshot
+// delegate to it after their own Pod acquisition (docs/08 Phase 4D.4). It
+// performs no Kubernetes API calls, no persistence, and no presentation
+// work, and is deterministic: the same Pods always produce the same
+// *models.SecurityAudit.
+func AnalyzeSecurity(pods []corev1.Pod) *models.SecurityAudit {
 	audit := &models.SecurityAudit{
 		TotalPodsAudited: len(pods),
 		Risks:            models.SecurityRisks{},
@@ -52,23 +58,23 @@ func (sa *SecurityAuditor) auditPods(pods []corev1.Pod) *models.SecurityAudit {
 
 	// Audit each pod
 	for _, pod := range pods {
-		issues := sa.auditPod(pod)
+		issues := auditPod(pod)
 		audit.Issues = append(audit.Issues, issues...)
 
 		// Count risks
 		for _, issue := range issues {
-			sa.incrementRiskCounter(audit, issue.Type)
+			incrementRiskCounter(audit, issue.Type)
 		}
 	}
 
 	// Generate priority actions
-	audit.PriorityActions = sa.generatePriorityActions(audit)
+	audit.PriorityActions = generatePriorityActions(audit)
 
 	return audit
 }
 
 // auditPod checks a single pod for security issues
-func (sa *SecurityAuditor) auditPod(pod corev1.Pod) []models.SecurityIssue {
+func auditPod(pod corev1.Pod) []models.SecurityIssue {
 	var issues []models.SecurityIssue
 
 	// Skip system namespaces for some checks
@@ -156,7 +162,7 @@ func (sa *SecurityAuditor) auditPod(pod corev1.Pod) []models.SecurityIssue {
 
 	// Check each container
 	for _, container := range pod.Spec.Containers {
-		containerIssues := sa.auditContainer(pod, container, isSystemNamespace)
+		containerIssues := auditContainer(pod, container, isSystemNamespace)
 		issues = append(issues, containerIssues...)
 	}
 
@@ -164,7 +170,7 @@ func (sa *SecurityAuditor) auditPod(pod corev1.Pod) []models.SecurityIssue {
 }
 
 // auditContainer checks a single container for security issues
-func (sa *SecurityAuditor) auditContainer(pod corev1.Pod, container corev1.Container, isSystemNamespace bool) []models.SecurityIssue {
+func auditContainer(pod corev1.Pod, container corev1.Container, isSystemNamespace bool) []models.SecurityIssue {
 	var issues []models.SecurityIssue
 
 	// Pod specs can explicitly enforce non-root execution, but absence of that
@@ -285,7 +291,7 @@ func (sa *SecurityAuditor) auditContainer(pod corev1.Pod, container corev1.Conta
 }
 
 // incrementRiskCounter increments the appropriate risk counter
-func (sa *SecurityAuditor) incrementRiskCounter(audit *models.SecurityAudit, issueType string) {
+func incrementRiskCounter(audit *models.SecurityAudit, issueType string) {
 	switch issueType {
 	case "running_as_root":
 		audit.Risks.RunningAsRoot++
@@ -311,7 +317,7 @@ func (sa *SecurityAuditor) incrementRiskCounter(audit *models.SecurityAudit, iss
 }
 
 // generatePriorityActions creates a prioritized action list
-func (sa *SecurityAuditor) generatePriorityActions(audit *models.SecurityAudit) []string {
+func generatePriorityActions(audit *models.SecurityAudit) []string {
 	var actions []string
 
 	// Critical actions first

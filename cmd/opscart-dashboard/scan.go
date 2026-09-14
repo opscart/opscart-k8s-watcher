@@ -21,9 +21,48 @@ import (
 // clusterScan holds results from all analyzers for a single cluster scan.
 // Fields other than report may be nil if the audit failed (RBAC, timeout, etc.).
 type clusterScan struct {
-	report     *models.CloudCostReport
-	secAudit   *models.SecurityAudit
-	cisResult  *analyzer.CISResult
+	report *models.CloudCostReport
+
+	// secAudit is displayed by pages.go/server.go's overview and is also an
+	// input to this scan cycle's incident batch (collectWarRoomIssues'
+	// critical "privileged_container" issues, refresh below) — like
+	// nodeHealth/netAudit, one of clusterScan's coordinator-migrated fields
+	// incident persistence reads. See secAuditGeneration and refresh's
+	// legacyScan capture for why that persistence use deliberately does not
+	// go through the coordinator-preserved value this field may hold.
+	secAudit *models.SecurityAudit
+
+	// secAuditGeneration is the ClusterSnapshot generation that produced
+	// secAudit when it came from the coordinator-driven path
+	// (security_runtime.go), or 0 for results from the legacy runFullScan
+	// path. Same defense-in-depth provenance guard as
+	// nodeOptimizationGeneration below — see its comment for why this is
+	// never relied on to paper over a real ordering bug. This governs the
+	// DISPLAY value only; see secAudit's comment for the incident-batch
+	// distinction.
+	secAuditGeneration uint64
+
+	// cisResult is derived from secAudit and netAudit, but ONLY from
+	// whichever values runFullScan itself fetched synchronously in this
+	// same legacy scan cycle (server.go step 5, computed immediately after
+	// steps 2 and 4) — never from the coordinator-published secAudit/netAudit
+	// this clusterScan may otherwise be carrying by the time a reader sees
+	// it. docs/08 Phase 4D.4 deliberately leaves this boundary as-is: CIS
+	// scoring is a derived, correctness-sensitive combination of two
+	// analyzers, and recomputing it from coordinator-driven Security+Network
+	// on every coalesced generation would need its own generation-guarded
+	// field and cross-analyzer sequencing inside runCoordinatedAnalysis —
+	// out of proportion to a display-only migration slice. The accepted
+	// consequence: once the coordinator has published a newer Security or
+	// Network generation than the last legacy scan cycle, the displayed CIS
+	// score is not guaranteed to be generation-consistent with the
+	// independently newer secAudit/netAudit shown elsewhere on the
+	// dashboard, until the next legacy scan cycle recomputes all three
+	// together again. This is unchanged by migrating Security here; the
+	// same latent gap already existed for netAudit alone since Network's
+	// own migration (Phase 4D.3) and is only being made explicit now.
+	cisResult *analyzer.CISResult
+
 	wasteAudit *analyzer.WasteAudit
 
 	// netAudit is displayed by pages.go/investigation.go/warroom.go and is
@@ -149,99 +188,10 @@ type dashboardState struct {
 	coordinator *clusterstate.Coordinator
 }
 
-// preserveNewerCoordinatorNodeOptimization guards refresh's wholesale
-// *clusterScan replacement (below) against clobbering a newer,
-// coordinator-published Node Optimization result (docs/08 Phase 4C) with
-// the legacy scan's own — always generation-less — step 6 computation.
-//
-// previous is the *clusterScan refresh is about to replace; next is the
-// one legacy runFullScan just built and is about to publish. The legacy
-// computation itself is intentionally still run every cycle regardless
-// (node_optimization_runtime.go documents why disabling it is unsafe); this
-// only decides which result the swap actually publishes. previous may be
-// nil (the very first scan for this cluster).
-//
-// The coordinator's own publishNodeOptimization already guards the
-// opposite direction (an older coordinator generation can never overwrite
-// a newer one, nor a legacy result that arrived after it — see its
-// generation check), so this is the one remaining place a newer result can
-// be lost: refresh does not go through publishNodeOptimization at all.
-func preserveNewerCoordinatorNodeOptimization(previous, next *clusterScan) {
-	if previous == nil || previous.nodeOptimizationGeneration == 0 {
-		return
-	}
-	next.nodeOptimization = previous.nodeOptimization
-	next.nodeOptimizationSavings = previous.nodeOptimizationSavings
-	next.nodeOptimizationGeneration = previous.nodeOptimizationGeneration
-}
-
-// preserveNewerCoordinatorResourceAnalysis is
-// preserveNewerCoordinatorNodeOptimization's exact counterpart for Resource
-// Analyzer (docs/08 Phase 4D.1): guards refresh's wholesale *clusterScan
-// replacement against clobbering a newer, coordinator-published
-// AllWorkloads/PodWorkloads result with the legacy scan's own —
-// always generation-less — computation. See
-// preserveNewerCoordinatorNodeOptimization for the full reasoning; this is
-// the same pattern applied to a second, independent analyzer, not a new
-// versioning system.
-func preserveNewerCoordinatorResourceAnalysis(previous, next *clusterScan) {
-	if previous == nil || previous.resourceAnalysisGeneration == 0 {
-		return
-	}
-	next.AllWorkloads = previous.AllWorkloads
-	next.PodWorkloads = previous.PodWorkloads
-	next.resourceAnalysisGeneration = previous.resourceAnalysisGeneration
-}
-
-// preserveNewerCoordinatorNodeHealth is
-// preserveNewerCoordinatorNodeOptimization's counterpart for Node Health
-// (docs/08 Phase 4D.2): guards refresh's wholesale *clusterScan replacement
-// against clobbering a newer, coordinator-published Node Health DISPLAY
-// result with the legacy scan's own — always generation-less — computation.
-//
-// This affects the DISPLAY field only. refresh takes a legacyScan snapshot
-// of next BEFORE calling this function (and preserveNewerCoordinatorNetworkAnalysis
-// below) specifically so incident persistence
-// (calcIncidentScore/collectWarRoomIssues/completeIncidentBatch, further
-// down in refresh) always uses this legacy scan cycle's own synchronous
-// observation, never a coordinator-sourced one — docs/08 Phase 4D.2's
-// incident-lifecycle decision (Option A: analysis-only migration).
-//
-// Why persistence cannot simply follow the coordinator's fresher value:
-// ResolveMissing(cluster, scanID) treats every ACTIVE incident for cluster
-// not refreshed by scanID as absent — for every issue type, not just Node
-// Health. If a coordinator-timed batch were upserted under its own scanID,
-// every other (still-legacy) incident type would incorrectly look
-// "missing" to that call and start or advance its own absence clock, on
-// the coordinator's cadence rather than the legacy scan's. Keeping exactly
-// one incident writer (the legacy scan, using its own evidence) avoids
-// that; this function only ever changes what the dashboard shows.
-func preserveNewerCoordinatorNodeHealth(previous, next *clusterScan) {
-	if previous == nil || previous.nodeHealthGeneration == 0 {
-		return
-	}
-	next.nodeHealth = previous.nodeHealth
-	next.nodeHealthGeneration = previous.nodeHealthGeneration
-}
-
-// preserveNewerCoordinatorNetworkAnalysis is
-// preserveNewerCoordinatorNodeHealth's counterpart for the Network analyzer
-// (docs/08 Phase 4D.3): guards refresh's wholesale *clusterScan replacement
-// against clobbering a newer, coordinator-published Network audit DISPLAY
-// result with the legacy scan's own — always generation-less — computation.
-//
-// netAudit feeds the incident batch too (collectWarRoomIssues' HIGH-risk
-// "unprotected_namespace" issues, further down in refresh), so exactly the
-// same DISPLAY-vs-incident-persistence split applies as
-// preserveNewerCoordinatorNodeHealth — see its doc comment and refresh's
-// legacyScan capture.
-func preserveNewerCoordinatorNetworkAnalysis(previous, next *clusterScan) {
-	if previous == nil || previous.netAuditGeneration == 0 {
-		return
-	}
-	next.netAudit = previous.netAudit
-	next.netAuditGeneration = previous.netAuditGeneration
-}
+// The preserveNewerCoordinatorX family used by refresh below — one guard
+// per Phase 4C/4D-migrated analyzer, protecting its coordinator-published
+// DISPLAY result from refresh's wholesale *clusterScan replacement — lives
+// in analysis_preservation.go.
 
 func (s *dashboardState) refresh(clusterList []string) error {
 	if !s.scanning.CompareAndSwap(false, true) {
@@ -264,8 +214,8 @@ func (s *dashboardState) refresh(clusterList []string) error {
 	// result, taken before any coordinator-preserve mutation below.
 	// Incident persistence (calcIncidentScore/collectWarRoomIssues and
 	// everything derived from them, further down) must always read every
-	// coordinator-migrated field (nodeHealth, netAudit, ...) from this
-	// legacy scan cycle's own observation, never a coordinator-published
+	// coordinator-migrated field (nodeHealth, netAudit, secAudit, ...) from
+	// this legacy scan cycle's own observation, never a coordinator-published
 	// one — see preserveNewerCoordinatorNodeHealth's doc comment. A shallow
 	// copy is enough: only the top-level *clusterScan fields the guards
 	// below reassign (never mutated in place) need to diverge from scan.
@@ -278,6 +228,7 @@ func (s *dashboardState) refresh(clusterList []string) error {
 	preserveNewerCoordinatorResourceAnalysis(s.scan, scan)
 	preserveNewerCoordinatorNodeHealth(s.scan, scan)
 	preserveNewerCoordinatorNetworkAnalysis(s.scan, scan)
+	preserveNewerCoordinatorSecurityAnalysis(s.scan, scan)
 	s.scan = scan
 	s.htmlPage = page
 	s.mu.Unlock()

@@ -165,11 +165,14 @@ unless the repository already has a very specific established meaning for that n
 
 Line count is a review signal, not a mechanical rule.
 
-- Around 500–700 lines: review whether the file now contains multiple responsibilities.
-- 1,000+ lines: strong signal that the file should be split if a meaningful domain boundary exists.
+Production Go files:
+
+- Target: <= 500 lines.
+- 500–650 lines: requires explicit cohesion/responsibility review.
+- \> 650 lines: should normally be split before completion unless there is a strong architectural reason not to.
 - 1,500–2,000+ line production files should not be created or materially expanded.
 
-Do not split a cohesive file into many tiny files solely to reduce line count.
+Files are still split by responsibility, not mechanically by line count — a file over 650 lines that is genuinely one cohesive responsibility, with no meaningful domain boundary to split along, is a documented exception, not a rule violation. Do not split a cohesive file into many tiny files solely to reduce line count.
 
 Prefer responsibility-based separation.
 
@@ -214,10 +217,12 @@ Avoid one giant test file covering an entire subsystem.
 
 ### Test file size guidance
 
-- Around 700–1,000 lines: review for a meaningful split.
+- Target: <= 700 lines.
+- 700–850 lines: requires explicit review.
+- \> 850 lines: should normally be split before completion unless there is a strong architectural reason not to.
 - 2,000+ line test files should not continue growing when distinct behaviors can be separated cleanly.
 
-Do not create tiny test files unnecessarily.
+Same principle as production files: split by behavior/responsibility, not mechanically by line count. Do not create tiny test files unnecessarily.
 
 ### Test quality
 

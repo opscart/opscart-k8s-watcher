@@ -153,13 +153,12 @@ func TestDetectEnvironment(t *testing.T) {
 }
 
 func TestAuditContainerUsesPodSpecEvidenceWording(t *testing.T) {
-	sa := &SecurityAuditor{}
 	pod := corev1.Pod{}
 	pod.Name = "api"
 	pod.Namespace = "app"
 	container := corev1.Container{Name: "main"}
 
-	issues := sa.auditContainer(pod, container, false)
+	issues := auditContainer(pod, container, false)
 	var nonRoot models.SecurityIssue
 	for _, issue := range issues {
 		if issue.Type == "running_as_root" {
@@ -186,7 +185,6 @@ func TestAuditContainerDistinguishesMissingResourceLimits(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			sa := &SecurityAuditor{}
 			pod := corev1.Pod{}
 			pod.Name = "api"
 			pod.Namespace = "app"
@@ -194,7 +192,7 @@ func TestAuditContainerDistinguishesMissingResourceLimits(t *testing.T) {
 				Name:      "main",
 				Resources: corev1.ResourceRequirements{Limits: tt.limits},
 			}
-			issues := sa.auditContainer(pod, container, false)
+			issues := auditContainer(pod, container, false)
 			for _, issue := range issues {
 				if issue.Type == "missing_resource_limits" {
 					if !strings.Contains(issue.Description, tt.want) {
@@ -209,12 +207,11 @@ func TestAuditContainerDistinguishesMissingResourceLimits(t *testing.T) {
 }
 
 func TestPriorityActionsUseReviewLanguage(t *testing.T) {
-	sa := &SecurityAuditor{}
 	audit := &models.SecurityAudit{Risks: models.SecurityRisks{
 		HostPathVolumes:       1,
 		MissingResourceLimits: 1,
 	}}
-	actions := strings.Join(sa.generatePriorityActions(audit), "\n")
+	actions := strings.Join(generatePriorityActions(audit), "\n")
 	for _, want := range []string{
 		"Review hostPath mounts and verify which workloads require host access",
 		"Review containers missing CPU or memory limits",
@@ -231,7 +228,6 @@ func TestPriorityActionsUseReviewLanguage(t *testing.T) {
 }
 
 func TestHostPathFindingPreservesEvidenceWithoutCriticalClaim(t *testing.T) {
-	sa := &SecurityAuditor{}
 	pod := corev1.Pod{}
 	pod.Name = "api"
 	pod.Namespace = "app"
@@ -241,7 +237,7 @@ func TestHostPathFindingPreservesEvidenceWithoutCriticalClaim(t *testing.T) {
 			HostPath: &corev1.HostPathVolumeSource{Path: "/var/lib/app"},
 		},
 	}}
-	issues := sa.auditPod(pod)
+	issues := auditPod(pod)
 	for _, issue := range issues {
 		if issue.Type == "host_path_volume" {
 			if issue.Severity == "critical" {
@@ -402,5 +398,32 @@ func TestCalculateIssueCounts(t *testing.T) {
 				t.Errorf("systemUnexpected: got %d, want %d", gotSU, tc.wantSysUnexpected)
 			}
 		})
+	}
+}
+
+// ── AnalyzeSecurity: docs/08 Phase 4D.4's Kubernetes-free counterpart to
+// AuditClusterSecurity. TestSecurityClusterWidePodSnapshotAvoidsListAndPreservesFindings
+// above already proves the client-backed and snapshot-backed call paths
+// converge on identical output, since both now delegate to this one
+// function — these tests cover AnalyzeSecurity's own contract directly. ──
+
+// TestAnalyzeSecurityRequiresNoKubernetesClient proves AnalyzeSecurity is a
+// plain function over a value slice, with no clientset or context reachable
+// from it at all.
+func TestAnalyzeSecurityRequiresNoKubernetesClient(t *testing.T) {
+	pods := []corev1.Pod{*securityTestPod("privileged", "app", true)}
+
+	got := AnalyzeSecurity(pods)
+
+	if got.TotalPodsAudited != 1 || len(got.Issues) == 0 {
+		t.Fatalf("AnalyzeSecurity(%v) = %+v, want at least one finding for a privileged pod", pods, got)
+	}
+}
+
+func TestAnalyzeSecurityNoPodsProducesEmptyAudit(t *testing.T) {
+	got := AnalyzeSecurity(nil)
+
+	if got.TotalPodsAudited != 0 || len(got.Issues) != 0 || len(got.PriorityActions) != 0 {
+		t.Fatalf("AnalyzeSecurity(nil) = %+v, want an empty audit", got)
 	}
 }
