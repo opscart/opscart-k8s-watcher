@@ -442,3 +442,84 @@ func TestNodeConditionIncidentsSeverityMatchesDisplayClassifier(t *testing.T) {
 		}
 	}
 }
+
+// ── AnalyzeNodeHealth: docs/08 Phase 4D.2's Kubernetes-free counterpart to
+// FindNodeHealthConditions. It is a thin composition of the two primitives
+// already exhaustively tested above (DetectUnhealthyNodeConditions,
+// CorrelateNodeWorkloads); these tests cover the composition itself. ──────
+
+func TestAnalyzeNodeHealthHealthyNodesProduceNoFindings(t *testing.T) {
+	nodes := []corev1.Node{nodeWithConditions("node-a", condition(corev1.NodeReady, corev1.ConditionTrue))}
+	pods := []corev1.Pod{scheduledOwnedPod("shop", "api-7d8f9c6b5-abc12", "node-a", "ReplicaSet", "api-7d8f9c6b5")}
+
+	got := AnalyzeNodeHealth(nodes, pods, nil)
+
+	if len(got) != 0 {
+		t.Fatalf("AnalyzeNodeHealth on all-healthy nodes = %+v, want no findings", got)
+	}
+}
+
+// TestAnalyzeNodeHealthEquivalentToDetectAndCorrelate proves the composition
+// itself is correct: for equivalent inputs, AnalyzeNodeHealth produces
+// exactly what calling DetectUnhealthyNodeConditions then
+// CorrelateNodeWorkloads directly would — the same algorithm
+// FindNodeHealthConditions uses, just fed from already-observed values
+// instead of a live List call.
+func TestAnalyzeNodeHealthEquivalentToDetectAndCorrelate(t *testing.T) {
+	nodes := []corev1.Node{
+		nodeWithConditions("node-a", condition(corev1.NodeReady, corev1.ConditionFalse)),
+		nodeWithConditions("node-b", condition(corev1.NodeMemoryPressure, corev1.ConditionTrue)),
+	}
+	pods := []corev1.Pod{
+		scheduledOwnedPod("shop", "api-7d8f9c6b5-abc12", "node-a", "ReplicaSet", "api-7d8f9c6b5"),
+		scheduledOwnedPod("shop", "db-0", "node-b", "StatefulSet", "db"),
+	}
+	controller := true
+	jobs := []batchv1.Job{{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "batch", Name: "nightly-29123456",
+			OwnerReferences: []metav1.OwnerReference{{Kind: "CronJob", Name: "nightly", Controller: &controller}}},
+	}}
+
+	got := AnalyzeNodeHealth(nodes, pods, jobs)
+	want := CorrelateNodeWorkloads(DetectUnhealthyNodeConditions(nodes), pods, jobs)
+
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("AnalyzeNodeHealth diverged from DetectUnhealthyNodeConditions+CorrelateNodeWorkloads:\ngot:  %+v\nwant: %+v", got, want)
+	}
+}
+
+// TestAnalyzeNodeHealthCronJobOwnerCorrelationEquivalence proves Job ->
+// CronJob owner resolution (pkg/scanner/cluster.go's ownerForJob, driven
+// entirely by each Job's own OwnerReferences — no separate CronJob object
+// is read anywhere) survives the migration unchanged.
+func TestAnalyzeNodeHealthCronJobOwnerCorrelationEquivalence(t *testing.T) {
+	controller := true
+	cronJob := batchv1.Job{ObjectMeta: metav1.ObjectMeta{Namespace: "batch", Name: "nightly-29123456",
+		OwnerReferences: []metav1.OwnerReference{{Kind: "CronJob", Name: "nightly", Controller: &controller}}}}
+	pod := scheduledOwnedPod("batch", "nightly-29123456-abc12", "node-a", "Job", cronJob.Name)
+	nodes := []corev1.Node{nodeWithConditions("node-a", condition(corev1.NodeReady, corev1.ConditionFalse))}
+
+	got := AnalyzeNodeHealth(nodes, []corev1.Pod{pod}, []batchv1.Job{cronJob})
+
+	if len(got) != 1 || len(got[0].CorrelatedWorkloads) != 1 {
+		t.Fatalf("unexpected correlation: %+v", got)
+	}
+	want := models.CorrelatedWorkload{Namespace: "batch", Kind: "CronJob", Name: "nightly", PodCount: 1}
+	if got[0].CorrelatedWorkloads[0] != want {
+		t.Fatalf("CronJob owner correlation = %+v, want %+v", got[0].CorrelatedWorkloads[0], want)
+	}
+}
+
+// TestAnalyzeNodeHealthSkipsCorrelationWithNoUnhealthyFindings proves the
+// "no unhealthy nodes -> no correlation work" shortcut still holds: a nil
+// Pods argument that would panic or misbehave in CorrelateNodeWorkloads is
+// never even reached when every Node is healthy.
+func TestAnalyzeNodeHealthSkipsCorrelationWithNoUnhealthyFindings(t *testing.T) {
+	nodes := []corev1.Node{nodeWithConditions("node-a", condition(corev1.NodeReady, corev1.ConditionTrue))}
+
+	got := AnalyzeNodeHealth(nodes, nil, nil)
+
+	if len(got) != 0 {
+		t.Fatalf("got %+v, want no findings", got)
+	}
+}

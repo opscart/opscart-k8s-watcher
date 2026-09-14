@@ -26,7 +26,24 @@ type clusterScan struct {
 	cisResult  *analyzer.CISResult
 	wasteAudit *analyzer.WasteAudit
 	netAudit   *analyzer.NetworkPolicyAudit
+	// nodeHealth is displayed by pages.go/investigation.go/warroom.go and is
+	// also the DIRECT input to this scan cycle's incident batch
+	// (completeIncidentBatch, refresh below) — the only one of clusterScan's
+	// coordinator-migrated fields incident persistence reads. See
+	// nodeHealthGeneration and refresh's legacyNodeHealth capture for why
+	// that persistence use deliberately does NOT go through the
+	// coordinator-preserved value this field may hold.
 	nodeHealth []models.NodeConditionFinding
+
+	// nodeHealthGeneration is the ClusterSnapshot generation that produced
+	// nodeHealth when it came from the coordinator-driven path
+	// (node_health_runtime.go), or 0 for results from the legacy runFullScan
+	// path. Same defense-in-depth provenance guard as
+	// nodeOptimizationGeneration below — see its comment for why this is
+	// never relied on to paper over a real ordering bug. This governs the
+	// DISPLAY value only; see nodeHealth's comment for the incident-batch
+	// distinction.
+	nodeHealthGeneration uint64
 
 	// AllWorkloads is every Deployment/StatefulSet/DaemonSet the scan
 	// observed, regardless of the --breakdown flag. Written by either the
@@ -103,9 +120,10 @@ type dashboardState struct {
 	acquisition *acquisition.Runtime
 
 	// coordinator is this cluster's Phase 4B coalescing coordinator, driving
-	// every Phase 4C/4D-migrated analyzer (currently Node Optimization and
-	// Resource Analyzer — see acquisition_runtime.go's runCoordinatedAnalysis)
-	// off acquisition's ClusterState instead of a direct Kubernetes call. Set
+	// every Phase 4C/4D-migrated analyzer (currently Node Optimization,
+	// Resource Analyzer, and Node Health — see acquisition_runtime.go's
+	// runCoordinatedAnalysis) off acquisition's ClusterState instead of a
+	// direct Kubernetes call. Set
 	// once at startup alongside acquisition, before any concurrent reader
 	// could observe it, and never reassigned afterward — same no-lock
 	// convention as acquisition above.
@@ -156,6 +174,36 @@ func preserveNewerCoordinatorResourceAnalysis(previous, next *clusterScan) {
 	next.resourceAnalysisGeneration = previous.resourceAnalysisGeneration
 }
 
+// preserveNewerCoordinatorNodeHealth is
+// preserveNewerCoordinatorNodeOptimization's counterpart for Node Health
+// (docs/08 Phase 4D.2): guards refresh's wholesale *clusterScan replacement
+// against clobbering a newer, coordinator-published Node Health DISPLAY
+// result with the legacy scan's own — always generation-less — computation.
+//
+// This affects the DISPLAY field only. refresh captures legacyNodeHealth
+// from next BEFORE calling this function specifically so incident
+// persistence (tallySnapshotCounts/completeIncidentBatch, further down in
+// refresh) always uses this legacy scan cycle's own synchronous
+// observation, never a coordinator-sourced one — docs/08 Phase 4D.2's
+// incident-lifecycle decision (Option A: analysis-only migration).
+//
+// Why persistence cannot simply follow the coordinator's fresher value:
+// ResolveMissing(cluster, scanID) treats every ACTIVE incident for cluster
+// not refreshed by scanID as absent — for every issue type, not just Node
+// Health. If a coordinator-timed Node Health batch were upserted under its
+// own scanID, every other (still-legacy) incident type would incorrectly
+// look "missing" to that call and start or advance its own absence clock,
+// on the coordinator's cadence rather than the legacy scan's. Keeping
+// exactly one incident writer (the legacy scan, using its own evidence)
+// avoids that; this function only ever changes what the dashboard shows.
+func preserveNewerCoordinatorNodeHealth(previous, next *clusterScan) {
+	if previous == nil || previous.nodeHealthGeneration == 0 {
+		return
+	}
+	next.nodeHealth = previous.nodeHealth
+	next.nodeHealthGeneration = previous.nodeHealthGeneration
+}
+
 func (s *dashboardState) refresh(clusterList []string) error {
 	if !s.scanning.CompareAndSwap(false, true) {
 		return nil
@@ -173,11 +221,18 @@ func (s *dashboardState) refresh(clusterList []string) error {
 	if err != nil {
 		return err
 	}
+	// Captured before any coordinator-preserve mutation below: incident
+	// persistence must always derive from this legacy scan cycle's own
+	// synchronous Node Health observation, never a coordinator-published one
+	// — see preserveNewerCoordinatorNodeHealth's doc comment.
+	legacyNodeHealth := scan.nodeHealth
+
 	page := renderHTML(scan, s.ctx, clusterList)
 
 	s.mu.Lock()
 	preserveNewerCoordinatorNodeOptimization(s.scan, scan)
 	preserveNewerCoordinatorResourceAnalysis(s.scan, scan)
+	preserveNewerCoordinatorNodeHealth(s.scan, scan)
 	s.scan = scan
 	s.htmlPage = page
 	s.mu.Unlock()
@@ -189,7 +244,7 @@ func (s *dashboardState) refresh(clusterList []string) error {
 		incScore, _, _ := calcIncidentScore(scan)
 		issues := collectWarRoomIssues(scan, 0)
 
-		critical, warnings := tallySnapshotCounts(issues, scan.nodeHealth)
+		critical, warnings := tallySnapshotCounts(issues, legacyNodeHealth)
 		var incidents []store.IncidentData
 		for _, is := range issues {
 			details, _ := json.Marshal(map[string]any{
@@ -221,7 +276,7 @@ func (s *dashboardState) refresh(clusterList []string) error {
 		if err := s.db.WriteSnapshot(s.ctx, scanID, snap); err != nil {
 			log.Printf("[%s] store snapshot: %v", displayName(s.ctx), err)
 		}
-		incidents = completeIncidentBatch(incidents, scan.nodeHealth)
+		incidents = completeIncidentBatch(incidents, legacyNodeHealth)
 		resolved, persistErr := persistCompleteIncidentBatch(s.db, s.ctx, scanID, incidents)
 		if persistErr != nil {
 			log.Printf("[%s] store incidents: %v", displayName(s.ctx), persistErr)

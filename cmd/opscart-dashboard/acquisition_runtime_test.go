@@ -140,12 +140,13 @@ func TestShutdownStopsAcquisitionBeforeSyncCompletes(t *testing.T) {
 	}
 }
 
-// ── Phase 4D.1: one Coordinator drives every migrated analyzer ────────────
+// ── Phase 4D.1/4D.2: one Coordinator drives every migrated analyzer ───────
 
 // TestRunCoordinatedAnalysisRunsBothAnalyzers proves runCoordinatedAnalysis
-// invokes Node Optimization and Resource Analyzer from the same snapshot —
-// "one coalesced generation -> all migrated analyzers run" (docs/08 §2.5) —
-// without needing a real Coordinator or informer wiring to prove it.
+// invokes Node Optimization, Resource Analyzer, and Node Health from the
+// same snapshot — "one coalesced generation -> all migrated analyzers run"
+// (docs/08 §2.5) — without needing a real Coordinator or informer wiring to
+// prove it.
 func TestRunCoordinatedAnalysisRunsBothAnalyzers(t *testing.T) {
 	state := &dashboardState{scan: &clusterScan{report: &models.CloudCostReport{Currency: "USD"}}}
 
@@ -165,14 +166,18 @@ func TestRunCoordinatedAnalysisRunsBothAnalyzers(t *testing.T) {
 	if state.scan.resourceAnalysisGeneration != snapshot.Generation() {
 		t.Fatalf("resourceAnalysisGeneration = %d, want %d", state.scan.resourceAnalysisGeneration, snapshot.Generation())
 	}
+	if state.scan.nodeHealthGeneration != snapshot.Generation() {
+		t.Fatalf("nodeHealthGeneration = %d, want %d", state.scan.nodeHealthGeneration, snapshot.Generation())
+	}
 }
 
 // TestStartAnalysisCoordinatorDrivesBothAnalyzersEndToEnd proves the actual
 // production wiring: a Coordinator created by startAnalysisCoordinator
 // against a real acquisition.Runtime's ClusterState eventually publishes
-// both Node Optimization and Resource Analyzer results, through the real
-// coalescing window (pkg/clusterstate.coalesceWindow) — "latest generation
-// wins after coalescing" for both analyzers at once, not a test seam.
+// Node Optimization, Resource Analyzer, and Node Health results, through
+// the real coalescing window (pkg/clusterstate.coalesceWindow) — "latest
+// generation wins after coalescing" for every migrated analyzer at once,
+// not a test seam.
 func TestStartAnalysisCoordinatorDrivesBothAnalyzersEndToEnd(t *testing.T) {
 	state := &dashboardState{scan: &clusterScan{report: &models.CloudCostReport{Currency: "USD"}}}
 
@@ -208,13 +213,14 @@ func TestStartAnalysisCoordinatorDrivesBothAnalyzersEndToEnd(t *testing.T) {
 		state.mu.RLock()
 		nodeOptGen := state.scan.nodeOptimizationGeneration
 		resourceGen := state.scan.resourceAnalysisGeneration
+		nodeHealthGen := state.scan.nodeHealthGeneration
 		state.mu.RUnlock()
-		if nodeOptGen > 0 && resourceGen > 0 {
+		if nodeOptGen > 0 && resourceGen > 0 && nodeHealthGen > 0 {
 			return
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
-	t.Fatal("coordinator did not publish both Node Optimization and Resource Analyzer results within 5s of a trustworthy initial sync")
+	t.Fatal("coordinator did not publish Node Optimization, Resource Analyzer, and Node Health results within 5s of a trustworthy initial sync")
 }
 
 // TestAnalysisCoordinatorsAreClusterSpecific proves each cluster gets its
