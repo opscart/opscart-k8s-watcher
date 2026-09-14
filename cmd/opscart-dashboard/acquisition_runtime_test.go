@@ -177,13 +177,16 @@ func TestRunCoordinatedAnalysisRunsBothAnalyzers(t *testing.T) {
 	if state.scan.secAuditGeneration != snapshot.Generation() {
 		t.Fatalf("secAuditGeneration = %d, want %d", state.scan.secAuditGeneration, snapshot.Generation())
 	}
+	if state.scan.wasteAuditGeneration != snapshot.Generation() {
+		t.Fatalf("wasteAuditGeneration = %d, want %d", state.scan.wasteAuditGeneration, snapshot.Generation())
+	}
 }
 
 // TestStartAnalysisCoordinatorDrivesBothAnalyzersEndToEnd proves the actual
 // production wiring: a Coordinator created by startAnalysisCoordinator
 // against a real acquisition.Runtime's ClusterState eventually publishes
-// Node Optimization, Resource Analyzer, Node Health, Network, and Security
-// results, through the real coalescing window
+// Node Optimization, Resource Analyzer, Node Health, Network, Security, and
+// Waste results, through the real coalescing window
 // (pkg/clusterstate.coalesceWindow) — "latest generation wins after
 // coalescing" for every migrated analyzer at once, not a test seam.
 func TestStartAnalysisCoordinatorDrivesBothAnalyzersEndToEnd(t *testing.T) {
@@ -224,13 +227,14 @@ func TestStartAnalysisCoordinatorDrivesBothAnalyzersEndToEnd(t *testing.T) {
 		nodeHealthGen := state.scan.nodeHealthGeneration
 		netAuditGen := state.scan.netAuditGeneration
 		secAuditGen := state.scan.secAuditGeneration
+		wasteAuditGen := state.scan.wasteAuditGeneration
 		state.mu.RUnlock()
-		if nodeOptGen > 0 && resourceGen > 0 && nodeHealthGen > 0 && netAuditGen > 0 && secAuditGen > 0 {
+		if nodeOptGen > 0 && resourceGen > 0 && nodeHealthGen > 0 && netAuditGen > 0 && secAuditGen > 0 && wasteAuditGen > 0 {
 			return
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
-	t.Fatal("coordinator did not publish Node Optimization, Resource Analyzer, and Node Health results within 5s of a trustworthy initial sync")
+	t.Fatal("coordinator did not publish Node Optimization, Resource Analyzer, Node Health, Network, Security, and Waste results within 5s of a trustworthy initial sync")
 }
 
 // TestAnalysisCoordinatorsAreClusterSpecific proves each cluster gets its

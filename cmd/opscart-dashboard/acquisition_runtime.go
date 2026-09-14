@@ -57,14 +57,16 @@ func (srv *server) startAcquisition(ctx context.Context, clusterCtx string) {
 // dirty-resource tracking. Each entry point independently gates on
 // snapshot.Trustworthy() and its own generation guard (see
 // runNodeOptimization/runResourceAnalysis/runNodeHealth/runNetworkAnalysis/
-// runSecurityAnalysis), so a skip in one never blocks another, and neither
-// can overwrite a newer result the other's guard already protects.
+// runSecurityAnalysis/runWasteAnalysis), so a skip in one never blocks
+// another, and neither can overwrite a newer result the other's guard
+// already protects.
 func runCoordinatedAnalysis(state *dashboardState, snapshot *clusterstate.ClusterSnapshot) {
 	runNodeOptimization(state, snapshot)
 	runResourceAnalysis(state, snapshot)
 	runNodeHealth(state, snapshot)
 	runNetworkAnalysis(state, snapshot)
 	runSecurityAnalysis(state, snapshot)
+	runWasteAnalysis(state, snapshot)
 }
 
 // startAnalysisCoordinator creates and starts this cluster's Phase 4B

@@ -139,3 +139,24 @@ func preserveNewerCoordinatorSecurityAnalysis(previous, next *clusterScan) {
 	next.secAudit = previous.secAudit
 	next.secAuditGeneration = previous.secAuditGeneration
 }
+
+// preserveNewerCoordinatorWasteAnalysis is
+// preserveNewerCoordinatorSecurityAnalysis's counterpart for the Waste
+// analyzer (docs/08 Phase 4D.5): guards refresh's wholesale *clusterScan
+// replacement against clobbering a newer, coordinator-published Waste audit
+// DISPLAY result with the legacy scan's own — always generation-less —
+// computation.
+//
+// wasteAudit feeds the incident batch too (collectWarRoomIssues'
+// StalePods/AbandonedNamespaces issues, and calcIncidentScore's
+// OrphanedPVCs penalty, further down in refresh), so exactly the same
+// DISPLAY-vs-incident-persistence split applies as
+// preserveNewerCoordinatorSecurityAnalysis — see its doc comment and
+// refresh's legacyScan capture.
+func preserveNewerCoordinatorWasteAnalysis(previous, next *clusterScan) {
+	if previous == nil || previous.wasteAuditGeneration == 0 {
+		return
+	}
+	next.wasteAudit = previous.wasteAudit
+	next.wasteAuditGeneration = previous.wasteAuditGeneration
+}

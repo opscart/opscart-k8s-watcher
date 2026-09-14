@@ -63,7 +63,25 @@ type clusterScan struct {
 	// own migration (Phase 4D.3) and is only being made explicit now.
 	cisResult *analyzer.CISResult
 
+	// wasteAudit is displayed by pages.go/investigation.go and is also an
+	// input to this scan cycle's incident batch (collectWarRoomIssues'
+	// StalePods/AbandonedNamespaces issues and calcIncidentScore's
+	// OrphanedPVCs penalty, refresh below) — like nodeHealth/netAudit/secAudit,
+	// one of clusterScan's coordinator-migrated fields incident persistence
+	// reads. See wasteAuditGeneration and refresh's legacyScan capture for
+	// why that persistence use deliberately does not go through the
+	// coordinator-preserved value this field may hold.
 	wasteAudit *analyzer.WasteAudit
+
+	// wasteAuditGeneration is the ClusterSnapshot generation that produced
+	// wasteAudit when it came from the coordinator-driven path
+	// (waste_runtime.go), or 0 for results from the legacy runFullScan
+	// path. Same defense-in-depth provenance guard as
+	// nodeOptimizationGeneration below — see its comment for why this is
+	// never relied on to paper over a real ordering bug. This governs the
+	// DISPLAY value only; see wasteAudit's comment for the incident-batch
+	// distinction.
+	wasteAuditGeneration uint64
 
 	// netAudit is displayed by pages.go/investigation.go/warroom.go and is
 	// also an input to this scan cycle's incident batch
@@ -229,6 +247,7 @@ func (s *dashboardState) refresh(clusterList []string) error {
 	preserveNewerCoordinatorNodeHealth(s.scan, scan)
 	preserveNewerCoordinatorNetworkAnalysis(s.scan, scan)
 	preserveNewerCoordinatorSecurityAnalysis(s.scan, scan)
+	preserveNewerCoordinatorWasteAnalysis(s.scan, scan)
 	s.scan = scan
 	s.htmlPage = page
 	s.mu.Unlock()
