@@ -104,6 +104,32 @@ func (s *Scanner) NodeSnapshot() []corev1.Node {
 	return append([]corev1.Node(nil), s.nodes...)
 }
 
+// AnalyzeNodeHealth is FindNodeHealthConditions' Kubernetes-free counterpart
+// (docs/08 Phase 4D.2): the same unhealthy-condition detection and workload
+// correlation, from already-observed nodes/pods/jobs instead of the
+// Scanner's own LIST calls. It performs no Kubernetes API reads, no
+// persistence, and no presentation work, and produces equivalent findings
+// to FindNodeHealthConditions for equivalent inputs.
+//
+// jobs supplies Job -> CronJob owner resolution purely from each Job's own
+// OwnerReferences (see ownerForJob in cluster.go) — no separate CronJob
+// read is needed or used anywhere in this correlation.
+//
+// FindNodeHealthConditions is intentionally NOT rewritten to call this: its
+// own "skip the Pods LIST entirely when there are no unhealthy findings"
+// behavior is a genuine Kubernetes API-call avoidance that only makes sense
+// when pods/jobs would otherwise require a live List call. Here, pods and
+// jobs are already in the caller's memory (a ClusterSnapshot) either way, so
+// the same short-circuit below is a compute shortcut only, not something to
+// preserve at the cost of two divergent algorithms.
+func AnalyzeNodeHealth(nodes []corev1.Node, pods []corev1.Pod, jobs []batchv1.Job) []models.NodeConditionFinding {
+	findings := DetectUnhealthyNodeConditions(nodes)
+	if len(findings) == 0 {
+		return findings
+	}
+	return CorrelateNodeWorkloads(findings, pods, jobs)
+}
+
 // DetectUnhealthyNodeConditions returns one finding per unhealthy Kubernetes
 // Node condition. It preserves the condition evidence without inferring a
 // cause (including for NetworkUnavailable).

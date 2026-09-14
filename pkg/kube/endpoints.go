@@ -21,16 +21,41 @@ func ReadyEndpointAddressCount(ctx context.Context, clientset kubernetes.Interfa
 	if err != nil {
 		return 0, err
 	}
+	return ReadyAddressCount(slices.Items), nil
+}
 
+// ReadyAddressCount sums ready endpoint addresses across already-scoped
+// EndpointSlices — the same readiness rule ReadyEndpointAddressCount applies
+// to its own live LIST result, extracted so a caller working from an
+// already-observed EndpointSlice snapshot (e.g. a ClusterSnapshot
+// generation) can reuse it instead of issuing a LIST of its own. Callers are
+// responsible for scoping slices to one namespace+service first — see
+// EndpointSlicesForService.
+func ReadyAddressCount(slices []discoveryv1.EndpointSlice) int {
 	count := 0
-	for _, slice := range slices.Items {
+	for _, slice := range slices {
 		for _, ep := range slice.Endpoints {
 			if ep.Conditions.Ready == nil || *ep.Conditions.Ready {
 				count += len(ep.Addresses)
 			}
 		}
 	}
-	return count, nil
+	return count
+}
+
+// EndpointSlicesForService filters an already-observed, cluster-wide
+// EndpointSlice list down to the slices for one namespace+service — the
+// in-memory equivalent of ReadyEndpointAddressCount's namespaced LIST plus
+// its discoveryv1.LabelServiceName label selector, for callers working from
+// a snapshot instead of a live client.
+func EndpointSlicesForService(slices []discoveryv1.EndpointSlice, namespace, svcName string) []discoveryv1.EndpointSlice {
+	var scoped []discoveryv1.EndpointSlice
+	for _, s := range slices {
+		if s.Namespace == namespace && s.Labels[discoveryv1.LabelServiceName] == svcName {
+			scoped = append(scoped, s)
+		}
+	}
+	return scoped
 }
 
 // ServiceHasReadyEndpoints reports whether the named service has at least one

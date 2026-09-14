@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/opscart/opscart-k8s-watcher/pkg/kube"
@@ -13,29 +14,70 @@ import (
 	"k8s.io/client-go/kubernetes"
 )
 
-// NodePoolCostAnalyzer detects AKS/K8s node pools and calculates real costs
+// NodePoolCostAnalyzer detects AKS/K8s node pools and calculates real costs.
+//
+// docs/08 Phase 4D.6: one NodePoolCostAnalyzer is now constructed per
+// cluster and reused for the lifetime of the dashboard process (see
+// cmd/opscart-dashboard's dashboardState.costAnalyzer), rather than being
+// rebuilt on every scan — that reuse is what lets providers' own pricing
+// caches (e.g. azurePricingProvider's 24h TTL) actually survive across
+// analysis passes. Because of that, this type is no longer only touched by
+// one goroutine at a time: the legacy scan-timer loop and the Coordinator
+// callback can both call into the same instance for the same cluster. mu
+// protects its mutable runtime bookkeeping. ctx, providers, and
+// providerOverride are configured before the analyzer is shared — see the
+// configuration methods' doc comment. The pricing providers themselves
+// (azurePricingProvider, AWSPricingProvider) already guard their own caches
+// with their own mutex. AnalyzeNodePoolCostResultFromResources holds mu
+// through provider lookups, including HTTP/API calls on cache misses. This
+// intentionally serializes Cost analysis per cluster during the migration so
+// one result cannot mix pool costs with another pass's mutable metadata.
 type NodePoolCostAnalyzer struct {
-	clientset         *kubernetes.Clientset
 	ctx               context.Context
 	region            string
 	providers         map[CloudProvider]PricingProvider
+	providerOverride  CloudProvider
+	mu                sync.Mutex
 	detectedProvider  CloudProvider
 	effectiveProvider CloudProvider
-	providerOverride  CloudProvider
 	warnings          []string
 	lastPriceRefresh  time.Time
 }
 
-// NewNodePoolCostAnalyzer creates a new node pool cost analyzer
-func NewNodePoolCostAnalyzer(clientset *kubernetes.Clientset, region string) *NodePoolCostAnalyzer {
+// NodePoolCostResult is one internally consistent pricing pass. Metadata is
+// captured under the same analyzer lock as PoolCosts and NodeInfos so callers
+// cannot combine one generation's Kubernetes-derived costs with another
+// concurrent pass's provider state.
+type NodePoolCostResult struct {
+	PoolCosts             []models.NodePoolCost
+	NodeInfos             []models.NodeInfo
+	Region                string
+	Provider              CloudProvider
+	DetectedProvider      CloudProvider
+	ProviderDetectionMode string
+	ProviderWarning       string
+	PricingWarnings       []string
+	PricingCapabilities   PricingCapabilities
+	LastPriceRefresh      time.Time
+}
+
+// NewNodePoolCostAnalyzer creates a new node pool cost analyzer. It takes no
+// Kubernetes client: acquisition is the caller's concern (see
+// AnalyzeNodePoolCosts for the live-client wrapper and
+// AnalyzeNodePoolCostsFromResources for the snapshot-driven path), while
+// this type owns only cluster-scoped pricing/provider runtime state.
+func NewNodePoolCostAnalyzer(region string) *NodePoolCostAnalyzer {
 	return &NodePoolCostAnalyzer{
-		clientset: clientset,
 		ctx:       context.Background(),
 		region:    region,
 		providers: map[CloudProvider]PricingProvider{CloudProviderAzure: NewAzurePricingProvider()},
 	}
 }
 
+// SetPricingProvider and SetCloudProviderOverride are configuration steps,
+// intended to be called once immediately after construction — before this
+// analyzer is shared across goroutines — so they deliberately do not take
+// mu (see the type's doc comment).
 func (npa *NodePoolCostAnalyzer) SetPricingProvider(provider PricingProvider) {
 	if provider != nil {
 		npa.providers[provider.Provider()] = provider
@@ -48,61 +90,122 @@ func (npa *NodePoolCostAnalyzer) SetCloudProviderOverride(provider CloudProvider
 	}
 }
 
-func (npa *NodePoolCostAnalyzer) Provider() CloudProvider         { return npa.effectiveProvider }
-func (npa *NodePoolCostAnalyzer) DetectedProvider() CloudProvider { return npa.detectedProvider }
+func (npa *NodePoolCostAnalyzer) Provider() CloudProvider {
+	npa.mu.Lock()
+	defer npa.mu.Unlock()
+	return npa.effectiveProvider
+}
+func (npa *NodePoolCostAnalyzer) DetectedProvider() CloudProvider {
+	npa.mu.Lock()
+	defer npa.mu.Unlock()
+	return npa.detectedProvider
+}
 func (npa *NodePoolCostAnalyzer) ProviderDetectionMode() string {
-	if npa.providerOverride != "" {
-		return "manual"
-	}
-	return "detected"
+	npa.mu.Lock()
+	defer npa.mu.Unlock()
+	return npa.providerDetectionModeLocked()
 }
 func (npa *NodePoolCostAnalyzer) ProviderWarning() string {
-	if npa.providerOverride != "" && npa.providerOverride != npa.detectedProvider {
-		return fmt.Sprintf("%s pricing is enabled by manual provider override; the cluster provider was not detected as %s.",
-			providerDisplayName(npa.providerOverride), providerDisplayName(npa.providerOverride))
-	}
-	return ""
+	npa.mu.Lock()
+	defer npa.mu.Unlock()
+	return npa.providerWarningLocked()
 }
-func (npa *NodePoolCostAnalyzer) Region() string { return npa.region }
+func (npa *NodePoolCostAnalyzer) Region() string {
+	npa.mu.Lock()
+	defer npa.mu.Unlock()
+	return npa.region
+}
 func (npa *NodePoolCostAnalyzer) PricingWarnings() []string {
+	npa.mu.Lock()
+	defer npa.mu.Unlock()
 	return append([]string(nil), npa.warnings...)
 }
-func (npa *NodePoolCostAnalyzer) LastPriceRefresh() time.Time { return npa.lastPriceRefresh }
+func (npa *NodePoolCostAnalyzer) LastPriceRefresh() time.Time {
+	npa.mu.Lock()
+	defer npa.mu.Unlock()
+	return npa.lastPriceRefresh
+}
 
 // PricingCapabilities returns the capabilities advertised by the effective
 // provider implementation. Unknown and mixed providers remain unsupported
 // rather than having capabilities inferred from their names.
 func (npa *NodePoolCostAnalyzer) PricingCapabilities() PricingCapabilities {
-	provider, ok := npa.providers[npa.effectiveProvider]
-	if !ok {
-		return PricingCapabilities{}
-	}
-	capabilities := provider.Capabilities()
-	capabilities.CapacityTypes = append([]string(nil), capabilities.CapacityTypes...)
-	return capabilities
+	npa.mu.Lock()
+	defer npa.mu.Unlock()
+	return npa.pricingCapabilitiesLocked()
 }
 
-// AnalyzeNodePoolCosts discovers node pools and computes costs from VM SKU pricing
-func (npa *NodePoolCostAnalyzer) AnalyzeNodePoolCosts() ([]models.NodePoolCost, []models.NodeInfo, error) {
-	nodeList, err := npa.clientset.CoreV1().Nodes().List(npa.ctx, metav1.ListOptions{})
+// AnalyzeNodePoolCosts is the live-client wrapper: it acquires Nodes and
+// Pods itself (one unconditional LIST each) and delegates every other step
+// to AnalyzeNodePoolCostsFromResources, so the live and snapshot-driven
+// paths run exactly one pool-grouping/pricing algorithm. clientset is a
+// per-call parameter rather than a stored field because it is scan-scoped
+// (each legacy scan cycle builds a fresh client for its own API-call
+// counters — see cmd/opscart-dashboard's kubeClientWithCounters), unlike
+// this analyzer's own pricing/provider runtime state, which is cluster-
+// scoped and persists across calls.
+func (npa *NodePoolCostAnalyzer) AnalyzeNodePoolCosts(clientset kubernetes.Interface) ([]models.NodePoolCost, []models.NodeInfo, error) {
+	result, err := npa.AnalyzeNodePoolCostResult(clientset)
 	if err != nil {
-		return nil, nil, fmt.Errorf("listing nodes: %w", err)
+		return nil, nil, err
 	}
-	npa.detectedProvider = DetectClusterProvider(nodeList.Items)
+	return result.PoolCosts, result.NodeInfos, nil
+}
+
+// AnalyzeNodePoolCostResult is AnalyzeNodePoolCosts with the provider metadata
+// from the same pricing pass included in its result.
+func (npa *NodePoolCostAnalyzer) AnalyzeNodePoolCostResult(clientset kubernetes.Interface) (NodePoolCostResult, error) {
+	nodeList, err := clientset.CoreV1().Nodes().List(npa.ctx, metav1.ListOptions{})
+	if err != nil {
+		return NodePoolCostResult{}, fmt.Errorf("listing nodes: %w", err)
+	}
+
+	// Get all pods to calculate per-node resource requests
+	podList, err := clientset.CoreV1().Pods("").List(npa.ctx, metav1.ListOptions{})
+	if err != nil {
+		return NodePoolCostResult{}, fmt.Errorf("listing pods: %w", err)
+	}
+
+	return npa.AnalyzeNodePoolCostResultFromResources(nodeList.Items, podList.Items), nil
+}
+
+// AnalyzeNodePoolCostsFromResources is AnalyzeNodePoolCosts' Kubernetes-free
+// counterpart (docs/08 Phase 4D.6): the same node-pool discovery and
+// pricing algorithm, from already-observed Nodes/Pods instead of the
+// analyzer's own LIST calls. It performs no Kubernetes API calls; pricing
+// lookups still go through npa's persistent, cluster-scoped provider state
+// (see this type's doc comment), so a provider's own cache/TTL continues to
+// apply across repeated calls exactly as it does for the live-client path.
+//
+// There is no error return: unlike AuditWaste/AnalyzeNodePoolCosts, there is
+// no LIST that can fail here — a per-pool pricing miss is captured as that
+// pool's own PricingWarning, not a function-level error, matching the
+// existing "unavailable, never guessed" evidence model.
+func (npa *NodePoolCostAnalyzer) AnalyzeNodePoolCostsFromResources(nodes []corev1.Node, pods []corev1.Pod) ([]models.NodePoolCost, []models.NodeInfo) {
+	result := npa.AnalyzeNodePoolCostResultFromResources(nodes, pods)
+	return result.PoolCosts, result.NodeInfos
+}
+
+// AnalyzeNodePoolCostResultFromResources returns one atomic result containing
+// both snapshot-derived costs and the provider metadata produced by that pass.
+func (npa *NodePoolCostAnalyzer) AnalyzeNodePoolCostResultFromResources(nodes []corev1.Node, pods []corev1.Pod) NodePoolCostResult {
+	npa.mu.Lock()
+	defer npa.mu.Unlock()
+
+	npa.detectedProvider = DetectClusterProvider(nodes)
 	npa.effectiveProvider = npa.detectedProvider
 	if npa.providerOverride != "" {
 		npa.effectiveProvider = npa.providerOverride
 	}
-
-	// Get all pods to calculate per-node resource requests
-	podList, err := npa.clientset.CoreV1().Pods("").List(npa.ctx, metav1.ListOptions{})
-	if err != nil {
-		return nil, nil, fmt.Errorf("listing pods: %w", err)
-	}
+	// warnings is this pass's own pricing-warning list, not an
+	// accumulating log — must be reset here now that npa (and therefore
+	// this slice) persists across many analysis passes instead of being
+	// discarded with a freshly-constructed analyzer each time.
+	npa.warnings = nil
 
 	// Map node name → total requests on that node
 	nodeRequests := make(map[string]models.ResourceCapacity)
-	for _, pod := range podList.Items {
+	for _, pod := range pods {
 		if pod.Status.Phase != corev1.PodRunning && pod.Status.Phase != corev1.PodPending {
 			continue
 		}
@@ -124,9 +227,11 @@ func (npa *NodePoolCostAnalyzer) AnalyzeNodePoolCosts() ([]models.NodePoolCost, 
 		}
 	}
 
-	// Discover region from first node if not set
+	// Discover region from first node if not set. This is sticky by design
+	// (like every other field here): once discovered, it is never
+	// overwritten by a later pass with a different first node.
 	if npa.region == "" {
-		for _, node := range nodeList.Items {
+		for _, node := range nodes {
 			if r := npa.extractRegion(node); r != "" {
 				npa.region = r
 				break
@@ -138,7 +243,7 @@ func (npa *NodePoolCostAnalyzer) AnalyzeNodePoolCosts() ([]models.NodePoolCost, 
 	poolMap := make(map[string]*nodePoolBuilder)
 	var nodeInfos []models.NodeInfo
 
-	for _, node := range nodeList.Items {
+	for _, node := range nodes {
 		info := npa.extractNodeInfo(node)
 		if npa.providerOverride != "" {
 			info.Provider = string(npa.providerOverride)
@@ -182,7 +287,43 @@ func (npa *NodePoolCostAnalyzer) AnalyzeNodePoolCosts() ([]models.NodePoolCost, 
 		poolCosts = append(poolCosts, poolCost)
 	}
 
-	return poolCosts, nodeInfos, nil
+	return NodePoolCostResult{
+		PoolCosts:             poolCosts,
+		NodeInfos:             nodeInfos,
+		Region:                npa.region,
+		Provider:              npa.effectiveProvider,
+		DetectedProvider:      npa.detectedProvider,
+		ProviderDetectionMode: npa.providerDetectionModeLocked(),
+		ProviderWarning:       npa.providerWarningLocked(),
+		PricingWarnings:       append([]string(nil), npa.warnings...),
+		PricingCapabilities:   npa.pricingCapabilitiesLocked(),
+		LastPriceRefresh:      npa.lastPriceRefresh,
+	}
+}
+
+func (npa *NodePoolCostAnalyzer) providerDetectionModeLocked() string {
+	if npa.providerOverride != "" {
+		return "manual"
+	}
+	return "detected"
+}
+
+func (npa *NodePoolCostAnalyzer) providerWarningLocked() string {
+	if npa.providerOverride != "" && npa.providerOverride != npa.detectedProvider {
+		return fmt.Sprintf("%s pricing is enabled by manual provider override; the cluster provider was not detected as %s.",
+			providerDisplayName(npa.providerOverride), providerDisplayName(npa.providerOverride))
+	}
+	return ""
+}
+
+func (npa *NodePoolCostAnalyzer) pricingCapabilitiesLocked() PricingCapabilities {
+	provider, ok := npa.providers[npa.effectiveProvider]
+	if !ok {
+		return PricingCapabilities{}
+	}
+	capabilities := provider.Capabilities()
+	capabilities.CapacityTypes = append([]string(nil), capabilities.CapacityTypes...)
+	return capabilities
 }
 
 func providerDisplayName(provider CloudProvider) string {
@@ -377,8 +518,24 @@ func (b *nodePoolBuilder) build(npa *NodePoolCostAnalyzer) models.NodePoolCost {
 	}
 }
 
-// extractNodeInfo reads node labels/metadata to populate NodeInfo
-func (npa *NodePoolCostAnalyzer) extractNodeInfo(node corev1.Node) models.NodeInfo {
+// NodeInfoFromNode derives cost/scheduling identity and capacity for a
+// single Kubernetes Node from its labels, status, and allocatable
+// resources — no clientset, cluster-wide state, or pricing-provider
+// lookup. It is a pure function of node, so callers outside this analyzer
+// (e.g. docs/08 Phase 4C's Node Optimization migration, which needs this
+// same evidence sourced from a ClusterSnapshot generation rather than a
+// live List call) can reuse it directly instead of reimplementing label
+// parsing that must otherwise be kept in sync by hand in two places.
+//
+// It intentionally leaves two things to the caller, exactly as
+// AnalyzeNodePoolCosts already does below:
+//   - CPURequested/MemGBRequested, which are pod-derived (a cluster-wide
+//     Pod list, not anything reachable from a single Node).
+//   - A manual cloud-provider override, which is analyzer configuration —
+//     not evidence observable on the Node itself — and gets applied by the
+//     caller afterward (see AnalyzeNodePoolCosts' own providerOverride
+//     step).
+func NodeInfoFromNode(node corev1.Node) models.NodeInfo {
 	labels := node.Labels
 
 	info := models.NodeInfo{
@@ -437,6 +594,11 @@ func (npa *NodePoolCostAnalyzer) extractNodeInfo(node corev1.Node) models.NodeIn
 	info.MemGBCapacity = float64(memQ.Value()) / (1024 * 1024 * 1024)
 
 	return info
+}
+
+// extractNodeInfo reads node labels/metadata to populate NodeInfo.
+func (npa *NodePoolCostAnalyzer) extractNodeInfo(node corev1.Node) models.NodeInfo {
+	return NodeInfoFromNode(node)
 }
 
 // extractRegion gets region from any node

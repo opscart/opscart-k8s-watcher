@@ -10,8 +10,9 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
-// These tests exercise the exact same builder chain runFullScan now uses for
-// Node Optimization (see server.go, "6. Node Optimization"):
+// These tests exercise the exact same builder chain buildNodeOptimization
+// uses for Node Optimization (see node_optimization_runtime.go, called by
+// both legacy_analysis.go's runLegacyAnalysis and the Coordinator):
 //
 //   BuildNodeOptimizationSchedulingEvidence
 //     + BuildNodeOptimizationStorageEvidence
@@ -230,7 +231,7 @@ func TestNodeOptimizationEvidenceWiring_StorageEvidencePassedIntoRecommendations
 	}
 }
 
-// This is the same full evidence-building chain runFullScan now uses,
+// This is the same full evidence-building chain buildNodeOptimization uses,
 // exercised end-to-end with both scheduling and storage evidence supplied
 // together — the exact shape the dashboard consumes via clusterScan.nodeOptimization.
 func TestNodeOptimizationEvidenceWiring_FullChainMatchesScanPipelineShape(t *testing.T) {

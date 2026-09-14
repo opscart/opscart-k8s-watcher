@@ -133,17 +133,30 @@ func runDashboard(_ *cobra.Command, _ []string) error {
 	}()
 	srv := newServer(cl, db, retentionDays, dbPersistent)
 
-	log.Printf("Scanning cluster %q ...", displayName(cl[0]))
-	if err := srv.getState(cl[0]).refresh(cl); err != nil {
-		return fmt.Errorf("initial scan: %w", err)
-	}
-
 	backgroundCtx, stopBackground := context.WithCancel(context.Background())
 	defer func() {
 		stopBackground()
 		srv.backgroundWG.Wait()
 	}()
-	srv.startBackgroundRefresh(backgroundCtx, dashboardScanInterval)
+
+	// docs/08 Phase 3/4A/5 startup sequence: start every configured
+	// cluster's informer-backed acquisition runtime, wait for their initial
+	// sync (refresh below reads ClusterSnapshot directly rather than
+	// calling Kubernetes, so it needs that sync first), run the first
+	// analysis pass for the primary cluster synchronously and fatally
+	// (matching every pre-Phase-5 startup contract: a cluster that cannot
+	// produce data at all is a startup failure, not a silent empty
+	// dashboard), and only then start every cluster's Coordinator — see
+	// startAnalysisCoordinators' doc comment for why that ordering matters.
+	srv.startAcquisitionRuntimes(backgroundCtx)
+	srv.waitForAcquisitionSync(backgroundCtx, cl)
+
+	log.Printf("Scanning cluster %q ...", displayName(cl[0]))
+	if err := srv.getState(cl[0]).refresh(cl); err != nil {
+		return fmt.Errorf("initial scan: %w", err)
+	}
+
+	srv.startAnalysisCoordinators(backgroundCtx)
 
 	addr := ":" + port
 	var httpHandlers sync.WaitGroup

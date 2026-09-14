@@ -13,6 +13,7 @@ rules:
       - services
       - endpoints
       - persistentvolumeclaims
+      - persistentvolumes
       - replicationcontrollers
       - events
     verbs: ["get", "list"]

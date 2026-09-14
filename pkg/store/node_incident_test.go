@@ -1,7 +1,6 @@
 package store
 
 import (
-	"fmt"
 	"testing"
 	"time"
 )
@@ -70,22 +69,23 @@ func TestNodeIncidentHealthyActiveResolvedBoundary(t *testing.T) {
 	if err := s.UpsertIncidents(cluster, "scan-active", []IncidentData{inc}); err != nil {
 		t.Fatal(err)
 	}
-	for miss := 1; miss <= resolveThreshold; miss++ {
-		scanID := fmt.Sprintf("scan-healthy-%d", miss)
-		if err := s.UpsertIncidents(cluster, scanID, nil); err != nil {
-			t.Fatal(err)
-		}
-		if _, err := s.ResolveMissing(cluster, scanID); err != nil {
-			t.Fatal(err)
-		}
-		rec, _ := s.GetIncidentHistory(cluster, inc.Fingerprint)
-		want := "active"
-		if miss == resolveThreshold {
-			want = "resolved"
-		}
-		if rec == nil || rec.Status != want {
-			t.Fatalf("miss %d status=%+v, want %s", miss, rec, want)
-		}
+
+	if err := s.UpsertIncidents(cluster, "scan-absent", nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.ResolveMissing(cluster, "scan-absent"); err != nil {
+		t.Fatal(err)
+	}
+	if rec, _ := s.GetIncidentHistory(cluster, inc.Fingerprint); rec == nil || rec.Status != "active" {
+		t.Fatalf("resolved before resolveAfter elapsed: %+v", rec)
+	}
+
+	backdateAbsentSince(t, s, cluster, inc.Fingerprint, resolveAfter)
+	if _, err := s.ResolveMissing(cluster, "scan-absent"); err != nil {
+		t.Fatal(err)
+	}
+	if rec, _ := s.GetIncidentHistory(cluster, inc.Fingerprint); rec == nil || rec.Status != "resolved" {
+		t.Fatalf("expected resolved at resolveAfter, got %+v", rec)
 	}
 }
 
@@ -101,32 +101,28 @@ func TestNodeIncidentConditionIsolationAndDebouncedResolution(t *testing.T) {
 		t.Fatalf("UpsertIncidents(initial): %v", err)
 	}
 
-	for miss := 1; miss < resolveThreshold; miss++ {
-		scanID := fmt.Sprintf("scan-miss-%d", miss)
-		if err := s.UpsertIncidents(cluster, scanID, []IncidentData{memory}); err != nil {
-			t.Fatalf("UpsertIncidents(%s): %v", scanID, err)
-		}
-		resolved, err := s.ResolveMissing(cluster, scanID)
-		if err != nil || resolved != 0 {
-			t.Fatalf("before threshold miss %d resolved=%d err=%v", miss, resolved, err)
-		}
-		rec, _ := s.GetIncidentHistory(cluster, disk.Fingerprint)
-		if rec.Status != "active" {
-			t.Fatalf("DiskPressure resolved before threshold at miss %d", miss)
-		}
+	// disk stays present every scan; memory goes absent.
+	if err := s.UpsertIncidents(cluster, "scan-miss", []IncidentData{disk}); err != nil {
+		t.Fatalf("UpsertIncidents(miss): %v", err)
+	}
+	if resolved, err := s.ResolveMissing(cluster, "scan-miss"); err != nil || resolved != 0 {
+		t.Fatalf("resolved before resolveAfter elapsed: resolved=%d err=%v", resolved, err)
+	}
+	if rec, _ := s.GetIncidentHistory(cluster, disk.Fingerprint); rec.Status != "active" {
+		t.Fatalf("DiskPressure resolved prematurely: %+v", rec)
+	}
+	if rec, _ := s.GetIncidentHistory(cluster, memory.Fingerprint); rec.Status != "active" {
+		t.Fatalf("MemoryPressure resolved before resolveAfter elapsed: %+v", rec)
 	}
 
-	scanID := fmt.Sprintf("scan-miss-%d", resolveThreshold)
-	if err := s.UpsertIncidents(cluster, scanID, []IncidentData{memory}); err != nil {
-		t.Fatalf("UpsertIncidents(threshold): %v", err)
-	}
-	resolved, err := s.ResolveMissing(cluster, scanID)
+	backdateAbsentSince(t, s, cluster, memory.Fingerprint, resolveAfter)
+	resolved, err := s.ResolveMissing(cluster, "scan-miss")
 	if err != nil || resolved != 1 {
-		t.Fatalf("at threshold resolved=%d err=%v", resolved, err)
+		t.Fatalf("at resolveAfter resolved=%d err=%v", resolved, err)
 	}
 	diskRec, _ := s.GetIncidentHistory(cluster, disk.Fingerprint)
 	memoryRec, _ := s.GetIncidentHistory(cluster, memory.Fingerprint)
-	if diskRec.Status != "resolved" || memoryRec.Status != "active" {
+	if diskRec.Status != "active" || memoryRec.Status != "resolved" {
 		t.Fatalf("condition isolation failed: disk=%s memory=%s", diskRec.Status, memoryRec.Status)
 	}
 }
@@ -138,14 +134,11 @@ func TestNodeIncidentReappearsBeforeThresholdAbsorbsFlap(t *testing.T) {
 	if err := s.UpsertIncidents(cluster, "scan-0", []IncidentData{inc}); err != nil {
 		t.Fatal(err)
 	}
-	for miss := 1; miss < resolveThreshold; miss++ {
-		scanID := fmt.Sprintf("scan-miss-%d", miss)
-		if err := s.UpsertIncidents(cluster, scanID, nil); err != nil {
-			t.Fatal(err)
-		}
-		if _, err := s.ResolveMissing(cluster, scanID); err != nil {
-			t.Fatal(err)
-		}
+	if err := s.UpsertIncidents(cluster, "scan-miss", nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.ResolveMissing(cluster, "scan-miss"); err != nil {
+		t.Fatal(err)
 	}
 	if err := s.UpsertIncidents(cluster, "scan-return", []IncidentData{inc}); err != nil {
 		t.Fatal(err)
@@ -153,7 +146,7 @@ func TestNodeIncidentReappearsBeforeThresholdAbsorbsFlap(t *testing.T) {
 	rec, _ := s.GetIncidentHistory(cluster, inc.Fingerprint)
 	events, _ := s.GetIncidentTimeline(cluster, inc.Fingerprint)
 	if rec.Status != "active" || len(events) != 1 || events[0].EventType != "DETECTED" {
-		t.Fatalf("pre-threshold flap was not absorbed: rec=%+v events=%+v", rec, events)
+		t.Fatalf("pre-duration flap was not absorbed: rec=%+v events=%+v", rec, events)
 	}
 }
 

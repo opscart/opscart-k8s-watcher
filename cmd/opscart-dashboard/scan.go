@@ -1,35 +1,80 @@
 package main
 
 import (
-	"context"
 	"crypto/rand"
 	"encoding/hex"
-	"encoding/json"
-	"log"
+	"fmt"
 	"sync"
 	"sync/atomic"
 	"time"
 
+	"github.com/opscart/opscart-k8s-watcher/pkg/acquisition"
 	"github.com/opscart/opscart-k8s-watcher/pkg/analyzer"
+	"github.com/opscart/opscart-k8s-watcher/pkg/clusterstate"
 	"github.com/opscart/opscart-k8s-watcher/pkg/models"
 	"github.com/opscart/opscart-k8s-watcher/pkg/scanner"
 	"github.com/opscart/opscart-k8s-watcher/pkg/store"
 )
 
-// clusterScan holds results from all analyzers for a single cluster scan.
-// Fields other than report may be nil if the audit failed (RBAC, timeout, etc.).
+// clusterScan holds results from all analyzers for one atomic analysis
+// pass (docs/08 Phase 5: buildClusterScan, analysis.go). Fields other than
+// report may be nil if the corresponding analyzer found nothing to report.
+//
+// Every field here is built from the SAME ClusterSnapshot generation in
+// one buildClusterScan call — there is exactly one analysis path per
+// cluster (Phase 5 removed the earlier coexistence of a separate
+// Coordinator-driven path and a legacy path, each independently
+// publishing/generation-guarding its own subset of these fields). generation
+// is the single ordering key publishScan (acquisition_runtime.go) uses to
+// guarantee a stale analysis pass can never overwrite a newer one.
 type clusterScan struct {
-	report     *models.CloudCostReport
-	secAudit   *models.SecurityAudit
-	cisResult  *analyzer.CISResult
+	// generation is the ClusterSnapshot generation this entire clusterScan
+	// was derived from (docs/08 §8: not a claim of one atomic Kubernetes
+	// transaction, and never a proxy for elapsed time — see docs/08 §2.6).
+	// publishScan's ordering guard compares this field; Coordinator's
+	// single-threaded loop is what makes "second call for the same
+	// generation is chronologically later" a safe basis for that guard
+	// even when a clock-triggered pass reuses an unchanged generation
+	// (docs/08 Phase 5's clock-driven re-analysis).
+	generation uint64
+
+	// report is the full Cost Intelligence composite for this pass (pool
+	// costs, namespace allocation, optimization scenarios, provider
+	// metadata) — see buildCostAnalysis, cost_runtime.go.
+	report *models.CloudCostReport
+
+	// secAudit is displayed by pages.go/server.go's overview and is also an
+	// input to this pass's incident batch (collectWarRoomIssues' critical
+	// "privileged_container" issues) and to cisResult below.
+	secAudit *models.SecurityAudit
+
+	// cisResult is derived from secAudit and netAudit computed in this SAME
+	// buildClusterScan call (analysis.go) — never from independently-timed
+	// values, so it is structurally impossible for this to combine
+	// Security and Network evidence from two different generations
+	// (docs/08 Phase 5's CIS/Security/Network generation-consistency
+	// requirement).
+	cisResult *analyzer.CISResult
+
+	// wasteAudit is displayed by pages.go/investigation.go and is also an
+	// input to this pass's incident batch (collectWarRoomIssues'
+	// StalePods/AbandonedNamespaces issues and calcIncidentScore's
+	// OrphanedPVCs penalty).
 	wasteAudit *analyzer.WasteAudit
-	netAudit   *analyzer.NetworkPolicyAudit
+
+	// netAudit is displayed by pages.go/investigation.go/warroom.go and is
+	// also an input to this pass's incident batch (collectWarRoomIssues'
+	// "unprotected_namespace" issues).
+	netAudit *analyzer.NetworkPolicyAudit
+
+	// nodeHealth is displayed by pages.go/investigation.go/warroom.go and is
+	// also the direct input to this pass's incident batch
+	// (completeIncidentBatch, persistAnalysis in acquisition_runtime.go).
 	nodeHealth []models.NodeConditionFinding
 
-	// AllWorkloads is every Deployment/StatefulSet/DaemonSet the scan
-	// observed, regardless of the --breakdown flag — retained from the pod
-	// enumeration ResourceAnalyzer.AnalyzeClusterResources already performs
-	// for cost allocation, not a second cluster fetch.
+	// AllWorkloads is every Deployment/StatefulSet/DaemonSet this pass
+	// observed, regardless of the --breakdown flag — see
+	// buildResourceAnalysis, resource_analysis_runtime.go.
 	AllWorkloads []models.WorkloadRef
 
 	// PodWorkloads is the confirmed pod -> owning workload map from the
@@ -42,16 +87,16 @@ type clusterScan struct {
 
 	// nodeOptimization is the read-only consolidation-simulation
 	// recommendation contract (see pkg/analyzer/node_optimization_recommendation.go),
-	// built from the same NodeInfo/Pod snapshots already fetched above for
-	// cost analysis — not a second cluster fetch. Nil/empty until the Node
-	// Optimization page renders it.
+	// built from this same pass's NodeInfo/Pod snapshots and report — not a
+	// second cluster fetch. Nil/empty until the Node Optimization page
+	// renders it.
 	nodeOptimization []analyzer.NodeOptimizationRecommendation
 
 	// nodeOptimizationSavings is aligned 1:1 by index with nodeOptimization.
 	// Each entry reuses Cost Intelligence's already-computed provider pricing
-	// (poolCosts from the cost-analysis scan step, not a second pricing call)
-	// to project the monthly savings of that pool's recommendation, when an
-	// exact price can be joined. See pkg/analyzer/node_optimization_savings.go.
+	// (report.NodePoolCosts, not a second pricing call) to project the
+	// monthly savings of that pool's recommendation, when an exact price
+	// can be joined. See pkg/analyzer/node_optimization_savings.go.
 	nodeOptimizationSavings []analyzer.NodeOptimizationSavingsProjection
 }
 
@@ -66,6 +111,51 @@ type dashboardState struct {
 	db            store.Store
 	retentionDays int
 	observation   scanObservation
+
+	// acquisition is this cluster's informer-backed acquisition runtime
+	// (docs/08 Phase 3/4A). It is set once during dashboard startup (see
+	// acquisition_runtime.go) before any concurrent reader could observe
+	// it, and never reassigned afterward, so — like ctx/db/retentionDays
+	// above — reading it needs no lock. It is nil if that cluster's
+	// Kubernetes client could not be constructed at startup, in which case
+	// refresh below can never produce a scan for this cluster.
+	//
+	// Since docs/08 Phase 4E, refresh below reads this runtime's
+	// ClusterState directly (via runAnalysisPass, acquisition_runtime.go)
+	// — the same ClusterState the coordinator below also reads.
+	acquisition *acquisition.Runtime
+
+	// coordinator is this cluster's Phase 4B coalescing coordinator (Phase 5:
+	// also clock-triggered — see NewCoordinator's clockInterval), driving
+	// every analyzer through the one analysis path (acquisition_runtime.go's
+	// runAnalysisPass) off acquisition's ClusterState instead of a direct
+	// Kubernetes call. Set once at startup alongside acquisition, before any
+	// concurrent reader could observe it, and never reassigned afterward —
+	// same no-lock convention as acquisition above.
+	coordinator *clusterstate.Coordinator
+
+	// costAnalyzer is this cluster's persistent Cost/pricing runtime (docs/08
+	// Phase 4D.6) — one *analyzer.NodePoolCostAnalyzer shared by every
+	// analysis pass (on-demand and Coordinator-triggered alike, since Phase
+	// 5 there is only one analysis path), so a pricing provider's own cache
+	// (e.g. the Azure Retail Prices provider's 24h TTL) survives across
+	// generations instead of being discarded with a freshly-constructed
+	// analyzer every cycle. Constructed once in getState, before this
+	// dashboardState is published to srv.states, and never reassigned
+	// afterward — same no-lock convention as acquisition/coordinator above.
+	// The type's own mutex protects it against the concurrent access this
+	// sharing introduces (see NodePoolCostAnalyzer's doc comment).
+	costAnalyzer *analyzer.NodePoolCostAnalyzer
+
+	// lastPersistedAt is the wall-clock time persistAnalysis
+	// (acquisition_runtime.go) last actually wrote incidents/history for
+	// this cluster, guarded by mu. It is the throttle that bounds
+	// persistence to roughly persistenceInterval regardless of how often
+	// runAnalysisPass itself runs (docs/08 Phase 5: an event-coalesced pass
+	// can fire every ~2s during a burst, and that must not become ~2s-
+	// cadence scan_history/incident writes). Its zero value means "never
+	// persisted yet," so the first pass for a cluster always persists.
+	lastPersistedAt time.Time
 }
 
 func (s *dashboardState) refresh(clusterList []string) error {
@@ -74,89 +164,24 @@ func (s *dashboardState) refresh(clusterList []string) error {
 	}
 	defer s.scanning.Store(false)
 
-	// Timer covers the full cycle — scan, render, and persistence — so
-	// DurationMS reflects what "scan duration" actually means to a reader.
-	// Previously this started after runFullScan/renderHTML completed, so
-	// the recorded duration measured only the persistence block below.
-	start := time.Now()
-
-	scanCounters := newAPICounters()
-	scan, err := runFullScan(s.ctx, scanCounters)
-	if err != nil {
-		return err
+	// docs/08 Phase 4E/5: this pass's evidence comes from the same
+	// ClusterSnapshot the Coordinator reads (runAnalysisPass,
+	// acquisition_runtime.go), not a direct Kubernetes call. A snapshot
+	// that isn't Trustworthy (RESYNCING/DEGRADED/STALE, or none published
+	// yet) must not be analyzed — the acquisition-health invariant every
+	// analysis pass enforces (docs/08 §4). main.go's startup sequence waits
+	// for initial sync before the first call, so this only actually
+	// triggers for a cluster whose acquisition never started or is still
+	// recovering.
+	if s.acquisition == nil {
+		return fmt.Errorf("acquisition unavailable for %s", displayName(s.ctx))
 	}
-	page := renderHTML(scan, s.ctx, clusterList)
-
-	s.mu.Lock()
-	s.scan = scan
-	s.htmlPage = page
-	s.mu.Unlock()
-
-	// Persist to operational memory (best-effort, never blocks scan)
-	if s.db != nil {
-		scanID := newScanID()
-
-		incScore, _, _ := calcIncidentScore(scan)
-		issues := collectWarRoomIssues(scan, 0)
-
-		critical, warnings := tallySnapshotCounts(issues, scan.nodeHealth)
-		var incidents []store.IncidentData
-		for _, is := range issues {
-			details, _ := json.Marshal(map[string]any{
-				"resource_age_days": is.ResourceAgeDays,
-				"message":           is.Message,
-			})
-			incidents = append(incidents, store.IncidentData{
-				Fingerprint:  store.WorkloadFingerprintForPod(is.Namespace, is.Resource, is.Type),
-				Namespace:    is.Namespace,
-				Resource:     is.Resource,
-				IssueType:    is.Type,
-				Severity:     is.Severity,
-				DetailsJSON:  string(details),
-				RestartCount: is.RestartCount,
-			})
-		}
-
-		snap := store.SnapshotData{
-			ScannedAt:     time.Now(),
-			IncidentScore: incScore,
-			CriticalCount: critical,
-			WarningCount:  warnings,
-			SecurityScore: scan.securityScore(),
-			WasteCount:    scan.wasteTotal(),
-			MonthlyCost:   scan.report.TotalMonthlyCost,
-			PodCount:      scan.monthlyPodCount(),
-		}
-
-		if err := s.db.WriteSnapshot(s.ctx, scanID, snap); err != nil {
-			log.Printf("[%s] store snapshot: %v", displayName(s.ctx), err)
-		}
-		incidents = completeIncidentBatch(incidents, scan.nodeHealth)
-		resolved, persistErr := persistCompleteIncidentBatch(s.db, s.ctx, scanID, incidents)
-		if persistErr != nil {
-			log.Printf("[%s] store incidents: %v", displayName(s.ctx), persistErr)
-		} else if resolved > 0 {
-			log.Printf("[%s] %d incident(s) resolved", displayName(s.ctx), resolved)
-		}
-		if cutoff, ok := store.RetentionCutoff(s.retentionDays, time.Now()); ok {
-			if pruned, err := s.db.PruneOlderThan(s.ctx, cutoff); err != nil {
-				log.Printf("[%s] store prune: %v", displayName(s.ctx), err)
-			} else if pruned > 0 {
-				log.Printf("[%s] retention: pruned %d incident(s) older than %d day(s)", displayName(s.ctx), pruned, s.retentionDays)
-			}
-		}
-		_ = s.db.WriteScanHistory(s.ctx, scanID, store.ScanMeta{
-			DurationMS: time.Since(start).Milliseconds(),
-			Success:    true,
-			Version:    Version,
-		})
+	snapshot := s.acquisition.ClusterState().Latest()
+	if snapshot == nil || !snapshot.Trustworthy() {
+		return fmt.Errorf("cluster state not yet trustworthy for %s", displayName(s.ctx))
 	}
 
-	s.mu.Lock()
-	s.observation = scanObservation{CompletedAt: time.Now(), Duration: time.Since(start), API: scanCounters.snapshot()}
-	s.mu.Unlock()
-
-	log.Printf("[%s] scan complete: %d namespaces, $%s/month, %d critical issues", displayName(s.ctx), len(scan.report.NamespaceCosts), formatMoney(scan.report.TotalMonthlyCost), countCriticalIssues(scan))
+	runAnalysisPass(s, snapshot, clusterList)
 	return nil
 }
 
@@ -196,51 +221,6 @@ func persistCompleteIncidentBatch(db store.Store, cluster, scanID string, incide
 		return 0, err
 	}
 	return db.ResolveMissing(cluster, scanID)
-}
-
-// startBackgroundRefresh ticks every interval and re-scans every cluster that
-// has been visited at least once. The worker is owned by ctx and backgroundWG,
-// so shutdown can stop scheduling work and wait for an in-flight scan before
-// the SQLite store is closed.
-func (srv *server) startBackgroundRefresh(ctx context.Context, interval time.Duration) {
-	srv.backgroundWG.Add(1)
-	go srv.runBackgroundRefresh(ctx, interval)
-}
-
-func (srv *server) runBackgroundRefresh(ctx context.Context, interval time.Duration) {
-	defer srv.backgroundWG.Done()
-
-	ticker := time.NewTicker(interval)
-	defer ticker.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-ticker.C:
-		}
-
-		srv.mu.RLock()
-		states := make([]*dashboardState, 0, len(srv.states))
-		for _, s := range srv.states {
-			states = append(states, s)
-		}
-		srv.mu.RUnlock()
-
-		for _, state := range states {
-			if ctx.Err() != nil {
-				return
-			}
-			state.mu.RLock()
-			hasData := state.scan != nil
-			state.mu.RUnlock()
-			if !hasData {
-				continue
-			}
-			if err := srv.refreshState(state, srv.clusterList); err != nil {
-				log.Printf("[%s] background refresh error: %v", displayName(state.ctx), err)
-			}
-		}
-	}
 }
 
 func newScanID() string {

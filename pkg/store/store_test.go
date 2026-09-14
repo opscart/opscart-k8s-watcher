@@ -11,20 +11,66 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-// driveToResolved runs ResolveMissing resolveThreshold times so that any
-// active incident absent from `present` crosses the debounce threshold and
-// flips to resolved. Mirrors the real scan loop: UpsertIncidents then
-// ResolveMissing, once per simulated scan.
+// driveToResolved marks every active incident not included in `present` as
+// absent from one scan, then drives it through both steps of the absence
+// lifecycle without waiting out resolveAfter in real time: one
+// ResolveMissing call to record absent_since (the first missing
+// evaluation), a backdate of absent_since far enough for resolveAfter to
+// have elapsed, and a second ResolveMissing call to resolve it. Mirrors two
+// real scans (UpsertIncidents then ResolveMissing, each) compressed to run
+// instantly.
 func driveToResolved(t *testing.T, s *SQLiteStore, cluster string, present []IncidentData, scanPrefix string) {
 	t.Helper()
-	for i := 0; i < resolveThreshold; i++ {
-		scanID := fmt.Sprintf("%s-%d", scanPrefix, i)
-		if err := s.UpsertIncidents(cluster, scanID, present); err != nil {
-			t.Fatalf("UpsertIncidents(%s): %v", scanID, err)
+	scanID := scanPrefix + "-resolve"
+	if err := s.UpsertIncidents(cluster, scanID, present); err != nil {
+		t.Fatalf("UpsertIncidents(%s): %v", scanID, err)
+	}
+	if _, err := s.ResolveMissing(cluster, scanID); err != nil {
+		t.Fatalf("ResolveMissing(%s) [record absence]: %v", scanID, err)
+	}
+
+	rows, err := s.db.Query(
+		`SELECT fingerprint FROM incidents WHERE cluster=? AND status='active' AND absent_since IS NOT NULL`,
+		cluster,
+	)
+	if err != nil {
+		t.Fatalf("query pending incidents: %v", err)
+	}
+	var fingerprints []string
+	for rows.Next() {
+		var fp string
+		if err := rows.Scan(&fp); err != nil {
+			rows.Close()
+			t.Fatalf("scan pending incident: %v", err)
 		}
-		if _, err := s.ResolveMissing(cluster, scanID); err != nil {
-			t.Fatalf("ResolveMissing(%s): %v", scanID, err)
-		}
+		fingerprints = append(fingerprints, fp)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("iterate pending incidents: %v", err)
+	}
+	rows.Close()
+
+	for _, fp := range fingerprints {
+		backdateAbsentSince(t, s, cluster, fp, resolveAfter+time.Minute)
+	}
+
+	if _, err := s.ResolveMissing(cluster, scanID); err != nil {
+		t.Fatalf("ResolveMissing(%s) [resolve]: %v", scanID, err)
+	}
+}
+
+// backdateAbsentSince sets an incident's absent_since to age ago from now,
+// simulating age of continuous absence without sleeping in tests.
+// ResolveMissing measures absence from absent_since, so this is equivalent
+// to age of real elapsed time having passed since the incident's absence
+// began.
+func backdateAbsentSince(t *testing.T, s *SQLiteStore, cluster, fingerprint string, age time.Duration) {
+	t.Helper()
+	if _, err := s.db.Exec(
+		`UPDATE incidents SET absent_since = ? WHERE cluster=? AND fingerprint=?`,
+		time.Now().Add(-age).Unix(), cluster, fingerprint,
+	); err != nil {
+		t.Fatalf("backdate absent_since: %v", err)
 	}
 }
 
@@ -400,67 +446,6 @@ func TestUpsertIncidentsUnchangedFocusPodEmitsRestartMilestone(t *testing.T) {
 	}
 }
 
-func TestResolveMissing(t *testing.T) {
-	s := openTestStore(t)
-
-	incA1 := IncidentData{Fingerprint: "default/Deployment/svc-a/crash_loop", Namespace: "default", Resource: "svc-a", IssueType: "crash_loop", Severity: "critical"}
-	incA2 := IncidentData{Fingerprint: "default/Deployment/svc-b/oom", Namespace: "default", Resource: "svc-b", IssueType: "oom", Severity: "warning"}
-
-	if err := s.UpsertIncidents("test-cluster", "scan-a", []IncidentData{incA1, incA2}); err != nil {
-		t.Fatalf("UpsertIncidents(scan-a): %v", err)
-	}
-
-	// svc-b must be absent for resolveThreshold consecutive scans before
-	// it resolves (debounced to avoid CrashLoopBackOff flapping).
-	for i := 0; i < resolveThreshold-1; i++ {
-		scanID := fmt.Sprintf("scan-b%d", i)
-		if err := s.UpsertIncidents("test-cluster", scanID, []IncidentData{incA1}); err != nil {
-			t.Fatalf("UpsertIncidents(%s): %v", scanID, err)
-		}
-		resolved, err := s.ResolveMissing("test-cluster", scanID)
-		if err != nil {
-			t.Fatalf("ResolveMissing(%s): %v", scanID, err)
-		}
-		if resolved != 0 {
-			t.Fatalf("expected no resolution before threshold, got %d at iteration %d", resolved, i)
-		}
-		recB, err := s.GetIncidentHistory("test-cluster", incA2.Fingerprint)
-		if err != nil {
-			t.Fatalf("GetIncidentHistory(B): %v", err)
-		}
-		if recB.Status != "active" {
-			t.Fatalf("expected svc-b still active before threshold, got %s", recB.Status)
-		}
-	}
-
-	if err := s.UpsertIncidents("test-cluster", "scan-b-final", []IncidentData{incA1}); err != nil {
-		t.Fatalf("UpsertIncidents(scan-b-final): %v", err)
-	}
-	resolved, err := s.ResolveMissing("test-cluster", "scan-b-final")
-	if err != nil {
-		t.Fatalf("ResolveMissing: %v", err)
-	}
-	if resolved != 1 {
-		t.Fatalf("expected 1 resolved incident, got %d", resolved)
-	}
-
-	recA, err := s.GetIncidentHistory("test-cluster", incA1.Fingerprint)
-	if err != nil {
-		t.Fatalf("GetIncidentHistory(A): %v", err)
-	}
-	if recA.Status != "active" {
-		t.Fatalf("expected svc-a active, got %s", recA.Status)
-	}
-
-	recB, err := s.GetIncidentHistory("test-cluster", incA2.Fingerprint)
-	if err != nil {
-		t.Fatalf("GetIncidentHistory(B): %v", err)
-	}
-	if recB.Status != "resolved" {
-		t.Fatalf("expected svc-b resolved, got %s", recB.Status)
-	}
-}
-
 func TestOwnerNameFromPod(t *testing.T) {
 	cases := []struct {
 		in   string
@@ -728,7 +713,7 @@ func TestTimeline_ReopenedAfterResolve(t *testing.T) {
 	if err := s.UpsertIncidents("test-cluster", "scan-1", []IncidentData{inc}); err != nil {
 		t.Fatalf("UpsertIncidents(1): %v", err)
 	}
-	// resolve it: incident absent for resolveThreshold consecutive scans
+	// resolve it: incident absent long enough for resolveAfter to elapse
 	driveToResolved(t, s, "test-cluster", nil, "scan-miss")
 	// push the resolution outside flapAbsorptionWindow so this reappearance
 	// reads as a genuine recurrence, not a flap
@@ -893,186 +878,12 @@ func TestBatchGetReopenCounts_MatchesQueryIncidentsReopenCount(t *testing.T) {
 }
 
 // ── Resolve debounce ─────────────────────────────────────────────────────────
-
-func TestDebounce_SingleMissStaysActiveNoEvent(t *testing.T) {
-	s := openTestStore(t)
-
-	inc := IncidentData{Fingerprint: "default/Deployment/svc-a/crash_loop", Namespace: "default", Resource: "svc-a", IssueType: "crash_loop", Severity: "critical"}
-
-	if err := s.UpsertIncidents("test-cluster", "scan-1", []IncidentData{inc}); err != nil {
-		t.Fatalf("UpsertIncidents(1): %v", err)
-	}
-	// absent from scan-2 (one miss, below resolveThreshold=3)
-	if err := s.UpsertIncidents("test-cluster", "scan-2", nil); err != nil {
-		t.Fatalf("UpsertIncidents(2): %v", err)
-	}
-	resolved, err := s.ResolveMissing("test-cluster", "scan-2")
-	if err != nil {
-		t.Fatalf("ResolveMissing: %v", err)
-	}
-	if resolved != 0 {
-		t.Fatalf("expected no resolution after a single miss, got %d", resolved)
-	}
-
-	rec, err := s.GetIncidentHistory("test-cluster", inc.Fingerprint)
-	if err != nil {
-		t.Fatalf("GetIncidentHistory: %v", err)
-	}
-	if rec.Status != "active" {
-		t.Fatalf("expected still active after single miss, got %s", rec.Status)
-	}
-
-	events, err := s.GetIncidentTimeline("test-cluster", inc.Fingerprint)
-	if err != nil {
-		t.Fatalf("GetIncidentTimeline: %v", err)
-	}
-	if len(events) != 1 || events[0].EventType != "DETECTED" {
-		t.Fatalf("expected only the initial DETECTED event, got %+v", events)
-	}
-}
-
-func TestDebounce_ReappearsWithinGraceWindowResetsCounter(t *testing.T) {
-	s := openTestStore(t)
-
-	inc := IncidentData{Fingerprint: "default/Deployment/svc-a/crash_loop", Namespace: "default", Resource: "svc-a", IssueType: "crash_loop", Severity: "critical", RestartCount: 5}
-
-	if err := s.UpsertIncidents("test-cluster", "scan-1", []IncidentData{inc}); err != nil {
-		t.Fatalf("UpsertIncidents(1): %v", err)
-	}
-	// two consecutive misses (below resolveThreshold=3)
-	for i := 0; i < 2; i++ {
-		scanID := fmt.Sprintf("scan-miss-%d", i)
-		if err := s.UpsertIncidents("test-cluster", scanID, nil); err != nil {
-			t.Fatalf("UpsertIncidents(%s): %v", scanID, err)
-		}
-		if _, err := s.ResolveMissing("test-cluster", scanID); err != nil {
-			t.Fatalf("ResolveMissing(%s): %v", scanID, err)
-		}
-	}
-
-	// reappears with identical severity/restart count before hitting the threshold
-	if err := s.UpsertIncidents("test-cluster", "scan-reappear", []IncidentData{inc}); err != nil {
-		t.Fatalf("UpsertIncidents(reappear): %v", err)
-	}
-
-	rec, err := s.GetIncidentHistory("test-cluster", inc.Fingerprint)
-	if err != nil {
-		t.Fatalf("GetIncidentHistory: %v", err)
-	}
-	if rec.Status != "active" {
-		t.Fatalf("expected active, got %s", rec.Status)
-	}
-
-	var missingScans int
-	if err := s.db.QueryRow(
-		"SELECT missing_scans FROM incidents WHERE cluster=? AND fingerprint=?",
-		"test-cluster", inc.Fingerprint,
-	).Scan(&missingScans); err != nil {
-		t.Fatalf("query missing_scans: %v", err)
-	}
-	if missingScans != 0 {
-		t.Fatalf("expected missing_scans reset to 0, got %d", missingScans)
-	}
-
-	events, err := s.GetIncidentTimeline("test-cluster", inc.Fingerprint)
-	if err != nil {
-		t.Fatalf("GetIncidentTimeline: %v", err)
-	}
-	if len(events) != 1 {
-		t.Fatalf("expected no RESOLVED/REOPENED events, only initial DETECTED, got %+v", events)
-	}
-}
-
-func TestDebounce_ThreeConsecutiveMissesResolvesOnce(t *testing.T) {
-	s := openTestStore(t)
-
-	inc := IncidentData{Fingerprint: "default/Deployment/svc-a/crash_loop", Namespace: "default", Resource: "svc-a", IssueType: "crash_loop", Severity: "critical"}
-
-	if err := s.UpsertIncidents("test-cluster", "scan-1", []IncidentData{inc}); err != nil {
-		t.Fatalf("UpsertIncidents(1): %v", err)
-	}
-
-	var totalResolved int
-	for i := 0; i < resolveThreshold; i++ {
-		scanID := fmt.Sprintf("scan-miss-%d", i)
-		if err := s.UpsertIncidents("test-cluster", scanID, nil); err != nil {
-			t.Fatalf("UpsertIncidents(%s): %v", scanID, err)
-		}
-		resolved, err := s.ResolveMissing("test-cluster", scanID)
-		if err != nil {
-			t.Fatalf("ResolveMissing(%s): %v", scanID, err)
-		}
-		totalResolved += resolved
-	}
-	if totalResolved != 1 {
-		t.Fatalf("expected exactly 1 resolution across %d misses, got %d", resolveThreshold, totalResolved)
-	}
-
-	rec, err := s.GetIncidentHistory("test-cluster", inc.Fingerprint)
-	if err != nil {
-		t.Fatalf("GetIncidentHistory: %v", err)
-	}
-	if rec.Status != "resolved" {
-		t.Fatalf("expected resolved after %d consecutive misses, got %s", resolveThreshold, rec.Status)
-	}
-
-	events, err := s.GetIncidentTimeline("test-cluster", inc.Fingerprint)
-	if err != nil {
-		t.Fatalf("GetIncidentTimeline: %v", err)
-	}
-	resolvedEvents := 0
-	for _, e := range events {
-		if e.EventType == "RESOLVED" {
-			resolvedEvents++
-		}
-	}
-	if resolvedEvents != 1 {
-		t.Fatalf("expected exactly one RESOLVED event, got %d in %+v", resolvedEvents, events)
-	}
-}
-
-func TestDebounce_ReopensAfterGenuineResolve(t *testing.T) {
-	s := openTestStore(t)
-
-	inc := IncidentData{Fingerprint: "default/Deployment/svc-a/crash_loop", Namespace: "default", Resource: "svc-a", IssueType: "crash_loop", Severity: "critical"}
-
-	if err := s.UpsertIncidents("test-cluster", "scan-1", []IncidentData{inc}); err != nil {
-		t.Fatalf("UpsertIncidents(1): %v", err)
-	}
-	driveToResolved(t, s, "test-cluster", nil, "scan-miss")
-
-	rec, err := s.GetIncidentHistory("test-cluster", inc.Fingerprint)
-	if err != nil {
-		t.Fatalf("GetIncidentHistory: %v", err)
-	}
-	if rec.Status != "resolved" {
-		t.Fatalf("expected genuinely resolved, got %s", rec.Status)
-	}
-	// push the resolution outside flapAbsorptionWindow so this reappearance
-	// reads as a genuine recurrence, not a flap
-	backdateIncidentEvents(t, s, "test-cluster", inc.Fingerprint, flapAbsorptionWindow+time.Minute)
-
-	if err := s.UpsertIncidents("test-cluster", "scan-reopen", []IncidentData{inc}); err != nil {
-		t.Fatalf("UpsertIncidents(reopen): %v", err)
-	}
-
-	rec, err = s.GetIncidentHistory("test-cluster", inc.Fingerprint)
-	if err != nil {
-		t.Fatalf("GetIncidentHistory: %v", err)
-	}
-	if rec.Status != "active" {
-		t.Fatalf("expected active after reopen, got %s", rec.Status)
-	}
-
-	events, err := s.GetIncidentTimeline("test-cluster", inc.Fingerprint)
-	if err != nil {
-		t.Fatalf("GetIncidentTimeline: %v", err)
-	}
-	last := events[len(events)-1]
-	if last.EventType != "REOPENED" || last.EventReason != "Reopened" {
-		t.Fatalf("expected trailing REOPENED event, got %+v", last)
-	}
-}
+//
+// Wall-clock resolution semantics (first absence, elapsed-duration boundary,
+// rapid-call safety, reappearance reset) are covered in
+// incident_resolution_test.go. The tests below cover behavior orthogonal to
+// the resolution mechanism itself: flap absorption's interaction with a
+// genuine resolve/reopen cycle.
 
 // ── Flap absorption ──────────────────────────────────────────────────────────
 

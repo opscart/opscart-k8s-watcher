@@ -28,21 +28,17 @@ func NewResourceAnalyzer(clientset *kubernetes.Clientset) *ResourceAnalyzer {
 	}
 }
 
-// AnalyzeClusterResources performs comprehensive resource analysis
+// AnalyzeClusterResources performs comprehensive resource analysis. It
+// acquires Pods and Nodes itself via the clientset, then delegates all
+// actual analysis to AnalyzeResources — see that function's doc comment for
+// why the two are split. Still used by the CLI (cmd/opscart-scan) and the
+// legacy dashboard scan path (docs/08 Phase 4D.1 does not migrate either).
 func (ra *ResourceAnalyzer) AnalyzeClusterResources(namespace string) (*models.ClusterResourceAnalysis, error) {
-	analysis := &models.ClusterResourceAnalysis{
-		Timestamp: time.Now(),
-	}
-
-	// Get cluster capacity
-	capacity, err := ra.getClusterCapacity()
+	nodeList, err := ra.clientset.CoreV1().Nodes().List(ra.ctx, metav1.ListOptions{})
 	if err != nil {
 		return nil, fmt.Errorf("failed to get cluster capacity: %w", err)
 	}
-	analysis.TotalCPUCores = capacity.CPU
-	analysis.TotalMemoryGB = capacity.Memory
 
-	// Get all pods
 	podList, err := ra.clientset.CoreV1().Pods(namespace).List(ra.ctx, metav1.ListOptions{})
 	if err != nil {
 		return nil, fmt.Errorf("failed to list pods: %w", err)
@@ -51,20 +47,45 @@ func (ra *ResourceAnalyzer) AnalyzeClusterResources(namespace string) (*models.C
 	// pipeline can examine the identical Pods without another API request.
 	ra.pods = append(ra.pods[:0], podList.Items...)
 
-	// Roll the same pod list up to one entry per owning workload — no
-	// second cluster fetch, just a different view of data already in hand.
-	analysis.Workloads = workloadsFromPods(podList.Items)
+	return AnalyzeResources(podList.Items, nodeList.Items, namespace), nil
+}
+
+// AnalyzeResources performs the same comprehensive resource analysis as
+// AnalyzeClusterResources, but from an already-observed Pods/Nodes snapshot
+// rather than issuing its own Kubernetes LIST calls — the acquisition/
+// analysis split docs/08 Phase 4D.1 requires for the dashboard's
+// coordinator-driven path (cmd/opscart-dashboard/resource_analysis_runtime.go).
+// It performs no Kubernetes API calls of its own and cannot fail.
+//
+// namespace filters pods exactly as AnalyzeClusterResources' own LIST call
+// used to (an empty namespace means cluster-wide, matching Pods("").List);
+// nodes contributes total cluster capacity unfiltered by namespace, exactly
+// as getClusterCapacity always did.
+func AnalyzeResources(pods []corev1.Pod, nodes []corev1.Node, namespace string) *models.ClusterResourceAnalysis {
+	analysis := &models.ClusterResourceAnalysis{
+		Timestamp: time.Now(),
+	}
+
+	capacity := clusterCapacityFromNodes(nodes)
+	analysis.TotalCPUCores = capacity.CPU
+	analysis.TotalMemoryGB = capacity.Memory
+
+	scopedPods := podsInNamespace(pods, namespace)
+
+	// Roll the pod list up to one entry per owning workload — no cluster
+	// fetch, just a different view of data already in hand.
+	analysis.Workloads = workloadsFromPods(scopedPods)
 	// Preserve the confirmed per-pod ownership too, so consumers that need
 	// to attribute a specific pod-scoped finding to its real workload
 	// (War Room identity, Overview health-grid aggregation) don't have to
 	// re-derive it from name patterns, which cannot distinguish a real
 	// StatefulSet replica from an unrelated pod sharing its naming pattern.
-	analysis.PodWorkloads = podWorkloadMap(podList.Items)
+	analysis.PodWorkloads = podWorkloadMap(scopedPods)
 
 	// Analyze by namespace
 	namespaceMap := make(map[string]*models.NamespaceResourceUsage)
 
-	for _, pod := range podList.Items {
+	for _, pod := range scopedPods {
 		ns := pod.Namespace
 
 		// Initialize namespace if not exists
@@ -101,8 +122,8 @@ func (ra *ResourceAnalyzer) AnalyzeClusterResources(namespace string) (*models.C
 		nsUsage.MemoryPercent = (nsUsage.MemoryGBRequested / analysis.TotalMemoryGB) * 100
 
 		// Detect waste patterns
-		nsUsage.WasteScore = ra.calculateWasteScore(nsUsage)
-		nsUsage.Flags = ra.generateFlags(nsUsage)
+		nsUsage.WasteScore = calculateWasteScore(nsUsage)
+		nsUsage.Flags = generateFlags(nsUsage)
 
 		// Calculate totals
 		analysis.TotalCPURequested += nsUsage.CPUCoresRequested
@@ -120,9 +141,9 @@ func (ra *ResourceAnalyzer) AnalyzeClusterResources(namespace string) (*models.C
 	analysis.MemoryUtilization = (analysis.TotalMemoryRequested / analysis.TotalMemoryGB) * 100
 
 	// Generate optimization opportunities
-	analysis.Optimizations = ra.generateOptimizations(namespaces)
+	analysis.Optimizations = generateOptimizations(namespaces)
 
-	return analysis, nil
+	return analysis
 }
 
 // PodSnapshot returns a copy of the Pod snapshot successfully retrieved by
@@ -131,16 +152,29 @@ func (ra *ResourceAnalyzer) PodSnapshot() []corev1.Pod {
 	return append([]corev1.Pod(nil), ra.pods...)
 }
 
-// getClusterCapacity calculates total cluster capacity
-func (ra *ResourceAnalyzer) getClusterCapacity() (models.ResourceCapacity, error) {
-	var capacity models.ResourceCapacity
-
-	nodeList, err := ra.clientset.CoreV1().Nodes().List(ra.ctx, metav1.ListOptions{})
-	if err != nil {
-		return capacity, err
+// podsInNamespace filters pods to namespace, matching what
+// clientset.CoreV1().Pods(namespace).List already did at acquisition time
+// for AnalyzeClusterResources' caller. An empty namespace means cluster-wide
+// (no filtering), matching Pods("").List's own convention.
+func podsInNamespace(pods []corev1.Pod, namespace string) []corev1.Pod {
+	if namespace == "" {
+		return pods
 	}
+	scoped := make([]corev1.Pod, 0, len(pods))
+	for _, pod := range pods {
+		if pod.Namespace == namespace {
+			scoped = append(scoped, pod)
+		}
+	}
+	return scoped
+}
 
-	for _, node := range nodeList.Items {
+// clusterCapacityFromNodes sums allocatable CPU/memory across nodes — the
+// same computation getClusterCapacity's LIST-based version always performed,
+// extracted so it can run against an already-observed Node snapshot too.
+func clusterCapacityFromNodes(nodes []corev1.Node) models.ResourceCapacity {
+	var capacity models.ResourceCapacity
+	for _, node := range nodes {
 		// Get allocatable resources (what's available for pods)
 		cpuQuantity := node.Status.Allocatable[corev1.ResourceCPU]
 		memoryQuantity := node.Status.Allocatable[corev1.ResourceMemory]
@@ -152,8 +186,7 @@ func (ra *ResourceAnalyzer) getClusterCapacity() (models.ResourceCapacity, error
 		capacity.CPU += cpu
 		capacity.Memory += memory
 	}
-
-	return capacity, nil
+	return capacity
 }
 
 // workloadsFromPods rolls a pod list up to one entry per owning
@@ -354,7 +387,7 @@ func isSpotEligible(pod corev1.Pod) bool {
 }
 
 // calculateWasteScore calculates a waste score (0-100) for a namespace
-func (ra *ResourceAnalyzer) calculateWasteScore(ns *models.NamespaceResourceUsage) float64 {
+func calculateWasteScore(ns *models.NamespaceResourceUsage) float64 {
 	score := 0.0
 
 	// Idle pods contribute heavily to waste
@@ -381,7 +414,7 @@ func (ra *ResourceAnalyzer) calculateWasteScore(ns *models.NamespaceResourceUsag
 }
 
 // generateFlags generates informational flags for a namespace
-func (ra *ResourceAnalyzer) generateFlags(ns *models.NamespaceResourceUsage) []string {
+func generateFlags(ns *models.NamespaceResourceUsage) []string {
 	var flags []string
 
 	if ns.IdlePods > 0 {
@@ -403,7 +436,7 @@ func (ra *ResourceAnalyzer) generateFlags(ns *models.NamespaceResourceUsage) []s
 }
 
 // generateOptimizations creates optimization recommendations
-func (ra *ResourceAnalyzer) generateOptimizations(namespaces []models.NamespaceResourceUsage) []models.Optimization {
+func generateOptimizations(namespaces []models.NamespaceResourceUsage) []models.Optimization {
 	var opts []models.Optimization
 
 	for _, ns := range namespaces {
