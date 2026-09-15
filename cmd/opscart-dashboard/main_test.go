@@ -263,10 +263,19 @@ func TestHandleOverviewPage_CursorSetAfterQuery(t *testing.T) {
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("status = %d, want 200; body: %s", resp.StatusCode, rec.Body.String())
 	}
-	for _, want := range []string{"Earliest retained observation:", "Configured retention:", "90 days", "Storage:", "Persistent"} {
+	for _, want := range []string{"Earliest retained observation:", "Configured retention:", "90 days"} {
 		if !strings.Contains(rec.Body.String(), want) {
 			t.Errorf("Overview Operational Memory card missing %q", want)
 		}
+	}
+	// The ambiguous OpsCart-persistence "Storage:" row was removed from the
+	// Cluster information card (docs/custom UI polish); "Configured
+	// retention:" must render exactly once now, only in Operational Memory.
+	if strings.Contains(rec.Body.String(), "Storage:") {
+		t.Error("Overview still renders the removed Cluster information Storage row")
+	}
+	if got := strings.Count(rec.Body.String(), "Configured retention:"); got != 1 {
+		t.Errorf("\"Configured retention:\" appears %d times, want exactly 1 (Operational Memory only)", got)
 	}
 
 	// The query must have used the cursor from the incoming cookie, proving
@@ -652,8 +661,10 @@ func TestOverviewTemplate_RendersFullyPopulatedData(t *testing.T) {
 		"Longest active",
 		"Most unstable namespace",
 		"Cluster information",
+		"Kubernetes cluster at a glance",
 		"Configured retention:",
-		"Storage:",
+		"Needs attention",
+		"Operational posture · 62/100",
 		"Cluster posture at a glance",
 		"Nodes",
 		"Namespaces",
@@ -666,6 +677,9 @@ func TestOverviewTemplate_RendersFullyPopulatedData(t *testing.T) {
 		if !strings.Contains(out, want) {
 			t.Errorf("rendered output missing %q", want)
 		}
+	}
+	if strings.Contains(out, "Storage:") {
+		t.Error("rendered output still contains the removed ambiguous Cluster information Storage row")
 	}
 }
 
@@ -699,24 +713,27 @@ func TestOverviewTemplate_CompactPostureLinksPreserveCluster(t *testing.T) {
 		t.Fatalf("template execution failed: %v", err)
 	}
 	out := buf.String()
-	for _, href := range []string{
-		data.InfraHref,
-		data.NsHref,
-		data.SecurityHref,
-		data.CostsHref,
-		data.WasteHref,
+	for _, tc := range []struct {
+		href   string
+		accent string
+	}{
+		{data.InfraHref, "posture-nodes"},
+		{data.NsHref, "posture-namespaces"},
+		{data.SecurityHref, "posture-security"},
+		{data.CostsHref, "posture-cost"},
+		{data.WasteHref, "posture-waste"},
 	} {
-		if href == "" {
+		if tc.href == "" {
 			t.Fatalf("fixture has empty posture href")
 		}
-		if !strings.Contains(out, `class="posture-card" href="`+href+`"`) {
-			t.Errorf("overview posture missing link %q", href)
+		if !strings.Contains(out, `class="posture-card `+tc.accent+`" href="`+tc.href+`"`) {
+			t.Errorf("overview posture missing link %q with semantic accent class %q", tc.href, tc.accent)
 		}
-		if !strings.Contains(href, "cluster=prod-eastus") {
-			t.Errorf("posture link did not preserve active cluster: %q", href)
+		if !strings.Contains(tc.href, "cluster=prod-eastus") {
+			t.Errorf("posture link did not preserve active cluster: %q", tc.href)
 		}
 	}
-	if !strings.Contains(out, `class="posture-card posture-card-muted node-optimization-card"`) {
+	if !strings.Contains(out, `class="posture-card posture-card-muted posture-optimization node-optimization-card"`) {
 		t.Errorf("expected non-actionable Node Optimization status card")
 	}
 }
@@ -777,6 +794,59 @@ func TestBuildOverviewData_CostAvailabilityUsesPricingEvidence(t *testing.T) {
 			data := buildOverviewData(tt.scan, "test-cluster", []string{"test-cluster"}, nil, time.Now())
 			if data.CostAvailable != tt.available {
 				t.Fatalf("CostAvailable = %v, want %v", data.CostAvailable, tt.available)
+			}
+		})
+	}
+}
+
+// TestBuildOverviewData_NamespaceCountUsesAuthoritativeInventoryNotCost is
+// the regression test for the minikube "0 Namespaces" bug: NamespaceCount
+// must come from the authoritative Kubernetes namespace inventory
+// (scan.namespaceCount, set from the ClusterSnapshot in buildClusterScan —
+// analysis.go), never from Cost Intelligence's NamespaceCosts allocation
+// entries, which a namespace can have zero of while still existing (e.g. no
+// priced/allocated workloads).
+func TestBuildOverviewData_NamespaceCountUsesAuthoritativeInventoryNotCost(t *testing.T) {
+	tests := []struct {
+		name string
+		scan *clusterScan
+		want int
+	}{
+		{
+			name: "namespaces present, zero NamespaceCosts still reports the real count",
+			scan: &clusterScan{
+				namespaceCount: 4,
+				report:         &models.CloudCostReport{NamespaceCosts: nil},
+			},
+			want: 4,
+		},
+		{
+			name: "no report at all still reports the authoritative count",
+			scan: &clusterScan{namespaceCount: 4},
+			want: 4,
+		},
+		{
+			name: "NamespaceCosts populated must not override the authoritative count",
+			scan: &clusterScan{
+				namespaceCount: 4,
+				report: &models.CloudCostReport{
+					NamespaceCosts: []models.NamespaceCostInfo{{Name: "only-priced-namespace"}},
+				},
+			},
+			want: 4,
+		},
+		{
+			name: "nil scan reports zero, not a panic",
+			scan: nil,
+			want: 0,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			data := buildOverviewData(tt.scan, "test-cluster", []string{"test-cluster"}, nil, time.Now())
+			if data.NamespaceCount != tt.want {
+				t.Fatalf("NamespaceCount = %d, want %d", data.NamespaceCount, tt.want)
 			}
 		})
 	}

@@ -49,6 +49,12 @@ func buildClusterScan(state *dashboardState, snapshot *clusterstate.ClusterSnaps
 	scan.AllWorkloads = resourceAnalysis.Workloads
 	scan.PodWorkloads = resourceAnalysis.PodWorkloads
 
+	// namespaceCount: the authoritative Kubernetes Namespace inventory from
+	// this same snapshot — not Cost Intelligence's NamespaceCosts (a
+	// namespace can exist with zero cost-allocation entries, e.g. no
+	// priced/allocated workloads, and still be a real namespace).
+	scan.namespaceCount = len(resources.Namespaces)
+
 	scan.secAudit = buildSecurityAnalysis(resources)
 	scan.wasteAudit = buildWasteAnalysis(resources)
 	scan.netAudit = buildNetworkAnalysis(resources)

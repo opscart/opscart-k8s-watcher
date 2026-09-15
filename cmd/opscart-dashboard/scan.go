@@ -85,6 +85,16 @@ type clusterScan struct {
 	// unrelated pod sharing its naming pattern.
 	PodWorkloads map[string]models.WorkloadRef
 
+	// namespaceCount is the authoritative Kubernetes namespace inventory
+	// size for this pass — len(resources.Namespaces) from the same
+	// ClusterSnapshot every other field here is built from (buildClusterScan,
+	// analysis.go), not derived from Cost Intelligence's NamespaceCosts
+	// (namespace *cost allocation* entries, which a namespace can legitimately
+	// have zero of — e.g. no priced/allocated workloads — while still
+	// existing). Overview's NamespaceCount must read this field, never
+	// report.NamespaceCosts.
+	namespaceCount int
+
 	// nodeOptimization is the read-only consolidation-simulation
 	// recommendation contract (see pkg/analyzer/node_optimization_recommendation.go),
 	// built from this same pass's NodeInfo/Pod snapshots and report — not a

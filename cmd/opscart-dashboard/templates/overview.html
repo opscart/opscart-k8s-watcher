@@ -11,14 +11,19 @@
 .ov-hdr{display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:1.4rem;flex-wrap:wrap;gap:1rem}
 .ov-hdr h1{font-size:1.85rem;font-weight:750;letter-spacing:-.02em}
 .ov-hdr-sub{color:var(--text-secondary);font-size:.86rem;margin-top:.2rem}
-.ov-kicker{background:linear-gradient(120deg,rgba(99,102,241,.08),rgba(15,23,42,.08));border:1px solid rgba(99,102,241,.16);border-radius:var(--radius-sm);padding:.68rem .9rem .68rem 1.05rem;margin-bottom:1.45rem;display:grid;grid-template-columns:1fr auto;gap:1.5rem;align-items:center}
+.ov-kicker{background:linear-gradient(120deg,rgba(99,102,241,.08),rgba(15,23,42,.08));border:1px solid rgba(99,102,241,.16);border-radius:var(--radius-sm);padding:1.05rem 1.15rem 1.05rem 1.3rem;margin-bottom:1.45rem;display:grid;grid-template-columns:1fr auto;gap:1.5rem;align-items:center}
 .ov-kicker-title{font-size:1.02rem;font-weight:700;letter-spacing:-.01em}
 .ov-kicker-sub{font-size:.8rem;color:var(--text-secondary);margin-top:.08rem}
 .ov-kpis{display:flex;border:1px solid var(--border);border-radius:var(--radius-sm);overflow:hidden;background:rgba(0,0,0,.12)}
-.ov-kpi{min-width:88px;padding:.42rem .75rem;text-align:center;border-left:1px solid var(--border)}
+.ov-kpi{min-width:104px;padding:.85rem .95rem;text-align:center;border-left:1px solid var(--border);position:relative}
 .ov-kpi:first-child{border-left:0}
-.ov-kpi-n{font-size:1.15rem;font-weight:800;line-height:1.1;font-variant-numeric:tabular-nums}
-.ov-kpi-l{font-size:.65rem;color:var(--text-secondary);text-transform:uppercase;letter-spacing:.45px;margin-top:.12rem}
+.ov-kpi:before{content:"";position:absolute;left:0;right:0;top:0;height:2px;background:var(--kpi-accent,transparent);opacity:.7}
+.ov-kpi-n{font-size:1.3rem;font-weight:800;line-height:1.1;font-variant-numeric:tabular-nums}
+.ov-kpi-l{font-size:.65rem;color:var(--text-secondary);text-transform:uppercase;letter-spacing:.45px;margin-top:.3rem}
+.ov-kpi-critical{--kpi-accent:#f87171}
+.ov-kpi-resolved{--kpi-accent:#4ade80}
+.ov-kpi-accelerating{--kpi-accent:#818cf8}
+.ov-kpi-total{--kpi-accent:#94a3b8}
 .good{color:#4ade80}.warn{color:#fbbf24}.bad{color:#f87171}
 
 .priority-grid{display:grid;grid-template-columns:minmax(0,1.65fr) minmax(320px,1fr);gap:1.3rem;margin-bottom:1.65rem;align-items:stretch;min-height:300px}
@@ -67,8 +72,8 @@
 @media(max-width:1100px){.middle-grid{grid-template-columns:1fr}}
 .activity-panel,.memory-panel{min-height:245px}
 .context-panel{min-height:245px;background:rgba(30,41,59,.38);border-color:rgba(51,65,85,.72)}
-.context-panel .panel-title{color:var(--text-secondary)}
-.context-panel .panel-sub{color:var(--text-muted)}
+.context-panel .panel-title{color:var(--text);font-size:1.03rem}
+.context-panel .panel-sub{color:var(--text-muted);margin-bottom:.2rem}
 .change-row{display:flex;align-items:center;gap:.65rem;padding:.72rem 0;border-top:1px solid rgba(51,65,85,.55);font-size:.81rem}
 .change-row:first-of-type{border-top:0}
 .change-dot{width:7px;height:7px;border-radius:50%;flex-shrink:0}
@@ -87,7 +92,33 @@
 .fact-row strong{color:var(--text);font-weight:600;text-align:right}
 .context-panel .fact-row{color:var(--text-muted);border-top:1px solid rgba(51,65,85,.38)}
 .context-panel .fact-row strong{color:var(--text-secondary)}
-.cluster-facts{margin-top:.7rem}
+
+.ctx-title-row{display:flex;align-items:center;gap:.6rem}
+.ctx-title-icon{width:28px;height:28px;display:inline-flex;align-items:center;justify-content:center;color:var(--primary-light);background:rgba(99,102,241,.14);border:1px solid rgba(99,102,241,.3);border-radius:var(--radius-xs);flex-shrink:0}
+.ctx-name-block{position:relative;overflow:hidden;margin:1rem 0 1.2rem;padding:1rem 1.1rem 1rem 1.25rem;background:linear-gradient(120deg,rgba(99,102,241,.12),rgba(15,23,42,.3));border:1px solid rgba(99,102,241,.24);border-radius:var(--radius-sm)}
+.ctx-name-block:before{content:"";position:absolute;left:0;top:0;bottom:0;width:3px;background:var(--primary)}
+.ctx-name-label{font-size:.65rem;color:var(--text-muted);text-transform:uppercase;letter-spacing:.45px;margin-bottom:.35rem}
+.ctx-name-value{font-size:1.2rem;font-weight:800;letter-spacing:-.01em;color:var(--text);overflow-wrap:anywhere;word-break:break-word;line-height:1.3}
+.ctx-stats{display:grid;grid-template-columns:repeat(3,1fr);gap:.6rem;margin-bottom:1.2rem}
+.ctx-stat{position:relative;overflow:hidden;padding:.95rem .5rem .85rem;text-align:center;background:rgba(15,23,42,.28);border:1px solid rgba(51,65,85,.5);border-radius:var(--radius-sm)}
+.ctx-stat:before{content:"";position:absolute;left:0;right:0;top:0;height:2px;background:var(--stat-accent,transparent);opacity:.75}
+.ctx-stat-ns{--stat-accent:#a78bfa}
+.ctx-stat-pools{--stat-accent:#22d3ee}
+.ctx-stat-pods{--stat-accent:#94a3b8}
+.ctx-stat-n{font-size:1.4rem;font-weight:800;font-variant-numeric:tabular-nums;color:var(--text);line-height:1.1}
+.ctx-stat-l{font-size:.63rem;color:var(--text-secondary);text-transform:uppercase;letter-spacing:.4px;margin-top:.35rem}
+.ctx-status{display:flex;align-items:center;gap:.7rem;padding:1rem 1.05rem;background:rgba(15,23,42,.28);border:1px solid rgba(51,65,85,.5);border-radius:var(--radius-sm)}
+.ctx-status.green{background:rgba(74,222,128,.07);border-color:rgba(74,222,128,.3)}
+.ctx-status.yellow{background:rgba(250,204,21,.07);border-color:rgba(250,204,21,.3)}
+.ctx-status.orange{background:rgba(251,191,36,.07);border-color:rgba(251,191,36,.3)}
+.ctx-status.red{background:rgba(248,113,113,.07);border-color:rgba(248,113,113,.3)}
+.ctx-status-dot{width:10px;height:10px;border-radius:50%;flex-shrink:0}
+.ctx-status-dot.green{background:#4ade80;box-shadow:0 0 0 3px rgba(74,222,128,.25)}
+.ctx-status-dot.yellow{background:#facc15;box-shadow:0 0 0 3px rgba(250,204,21,.25)}
+.ctx-status-dot.orange{background:#fbbf24;box-shadow:0 0 0 3px rgba(251,191,36,.25)}
+.ctx-status-dot.red{background:#f87171;box-shadow:0 0 0 3px rgba(248,113,113,.25)}
+.ctx-status-text{font-size:1rem;font-weight:800;color:var(--text);letter-spacing:-.01em}
+.ctx-status-sub{font-size:.78rem;color:var(--text-secondary);margin-top:.18rem;font-variant-numeric:tabular-nums}
 
 .posture{background:rgba(30,41,59,.54);border:1px solid var(--border);border-radius:var(--radius);padding:1.35rem 1.45rem 1.45rem}
 .posture-hdr{display:flex;justify-content:space-between;align-items:flex-start;gap:1rem;margin-bottom:1.05rem}
@@ -96,10 +127,18 @@
 .posture-grid{display:grid;grid-template-columns:repeat(6,1fr);gap:.85rem}
 @media(max-width:1300px){.posture-grid{grid-template-columns:repeat(3,1fr)}}
 @media(max-width:760px){.posture-grid{grid-template-columns:1fr}}
-.posture-card{display:flex;flex-direction:column;text-decoration:none;color:inherit;background:rgba(15,23,42,.34);border:1px solid var(--border);border-radius:var(--radius-sm);padding:1.05rem;min-height:150px;transition:border-color .15s,background .15s}
+.posture-card{position:relative;display:flex;flex-direction:column;text-decoration:none;color:inherit;background:rgba(15,23,42,.34);border:1px solid var(--border);border-radius:var(--radius-sm);padding:1.05rem;min-height:150px;transition:border-color .15s,background .15s;overflow:hidden}
 .posture-card:hover{border-color:rgba(129,140,248,.55);background:rgba(15,23,42,.5)}
+.posture-card:before{content:"";position:absolute;left:0;right:0;top:0;height:2px;background:var(--posture-accent,transparent)}
 .posture-card-muted{cursor:default;background:rgba(15,23,42,.2);border-style:dashed}
 .posture-card-muted:hover{border-color:var(--border);background:rgba(15,23,42,.2)}
+.posture-icon{width:26px;height:26px;border-radius:var(--radius-xs);display:flex;align-items:center;justify-content:center;margin-bottom:.7rem;background:var(--posture-accent-bg);color:var(--posture-accent);border:1px solid var(--posture-accent-border)}
+.posture-nodes{--posture-accent:#22d3ee;--posture-accent-bg:rgba(34,211,238,.12);--posture-accent-border:rgba(34,211,238,.28)}
+.posture-namespaces{--posture-accent:#a78bfa;--posture-accent-bg:rgba(167,139,250,.12);--posture-accent-border:rgba(167,139,250,.28)}
+.posture-security{--posture-accent:#f87171;--posture-accent-bg:rgba(248,113,113,.12);--posture-accent-border:rgba(248,113,113,.28)}
+.posture-cost{--posture-accent:#fbbf24;--posture-accent-bg:rgba(251,191,36,.12);--posture-accent-border:rgba(251,191,36,.28)}
+.posture-waste{--posture-accent:#2dd4bf;--posture-accent-bg:rgba(45,212,191,.12);--posture-accent-border:rgba(45,212,191,.28)}
+.posture-optimization{--posture-accent:#4ade80;--posture-accent-bg:rgba(74,222,128,.12);--posture-accent-border:rgba(74,222,128,.28)}
 .posture-name{font-size:.8rem;font-weight:650;margin-bottom:.65rem}
 .posture-value{font-size:1.28rem;font-weight:800;line-height:1.15;font-variant-numeric:tabular-nums}
 .posture-value.unavailable{font-size:1.05rem;color:var(--text-secondary)}
@@ -130,11 +169,11 @@
     <div class="ov-kicker-sub">Start with the top issue, or open the War Room for the full ranked analysis.</div>
   </div>
   <div class="ov-kpis">
-    <div class="ov-kpi"><div class="ov-kpi-n bad">{{.CriticalCount}}</div><div class="ov-kpi-l">Critical</div></div>
+    <div class="ov-kpi ov-kpi-critical"><div class="ov-kpi-n bad">{{.CriticalCount}}</div><div class="ov-kpi-l">Critical</div></div>
     {{if .Scoreboard}}
-    <div class="ov-kpi"><div class="ov-kpi-n good">{{.Scoreboard.Resolved}}</div><div class="ov-kpi-l">Resolved</div></div>
-    <div class="ov-kpi"><div class="ov-kpi-n{{if gt .Scoreboard.Accelerating 0}} bad{{end}}">{{.Scoreboard.Accelerating}}</div><div class="ov-kpi-l">Accelerating</div></div>
-    <div class="ov-kpi"><div class="ov-kpi-n">{{.Scoreboard.TotalSeen}}</div><div class="ov-kpi-l">Total seen</div></div>
+    <div class="ov-kpi ov-kpi-resolved"><div class="ov-kpi-n good">{{.Scoreboard.Resolved}}</div><div class="ov-kpi-l">Resolved</div></div>
+    <div class="ov-kpi ov-kpi-accelerating"><div class="ov-kpi-n{{if gt .Scoreboard.Accelerating 0}} bad{{end}}">{{.Scoreboard.Accelerating}}</div><div class="ov-kpi-l">Accelerating</div></div>
+    <div class="ov-kpi ov-kpi-total"><div class="ov-kpi-n">{{.Scoreboard.TotalSeen}}</div><div class="ov-kpi-l">Total seen</div></div>
     {{end}}
   </div>
 </div>
@@ -224,15 +263,25 @@
   </section>
 
   <section class="panel context-panel">
-    <div class="panel-title"><span>Cluster information</span></div>
-    <div class="panel-sub">Current scope and data state</div>
-    <div class="cluster-facts">
-      <div class="fact-row"><span>Cluster</span><strong>{{.ClusterName}}</strong></div>
-      <div class="fact-row"><span>Namespaces</span><strong>{{.NamespaceCount}}</strong></div>
-      <div class="fact-row"><span>Node pools</span><strong>{{.NodePoolCount}}</strong></div>
-      <div class="fact-row"><span>Running pods</span><strong>{{.PodCount}}</strong></div>
-      <div class="fact-row"><span>Storage:</span><strong>{{.StorageMode}}</strong></div>
-      <div class="fact-row"><span>Configured retention</span><strong>{{.ConfiguredRetention}}</strong></div>
+    <div class="panel-title">
+      <span class="ctx-title-row"><span class="ctx-title-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75"><path d="M21 8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4a2 2 0 0 0 1-1.73z"/><polyline points="3.27 6.96 12 12.01 20.73 6.96"/><line x1="12" y1="22" x2="12" y2="12"/></svg></span><span>Cluster information</span></span>
+    </div>
+    <div class="panel-sub">Kubernetes cluster at a glance</div>
+    <div class="ctx-name-block">
+      <div class="ctx-name-label">Cluster</div>
+      <div class="ctx-name-value">{{.ClusterName}}</div>
+    </div>
+    <div class="ctx-stats">
+      <div class="ctx-stat ctx-stat-ns"><div class="ctx-stat-n">{{.NamespaceCount}}</div><div class="ctx-stat-l">Namespaces</div></div>
+      <div class="ctx-stat ctx-stat-pools"><div class="ctx-stat-n">{{.NodePoolCount}}</div><div class="ctx-stat-l">Node pools</div></div>
+      <div class="ctx-stat ctx-stat-pods"><div class="ctx-stat-n">{{.PodCount}}</div><div class="ctx-stat-l">Running pods</div></div>
+    </div>
+    <div class="ctx-status {{.IncidentScoreColor}}">
+      <span class="ctx-status-dot {{.IncidentScoreColor}}"></span>
+      <div>
+        <div class="ctx-status-text">{{.IncidentScoreLabel}}</div>
+        <div class="ctx-status-sub">Operational posture · {{.IncidentScore}}/100</div>
+      </div>
     </div>
   </section>
 </div>
@@ -242,25 +291,29 @@
     <div><div class="posture-title">Cluster posture at a glance</div><div class="posture-sub">Operational, efficiency, and risk signals without duplicating the detailed pages.</div></div>
   </div>
   <div class="posture-grid">
-    <a class="posture-card" href="{{.InfraHref}}">
+    <a class="posture-card posture-nodes" href="{{.InfraHref}}">
+      <div class="posture-icon"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75"><rect x="3" y="4" width="18" height="6" rx="2"/><rect x="3" y="14" width="18" height="6" rx="2"/><circle cx="7" cy="7" r=".7" fill="currentColor"/><circle cx="7" cy="17" r=".7" fill="currentColor"/></svg></div>
       <div class="posture-name">Nodes</div>
       <div class="posture-value">{{.NodePoolCount}}</div>
       <div class="posture-copy">node pool(s) · CPU {{.CPUUtilization}}% · memory {{.MemUtilization}}%</div>
       <div class="posture-state {{if eq .UtilizationStatus "Nominal"}}good{{else}}warn{{end}}">Utilization {{.UtilizationStatus}}</div>
     </a>
-    <a class="posture-card" href="{{.NsHref}}">
+    <a class="posture-card posture-namespaces" href="{{.NsHref}}">
+      <div class="posture-icon"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75"><path d="M21 8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4a2 2 0 0 0 1-1.73z"/><polyline points="3.27 6.96 12 12.01 20.73 6.96"/></svg></div>
       <div class="posture-name">Namespaces</div>
       <div class="posture-value">{{.NamespaceCount}}</div>
       <div class="posture-copy">namespaces in the current cluster scope</div>
       <div class="posture-state">Open namespace health →</div>
     </a>
-    <a class="posture-card" href="{{.SecurityHref}}">
+    <a class="posture-card posture-security" href="{{.SecurityHref}}">
+      <div class="posture-icon"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg></div>
       <div class="posture-name">Security</div>
       <div class="posture-value{{if lt .SecurityScore 50}} bad{{else if lt .SecurityScore 80}} warn{{else}} good{{end}}">{{.SecurityScore}}/100</div>
       <div class="posture-copy">{{.PrivilegedContainers}} privileged container(s)</div>
       <div class="posture-state">Review risk →</div>
     </a>
-    <a class="posture-card" href="{{.CostsHref}}">
+    <a class="posture-card posture-cost" href="{{.CostsHref}}">
+      <div class="posture-icon"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75"><line x1="12" y1="2" x2="12" y2="22"/><path d="M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"/></svg></div>
       <div class="posture-name">Cost</div>
       {{if .CostAvailable}}
       <div class="posture-value">${{money .MonthlyCost}}/mo</div>
@@ -272,14 +325,16 @@
       <div class="posture-state">Review pricing evidence →</div>
       {{end}}
     </a>
-    <a class="posture-card" href="{{.WasteHref}}">
+    <a class="posture-card posture-waste" href="{{.WasteHref}}">
+      <div class="posture-icon"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14H6L5 6"/><path d="M10 11v6M14 11v6"/><path d="M9 6V4h6v2"/></svg></div>
       <div class="posture-name">Waste &amp; Drift</div>
       <div class="posture-value">{{.WasteCount}}</div>
       <div class="posture-copy">current findings</div>
       <div class="posture-state">Review findings →</div>
     </a>
     {{if .NodeOptimizationAvailable}}
-    <a class="posture-card node-optimization-card" href="{{.OptHref}}">
+    <a class="posture-card posture-optimization node-optimization-card" href="{{.OptHref}}">
+      <div class="posture-icon"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75"><path d="M3 17l6-6 4 4 8-9"/><path d="M15 6h6v6"/></svg></div>
       <div class="posture-name">Node Optimization</div>
       <div class="posture-value">Available</div>
       <div class="posture-copy">Read-only consolidation simulation{{if .NodeOptimizationHasProvenCandidate}} · {{.NodeOptimizationProvenCount}} proven consolidation candidate{{if ne .NodeOptimizationProvenCount 1}}s{{end}}{{end}}</div>
@@ -287,7 +342,8 @@
       <div class="posture-state">Open simulation →</div>
     </a>
     {{else}}
-    <article class="posture-card posture-card-muted node-optimization-card">
+    <article class="posture-card posture-card-muted posture-optimization node-optimization-card">
+      <div class="posture-icon"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75"><path d="M3 17l6-6 4 4 8-9"/><path d="M15 6h6v6"/></svg></div>
       <div class="posture-name">Node Optimization</div>
       <div class="posture-value">In development</div>
       <div class="posture-copy">Simulation foundation exists; the dashboard workflow is not yet available.</div>
