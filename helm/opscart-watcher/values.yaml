@@ -36,6 +36,16 @@ logs:
   # Set false to disable the preview and remove pods/log RBAC.
   enabled: true
 
+ai:
+  # Manual War Room AI analysis only; no analysis is triggered automatically.
+  enabled: false
+  provider: openai
+  baseURL: https://api.openai.com/v1
+  model: ""                  # required when enabled
+  timeout: 30s
+  existingSecret: ""         # required when enabled; Secret is managed outside this chart
+  apiKeyKey: api-key          # key within existingSecret
+
 resources:
   requests:
     cpu: 100m

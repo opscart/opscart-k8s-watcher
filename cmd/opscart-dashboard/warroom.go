@@ -94,6 +94,7 @@ type warRoomPageData struct {
 	HighestRestarts    int
 	HasHighestRestarts bool
 	NamespaceFindings  int
+	AI                 warRoomAIPageData
 }
 
 type warRoomFilterOption struct {
@@ -316,7 +317,11 @@ func (srv *server) handleWarRoomPage(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, target, http.StatusSeeOther)
 		return
 	}
-	ctx := srv.activeCtx(r)
+	ctx, ok := srv.warRoomCluster(r)
+	if !ok {
+		http.Error(w, "unknown cluster", http.StatusBadRequest)
+		return
+	}
 	state := srv.getState(ctx)
 
 	state.mu.RLock()
@@ -334,7 +339,8 @@ func (srv *server) handleWarRoomPage(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	fmt.Fprint(w, renderWarRoomPageWithStore(scan, ctx, srv.clusterList, r.URL.Query(), srv.db))
+	aiData := srv.buildWarRoomAIPageData(scan, ctx, r.URL.Query().Get("ai_issue"))
+	fmt.Fprint(w, renderWarRoomPageWithAI(scan, ctx, srv.clusterList, r.URL.Query(), srv.db, aiData))
 }
 
 func renderWarRoomPage(scan *clusterScan, activeCtx string, clusterList []string) string {
@@ -346,6 +352,10 @@ func renderWarRoomPageWithFilters(scan *clusterScan, activeCtx string, clusterLi
 }
 
 func renderWarRoomPageWithStore(scan *clusterScan, activeCtx string, clusterList []string, query url.Values, db store.Store) string {
+	return renderWarRoomPageWithAI(scan, activeCtx, clusterList, query, db, warRoomAIPageData{})
+}
+
+func renderWarRoomPageWithAI(scan *clusterScan, activeCtx string, clusterList []string, query url.Values, db store.Store, aiData warRoomAIPageData) string {
 	allIssues := collectWarRoomIssuesWithStore(scan, 0, db, activeCtx)
 	for i := range allIssues {
 		enrichWarRoomIdentity(&allIssues[i], scan)
@@ -410,7 +420,7 @@ func renderWarRoomPageWithStore(scan *clusterScan, activeCtx string, clusterList
 		OldestActive: stats.oldest, HasOldestActive: stats.hasOldest,
 		OldestActiveLabel: stats.oldestLabel, OldestActiveHref: stats.oldestHref,
 		HighestRestarts: stats.highestRestarts, HasHighestRestarts: stats.hasHighestRestarts,
-		NamespaceFindings: stats.namespaceFindings,
+		NamespaceFindings: stats.namespaceFindings, AI: aiData,
 	}
 
 	var buf strings.Builder

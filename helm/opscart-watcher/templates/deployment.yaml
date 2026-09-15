@@ -53,6 +53,23 @@ spec:
               value: {{ .Values.logs.enabled | quote }}
             - name: OPSCART_AUTH_SECRET_NAME
               value: {{ include "opscart-watcher.authSecretName" . | quote }}
+            {{- if .Values.ai.enabled }}
+            - name: OPSCART_AI_ENABLED
+              value: "true"
+            - name: OPSCART_AI_PROVIDER
+              value: {{ .Values.ai.provider | quote }}
+            - name: OPSCART_AI_BASE_URL
+              value: {{ .Values.ai.baseURL | quote }}
+            - name: OPSCART_AI_MODEL
+              value: {{ required "ai.model is required when AI is enabled" .Values.ai.model | quote }}
+            - name: OPSCART_AI_TIMEOUT
+              value: {{ .Values.ai.timeout | quote }}
+            - name: OPSCART_AI_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ required "ai.existingSecret is required when AI is enabled" .Values.ai.existingSecret | quote }}
+                  key: {{ .Values.ai.apiKeyKey | quote }}
+            {{- end }}
           ports:
             - name: http
               containerPort: {{ .Values.service.targetPort }}

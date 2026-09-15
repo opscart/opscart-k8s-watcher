@@ -13,6 +13,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/opscart/opscart-k8s-watcher/pkg/aianalysis"
 	"github.com/opscart/opscart-k8s-watcher/pkg/analyzer"
 	"github.com/opscart/opscart-k8s-watcher/pkg/store"
 	"github.com/spf13/cobra"
@@ -100,6 +101,14 @@ func runDashboard(_ *cobra.Command, _ []string) error {
 	if _, err := analyzer.ParseCloudProviderOverride(cloudProvider); err != nil {
 		return err
 	}
+	aiConfig, err := aianalysis.LoadConfigFromEnv()
+	if err != nil {
+		return fmt.Errorf("AI configuration: %w", err)
+	}
+	aiProvider, err := aianalysis.NewAIProvider(aiConfig)
+	if err != nil {
+		return fmt.Errorf("AI configuration: %w", err)
+	}
 	cl := parseClusterList()
 	dbPath := os.Getenv("OPSCART_DB_PATH")
 	if dbPath == "" {
@@ -132,6 +141,10 @@ func runDashboard(_ *cobra.Command, _ []string) error {
 		}
 	}()
 	srv := newServer(cl, db, retentionDays, dbPersistent)
+	srv.aiProvider = aiProvider
+	if aiProvider != nil {
+		srv.aiRuntime = newWarRoomAIRuntime(aiConfig.Provider, aiConfig.Model)
+	}
 
 	backgroundCtx, stopBackground := context.WithCancel(context.Background())
 	defer func() {

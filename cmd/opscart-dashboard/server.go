@@ -17,6 +17,7 @@ import (
 
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
 	awspricing "github.com/aws/aws-sdk-go-v2/service/pricing"
+	"github.com/opscart/opscart-k8s-watcher/pkg/aianalysis"
 	"github.com/opscart/opscart-k8s-watcher/pkg/analyzer"
 	"github.com/opscart/opscart-k8s-watcher/pkg/models"
 	"github.com/opscart/opscart-k8s-watcher/pkg/store"
@@ -85,6 +86,8 @@ type server struct {
 	retentionDays       int
 	dbPersistent        bool
 	auth                *authConfig
+	aiProvider          aianalysis.AIProvider
+	aiRuntime           *warRoomAIRuntime
 	backgroundWG        sync.WaitGroup
 	logsEnabled         bool
 	kubeClientFor       kubeClientFactory
@@ -253,6 +256,7 @@ func (srv *server) newMux() http.Handler {
 	mux.HandleFunc("/api/overview", srv.handleOverview)
 	mux.HandleFunc("/api/summary", srv.handleSummary)
 	mux.HandleFunc("/api/warroom", srv.handleWarRoom)
+	mux.HandleFunc("/api/warroom/ai-analysis", srv.handleWarRoomAIAnalysis)
 	mux.HandleFunc("/warroom", srv.handleWarRoomPage)
 	mux.HandleFunc("/infrastructure", srv.handleInfrastructurePage)
 	mux.HandleFunc("/namespaces", srv.handleNamespacesPage)
