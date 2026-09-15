@@ -14,6 +14,7 @@ import (
 	"github.com/opscart/opscart-k8s-watcher/pkg/models"
 	"github.com/opscart/opscart-k8s-watcher/pkg/scanner"
 	"github.com/opscart/opscart-k8s-watcher/pkg/store"
+	corev1 "k8s.io/api/core/v1"
 )
 
 // clusterScan holds results from all analyzers for one atomic analysis
@@ -84,6 +85,52 @@ type clusterScan struct {
 	// which cannot distinguish a real StatefulSet replica from an
 	// unrelated pod sharing its naming pattern.
 	PodWorkloads map[string]models.WorkloadRef
+
+	// namespaceCount is the authoritative Kubernetes namespace inventory
+	// size for this pass — len(resources.Namespaces) from the same
+	// ClusterSnapshot every other field here is built from (buildClusterScan,
+	// analysis.go), not derived from Cost Intelligence's NamespaceCosts
+	// (namespace *cost allocation* entries, which a namespace can legitimately
+	// have zero of — e.g. no priced/allocated workloads — while still
+	// existing). Overview's NamespaceCount must read this field, never
+	// report.NamespaceCosts.
+	namespaceCount int
+
+	// namespaces is the authoritative, already-acquired Kubernetes
+	// Namespace inventory for this pass (resources.Namespaces from the
+	// same ClusterSnapshot every other field here is built from) — the
+	// Namespaces page's primary table is built by iterating this slice,
+	// never scan.report.NamespaceCosts (a *cost allocation* list a real
+	// namespace can legitimately be absent from). len(namespaces) equals
+	// namespaceCount above; this field exists because that page also
+	// needs each namespace's Name, not just the count.
+	namespaces []*corev1.Namespace
+
+	// nodes is the authoritative, already-acquired Kubernetes Node inventory
+	// for this pass (resources.Nodes from the same ClusterSnapshot every
+	// other field here is built from) — the Infrastructure page's Nodes tab
+	// reads real node conditions (Ready/MemoryPressure/DiskPressure/
+	// PIDPressure/NetworkUnavailable), Spec.Unschedulable, CreationTimestamp,
+	// and Status.NodeInfo.KubeletVersion directly from these objects. Never
+	// derive node health or age from anything other than these fields.
+	nodes []*corev1.Node
+
+	// nodeInfos is result.NodeInfos from this same pass's Cost Intelligence
+	// computation (buildCostAnalysis, cost_runtime.go) — per-node
+	// NodePool/VMSize/Zone/CPUCapacity/MemGBCapacity/CPURequested/
+	// MemGBRequested, keyed by Name. Reused rather than recomputed so the
+	// Infrastructure page's request/allocatable figures can never drift
+	// from Cost Intelligence's own per-node evidence.
+	nodeInfos []models.NodeInfo
+
+	// nodePodCounts maps Node name -> Running/Pending pod count for this
+	// pass, computed once in buildClusterScan (countPodsByNode, analysis.go)
+	// from this same snapshot's Pods.
+	nodePodCounts map[string]int
+
+	// namespacePodCounts maps Namespace name -> Pod count for this pass,
+	// computed once in buildClusterScan from this same snapshot's Pods.
+	namespacePodCounts map[string]int
 
 	// nodeOptimization is the read-only consolidation-simulation
 	// recommendation contract (see pkg/analyzer/node_optimization_recommendation.go),

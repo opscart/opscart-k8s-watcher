@@ -109,6 +109,42 @@ func TestBuildClusterScanCISMatchesSameCallSecurityAndNetwork(t *testing.T) {
 	}
 }
 
+// TestBuildClusterScanNamespaceCountIsAuthoritativeNotCostDerived is the
+// regression test for the minikube "0 Namespaces" bug: buildClusterScan
+// must set namespaceCount from the snapshot's real Kubernetes Namespace
+// inventory (resources.Namespaces), independent of whether Cost
+// Intelligence produced any NamespaceCosts allocation entries — a
+// namespace can exist with zero priced/allocated workloads and still be a
+// real namespace. Mirrors the exact reported condition: 4 real namespaces,
+// empty NamespaceCosts.
+func TestBuildClusterScanNamespaceCountIsAuthoritativeNotCostDerived(t *testing.T) {
+	state := &dashboardState{costAnalyzer: analyzer.NewNodePoolCostAnalyzer("")}
+
+	cs := clusterstate.NewClusterState("cluster-a")
+	cs.Update(clusterstate.ClusterResources{
+		Namespaces: []*corev1.Namespace{
+			{ObjectMeta: metav1.ObjectMeta{Name: "default"}},
+			{ObjectMeta: metav1.ObjectMeta{Name: "kube-system"}},
+			{ObjectMeta: metav1.ObjectMeta{Name: "kube-public"}},
+			{ObjectMeta: metav1.ObjectMeta{Name: "kube-node-lease"}},
+		},
+		// Deliberately no priced Nodes/Pods: Cost Intelligence produces no
+		// NamespaceCosts allocation entries for this generation, exactly
+		// the minikube condition that exposed the bug.
+	})
+	cs.SetAcquisitionState(clusterstate.AcquisitionHealthy)
+	snapshot := cs.Publish()
+
+	scan := buildClusterScan(state, snapshot)
+
+	if len(scan.report.NamespaceCosts) != 0 {
+		t.Fatalf("test fixture invalid: expected zero NamespaceCosts, got %d", len(scan.report.NamespaceCosts))
+	}
+	if scan.namespaceCount != 4 {
+		t.Fatalf("namespaceCount = %d, want 4 (authoritative Kubernetes namespace inventory, independent of empty NamespaceCosts)", scan.namespaceCount)
+	}
+}
+
 // ── docs/08 Phase 5: bounded, trigger-agnostic persistence cadence ─────────
 
 type snapshotWriteSpy struct {

@@ -13,6 +13,8 @@ import (
 
 	"github.com/opscart/opscart-k8s-watcher/pkg/analyzer"
 	"github.com/opscart/opscart-k8s-watcher/pkg/models"
+	"github.com/opscart/opscart-k8s-watcher/pkg/store"
+	corev1 "k8s.io/api/core/v1"
 )
 
 // ── Stub pages ────────────────────────────────────────────────────────────────
@@ -134,8 +136,13 @@ func (srv *server) handleInfrastructurePage(w http.ResponseWriter, r *http.Reque
 		state.mu.RUnlock()
 	}
 
+	tab := infraTabNodes
+	if r.URL.Query().Get("tab") == infraTabPools {
+		tab = infraTabPools
+	}
+
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	fmt.Fprint(w, renderInfrastructurePage(scan, ctx, srv.clusterList))
+	fmt.Fprint(w, renderInfrastructurePage(scan, ctx, srv.clusterList, tab))
 }
 
 type infrastructurePageData struct {
@@ -158,6 +165,26 @@ type infrastructurePageData struct {
 	ScannedAtMs       int64
 	NodeHealthPools   []infrastructureNodeHealthPool
 	HasUnhealthyNodes bool
+
+	// Two-tab structure (docs/custom UI: Nodes primary, Node Pools
+	// secondary) — server-rendered via ?tab=, no client JS. Both tabs'
+	// content are always present in the response; ActiveTab only decides
+	// which panel is visible (CSS), so a no-JS client still sees the
+	// correct panel after the normal full-page navigation the tab links
+	// trigger.
+	ActiveTab    string
+	NodesTabHref string
+	PoolsTabHref string
+
+	// Nodes tab: one row per authoritative Kubernetes Node (informer/
+	// snapshot-backed — see clusterScan.nodes/nodeInfos/nodePodCounts,
+	// scan.go). Never derived from Cost Intelligence's pool aggregates.
+	HasNodes           bool
+	NodeRows           []template.HTML
+	NotReadyCount      int
+	UnderPressureCount int
+	NodeCPUReqStr      string
+	NodeMemReqStr      string
 }
 
 type infrastructureNodeHealthPool struct {
@@ -195,9 +222,33 @@ type infrastructureNodeNamespace struct {
 const (
 	defaultNodePoolDisplayName       = "default"
 	visibleNodeNamespaceSummaryLimit = 5
+
+	infraTabNodes = "nodes"
+	infraTabPools = "pools"
 )
 
-func renderInfrastructurePage(scan *clusterScan, activeCtx string, clusterList []string) string {
+// infraTabHref builds the Infrastructure URL for one tab, preserving the
+// active cluster query param. "nodes" is the default tab and never appends
+// ?tab=, so its link matches the page's existing bare URL exactly.
+func infraTabHref(activeCtx, tab string) string {
+	v := url.Values{}
+	if activeCtx != "" {
+		v.Set("cluster", activeCtx)
+	}
+	if tab != infraTabNodes {
+		v.Set("tab", tab)
+	}
+	if len(v) == 0 {
+		return "/infrastructure"
+	}
+	return "/infrastructure?" + v.Encode()
+}
+
+func renderInfrastructurePage(scan *clusterScan, activeCtx string, clusterList []string, activeTab string) string {
+	if activeTab != infraTabPools {
+		activeTab = infraTabNodes
+	}
+
 	var pools []models.NodePoolCost
 	scannedAt := time.Now()
 	clusterName := displayName(activeCtx)
@@ -217,6 +268,13 @@ func renderInfrastructurePage(scan *clusterScan, activeCtx string, clusterList [
 		totalRI1yr += p.RISavings
 		totalRI3yr += p.RISavings3yr
 	}
+	// The authoritative Kubernetes Node inventory (scan.nodes) is the real
+	// node count; the pool-aggregated sum above is only a fallback for a
+	// *clusterScan built without it (e.g. an older/synthetic fixture) —
+	// both describe the same node set in production.
+	if scan != nil && len(scan.nodes) > 0 {
+		totalNodes = len(scan.nodes)
+	}
 
 	q := ""
 	if activeCtx != "" {
@@ -224,9 +282,10 @@ func renderInfrastructurePage(scan *clusterScan, activeCtx string, clusterList [
 	}
 
 	// Pre-render pool rows
+	poolExtras := buildInfraPoolExtras(scan)
 	var poolRows []template.HTML
 	for _, p := range pools {
-		poolRows = append(poolRows, template.HTML(renderInfraPoolRow(p)))
+		poolRows = append(poolRows, template.HTML(renderInfraPoolRow(p, poolExtras[p.Name])))
 	}
 
 	ri1yrCell := template.HTML(`<span class="ri-na">—</span>`)
@@ -237,6 +296,9 @@ func renderInfrastructurePage(scan *clusterScan, activeCtx string, clusterList [
 	if totalRI3yr > 0 {
 		ri3yrCell = template.HTML(fmt.Sprintf(`<span class="ri-val">$%s</span>`, formatMoney(totalRI3yr)))
 	}
+
+	nodeRows, notReady, underPressure := buildInfrastructureNodeRows(scan)
+	nodeCPUStr, nodeMemStr := nodeCPUMemSummary(scan)
 
 	data := infrastructurePageData{
 		ClusterName: clusterName,
@@ -261,6 +323,17 @@ func renderInfrastructurePage(scan *clusterScan, activeCtx string, clusterList [
 		RI1yrCell:   ri1yrCell,
 		RI3yrCell:   ri3yrCell,
 		ScannedAtMs: scannedAt.UnixMilli(),
+
+		ActiveTab:    activeTab,
+		NodesTabHref: infraTabHref(activeCtx, infraTabNodes),
+		PoolsTabHref: infraTabHref(activeCtx, infraTabPools),
+
+		HasNodes:           len(nodeRows) > 0,
+		NodeRows:           nodeRows,
+		NotReadyCount:      notReady,
+		UnderPressureCount: underPressure,
+		NodeCPUReqStr:      nodeCPUStr,
+		NodeMemReqStr:      nodeMemStr,
 	}
 	if scan != nil {
 		data.NodeHealthPools = buildInfrastructureNodeHealth(scan.nodeHealth)
@@ -374,6 +447,191 @@ func buildInfrastructureNodeHealth(findings []models.NodeConditionFinding) []inf
 	return pools
 }
 
+// ── Infrastructure page: Nodes tab ──────────────────────────────────────────
+//
+// One row per authoritative Kubernetes Node — clusterScan.nodes (raw
+// corev1.Node, informer/snapshot-backed) joined by Name with
+// clusterScan.nodeInfos (this same pass's Cost Intelligence per-node
+// evidence: NodePool/VMSize/Zone/CPU+MemGBCapacity/CPU+MemGBRequested) and
+// clusterScan.nodePodCounts. Node health is derived only from the Node's
+// own reported Conditions — never from cost, pricing, or utilization
+// evidence (docs/custom UI: "Do not infer health from cost/utilization").
+
+var nodePressureConditionTypes = []corev1.NodeConditionType{
+	corev1.NodeMemoryPressure, corev1.NodeDiskPressure, corev1.NodePIDPressure, corev1.NodeNetworkUnavailable,
+}
+
+func nodeConditionStatus(node *corev1.Node, condType corev1.NodeConditionType) (corev1.ConditionStatus, bool) {
+	for _, c := range node.Status.Conditions {
+		if c.Type == condType {
+			return c.Status, true
+		}
+	}
+	return "", false
+}
+
+// nodeReady reports Kubernetes' own Ready condition. An absent or
+// non-"True" Ready condition is treated as not ready — evidence must be
+// affirmatively present to call a node healthy, never assumed.
+func nodeReady(node *corev1.Node) bool {
+	status, ok := nodeConditionStatus(node, corev1.NodeReady)
+	return ok && status == corev1.ConditionTrue
+}
+
+// nodePressureConditions returns the currently-true pressure/availability
+// condition type names for node — MemoryPressure/DiskPressure/PIDPressure/
+// NetworkUnavailable, exactly the set docs/custom UI names, and only when
+// the cluster's own kubelet-reported condition is actually "True".
+func nodePressureConditions(node *corev1.Node) []string {
+	var active []string
+	for _, ct := range nodePressureConditionTypes {
+		if status, ok := nodeConditionStatus(node, ct); ok && status == corev1.ConditionTrue {
+			active = append(active, string(ct))
+		}
+	}
+	return active
+}
+
+// nodeHealthBadge classifies a node strictly from its own Kubernetes
+// conditions: NotReady beats Warning (any pressure condition) beats
+// Healthy. Cordoned (Spec.Unschedulable) is a separate, independent badge —
+// rendered alongside, not folded into this classification — since a
+// cordoned node can otherwise still be Ready.
+func nodeHealthBadge(node *corev1.Node) (label, cssClass string) {
+	if !nodeReady(node) {
+		return "NotReady", "node-badge-bad"
+	}
+	if len(nodePressureConditions(node)) > 0 {
+		return "Warning", "node-badge-warn"
+	}
+	return "Healthy", "node-badge-good"
+}
+
+// buildInfrastructureNodeRows renders one table row per Node in scan.nodes,
+// sorted by name for deterministic output, and tallies the NotReady/
+// under-pressure counts the Nodes tab's KPI banner shows.
+func buildInfrastructureNodeRows(scan *clusterScan) (rows []template.HTML, notReady, underPressure int) {
+	if scan == nil || len(scan.nodes) == 0 {
+		return nil, 0, 0
+	}
+
+	infoByName := make(map[string]models.NodeInfo, len(scan.nodeInfos))
+	for _, info := range scan.nodeInfos {
+		infoByName[info.Name] = info
+	}
+
+	nodes := append([]*corev1.Node(nil), scan.nodes...)
+	sort.Slice(nodes, func(i, j int) bool { return nodes[i].Name < nodes[j].Name })
+
+	for _, node := range nodes {
+		if !nodeReady(node) {
+			notReady++
+		} else if len(nodePressureConditions(node)) > 0 {
+			underPressure++
+		}
+		rows = append(rows, template.HTML(renderInfraNodeRow(node, infoByName[node.Name], scan.nodePodCounts[node.Name])))
+	}
+	return rows, notReady, underPressure
+}
+
+// nodeCPUMemSummary sums this pass's per-node CPU/memory requested and
+// allocatable evidence (scan.nodeInfos) for the Nodes tab's KPI banner.
+func nodeCPUMemSummary(scan *clusterScan) (cpuStr, memStr string) {
+	if scan == nil {
+		return "0.0 / 0.0 cores", "0.0 / 0.0 GB"
+	}
+	var reqCPU, capCPU, reqMem, capMem float64
+	for _, info := range scan.nodeInfos {
+		reqCPU += info.CPURequested
+		capCPU += info.CPUCapacity
+		reqMem += info.MemGBRequested
+		capMem += info.MemGBCapacity
+	}
+	return fmt.Sprintf("%.1f / %.1f cores", reqCPU, capCPU), fmt.Sprintf("%.1f / %.1f GB", reqMem, capMem)
+}
+
+func renderInfraNodeRow(node *corev1.Node, info models.NodeInfo, podCount int) string {
+	healthLabel, healthClass := nodeHealthBadge(node)
+	badges := fmt.Sprintf(`<span class="tag %s">%s</span>`, healthClass, healthLabel)
+	if node.Spec.Unschedulable {
+		badges += `<span class="tag tag-cordoned">Cordoned</span>`
+	}
+	for _, cond := range nodePressureConditions(node) {
+		badges += fmt.Sprintf(`<span class="tag tag-pressure">%s</span>`, cond)
+	}
+
+	pool := info.NodePool
+	if pool == "" {
+		pool = defaultNodePoolDisplayName
+	}
+	zone := info.Zone
+	if zone == "" {
+		zone = "—"
+	}
+	version := node.Status.NodeInfo.KubeletVersion
+	if version == "" {
+		version = "—"
+	}
+	age := "—"
+	if !node.CreationTimestamp.IsZero() {
+		age = humanAge(time.Since(node.CreationTimestamp.Time))
+	}
+
+	var cpuPct float64
+	if info.CPUCapacity > 0 {
+		cpuPct = (info.CPURequested / info.CPUCapacity) * 100
+	}
+	cpuBarPct := cpuPct
+	if cpuBarPct > 100 {
+		cpuBarPct = 100
+	}
+
+	var memPct float64
+	if info.MemGBCapacity > 0 {
+		memPct = (info.MemGBRequested / info.MemGBCapacity) * 100
+	}
+	memBarPct := memPct
+	if memBarPct > 100 {
+		memBarPct = 100
+	}
+
+	return fmt.Sprintf(`<tr>
+<td>
+  <div class="node-name">%s</div>
+  <div class="badge-row">%s</div>
+</td>
+<td><span class="node-pool-tag">%s</span></td>
+<td class="util-cell">
+  <div class="util-nums">%.1f / %.1f cores</div>
+  <div class="util-bar">
+    <div class="util-track"><div class="util-fill %s" style="width:%.1f%%"></div></div>
+    <span class="util-pct">%.0f%%</span>
+  </div>
+</td>
+<td class="util-cell">
+  <div class="util-nums">%.1f / %.1f GB</div>
+  <div class="util-bar">
+    <div class="util-track"><div class="util-fill %s" style="width:%.1f%%"></div></div>
+    <span class="util-pct">%.0f%%</span>
+  </div>
+</td>
+<td style="text-align:center">%d</td>
+<td>%s</td>
+<td>%s</td>
+<td class="sku">%s</td>
+</tr>`,
+		node.Name,
+		badges,
+		pool,
+		info.CPURequested, info.CPUCapacity, utilFillClass(cpuPct), cpuBarPct, cpuPct,
+		info.MemGBRequested, info.MemGBCapacity, utilFillClass(memPct), memBarPct, memPct,
+		podCount,
+		zone,
+		age,
+		version,
+	)
+}
+
 var getInfrastructureTmpl = sync.OnceValue(func() *template.Template {
 	return template.Must(
 		template.New("infrastructure.html").
@@ -381,7 +639,67 @@ var getInfrastructureTmpl = sync.OnceValue(func() *template.Template {
 	)
 })
 
-func renderInfraPoolRow(p models.NodePoolCost) string {
+// infraPoolExtra holds the per-pool fields NodePoolCost itself doesn't
+// carry (pod count, zones, kubelet version, node health) — aggregated once
+// by buildInfraPoolExtras from the same authoritative per-node evidence the
+// Nodes tab uses (scan.nodes/nodeInfos/nodePodCounts), never recomputed or
+// guessed independently.
+type infraPoolExtra struct {
+	PodCount      int
+	Zones         string
+	Version       string
+	NotReadyCount int
+	PressureCount int
+}
+
+// buildInfraPoolExtras groups this same pass's per-node evidence by
+// NodeInfo.NodePool — the identical pool key NodePoolCost itself is grouped
+// by in pkg/analyzer/nodepool_costs.go — so a pool's aggregate here can
+// never disagree with which nodes NodePoolCost already attributed to it.
+func buildInfraPoolExtras(scan *clusterScan) map[string]infraPoolExtra {
+	if scan == nil {
+		return nil
+	}
+	nodeByName := make(map[string]*corev1.Node, len(scan.nodes))
+	for _, n := range scan.nodes {
+		nodeByName[n.Name] = n
+	}
+
+	extras := make(map[string]infraPoolExtra)
+	for _, info := range scan.nodeInfos {
+		pool := info.NodePool
+		if pool == "" {
+			pool = defaultNodePoolDisplayName
+		}
+		e := extras[pool]
+		e.PodCount += scan.nodePodCounts[info.Name]
+		if info.Zone != "" && !strings.Contains(e.Zones, info.Zone) {
+			if e.Zones != "" {
+				e.Zones += ", "
+			}
+			e.Zones += info.Zone
+		}
+		if node, ok := nodeByName[info.Name]; ok {
+			if v := node.Status.NodeInfo.KubeletVersion; v != "" {
+				switch {
+				case e.Version == "":
+					e.Version = v
+				case e.Version != v:
+					e.Version = "Mixed"
+				}
+			}
+			if !nodeReady(node) {
+				e.NotReadyCount++
+			} else if len(nodePressureConditions(node)) > 0 {
+				e.PressureCount++
+			}
+		}
+		extras[pool] = e
+	}
+	return extras
+}
+
+func renderInfraPoolRow(p models.NodePoolCost, extra infraPoolExtra) string {
 	// Priority badge
 	priTag := `<span class="tag tag-regular">On-Demand</span>`
 	if strings.EqualFold(p.Priority, "spot") {
@@ -398,29 +716,20 @@ func renderInfraPoolRow(p models.NodePoolCost) string {
 		osTag = `<span class="tag tag-windows">Windows</span>`
 	}
 
-	// CPU utilization
+	// CPU requested vs allocatable — never "utilization"/"usage": these are
+	// declared Pod resource requests against Node.Status.Allocatable, not
+	// Metrics API runtime figures (docs/custom UI: data-correctness rules).
 	cpuPct := p.CPUUtilizationPct
 	if cpuPct > 100 {
 		cpuPct = 100
 	}
-	cpuColor := "fill-green"
-	if p.CPUUtilizationPct > 80 {
-		cpuColor = "fill-red"
-	} else if p.CPUUtilizationPct > 50 {
-		cpuColor = "fill-yellow"
-	}
+	cpuColor := utilFillClass(p.CPUUtilizationPct)
 
-	// Memory utilization
 	memPct := p.MemoryUtilizationPct
 	if memPct > 100 {
 		memPct = 100
 	}
-	memColor := "fill-green"
-	if p.MemoryUtilizationPct > 80 {
-		memColor = "fill-red"
-	} else if p.MemoryUtilizationPct > 50 {
-		memColor = "fill-yellow"
-	}
+	memColor := utilFillClass(p.MemoryUtilizationPct)
 
 	// Node count (show autoscaler max if set)
 	nodeCell := fmt.Sprintf(`<div style="text-align:center;font-weight:600">%d</div>`, p.NodeCount)
@@ -428,20 +737,27 @@ func renderInfraPoolRow(p models.NodePoolCost) string {
 		nodeCell += fmt.Sprintf(`<div class="sub" style="text-align:center">max %d</div>`, p.MaxNodeCount)
 	}
 
-	// RI savings cells
-	ri1yr := `<span class="ri-na">—</span>`
-	if p.RISavings > 0 {
-		ri1yr = fmt.Sprintf(`<span class="ri-val">$%s</span>`, formatMoney(p.RISavings))
-	}
-	ri3yr := `<span class="ri-na">—</span>`
-	if p.RISavings3yr > 0 {
-		ri3yr = fmt.Sprintf(`<span class="ri-val">$%s</span>`, formatMoney(p.RISavings3yr))
-	}
-
 	// SKU sub-line: cores × memory
 	skuSpec := ""
 	if p.CPUCoresPerNode > 0 || p.MemoryGBPerNode > 0 {
 		skuSpec = fmt.Sprintf(`<div class="sub">%.0f vCPU &middot; %.0f GB</div>`, p.CPUCoresPerNode, p.MemoryGBPerNode)
+	}
+
+	healthLabel, healthClass := "Healthy", "node-badge-good"
+	switch {
+	case extra.NotReadyCount > 0:
+		healthLabel, healthClass = fmt.Sprintf("%d NotReady", extra.NotReadyCount), "node-badge-bad"
+	case extra.PressureCount > 0:
+		healthLabel, healthClass = fmt.Sprintf("%d Warning", extra.PressureCount), "node-badge-warn"
+	}
+
+	zones := extra.Zones
+	if zones == "" {
+		zones = "—"
+	}
+	version := extra.Version
+	if version == "" {
+		version = "—"
 	}
 
 	return fmt.Sprintf(`<tr>
@@ -467,10 +783,10 @@ func renderInfraPoolRow(p models.NodePoolCost) string {
     <span class="util-pct">%.0f%%</span>
   </div>
 </td>
-<td style="text-align:right" class="money">$%s</td>
-<td style="text-align:right" class="money">$%s</td>
-<td style="text-align:right">%s</td>
-<td style="text-align:right">%s</td>
+<td style="text-align:center">%d</td>
+<td><span class="tag %s">%s</span></td>
+<td>%s</td>
+<td class="sku">%s</td>
 </tr>`,
 		p.Name,
 		priTag, modeTag, osTag,
@@ -480,10 +796,26 @@ func renderInfraPoolRow(p models.NodePoolCost) string {
 		cpuColor, cpuPct, p.CPUUtilizationPct,
 		p.MemoryRequested, p.TotalMemoryCapacity,
 		memColor, memPct, p.MemoryUtilizationPct,
-		formatMoney(p.PricePerNodeMonth),
-		formatMoney(p.TotalMonthly),
-		ri1yr, ri3yr,
+		extra.PodCount,
+		healthClass, healthLabel,
+		zones,
+		version,
 	)
+}
+
+// utilFillClass classifies a requested/allocatable percentage into the
+// same green/yellow/red thresholds used across the Infrastructure page's
+// bars (Node Pools rows and Nodes tab rows alike) — one shared definition
+// so both tabs agree on what "under pressure" looks like visually.
+func utilFillClass(pct float64) string {
+	switch {
+	case pct > 80:
+		return "fill-red"
+	case pct > 50:
+		return "fill-yellow"
+	default:
+		return "fill-green"
+	}
 }
 
 func sumCPUReq(pools []models.NodePoolCost) float64 {
@@ -527,28 +859,75 @@ func (srv *server) handleNamespacesPage(w http.ResponseWriter, r *http.Request) 
 }
 
 type namespacesPageData struct {
-	ClusterName      string
-	DashURL          string
+	ClusterName string
+	DashURL     string
+	Sidebar     template.HTML
+
+	// Namespace-centric top summary (docs/custom UI: operational/tenant
+	// health view, not a Cost Intelligence duplicate). NamespaceCount is
+	// the authoritative Kubernetes namespace inventory size for this pass
+	// (len(scan.namespaces) — the same slice the primary table below is
+	// built from, see buildNamespaceOpsRows), never len(NamespaceCosts):
+	// a namespace can have zero cost-allocated workloads and still exist.
+	// TotalPods is read from scan.nodePodCounts (already-acquired
+	// per-node pod occupancy), not summed from NamespaceCosts, for the
+	// same completeness reason.
 	NamespaceCount   int
-	ProtectedCount   int
+	HealthyCount     int
+	AttentionCount   int
 	UnprotectedCount int
-	TotalCost        float64
-	NSRows           []namespacesNSRow
-	TotalCostCell    template.HTML
+	TotalWorkloads   int
 	TotalPods        int
-	TotalCPU         float64
-	TotalMem         float64
-	Sidebar          template.HTML
+
+	// Namespaces needing attention: compact highlight cards, populated
+	// only when the underlying evidence (active issues / restarts /
+	// governance gaps) is actually present — see buildNamespaceAttentionCards.
+	AttentionCards []namespaceAttentionCard
+
+	// Primary table: one row per namespace in the authoritative Kubernetes
+	// namespace inventory (scan.namespaces — see buildNamespaceOpsRows),
+	// opportunistically enriched with cost/issue/governance evidence where
+	// it exists. Every namespace NamespaceCount counts is guaranteed a
+	// row here; cost allocation never decides whether a namespace exists.
+	HasRows bool
+	NSRows  []template.HTML
 }
 
-type namespacesNSRow struct {
-	Name      string
-	CostCell  template.HTML
-	PodCount  int
-	CPUCores  float64
-	MemoryGB  float64
-	NetCell   template.HTML
-	WasteCell template.HTML
+// namespaceAttentionCard is one "needs attention" highlight — always
+// derived from a namespaceOpsRow already computed for the primary table,
+// never a separate scoring pass.
+type namespaceAttentionCard struct {
+	Label   string
+	NSName  string
+	Metric  string
+	Support string
+	Class   string
+}
+
+// namespaceOpsRow is one namespace's operational profile. Every field is
+// read or composed from evidence this same scan pass already computed —
+// buildNamespaceHealth/collectWarRoomIssues' active-issue, severity, and
+// restart evidence (the same source buildWorkloadHealthGrid uses for
+// per-workload severity), scan.AllWorkloads for workload counts,
+// scan.namespacePodCounts for snapshot-backed Pod counts, and NetworkPolicyAudit's
+// per-namespace coverage state. No independent namespace-health score is
+// computed here — see healthFromIssueSummary.
+type namespaceOpsRow struct {
+	Name          string
+	HealthLabel   string // "Healthy" | "Degraded" | "Critical"
+	HealthClass   string
+	WorkloadCount int
+
+	// PodCount comes from the authoritative ClusterResources.Pods inventory
+	// retained on clusterScan, independently of cost allocation.
+	PodCount int
+
+	ActiveIssues    int
+	RestartCount    int
+	OOMCount        int
+	Governance      string // "Protected" | "Partial" | "Unprotected" | "" (no NetworkPolicy audit evidence)
+	GovernanceClass string
+	CostCell        template.HTML
 }
 
 var getNamespacesTmpl = sync.OnceValue(func() *template.Template {
@@ -559,23 +938,9 @@ var getNamespacesTmpl = sync.OnceValue(func() *template.Template {
 })
 
 func renderNamespacesPage(scan *clusterScan, activeCtx string, clusterList []string) string {
-	var nsCosts []models.NamespaceCostInfo
 	clusterName := displayName(activeCtx)
 	if scan != nil && scan.report != nil {
-		nsCosts = make([]models.NamespaceCostInfo, len(scan.report.NamespaceCosts))
-		copy(nsCosts, scan.report.NamespaceCosts)
-		sort.Slice(nsCosts, func(i, j int) bool {
-			return nsCosts[i].EstimatedCost.Best > nsCosts[j].EstimatedCost.Best
-		})
 		clusterName = scan.report.ClusterName
-	}
-
-	protectedSet, unprotectedSet := nsNetPolicySets(scan)
-	wasteCounts := wasteCountByNS(scan)
-
-	var totalCost float64
-	for _, ns := range nsCosts {
-		totalCost += ns.EstimatedCost.Best
 	}
 
 	q := ""
@@ -583,69 +948,55 @@ func renderNamespacesPage(scan *clusterScan, activeCtx string, clusterList []str
 		q = "?cluster=" + url.QueryEscape(activeCtx)
 	}
 
-	var totalPods int
-	var totalCPU, totalMem float64
-	var nsRows []namespacesNSRow
-	for _, ns := range nsCosts {
-		totalPods += ns.PodCount
-		totalCPU += ns.CPUCores
-		totalMem += ns.MemoryGB
+	rows := buildNamespaceOpsRows(scan)
 
-		costCell := template.HTML(`<span class="muted">—</span>`)
-		if ns.EstimatedCost.Best >= 1 {
-			costCell = template.HTML(`<span class="money">$` + formatMoney(ns.EstimatedCost.Best) + `</span>`)
-		} else if ns.EstimatedCost.Best > 0 {
-			costCell = `<span class="money">&lt;$1</span>`
-		}
-
-		var netCell template.HTML
-		if protectedSet[ns.Name] {
-			netCell = `<span class="badge badge-ok">✅ Protected</span>`
-		} else if unprotectedSet[ns.Name] {
-			netCell = `<span class="badge badge-danger">❌ Unprotected</span>`
+	var healthyCount, attentionCount, unprotectedRowCount, totalWorkloads, totalPods int
+	var nsRowsHTML []template.HTML
+	for _, row := range rows {
+		if row.HealthLabel == "Healthy" {
+			healthyCount++
 		} else {
-			netCell = `<span class="muted">—</span>`
+			attentionCount++
 		}
-
-		wc := wasteCounts[ns.Name]
-		var wasteCell template.HTML
-		switch {
-		case wc == 0:
-			wasteCell = `<span class="muted">—</span>`
-		case wc <= 2:
-			wasteCell = template.HTML(fmt.Sprintf(`<span class="badge badge-warn">⚠ %d</span>`, wc))
-		default:
-			wasteCell = template.HTML(fmt.Sprintf(`<span class="badge badge-danger">⚠ %d</span>`, wc))
+		if row.Governance == "Unprotected" || row.Governance == "Partial" {
+			unprotectedRowCount++
 		}
-
-		nsRows = append(nsRows, namespacesNSRow{
-			Name:      ns.Name,
-			CostCell:  costCell,
-			PodCount:  ns.PodCount,
-			CPUCores:  ns.CPUCores,
-			MemoryGB:  ns.MemoryGB,
-			NetCell:   netCell,
-			WasteCell: wasteCell,
-		})
+		totalWorkloads += row.WorkloadCount
+		totalPods += row.PodCount
+		nsRowsHTML = append(nsRowsHTML, template.HTML(renderNamespaceOpsRow(row)))
 	}
 
-	totalCostCell := template.HTML(`<span class="muted">—</span>`)
-	if totalCost >= 1 {
-		totalCostCell = template.HTML(`$` + formatMoney(totalCost))
+	// NamespaceCount: rows are now built 1:1 from scan.namespaces (see
+	// buildNamespaceOpsRows), so len(rows) already equals the authoritative
+	// inventory size whenever a scan is available.
+	namespaceCount := len(rows)
+	// TotalPods: prefer the authoritative cluster-wide pod occupancy this
+	// same pass already computed (scan.nodePodCounts, see countPodsByNode)
+	// over the NamespaceCosts-derived sum above, for the same
+	// completeness reason NamespaceCount doesn't use NamespaceCosts.
+	if scan != nil && len(scan.nodePodCounts) > 0 {
+		totalPods = 0
+		for _, c := range scan.nodePodCounts {
+			totalPods += c
+		}
+	}
+	unprotectedCount := unprotectedRowCount
+	if scan != nil && scan.netAudit != nil {
+		unprotectedCount = len(scan.netAudit.UnprotectedNamespaces)
 	}
 
 	data := namespacesPageData{
 		ClusterName:      clusterName,
 		DashURL:          "/" + q,
-		NamespaceCount:   len(nsCosts),
-		ProtectedCount:   len(protectedSet),
-		UnprotectedCount: len(unprotectedSet),
-		TotalCost:        totalCost,
-		NSRows:           nsRows,
-		TotalCostCell:    totalCostCell,
+		NamespaceCount:   namespaceCount,
+		HealthyCount:     healthyCount,
+		AttentionCount:   attentionCount,
+		UnprotectedCount: unprotectedCount,
+		TotalWorkloads:   totalWorkloads,
 		TotalPods:        totalPods,
-		TotalCPU:         totalCPU,
-		TotalMem:         totalMem,
+		AttentionCards:   buildNamespaceAttentionCards(rows),
+		HasRows:          len(rows) > 0,
+		NSRows:           nsRowsHTML,
 		Sidebar:          template.HTML(buildSidebar("namespaces", activeCtx, clusterName, clusterList, countCriticalIssues(scan))),
 	}
 
@@ -655,6 +1006,313 @@ func renderNamespacesPage(scan *clusterScan, activeCtx string, clusterList []str
 		return ""
 	}
 	return buf.String()
+}
+
+// nsIssueSummary aggregates collectWarRoomIssues' output for one
+// namespace — the same active-issue evidence War Room and the Overview
+// Workload Health grid already surface, never a second/independent
+// incident computation.
+type nsIssueSummary struct {
+	Count        int
+	HasCritical  bool
+	RestartCount int
+	OOMCount     int
+}
+
+// namespaceIssueSummaries groups collectWarRoomIssues(scan, 0) by
+// namespace. Uses the exact same issue collection as War Room — crash
+// loops/OOM (scan.wasteAudit.StalePods zombies), privileged containers
+// (scan.secAudit), high-risk missing NetworkPolicy coverage
+// (scan.netAudit), and idle namespaces (scan.wasteAudit) — so "active
+// issues" on this page can never drift from what War Room itself reports.
+func namespaceIssueSummaries(scan *clusterScan) map[string]*nsIssueSummary {
+	summaries := make(map[string]*nsIssueSummary)
+	if scan == nil {
+		return summaries
+	}
+	for _, issue := range collectWarRoomIssues(scan, 0) {
+		if issue.Namespace == "" {
+			continue
+		}
+		s := summaries[issue.Namespace]
+		if s == nil {
+			s = &nsIssueSummary{}
+			summaries[issue.Namespace] = s
+		}
+		s.Count++
+		s.RestartCount += issue.RestartCount
+		if store.CanonicalIssueType(issue.Type) == store.IssueOOMKilled {
+			s.OOMCount++
+		}
+		if issue.Severity == "critical" {
+			s.HasCritical = true
+		}
+	}
+	return summaries
+}
+
+// namespaceGovernanceStates classifies every namespace NetworkPolicyAudit
+// observed into Protected/Partial/Unprotected, straight from
+// NetworkPolicyAudit's own coverage evidence (analyzer/network.go) — a
+// namespace with at least one policy but an incomplete ingress/egress
+// coverage gap is "Partial", never folded into the same bucket as a
+// namespace with zero policies at all.
+func namespaceGovernanceStates(scan *clusterScan) map[string]string {
+	states := make(map[string]string)
+	if scan == nil || scan.netAudit == nil {
+		return states
+	}
+	for _, ns := range scan.netAudit.ProtectedNamespaces {
+		states[ns.Name] = "Protected"
+	}
+	for _, ns := range scan.netAudit.UnprotectedNamespaces {
+		if ns.PolicyCount > 0 {
+			states[ns.Name] = "Partial"
+		} else {
+			states[ns.Name] = "Unprotected"
+		}
+	}
+	return states
+}
+
+// namespaceWorkloadCounts groups scan.AllWorkloads by namespace — the
+// same complete Deployment/StatefulSet/DaemonSet universe
+// buildWorkloadHealthGrid iterates, not a second enumeration.
+func namespaceWorkloadCounts(scan *clusterScan) map[string]int {
+	counts := make(map[string]int)
+	if scan == nil {
+		return counts
+	}
+	for _, w := range scan.AllWorkloads {
+		counts[w.Namespace]++
+	}
+	return counts
+}
+
+// healthFromIssueSummary composes a namespace's Healthy/Degraded/Critical
+// label directly from nsIssueSummary — no independent scoring. Any active
+// issue at all means not Healthy; a critical-severity issue (the same
+// "critical" value collectWarRoomIssues/sortWarRoomIssues already use)
+// means Critical, otherwise Degraded.
+func healthFromIssueSummary(s *nsIssueSummary) (label, class string) {
+	if s == nil || s.Count == 0 {
+		return "Healthy", "badge-ok"
+	}
+	if s.HasCritical {
+		return "Critical", "badge-danger"
+	}
+	return "Degraded", "badge-warn"
+}
+
+// namespaceHealthRank orders HealthLabel worst-first for the primary
+// table's default sort — this page's whole purpose is "which namespaces
+// need attention", so the worst-health namespace belongs at the top
+// rather than the highest-cost one.
+func namespaceHealthRank(label string) int {
+	switch label {
+	case "Critical":
+		return 0
+	case "Degraded":
+		return 1
+	default:
+		return 2
+	}
+}
+
+// namespaceCostByName indexes scan.report.NamespaceCosts by name for
+// opportunistic per-namespace enrichment — never as the base list of which
+// namespaces exist (that's scan.namespaces; see buildNamespaceOpsRows). A
+// namespace present here but absent from scan.namespaces (e.g. stale cost
+// data from a namespace that no longer exists) must never produce a row.
+func namespaceCostByName(scan *clusterScan) map[string]models.NamespaceCostInfo {
+	byName := make(map[string]models.NamespaceCostInfo)
+	if scan == nil || scan.report == nil {
+		return byName
+	}
+	for _, ns := range scan.report.NamespaceCosts {
+		byName[ns.Name] = ns
+	}
+	return byName
+}
+
+// buildNamespaceOpsRows builds the primary table's rows from
+// scan.namespaces — the authoritative, already-acquired Kubernetes
+// Namespace inventory for this pass (resources.Namespaces, informer-backed,
+// zero new API calls; see buildClusterScan/scan.go) — so the row count
+// always matches namespacesPageData.NamespaceCount. Pod counts come from
+// this same snapshot's ClusterResources.Pods via scan.namespacePodCounts.
+// Other signals (cost, active issues, restarts/OOM, governance, workload
+// count) are joined onto this base list without deciding which namespaces
+// exist. Cost allocation (scan.report.NamespaceCosts) in particular never
+// decides namespace existence or Pod count.
+func buildNamespaceOpsRows(scan *clusterScan) []namespaceOpsRow {
+	if scan == nil || len(scan.namespaces) == 0 {
+		return nil
+	}
+
+	issueSummaries := namespaceIssueSummaries(scan)
+	governance := namespaceGovernanceStates(scan)
+	workloadCounts := namespaceWorkloadCounts(scan)
+	costByName := namespaceCostByName(scan)
+
+	rows := make([]namespaceOpsRow, 0, len(scan.namespaces))
+	for _, nsObj := range scan.namespaces {
+		name := nsObj.Name
+
+		summary := issueSummaries[name]
+		healthLabel, healthClass := healthFromIssueSummary(summary)
+
+		var activeIssues, restarts, oom int
+		if summary != nil {
+			activeIssues, restarts, oom = summary.Count, summary.RestartCount, summary.OOMCount
+		}
+
+		governanceLabel := governance[name]
+		governanceClass := ""
+		switch governanceLabel {
+		case "Protected":
+			governanceClass = "badge-ok"
+		case "Partial":
+			governanceClass = "badge-warn"
+		case "Unprotected":
+			governanceClass = "badge-danger"
+		}
+
+		costCell := template.HTML(`<span class="muted">—</span>`)
+		if cost, ok := costByName[name]; ok {
+			if cost.EstimatedCost.Best >= 1 {
+				costCell = template.HTML(`<span class="money">$` + formatMoney(cost.EstimatedCost.Best) + `</span>`)
+			} else if cost.EstimatedCost.Best > 0 {
+				costCell = `<span class="money">&lt;$1</span>`
+			}
+		}
+
+		rows = append(rows, namespaceOpsRow{
+			Name:            name,
+			HealthLabel:     healthLabel,
+			HealthClass:     healthClass,
+			WorkloadCount:   workloadCounts[name],
+			PodCount:        scan.namespacePodCounts[name],
+			ActiveIssues:    activeIssues,
+			RestartCount:    restarts,
+			OOMCount:        oom,
+			Governance:      governanceLabel,
+			GovernanceClass: governanceClass,
+			CostCell:        costCell,
+		})
+	}
+
+	sort.SliceStable(rows, func(i, j int) bool {
+		ri, rj := namespaceHealthRank(rows[i].HealthLabel), namespaceHealthRank(rows[j].HealthLabel)
+		if ri != rj {
+			return ri < rj
+		}
+		if rows[i].ActiveIssues != rows[j].ActiveIssues {
+			return rows[i].ActiveIssues > rows[j].ActiveIssues
+		}
+		return rows[i].Name < rows[j].Name
+	})
+	return rows
+}
+
+// buildNamespaceAttentionCards surfaces at most three compact highlights
+// above the primary table, each backed by a namespaceOpsRow already
+// computed for the table — never a separate/invented category. A card is
+// omitted entirely when no namespace satisfies its evidence requirement.
+func buildNamespaceAttentionCards(rows []namespaceOpsRow) []namespaceAttentionCard {
+	var cards []namespaceAttentionCard
+
+	var mostIssues *namespaceOpsRow
+	for i := range rows {
+		if rows[i].ActiveIssues == 0 {
+			continue
+		}
+		if mostIssues == nil || rows[i].ActiveIssues > mostIssues.ActiveIssues {
+			mostIssues = &rows[i]
+		}
+	}
+	if mostIssues != nil {
+		cards = append(cards, namespaceAttentionCard{
+			Label:   "Most Active Issues",
+			NSName:  mostIssues.Name,
+			Metric:  fmt.Sprintf("%d active issue%s · %s", mostIssues.ActiveIssues, plural(mostIssues.ActiveIssues), mostIssues.HealthLabel),
+			Support: fmt.Sprintf("%d workload%s in namespace", mostIssues.WorkloadCount, plural(mostIssues.WorkloadCount)),
+			Class:   mostIssues.HealthClass,
+		})
+	}
+
+	var mostRestarts *namespaceOpsRow
+	for i := range rows {
+		if rows[i].RestartCount == 0 {
+			continue
+		}
+		if mostRestarts == nil || rows[i].RestartCount > mostRestarts.RestartCount {
+			mostRestarts = &rows[i]
+		}
+	}
+	if mostRestarts != nil {
+		cards = append(cards, namespaceAttentionCard{
+			Label:   "Highest Restart Activity",
+			NSName:  mostRestarts.Name,
+			Metric:  fmt.Sprintf("%s restart%s · %d OOM", formatCount(mostRestarts.RestartCount), plural(mostRestarts.RestartCount), mostRestarts.OOMCount),
+			Support: fmt.Sprintf("%d workload%s in namespace", mostRestarts.WorkloadCount, plural(mostRestarts.WorkloadCount)),
+			Class:   "badge-warn",
+		})
+	}
+
+	var riskiest *namespaceOpsRow
+	for i := range rows {
+		if rows[i].Governance != "Unprotected" || rows[i].ActiveIssues == 0 {
+			continue
+		}
+		if riskiest == nil || rows[i].ActiveIssues > riskiest.ActiveIssues {
+			riskiest = &rows[i]
+		}
+	}
+	if riskiest != nil {
+		cards = append(cards, namespaceAttentionCard{
+			Label:   "Unprotected & Unhealthy",
+			NSName:  riskiest.Name,
+			Metric:  fmt.Sprintf("%d active issue%s · %s", riskiest.ActiveIssues, plural(riskiest.ActiveIssues), riskiest.Governance),
+			Support: fmt.Sprintf("No NetworkPolicy · %s health", riskiest.HealthLabel),
+			Class:   "badge-danger",
+		})
+	}
+
+	return cards
+}
+
+func renderNamespaceOpsRow(row namespaceOpsRow) string {
+	governanceCell := `<span class="muted">—</span>`
+	if row.Governance != "" {
+		governanceCell = fmt.Sprintf(`<span class="badge %s">%s</span>`, row.GovernanceClass, row.Governance)
+	}
+
+	issuesCell := `<span class="muted">0</span>`
+	if row.ActiveIssues > 0 {
+		issuesCell = fmt.Sprintf(`<span class="issue-count %s">%d</span>`, row.HealthClass, row.ActiveIssues)
+	}
+
+	return fmt.Sprintf(`<tr class="namespace-row" data-namespace="%s" data-health="%s" data-governance="%s">
+<td><span class="ns-name">%s</span></td>
+<td><span class="badge %s">%s</span></td>
+<td style="text-align:center">%d</td>
+<td style="text-align:center">%d</td>
+<td style="text-align:center">%s</td>
+<td style="text-align:center">%d / %d</td>
+<td>%s</td>
+<td style="text-align:right" class="cost-secondary">%s</td>
+</tr>`,
+		row.Name, row.HealthLabel, row.Governance,
+		row.Name,
+		row.HealthClass, row.HealthLabel,
+		row.WorkloadCount,
+		row.PodCount,
+		issuesCell,
+		row.RestartCount, row.OOMCount,
+		governanceCell,
+		row.CostCell,
+	)
 }
 
 // nsNetPolicySets returns two maps of namespace names: one protected, one unprotected.

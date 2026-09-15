@@ -844,6 +844,15 @@ func buildOverviewData(scan *clusterScan, activeCtx string, clusterList []string
 	var criticalCount int
 	var privilegedContainers, runningAsRoot, unprotectedNamespaces int
 	if scan != nil {
+		// NamespaceCount is the authoritative Kubernetes namespace inventory
+		// (scan.namespaceCount, set from the ClusterSnapshot in
+		// buildClusterScan) — deliberately read unconditionally here, not
+		// inside the `scan.report != nil` block below: it must never depend
+		// on Cost Intelligence having produced any NamespaceCosts allocation
+		// entries (a namespace can exist with zero priced/allocated
+		// workloads and still be a real namespace).
+		nsCount = scan.namespaceCount
+
 		wrIssues = collectWarRoomIssuesWithStore(scan, 0, db, activeCtx)
 		for _, w := range wrIssues {
 			if w.Severity == "critical" {
@@ -868,7 +877,6 @@ func buildOverviewData(scan *clusterScan, activeCtx string, clusterList []string
 			savings = scan.report.TotalSavingsPotential.Best
 			clusterName = scan.report.ClusterName
 			nodePoolCount = len(scan.report.NodePoolCosts)
-			nsCount = len(scan.report.NamespaceCosts)
 
 			// Aggregate CPU/Mem utilization across pools
 			var totalCPU, usedCPU, totalMem, usedMem float64
