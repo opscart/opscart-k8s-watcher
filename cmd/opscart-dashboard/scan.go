@@ -96,6 +96,16 @@ type clusterScan struct {
 	// report.NamespaceCosts.
 	namespaceCount int
 
+	// namespaces is the authoritative, already-acquired Kubernetes
+	// Namespace inventory for this pass (resources.Namespaces from the
+	// same ClusterSnapshot every other field here is built from) — the
+	// Namespaces page's primary table is built by iterating this slice,
+	// never scan.report.NamespaceCosts (a *cost allocation* list a real
+	// namespace can legitimately be absent from). len(namespaces) equals
+	// namespaceCount above; this field exists because that page also
+	// needs each namespace's Name, not just the count.
+	namespaces []*corev1.Namespace
+
 	// nodes is the authoritative, already-acquired Kubernetes Node inventory
 	// for this pass (resources.Nodes from the same ClusterSnapshot every
 	// other field here is built from) — the Infrastructure page's Nodes tab
@@ -117,6 +127,10 @@ type clusterScan struct {
 	// pass, computed once in buildClusterScan (countPodsByNode, analysis.go)
 	// from this same snapshot's Pods.
 	nodePodCounts map[string]int
+
+	// namespacePodCounts maps Namespace name -> Pod count for this pass,
+	// computed once in buildClusterScan from this same snapshot's Pods.
+	namespacePodCounts map[string]int
 
 	// nodeOptimization is the read-only consolidation-simulation
 	// recommendation contract (see pkg/analyzer/node_optimization_recommendation.go),

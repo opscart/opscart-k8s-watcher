@@ -62,16 +62,20 @@ func buildClusterScan(state *dashboardState, snapshot *clusterstate.ClusterSnaps
 	// so a node's reported pod count is never inconsistent with its
 	// reported CPU/memory requested evidence.
 	scan.nodePodCounts = countPodsByNode(resources.Pods)
+	scan.namespacePodCounts = countPodsByNamespace(resources.Pods)
 
 	resourceAnalysis := buildResourceAnalysis(resources, namespace)
 	scan.AllWorkloads = resourceAnalysis.Workloads
 	scan.PodWorkloads = resourceAnalysis.PodWorkloads
 
-	// namespaceCount: the authoritative Kubernetes Namespace inventory from
-	// this same snapshot — not Cost Intelligence's NamespaceCosts (a
-	// namespace can exist with zero cost-allocation entries, e.g. no
-	// priced/allocated workloads, and still be a real namespace).
+	// namespaceCount/namespaces: the authoritative Kubernetes Namespace
+	// inventory from this same snapshot — not Cost Intelligence's
+	// NamespaceCosts (a namespace can exist with zero cost-allocation
+	// entries, e.g. no priced/allocated workloads, and still be a real
+	// namespace). resources.Namespaces is already an independent slice
+	// (see ClusterResources' doc comment), so no further copy is needed.
 	scan.namespaceCount = len(resources.Namespaces)
+	scan.namespaces = resources.Namespaces
 
 	scan.secAudit = buildSecurityAnalysis(resources)
 	scan.wasteAudit = buildWasteAnalysis(resources)
@@ -105,6 +109,20 @@ func countPodsByNode(pods []*corev1.Pod) map[string]int {
 			continue
 		}
 		counts[pod.Spec.NodeName]++
+	}
+	return counts
+}
+
+// countPodsByNamespace counts every Pod in the authoritative snapshot by
+// namespace. Unlike cost allocation, this inventory includes Pods regardless
+// of whether pricing or workload ownership could be resolved.
+func countPodsByNamespace(pods []*corev1.Pod) map[string]int {
+	counts := make(map[string]int)
+	for _, pod := range pods {
+		if pod == nil {
+			continue
+		}
+		counts[pod.Namespace]++
 	}
 	return counts
 }
