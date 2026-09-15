@@ -13,6 +13,7 @@ import (
 
 	"github.com/opscart/opscart-k8s-watcher/pkg/analyzer"
 	"github.com/opscart/opscart-k8s-watcher/pkg/models"
+	corev1 "k8s.io/api/core/v1"
 )
 
 // ── Stub pages ────────────────────────────────────────────────────────────────
@@ -134,8 +135,13 @@ func (srv *server) handleInfrastructurePage(w http.ResponseWriter, r *http.Reque
 		state.mu.RUnlock()
 	}
 
+	tab := infraTabNodes
+	if r.URL.Query().Get("tab") == infraTabPools {
+		tab = infraTabPools
+	}
+
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	fmt.Fprint(w, renderInfrastructurePage(scan, ctx, srv.clusterList))
+	fmt.Fprint(w, renderInfrastructurePage(scan, ctx, srv.clusterList, tab))
 }
 
 type infrastructurePageData struct {
@@ -158,6 +164,26 @@ type infrastructurePageData struct {
 	ScannedAtMs       int64
 	NodeHealthPools   []infrastructureNodeHealthPool
 	HasUnhealthyNodes bool
+
+	// Two-tab structure (docs/custom UI: Nodes primary, Node Pools
+	// secondary) — server-rendered via ?tab=, no client JS. Both tabs'
+	// content are always present in the response; ActiveTab only decides
+	// which panel is visible (CSS), so a no-JS client still sees the
+	// correct panel after the normal full-page navigation the tab links
+	// trigger.
+	ActiveTab    string
+	NodesTabHref string
+	PoolsTabHref string
+
+	// Nodes tab: one row per authoritative Kubernetes Node (informer/
+	// snapshot-backed — see clusterScan.nodes/nodeInfos/nodePodCounts,
+	// scan.go). Never derived from Cost Intelligence's pool aggregates.
+	HasNodes           bool
+	NodeRows           []template.HTML
+	NotReadyCount      int
+	UnderPressureCount int
+	NodeCPUReqStr      string
+	NodeMemReqStr      string
 }
 
 type infrastructureNodeHealthPool struct {
@@ -195,9 +221,33 @@ type infrastructureNodeNamespace struct {
 const (
 	defaultNodePoolDisplayName       = "default"
 	visibleNodeNamespaceSummaryLimit = 5
+
+	infraTabNodes = "nodes"
+	infraTabPools = "pools"
 )
 
-func renderInfrastructurePage(scan *clusterScan, activeCtx string, clusterList []string) string {
+// infraTabHref builds the Infrastructure URL for one tab, preserving the
+// active cluster query param. "nodes" is the default tab and never appends
+// ?tab=, so its link matches the page's existing bare URL exactly.
+func infraTabHref(activeCtx, tab string) string {
+	v := url.Values{}
+	if activeCtx != "" {
+		v.Set("cluster", activeCtx)
+	}
+	if tab != infraTabNodes {
+		v.Set("tab", tab)
+	}
+	if len(v) == 0 {
+		return "/infrastructure"
+	}
+	return "/infrastructure?" + v.Encode()
+}
+
+func renderInfrastructurePage(scan *clusterScan, activeCtx string, clusterList []string, activeTab string) string {
+	if activeTab != infraTabPools {
+		activeTab = infraTabNodes
+	}
+
 	var pools []models.NodePoolCost
 	scannedAt := time.Now()
 	clusterName := displayName(activeCtx)
@@ -217,6 +267,13 @@ func renderInfrastructurePage(scan *clusterScan, activeCtx string, clusterList [
 		totalRI1yr += p.RISavings
 		totalRI3yr += p.RISavings3yr
 	}
+	// The authoritative Kubernetes Node inventory (scan.nodes) is the real
+	// node count; the pool-aggregated sum above is only a fallback for a
+	// *clusterScan built without it (e.g. an older/synthetic fixture) —
+	// both describe the same node set in production.
+	if scan != nil && len(scan.nodes) > 0 {
+		totalNodes = len(scan.nodes)
+	}
 
 	q := ""
 	if activeCtx != "" {
@@ -224,9 +281,10 @@ func renderInfrastructurePage(scan *clusterScan, activeCtx string, clusterList [
 	}
 
 	// Pre-render pool rows
+	poolExtras := buildInfraPoolExtras(scan)
 	var poolRows []template.HTML
 	for _, p := range pools {
-		poolRows = append(poolRows, template.HTML(renderInfraPoolRow(p)))
+		poolRows = append(poolRows, template.HTML(renderInfraPoolRow(p, poolExtras[p.Name])))
 	}
 
 	ri1yrCell := template.HTML(`<span class="ri-na">—</span>`)
@@ -237,6 +295,9 @@ func renderInfrastructurePage(scan *clusterScan, activeCtx string, clusterList [
 	if totalRI3yr > 0 {
 		ri3yrCell = template.HTML(fmt.Sprintf(`<span class="ri-val">$%s</span>`, formatMoney(totalRI3yr)))
 	}
+
+	nodeRows, notReady, underPressure := buildInfrastructureNodeRows(scan)
+	nodeCPUStr, nodeMemStr := nodeCPUMemSummary(scan)
 
 	data := infrastructurePageData{
 		ClusterName: clusterName,
@@ -261,6 +322,17 @@ func renderInfrastructurePage(scan *clusterScan, activeCtx string, clusterList [
 		RI1yrCell:   ri1yrCell,
 		RI3yrCell:   ri3yrCell,
 		ScannedAtMs: scannedAt.UnixMilli(),
+
+		ActiveTab:    activeTab,
+		NodesTabHref: infraTabHref(activeCtx, infraTabNodes),
+		PoolsTabHref: infraTabHref(activeCtx, infraTabPools),
+
+		HasNodes:           len(nodeRows) > 0,
+		NodeRows:           nodeRows,
+		NotReadyCount:      notReady,
+		UnderPressureCount: underPressure,
+		NodeCPUReqStr:      nodeCPUStr,
+		NodeMemReqStr:      nodeMemStr,
 	}
 	if scan != nil {
 		data.NodeHealthPools = buildInfrastructureNodeHealth(scan.nodeHealth)
@@ -374,6 +446,191 @@ func buildInfrastructureNodeHealth(findings []models.NodeConditionFinding) []inf
 	return pools
 }
 
+// ── Infrastructure page: Nodes tab ──────────────────────────────────────────
+//
+// One row per authoritative Kubernetes Node — clusterScan.nodes (raw
+// corev1.Node, informer/snapshot-backed) joined by Name with
+// clusterScan.nodeInfos (this same pass's Cost Intelligence per-node
+// evidence: NodePool/VMSize/Zone/CPU+MemGBCapacity/CPU+MemGBRequested) and
+// clusterScan.nodePodCounts. Node health is derived only from the Node's
+// own reported Conditions — never from cost, pricing, or utilization
+// evidence (docs/custom UI: "Do not infer health from cost/utilization").
+
+var nodePressureConditionTypes = []corev1.NodeConditionType{
+	corev1.NodeMemoryPressure, corev1.NodeDiskPressure, corev1.NodePIDPressure, corev1.NodeNetworkUnavailable,
+}
+
+func nodeConditionStatus(node *corev1.Node, condType corev1.NodeConditionType) (corev1.ConditionStatus, bool) {
+	for _, c := range node.Status.Conditions {
+		if c.Type == condType {
+			return c.Status, true
+		}
+	}
+	return "", false
+}
+
+// nodeReady reports Kubernetes' own Ready condition. An absent or
+// non-"True" Ready condition is treated as not ready — evidence must be
+// affirmatively present to call a node healthy, never assumed.
+func nodeReady(node *corev1.Node) bool {
+	status, ok := nodeConditionStatus(node, corev1.NodeReady)
+	return ok && status == corev1.ConditionTrue
+}
+
+// nodePressureConditions returns the currently-true pressure/availability
+// condition type names for node — MemoryPressure/DiskPressure/PIDPressure/
+// NetworkUnavailable, exactly the set docs/custom UI names, and only when
+// the cluster's own kubelet-reported condition is actually "True".
+func nodePressureConditions(node *corev1.Node) []string {
+	var active []string
+	for _, ct := range nodePressureConditionTypes {
+		if status, ok := nodeConditionStatus(node, ct); ok && status == corev1.ConditionTrue {
+			active = append(active, string(ct))
+		}
+	}
+	return active
+}
+
+// nodeHealthBadge classifies a node strictly from its own Kubernetes
+// conditions: NotReady beats Warning (any pressure condition) beats
+// Healthy. Cordoned (Spec.Unschedulable) is a separate, independent badge —
+// rendered alongside, not folded into this classification — since a
+// cordoned node can otherwise still be Ready.
+func nodeHealthBadge(node *corev1.Node) (label, cssClass string) {
+	if !nodeReady(node) {
+		return "NotReady", "node-badge-bad"
+	}
+	if len(nodePressureConditions(node)) > 0 {
+		return "Warning", "node-badge-warn"
+	}
+	return "Healthy", "node-badge-good"
+}
+
+// buildInfrastructureNodeRows renders one table row per Node in scan.nodes,
+// sorted by name for deterministic output, and tallies the NotReady/
+// under-pressure counts the Nodes tab's KPI banner shows.
+func buildInfrastructureNodeRows(scan *clusterScan) (rows []template.HTML, notReady, underPressure int) {
+	if scan == nil || len(scan.nodes) == 0 {
+		return nil, 0, 0
+	}
+
+	infoByName := make(map[string]models.NodeInfo, len(scan.nodeInfos))
+	for _, info := range scan.nodeInfos {
+		infoByName[info.Name] = info
+	}
+
+	nodes := append([]*corev1.Node(nil), scan.nodes...)
+	sort.Slice(nodes, func(i, j int) bool { return nodes[i].Name < nodes[j].Name })
+
+	for _, node := range nodes {
+		if !nodeReady(node) {
+			notReady++
+		} else if len(nodePressureConditions(node)) > 0 {
+			underPressure++
+		}
+		rows = append(rows, template.HTML(renderInfraNodeRow(node, infoByName[node.Name], scan.nodePodCounts[node.Name])))
+	}
+	return rows, notReady, underPressure
+}
+
+// nodeCPUMemSummary sums this pass's per-node CPU/memory requested and
+// allocatable evidence (scan.nodeInfos) for the Nodes tab's KPI banner.
+func nodeCPUMemSummary(scan *clusterScan) (cpuStr, memStr string) {
+	if scan == nil {
+		return "0.0 / 0.0 cores", "0.0 / 0.0 GB"
+	}
+	var reqCPU, capCPU, reqMem, capMem float64
+	for _, info := range scan.nodeInfos {
+		reqCPU += info.CPURequested
+		capCPU += info.CPUCapacity
+		reqMem += info.MemGBRequested
+		capMem += info.MemGBCapacity
+	}
+	return fmt.Sprintf("%.1f / %.1f cores", reqCPU, capCPU), fmt.Sprintf("%.1f / %.1f GB", reqMem, capMem)
+}
+
+func renderInfraNodeRow(node *corev1.Node, info models.NodeInfo, podCount int) string {
+	healthLabel, healthClass := nodeHealthBadge(node)
+	badges := fmt.Sprintf(`<span class="tag %s">%s</span>`, healthClass, healthLabel)
+	if node.Spec.Unschedulable {
+		badges += `<span class="tag tag-cordoned">Cordoned</span>`
+	}
+	for _, cond := range nodePressureConditions(node) {
+		badges += fmt.Sprintf(`<span class="tag tag-pressure">%s</span>`, cond)
+	}
+
+	pool := info.NodePool
+	if pool == "" {
+		pool = defaultNodePoolDisplayName
+	}
+	zone := info.Zone
+	if zone == "" {
+		zone = "—"
+	}
+	version := node.Status.NodeInfo.KubeletVersion
+	if version == "" {
+		version = "—"
+	}
+	age := "—"
+	if !node.CreationTimestamp.IsZero() {
+		age = humanAge(time.Since(node.CreationTimestamp.Time))
+	}
+
+	var cpuPct float64
+	if info.CPUCapacity > 0 {
+		cpuPct = (info.CPURequested / info.CPUCapacity) * 100
+	}
+	cpuBarPct := cpuPct
+	if cpuBarPct > 100 {
+		cpuBarPct = 100
+	}
+
+	var memPct float64
+	if info.MemGBCapacity > 0 {
+		memPct = (info.MemGBRequested / info.MemGBCapacity) * 100
+	}
+	memBarPct := memPct
+	if memBarPct > 100 {
+		memBarPct = 100
+	}
+
+	return fmt.Sprintf(`<tr>
+<td>
+  <div class="node-name">%s</div>
+  <div class="badge-row">%s</div>
+</td>
+<td><span class="node-pool-tag">%s</span></td>
+<td class="util-cell">
+  <div class="util-nums">%.1f / %.1f cores</div>
+  <div class="util-bar">
+    <div class="util-track"><div class="util-fill %s" style="width:%.1f%%"></div></div>
+    <span class="util-pct">%.0f%%</span>
+  </div>
+</td>
+<td class="util-cell">
+  <div class="util-nums">%.1f / %.1f GB</div>
+  <div class="util-bar">
+    <div class="util-track"><div class="util-fill %s" style="width:%.1f%%"></div></div>
+    <span class="util-pct">%.0f%%</span>
+  </div>
+</td>
+<td style="text-align:center">%d</td>
+<td>%s</td>
+<td>%s</td>
+<td class="sku">%s</td>
+</tr>`,
+		node.Name,
+		badges,
+		pool,
+		info.CPURequested, info.CPUCapacity, utilFillClass(cpuPct), cpuBarPct, cpuPct,
+		info.MemGBRequested, info.MemGBCapacity, utilFillClass(memPct), memBarPct, memPct,
+		podCount,
+		zone,
+		age,
+		version,
+	)
+}
+
 var getInfrastructureTmpl = sync.OnceValue(func() *template.Template {
 	return template.Must(
 		template.New("infrastructure.html").
@@ -381,7 +638,67 @@ var getInfrastructureTmpl = sync.OnceValue(func() *template.Template {
 	)
 })
 
-func renderInfraPoolRow(p models.NodePoolCost) string {
+// infraPoolExtra holds the per-pool fields NodePoolCost itself doesn't
+// carry (pod count, zones, kubelet version, node health) — aggregated once
+// by buildInfraPoolExtras from the same authoritative per-node evidence the
+// Nodes tab uses (scan.nodes/nodeInfos/nodePodCounts), never recomputed or
+// guessed independently.
+type infraPoolExtra struct {
+	PodCount      int
+	Zones         string
+	Version       string
+	NotReadyCount int
+	PressureCount int
+}
+
+// buildInfraPoolExtras groups this same pass's per-node evidence by
+// NodeInfo.NodePool — the identical pool key NodePoolCost itself is grouped
+// by in pkg/analyzer/nodepool_costs.go — so a pool's aggregate here can
+// never disagree with which nodes NodePoolCost already attributed to it.
+func buildInfraPoolExtras(scan *clusterScan) map[string]infraPoolExtra {
+	if scan == nil {
+		return nil
+	}
+	nodeByName := make(map[string]*corev1.Node, len(scan.nodes))
+	for _, n := range scan.nodes {
+		nodeByName[n.Name] = n
+	}
+
+	extras := make(map[string]infraPoolExtra)
+	for _, info := range scan.nodeInfos {
+		pool := info.NodePool
+		if pool == "" {
+			pool = defaultNodePoolDisplayName
+		}
+		e := extras[pool]
+		e.PodCount += scan.nodePodCounts[info.Name]
+		if info.Zone != "" && !strings.Contains(e.Zones, info.Zone) {
+			if e.Zones != "" {
+				e.Zones += ", "
+			}
+			e.Zones += info.Zone
+		}
+		if node, ok := nodeByName[info.Name]; ok {
+			if v := node.Status.NodeInfo.KubeletVersion; v != "" {
+				switch {
+				case e.Version == "":
+					e.Version = v
+				case e.Version != v:
+					e.Version = "Mixed"
+				}
+			}
+			if !nodeReady(node) {
+				e.NotReadyCount++
+			} else if len(nodePressureConditions(node)) > 0 {
+				e.PressureCount++
+			}
+		}
+		extras[pool] = e
+	}
+	return extras
+}
+
+func renderInfraPoolRow(p models.NodePoolCost, extra infraPoolExtra) string {
 	// Priority badge
 	priTag := `<span class="tag tag-regular">On-Demand</span>`
 	if strings.EqualFold(p.Priority, "spot") {
@@ -398,29 +715,20 @@ func renderInfraPoolRow(p models.NodePoolCost) string {
 		osTag = `<span class="tag tag-windows">Windows</span>`
 	}
 
-	// CPU utilization
+	// CPU requested vs allocatable — never "utilization"/"usage": these are
+	// declared Pod resource requests against Node.Status.Allocatable, not
+	// Metrics API runtime figures (docs/custom UI: data-correctness rules).
 	cpuPct := p.CPUUtilizationPct
 	if cpuPct > 100 {
 		cpuPct = 100
 	}
-	cpuColor := "fill-green"
-	if p.CPUUtilizationPct > 80 {
-		cpuColor = "fill-red"
-	} else if p.CPUUtilizationPct > 50 {
-		cpuColor = "fill-yellow"
-	}
+	cpuColor := utilFillClass(p.CPUUtilizationPct)
 
-	// Memory utilization
 	memPct := p.MemoryUtilizationPct
 	if memPct > 100 {
 		memPct = 100
 	}
-	memColor := "fill-green"
-	if p.MemoryUtilizationPct > 80 {
-		memColor = "fill-red"
-	} else if p.MemoryUtilizationPct > 50 {
-		memColor = "fill-yellow"
-	}
+	memColor := utilFillClass(p.MemoryUtilizationPct)
 
 	// Node count (show autoscaler max if set)
 	nodeCell := fmt.Sprintf(`<div style="text-align:center;font-weight:600">%d</div>`, p.NodeCount)
@@ -428,20 +736,27 @@ func renderInfraPoolRow(p models.NodePoolCost) string {
 		nodeCell += fmt.Sprintf(`<div class="sub" style="text-align:center">max %d</div>`, p.MaxNodeCount)
 	}
 
-	// RI savings cells
-	ri1yr := `<span class="ri-na">—</span>`
-	if p.RISavings > 0 {
-		ri1yr = fmt.Sprintf(`<span class="ri-val">$%s</span>`, formatMoney(p.RISavings))
-	}
-	ri3yr := `<span class="ri-na">—</span>`
-	if p.RISavings3yr > 0 {
-		ri3yr = fmt.Sprintf(`<span class="ri-val">$%s</span>`, formatMoney(p.RISavings3yr))
-	}
-
 	// SKU sub-line: cores × memory
 	skuSpec := ""
 	if p.CPUCoresPerNode > 0 || p.MemoryGBPerNode > 0 {
 		skuSpec = fmt.Sprintf(`<div class="sub">%.0f vCPU &middot; %.0f GB</div>`, p.CPUCoresPerNode, p.MemoryGBPerNode)
+	}
+
+	healthLabel, healthClass := "Healthy", "node-badge-good"
+	switch {
+	case extra.NotReadyCount > 0:
+		healthLabel, healthClass = fmt.Sprintf("%d NotReady", extra.NotReadyCount), "node-badge-bad"
+	case extra.PressureCount > 0:
+		healthLabel, healthClass = fmt.Sprintf("%d Warning", extra.PressureCount), "node-badge-warn"
+	}
+
+	zones := extra.Zones
+	if zones == "" {
+		zones = "—"
+	}
+	version := extra.Version
+	if version == "" {
+		version = "—"
 	}
 
 	return fmt.Sprintf(`<tr>
@@ -467,10 +782,10 @@ func renderInfraPoolRow(p models.NodePoolCost) string {
     <span class="util-pct">%.0f%%</span>
   </div>
 </td>
-<td style="text-align:right" class="money">$%s</td>
-<td style="text-align:right" class="money">$%s</td>
-<td style="text-align:right">%s</td>
-<td style="text-align:right">%s</td>
+<td style="text-align:center">%d</td>
+<td><span class="tag %s">%s</span></td>
+<td>%s</td>
+<td class="sku">%s</td>
 </tr>`,
 		p.Name,
 		priTag, modeTag, osTag,
@@ -480,10 +795,26 @@ func renderInfraPoolRow(p models.NodePoolCost) string {
 		cpuColor, cpuPct, p.CPUUtilizationPct,
 		p.MemoryRequested, p.TotalMemoryCapacity,
 		memColor, memPct, p.MemoryUtilizationPct,
-		formatMoney(p.PricePerNodeMonth),
-		formatMoney(p.TotalMonthly),
-		ri1yr, ri3yr,
+		extra.PodCount,
+		healthClass, healthLabel,
+		zones,
+		version,
 	)
+}
+
+// utilFillClass classifies a requested/allocatable percentage into the
+// same green/yellow/red thresholds used across the Infrastructure page's
+// bars (Node Pools rows and Nodes tab rows alike) — one shared definition
+// so both tabs agree on what "under pressure" looks like visually.
+func utilFillClass(pct float64) string {
+	switch {
+	case pct > 80:
+		return "fill-red"
+	case pct > 50:
+		return "fill-yellow"
+	default:
+		return "fill-green"
+	}
 }
 
 func sumCPUReq(pools []models.NodePoolCost) float64 {

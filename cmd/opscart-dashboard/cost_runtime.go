@@ -56,13 +56,22 @@ import (
 // the complete report pipeline. npa is this cluster's persistent Cost runtime
 // (dashboardState.costAnalyzer), so provider caches retain their independent
 // wall-clock TTL across generations.
-func buildCostAnalysis(npa *analyzer.NodePoolCostAnalyzer, ctx string, resources clusterstate.ClusterResources) *models.CloudCostReport {
+//
+// It also returns result.NodeInfos — the same per-node evidence
+// (Name/NodePool/VMSize/Zone/CPUCapacity/MemGBCapacity/CPURequested/
+// MemGBRequested) AnalyzeNodePoolCostResultFromResources already computes
+// once per pass while building pool aggregates, previously discarded after
+// use. analysis.go retains it on clusterScan so the Infrastructure page's
+// per-node Nodes tab can reuse this exact evidence instead of recomputing
+// per-node CPU/memory requests a second time.
+func buildCostAnalysis(npa *analyzer.NodePoolCostAnalyzer, ctx string, resources clusterstate.ClusterResources) (*models.CloudCostReport, []models.NodeInfo) {
 	nodes := snapshotResourceCopy(resources.Nodes)
 	pods := snapshotResourceCopy(resources.Pods)
 	result := npa.AnalyzeNodePoolCostResultFromResources(nodes, pods)
 	resourceAnalysis := analyzer.AnalyzeResources(pods, nodes, namespace)
 
-	return buildCloudCostReport(ctx, result, resourceAnalysis, costPodsInNamespace(pods, namespace))
+	report := buildCloudCostReport(ctx, result, resourceAnalysis, costPodsInNamespace(pods, namespace))
+	return report, result.NodeInfos
 }
 
 // buildCloudCostReport is shared by the snapshot and temporary legacy paths

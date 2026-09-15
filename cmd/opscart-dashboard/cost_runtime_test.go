@@ -107,7 +107,7 @@ func TestBuildCostAnalysisMatchesDirectAnalyzerCall(t *testing.T) {
 	resources := clusterstate.ClusterResources{Nodes: []*corev1.Node{costNode("node-a", 4, 16)}}
 
 	npa := analyzer.NewNodePoolCostAnalyzer("")
-	got := buildCostAnalysis(npa, "cluster-a", resources)
+	got, _ := buildCostAnalysis(npa, "cluster-a", resources)
 
 	direct := analyzer.NewNodePoolCostAnalyzer("")
 	wantPoolCosts, _ := direct.AnalyzeNodePoolCostsFromResources([]corev1.Node{*resources.Nodes[0]}, nil)
@@ -131,7 +131,7 @@ func TestCompleteCoordinatorCostReportMatchesLegacyConstruction(t *testing.T) {
 	node := pricedCostNode("node-a", 8, 32)
 	pod := costWorkloadPod("api-0", "team-a", "node-a", 3000, 4)
 
-	coordinatorReport := buildCostAnalysis(
+	coordinatorReport, _ := buildCostAnalysis(
 		newDashboardCostAnalyzer(refreshedAt),
 		"cluster-a",
 		clusterstate.ClusterResources{Nodes: []*corev1.Node{node}, Pods: []*corev1.Pod{pod}},

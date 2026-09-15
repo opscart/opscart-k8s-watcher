@@ -3,6 +3,7 @@ package main
 import (
 	"github.com/opscart/opscart-k8s-watcher/pkg/analyzer"
 	"github.com/opscart/opscart-k8s-watcher/pkg/clusterstate"
+	corev1 "k8s.io/api/core/v1"
 )
 
 // This file is docs/08 Phase 4E/5: buildClusterScan is the one recurring
@@ -42,8 +43,25 @@ func buildClusterScan(state *dashboardState, snapshot *clusterstate.ClusterSnaps
 
 	scan.nodeHealth = buildNodeHealth(resources)
 
-	report := buildCostAnalysis(state.costAnalyzer, state.ctx, resources)
+	report, nodeInfos := buildCostAnalysis(state.costAnalyzer, state.ctx, resources)
 	scan.report = report
+	scan.nodeInfos = nodeInfos
+
+	// nodes is the authoritative, already-acquired Kubernetes Node inventory
+	// for this pass (informer-backed, zero additional API calls) — the
+	// Infrastructure page's Nodes tab reads real node conditions,
+	// schedulability, age, and kubelet version directly from these objects.
+	// snapshot.Resources() already returns an independent slice (see
+	// ClusterResources' doc comment), so no further copy is needed here.
+	scan.nodes = resources.Nodes
+
+	// nodePodCounts: pods actually occupying each node, counted once here
+	// from this same snapshot's Pods — mirrors the exact Running/Pending
+	// phase filter AnalyzeNodePoolCostResultFromResources already uses when
+	// summing per-node resource requests (pkg/analyzer/nodepool_costs.go),
+	// so a node's reported pod count is never inconsistent with its
+	// reported CPU/memory requested evidence.
+	scan.nodePodCounts = countPodsByNode(resources.Pods)
 
 	resourceAnalysis := buildResourceAnalysis(resources, namespace)
 	scan.AllWorkloads = resourceAnalysis.Workloads
@@ -69,4 +87,24 @@ func buildClusterScan(state *dashboardState, snapshot *clusterstate.ClusterSnaps
 	scan.nodeOptimizationSavings = savings
 
 	return scan
+}
+
+// countPodsByNode counts, per Node name, the Pods currently occupying it —
+// Running or Pending only, matching AnalyzeNodePoolCostResultFromResources'
+// own phase filter (pkg/analyzer/nodepool_costs.go) for the exact same
+// reason: a Succeeded/Failed pod no longer holds resources on that node.
+// Pods with no Spec.NodeName (not yet scheduled) are not counted against
+// any node.
+func countPodsByNode(pods []*corev1.Pod) map[string]int {
+	counts := make(map[string]int, len(pods))
+	for _, pod := range pods {
+		if pod.Status.Phase != corev1.PodRunning && pod.Status.Phase != corev1.PodPending {
+			continue
+		}
+		if pod.Spec.NodeName == "" {
+			continue
+		}
+		counts[pod.Spec.NodeName]++
+	}
+	return counts
 }

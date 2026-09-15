@@ -20,7 +20,7 @@ func infrastructureTestScan(findings ...models.NodeConditionFinding) *clusterSca
 }
 
 func TestInfrastructureNodeHealthHealthyStateAndExistingContent(t *testing.T) {
-	body := renderInfrastructurePage(infrastructureTestScan(), "minikube", []string{"minikube"})
+	body := renderInfrastructurePage(infrastructureTestScan(), "minikube", []string{"minikube"}, "nodes")
 	for _, want := range []string{
 		"Node Health &amp; Workload Placement",
 		"All nodes healthy",
@@ -45,7 +45,7 @@ func TestInfrastructureNodeHealthRendersEvidenceAndPlacementSemantics(t *testing
 			{Namespace: "inventory", Kind: "StatefulSet", Name: "db", PodCount: 2},
 		},
 	}
-	body := renderInfrastructurePage(infrastructureTestScan(finding), "minikube", []string{"minikube"})
+	body := renderInfrastructurePage(infrastructureTestScan(finding), "minikube", []string{"minikube"}, "nodes")
 	for _, want := range []string{
 		"worker-21", "DiskPressure", "Kubernetes condition: True", "Reason: KubeletHasDiskPressure",
 		"disk pressure reported by kubelet", "2026-08-16 11:30:00 UTC",
@@ -79,7 +79,7 @@ func TestInfrastructureNodeHealthCompactNamespaceSummaryAndFullDetails(t *testin
 		{Namespace: "gamma", Kind: "Deployment", Name: "web", PodCount: 2},
 		{Namespace: "zeta", Kind: "Deployment", Name: "worker", PodCount: 1},
 	}}
-	body := renderInfrastructurePage(infrastructureTestScan(finding), "minikube", nil)
+	body := renderInfrastructurePage(infrastructureTestScan(finding), "minikube", nil, "nodes")
 	for _, want := range []string{
 		`class="placement-summary-list"`,
 		"alpha", "2 workloads · 4 pods",
@@ -102,7 +102,7 @@ func TestInfrastructureNodeHealthPreservesNamespaceIdentity(t *testing.T) {
 		{Namespace: "blue", Kind: "Deployment", Name: "api", PodCount: 1},
 		{Namespace: "green", Kind: "Deployment", Name: "api", PodCount: 1},
 	}}
-	body := renderInfrastructurePage(infrastructureTestScan(finding), "minikube", nil)
+	body := renderInfrastructurePage(infrastructureTestScan(finding), "minikube", nil, "nodes")
 	if !strings.Contains(body, "blue") || !strings.Contains(body, "green") || strings.Count(body, "> api</div>") != 2 {
 		t.Fatalf("same-named workloads were not visibly namespace-distinct")
 	}
@@ -114,7 +114,7 @@ func TestInfrastructureNodeHealthGroupsConditionsUnderPhysicalNode(t *testing.T)
 		models.NodeConditionFinding{NodeName: "node-a", NodePool: "pool-a", ConditionType: "MemoryPressure", ConditionStatus: "True", CorrelatedWorkloads: workloads},
 		models.NodeConditionFinding{NodeName: "node-a", NodePool: "pool-a", ConditionType: "DiskPressure", ConditionStatus: "True", CorrelatedWorkloads: workloads},
 	)
-	body := renderInfrastructurePage(scan, "minikube", nil)
+	body := renderInfrastructurePage(scan, "minikube", nil, "nodes")
 	if strings.Count(body, `class="node-health-card"`) != 1 || strings.Count(body, `class="node-condition"`) != 2 {
 		t.Fatalf("one physical node was not rendered as one card with two conditions")
 	}
@@ -145,7 +145,7 @@ func TestInfrastructureNodeHealthPoolsNodesFallbackAndOrdering(t *testing.T) {
 	if len(first[1].Nodes) != 1 || len(first[1].Nodes[0].Conditions) != 2 || first[1].Nodes[0].Conditions[0].Type != "DiskPressure" || first[1].Nodes[0].Conditions[1].Type != "MemoryPressure" {
 		t.Fatalf("node/condition ordering = %+v", first[1])
 	}
-	body := renderInfrastructurePage(infrastructureTestScan(findings...), "minikube", nil)
+	body := renderInfrastructurePage(infrastructureTestScan(findings...), "minikube", nil, "nodes")
 	if !strings.Contains(body, `class="node-pool-label">default</div>`) || strings.Contains(body, "Unassigned / Unknown pool") || strings.Count(body, `class="node-health-card"`) != 3 {
 		t.Fatalf("unknown pool or multiple nodes did not render correctly")
 	}
