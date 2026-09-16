@@ -71,3 +71,18 @@ func TestWarRoomAICacheCapacityAndDuplicateGeneration(t *testing.T) {
 		t.Fatal("finished generation did not release in-flight slot")
 	}
 }
+
+func TestCloneAnalysisResponsePreservesEmptyArrays(t *testing.T) {
+	response := aianalysis.AnalysisResponse{
+		Summary:         "summary",
+		LikelyCauses:    []aianalysis.LikelyCause{},
+		Recommendations: []aianalysis.Recommendation{},
+		EvidenceUsed:    []string{},
+		MissingEvidence: []string{},
+		Confidence:      aianalysis.ConfidenceLow,
+	}
+	cloned := cloneAnalysisResponse(response)
+	if cloned.LikelyCauses == nil || cloned.Recommendations == nil || cloned.EvidenceUsed == nil || cloned.MissingEvidence == nil {
+		t.Fatalf("cloneAnalysisResponse() changed empty arrays to nil: %#v", cloned)
+	}
+}

@@ -153,9 +153,21 @@ func (cache *warRoomAICache) pruneExpired(now time.Time) {
 }
 
 func cloneAnalysisResponse(response aianalysis.AnalysisResponse) aianalysis.AnalysisResponse {
-	response.LikelyCauses = append([]aianalysis.LikelyCause(nil), response.LikelyCauses...)
-	response.Recommendations = append([]aianalysis.Recommendation(nil), response.Recommendations...)
-	response.EvidenceUsed = append([]string(nil), response.EvidenceUsed...)
-	response.MissingEvidence = append([]string(nil), response.MissingEvidence...)
+	if response.LikelyCauses != nil {
+		cloned := make([]aianalysis.LikelyCause, len(response.LikelyCauses))
+		copy(cloned, response.LikelyCauses)
+		response.LikelyCauses = cloned
+	}
+	if response.Recommendations != nil {
+		cloned := make([]aianalysis.Recommendation, len(response.Recommendations))
+		copy(cloned, response.Recommendations)
+		response.Recommendations = cloned
+	}
+	if response.EvidenceUsed != nil {
+		response.EvidenceUsed = append([]string{}, response.EvidenceUsed...)
+	}
+	if response.MissingEvidence != nil {
+		response.MissingEvidence = append([]string{}, response.MissingEvidence...)
+	}
 	return response
 }

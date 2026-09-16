@@ -54,6 +54,9 @@ func TestOpenAIProviderSendsConfiguredRequestAndMapsResponse(t *testing.T) {
 		if request.Model != "configured-model" {
 			t.Errorf("model = %q, want configured-model", request.Model)
 		}
+		if request.MaxOutputTokens != openAIMaxOutputTokens {
+			t.Errorf("max_output_tokens = %d, want %d", request.MaxOutputTokens, openAIMaxOutputTokens)
+		}
 		if request.Store {
 			t.Error("store = true, want false")
 		}
@@ -366,6 +369,47 @@ func TestOpenAIProviderRequiresCompletedStatus(t *testing.T) {
 			if err == nil || err.Error() != "AI provider response was not completed" {
 				t.Fatalf("Analyze() error = %v, want incomplete response error", err)
 			}
+		})
+	}
+}
+
+func TestOpenAIProviderRejectsResponseOutsideNeutralBounds(t *testing.T) {
+	tests := []struct {
+		name   string
+		mutate func(*AnalysisResponse)
+	}{
+		{name: "oversized", mutate: func(response *AnalysisResponse) {
+			response.Summary = strings.Repeat("provider-output-sentinel", maxSummaryBytes)
+		}},
+		{name: "whitespace-only", mutate: func(response *AnalysisResponse) {
+			response.Recommendations[0].Action = " \t"
+		}},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			response := validAnalysisResponse()
+			test.mutate(response)
+			structured, err := json.Marshal(response)
+			if err != nil {
+				t.Fatal(err)
+			}
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				_ = json.NewEncoder(w).Encode(map[string]any{
+					"status": "completed",
+					"output": []any{map[string]any{
+						"content": []any{map[string]any{"type": "output_text", "text": string(structured)}},
+					}},
+				})
+			}))
+			defer server.Close()
+
+			provider := mustProvider(t, server.URL, time.Second)
+			_, err = provider.Analyze(context.Background(), syntheticRequest())
+			if !errors.Is(err, errInvalidStructuredResponse) {
+				t.Fatalf("Analyze() error = %v, want invalid structured response", err)
+			}
+			assertErrorDoesNotContain(t, err, "provider-output-sentinel", syntheticAPIKey, server.URL)
 		})
 	}
 }

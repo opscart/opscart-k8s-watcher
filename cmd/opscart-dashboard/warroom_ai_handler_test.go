@@ -205,6 +205,53 @@ func TestWarRoomAIRejectsCrossOriginAndBrowserEvidence(t *testing.T) {
 	}
 }
 
+func TestWarRoomAISameOriginValidation(t *testing.T) {
+	tests := []struct {
+		name           string
+		target         string
+		origin         string
+		forwardedHost  string
+		secFetchSite   string
+		forwardedProto []string
+		want           bool
+	}{
+		{name: "direct HTTP", target: "http://dashboard.example/api/warroom/ai-analysis", origin: "http://dashboard.example", want: true},
+		{name: "direct HTTPS", target: "https://dashboard.example/api/warroom/ai-analysis", origin: "https://dashboard.example", want: true},
+		{name: "forwarded HTTP", target: "http://dashboard.example/api/warroom/ai-analysis", origin: "http://dashboard.example", forwardedProto: []string{"http"}, want: true},
+		{name: "TLS terminating proxy", target: "http://dashboard.example/api/warroom/ai-analysis", origin: "https://dashboard.example", forwardedProto: []string{"https"}, want: true},
+		{name: "host mismatch", target: "http://dashboard.example/api/warroom/ai-analysis", origin: "http://other.example", want: false},
+		{name: "forwarded host is not trusted", target: "http://internal.example/api/warroom/ai-analysis", origin: "https://public.example", forwardedHost: "public.example", forwardedProto: []string{"https"}, want: false},
+		{name: "cross-site fetch", target: "http://dashboard.example/api/warroom/ai-analysis", origin: "http://dashboard.example", secFetchSite: "cross-site", want: false},
+		{name: "missing origin", target: "http://dashboard.example/api/warroom/ai-analysis", want: false},
+		{name: "empty forwarded proto", target: "http://dashboard.example/api/warroom/ai-analysis", origin: "http://dashboard.example", forwardedProto: []string{""}, want: false},
+		{name: "unsupported forwarded proto", target: "http://dashboard.example/api/warroom/ai-analysis", origin: "http://dashboard.example", forwardedProto: []string{"ftp"}, want: false},
+		{name: "whitespace forwarded proto", target: "http://dashboard.example/api/warroom/ai-analysis", origin: "https://dashboard.example", forwardedProto: []string{" https "}, want: false},
+		{name: "comma-separated forwarded proto", target: "http://dashboard.example/api/warroom/ai-analysis", origin: "https://dashboard.example", forwardedProto: []string{"https,http"}, want: false},
+		{name: "repeated forwarded proto", target: "http://dashboard.example/api/warroom/ai-analysis", origin: "https://dashboard.example", forwardedProto: []string{"https", "https"}, want: false},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			request := httptest.NewRequest(http.MethodPost, test.target, nil)
+			if test.origin != "" {
+				request.Header.Set("Origin", test.origin)
+			}
+			if test.forwardedHost != "" {
+				request.Header.Set("X-Forwarded-Host", test.forwardedHost)
+			}
+			if test.secFetchSite != "" {
+				request.Header.Set("Sec-Fetch-Site", test.secFetchSite)
+			}
+			for _, value := range test.forwardedProto {
+				request.Header.Add("X-Forwarded-Proto", value)
+			}
+			if got := sameOriginWarRoomAIRequest(request); got != test.want {
+				t.Fatalf("sameOriginWarRoomAIRequest() = %t, want %t", got, test.want)
+			}
+		})
+	}
+}
+
 func TestWarRoomAICacheReuseAndExplicitRegeneration(t *testing.T) {
 	scan, db := warRoomAICrashFixture("prod", 7)
 	provider := &fakeWarRoomAIProvider{response: testWarRoomAIResponse()}
@@ -355,5 +402,42 @@ func TestWarRoomAIProviderErrorsAreSafe(t *testing.T) {
 	recorder := warRoomAIPost(t, srv.newMux(), "/api/warroom/ai-analysis?cluster=prod", selector, "http://example.com", true)
 	if recorder.Code != http.StatusBadGateway || strings.Contains(recorder.Body.String(), "provider-secret-and-body") {
 		t.Fatalf("unsafe provider error response: status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+}
+
+func TestWarRoomAIRejectsInvalidProviderResponsesWithoutCaching(t *testing.T) {
+	tests := []struct {
+		name   string
+		mutate func(*aianalysis.AnalysisResponse)
+	}{
+		{name: "oversized", mutate: func(response *aianalysis.AnalysisResponse) {
+			response.Summary = strings.Repeat("oversized-provider-output", 128)
+		}},
+		{name: "invalid", mutate: func(response *aianalysis.AnalysisResponse) {
+			response.LikelyCauses[0].Title = " \t"
+		}},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			scan, db := warRoomAICrashFixture("prod", 7)
+			response := testWarRoomAIResponse()
+			test.mutate(response)
+			provider := &fakeWarRoomAIProvider{response: response}
+			srv := newWarRoomAITestServer([]string{"prod"}, map[string]*clusterScan{"prod": scan}, db, provider)
+			selection := collectWarRoomAISelections(scan, "prod", db)[0]
+
+			recorder := warRoomAIPost(t, srv.newMux(), "/api/warroom/ai-analysis?cluster=prod", selection.Selector, "http://example.com", true)
+			if recorder.Code != http.StatusBadGateway || strings.Contains(recorder.Body.String(), "provider-output") {
+				t.Fatalf("invalid provider response status=%d body=%s", recorder.Code, recorder.Body.String())
+			}
+			if _, ok := srv.aiRuntime.cache.latest("prod", selection.Selector); ok {
+				t.Fatal("invalid provider response was cached")
+			}
+			page := srv.buildWarRoomAIPageData(scan, "prod", selection.Selector)
+			if page.Result != nil {
+				t.Fatal("invalid provider response was available for rendering")
+			}
+		})
 	}
 }

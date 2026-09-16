@@ -259,6 +259,10 @@ func (srv *server) handleWarRoomAIAnalysis(w http.ResponseWriter, r *http.Reques
 		writeWarRoomAIError(w, http.StatusBadGateway, "AI analysis could not be generated")
 		return
 	}
+	if err := aianalysis.ValidateResponse(response); err != nil {
+		writeWarRoomAIError(w, http.StatusBadGateway, "AI analysis could not be generated")
+		return
+	}
 
 	generatedAt := srv.aiRuntime.cache.now()
 	entry := warRoomAICacheEntry{
@@ -308,17 +312,22 @@ func sameOriginWarRoomAIRequest(r *http.Request) bool {
 	if site := strings.ToLower(strings.TrimSpace(r.Header.Get("Sec-Fetch-Site"))); site != "" && site != "same-origin" {
 		return false
 	}
-	origin := strings.TrimSpace(r.Header.Get("Origin"))
-	if origin == "" {
+	origins := r.Header.Values("Origin")
+	if len(origins) != 1 || origins[0] == "" || origins[0] != strings.TrimSpace(origins[0]) {
 		return false
 	}
-	parsed, err := url.Parse(origin)
+	parsed, err := url.Parse(origins[0])
 	if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Host == "" {
 		return false
 	}
 	requestScheme := "http"
 	if r.TLS != nil {
 		requestScheme = "https"
+	} else if forwardedProto := r.Header.Values("X-Forwarded-Proto"); len(forwardedProto) != 0 {
+		if len(forwardedProto) != 1 || (forwardedProto[0] != "http" && forwardedProto[0] != "https") {
+			return false
+		}
+		requestScheme = forwardedProto[0]
 	}
 	return parsed.Scheme == requestScheme && strings.EqualFold(parsed.Host, r.Host)
 }

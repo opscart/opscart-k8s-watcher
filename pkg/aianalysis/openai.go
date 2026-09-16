@@ -13,7 +13,11 @@ import (
 )
 
 const (
-	maxResponseBytes     = 1 << 20
+	maxResponseBytes = 1 << 20
+	// The Phase 2 POC response is a compact structured analysis. This fixed
+	// ceiling bounds generation cost without adding configuration surface.
+	openAIMaxOutputTokens = 4096
+
 	analysisInstructions = `Analyze only the operational evidence supplied in the input.
 Do not claim or imply direct access to the Kubernetes cluster, logs, credentials, or any other data source.
 Clearly distinguish observed facts from hypotheses. Identify material evidence that is missing.
@@ -29,11 +33,12 @@ type openAIProvider struct {
 }
 
 type openAIRequest struct {
-	Model        string           `json:"model"`
-	Instructions string           `json:"instructions"`
-	Input        string           `json:"input"`
-	Store        bool             `json:"store"`
-	Text         openAITextConfig `json:"text"`
+	Model           string           `json:"model"`
+	Instructions    string           `json:"instructions"`
+	Input           string           `json:"input"`
+	MaxOutputTokens int              `json:"max_output_tokens"`
+	Store           bool             `json:"store"`
+	Text            openAITextConfig `json:"text"`
 }
 
 type openAITextConfig struct {
@@ -110,10 +115,11 @@ func (provider *openAIProvider) Analyze(ctx context.Context, req AnalysisRequest
 		return nil, fmt.Errorf("encode analysis evidence: %w", err)
 	}
 	wireRequest := openAIRequest{
-		Model:        provider.model,
-		Instructions: analysisInstructions,
-		Input:        string(input),
-		Store:        false,
+		Model:           provider.model,
+		Instructions:    analysisInstructions,
+		Input:           string(input),
+		MaxOutputTokens: openAIMaxOutputTokens,
+		Store:           false,
 		Text: openAITextConfig{Format: openAIResponseFormat{
 			Type:   "json_schema",
 			Name:   "opscart_analysis",
@@ -220,12 +226,6 @@ func decodeAnalysisResponse(value string) (*AnalysisResponse, error) {
 	if wire.Summary == nil || *wire.Summary == "" || wire.LikelyCauses == nil || wire.Recommendations == nil || wire.EvidenceUsed == nil || wire.MissingEvidence == nil || wire.Confidence == nil {
 		return nil, errInvalidStructuredResponse
 	}
-	switch *wire.Confidence {
-	case ConfidenceLow, ConfidenceMedium, ConfidenceHigh:
-	default:
-		return nil, errInvalidStructuredResponse
-	}
-
 	response := &AnalysisResponse{
 		Summary:         *wire.Summary,
 		LikelyCauses:    make([]LikelyCause, len(*wire.LikelyCauses)),
@@ -257,6 +257,9 @@ func decodeAnalysisResponse(value string) (*AnalysisResponse, error) {
 			return nil, errInvalidStructuredResponse
 		}
 		response.MissingEvidence[i] = *evidence
+	}
+	if err := ValidateResponse(response); err != nil {
+		return nil, errInvalidStructuredResponse
 	}
 	return response, nil
 }
