@@ -159,32 +159,60 @@ func collectWarRoomIssues(scan *clusterScan, limit int) []warRoomIssue {
 
 	// 3. High-risk unprotected namespaces
 	if scan.netAudit != nil {
+		// Every namespace NetworkPolicyAudit flagged as unprotected is a
+		// real, current coverage gap — surface all of them, same as
+		// idle_namespace below and the Namespaces page's Governance column
+		// (namespaceGovernanceStates), neither of which gates on RiskLevel.
+		// RiskLevel comes from analyzeRisk's namespace-name/pod-count
+		// heuristic (network.go) — a reasonable prioritization signal, but
+		// not a reliable "is this actually a finding" gate: a namespace
+		// like "payments" with 5 pods and no "prod"/"staging" substring in
+		// its name computes RiskLevel "LOW" despite being a real gap, which
+		// used to make it silently vanish from War Room's own issue list
+		// while the Namespaces page kept showing it as "Unprotected" —
+		// two pages disagreeing about the same evidence. Previously gated
+		// on ns.RiskLevel == "HIGH" only.
 		for _, ns := range scan.netAudit.UnprotectedNamespaces {
-			if ns.RiskLevel == "HIGH" {
-				classification := "Missing NetworkPolicy"
-				message := fmt.Sprintf("%d pods in namespace, no NetworkPolicy present", ns.PodCount)
-				if ns.PolicyCount > 0 {
-					// This namespace HAS policies — the gap is coverage,
-					// not absence. Never claim "missing" when a policy
-					// exists; state the actual gap.
-					classification = "Incomplete NetworkPolicy coverage"
-					policyWord := "policy"
-					if ns.PolicyCount != 1 {
-						policyWord = "policies"
-					}
-					message = fmt.Sprintf("%d of %d observed pods lack configured ingress and egress coverage (%d %s present)",
-						ns.CoverageGapPodCount, ns.PodCount, ns.PolicyCount, policyWord)
+			// Severity is driven by the same evidence the message text
+			// already branches on — zero NetworkPolicies at all (no
+			// protection whatsoever) vs. partial coverage (some protection
+			// exists, the gap is narrower) — not by RiskLevel. RiskLevel is
+			// a namespace-name/pod-count heuristic (analyzeRisk in
+			// network.go); using it for severity would just move the same
+			// unreliable "does this look important" guess from the
+			// existence gate this fix removed to the urgency shown here.
+			// Every other severity assignment in this codebase (pod-level
+			// findings in waste_probe_evidence.go, host_network in
+			// security.go) is driven by evidence directness/confirmation,
+			// never by an environment-name guess — PolicyCount == 0 is
+			// direct, unambiguous evidence of zero protection, matching
+			// the "critical"-tier pattern elsewhere; a namespace with some
+			// policies but a coverage gap is a narrower, softer finding.
+			classification := "Missing NetworkPolicy"
+			severity := "high"
+			message := fmt.Sprintf("%d pods in namespace, no NetworkPolicy present", ns.PodCount)
+			if ns.PolicyCount > 0 {
+				// This namespace HAS policies — the gap is coverage,
+				// not absence. Never claim "missing" when a policy
+				// exists; state the actual gap.
+				classification = "Incomplete NetworkPolicy coverage"
+				severity = "medium"
+				policyWord := "policy"
+				if ns.PolicyCount != 1 {
+					policyWord = "policies"
 				}
-				issues = append(issues, warRoomIssue{
-					Severity:       "high",
-					Type:           "unprotected_namespace",
-					Namespace:      ns.Name,
-					Resource:       "namespace",
-					Message:        message,
-					KubectlCmd:     fmt.Sprintf("kubectl get networkpolicies -n %s", ns.Name),
-					Classification: classification,
-				})
+				message = fmt.Sprintf("%d of %d observed pods lack configured ingress and egress coverage (%d %s present)",
+					ns.CoverageGapPodCount, ns.PodCount, ns.PolicyCount, policyWord)
 			}
+			issues = append(issues, warRoomIssue{
+				Severity:       severity,
+				Type:           "unprotected_namespace",
+				Namespace:      ns.Name,
+				Resource:       "namespace",
+				Message:        message,
+				KubectlCmd:     fmt.Sprintf("kubectl get networkpolicies -n %s", ns.Name),
+				Classification: classification,
+			})
 		}
 	}
 	// 4. Idle/abandoned namespaces are posture findings, not workloads.
