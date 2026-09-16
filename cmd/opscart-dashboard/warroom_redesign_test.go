@@ -290,7 +290,7 @@ func TestWarRoomDenseEqualCardsAndResetVisibility(t *testing.T) {
 		`class="wr-card c wr-type-crash-loop"`,
 		`class="wr-evidence"`, "Classification", "Active For", "Restarts",
 		`<footer class="wr-actions">`, `title="Focus Pod: api-7cddf79d98-jxmtx"`,
-		`min-height:260px`,
+		`min-height:190px`,
 	} {
 		if !strings.Contains(body, want) {
 			t.Errorf("dense card rendering missing %q", want)
