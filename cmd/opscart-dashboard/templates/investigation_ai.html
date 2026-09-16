@@ -7,6 +7,13 @@
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
 {{template "base" .}}
 <style>
+.main{
+  --bg:#0b0f1a;--surface:#141a2c;--surface-hover:#202844;--border:#232b45;
+  --text-muted:#8a96ad;--inv-inset:#0e1424;
+  --inv-shadow-sm:0 1px 2px rgba(0,0,0,.4);
+  background:var(--bg);
+}
+.ai-scope-card,.ai-result-block{box-shadow:var(--inv-shadow-sm)}
 .inv-tabs{display:flex;gap:.5rem;margin-bottom:1.5rem;border-bottom:1px solid var(--border)}
 .inv-tab{display:inline-flex;align-items:center;padding:.6rem 1rem;color:var(--text-muted);font-size:.85rem;font-weight:600;text-decoration:none;border-bottom:2px solid transparent;margin-bottom:-1px}
 .inv-tab:hover{color:var(--text)}

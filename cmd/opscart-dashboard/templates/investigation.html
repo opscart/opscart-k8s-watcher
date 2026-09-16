@@ -7,6 +7,13 @@
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
 {{template "base" .}}
 <style>
+.main{
+  --bg:#0b0f1a;--surface:#141a2c;--surface-hover:#202844;--border:#232b45;
+  --text-muted:#8a96ad;--inv-inset:#0e1424;
+  --inv-shadow-sm:0 1px 2px rgba(0,0,0,.4);
+  background:var(--bg);
+}
+.inv-chip,.inv-hint,.inv-empty,.inv-res-card,.inv-summary,.inv-scope-card,.inv-evidence-chip{box-shadow:var(--inv-shadow-sm)}
 .inv-tabs{display:flex;gap:.5rem;margin-bottom:1.5rem;border-bottom:1px solid var(--border)}
 .inv-tab{display:inline-flex;align-items:center;padding:.6rem 1rem;color:var(--text-muted);font-size:.85rem;font-weight:600;text-decoration:none;border-bottom:2px solid transparent;margin-bottom:-1px}
 .inv-tab:hover{color:var(--text)}
@@ -24,7 +31,7 @@
 .inv-hints{display:flex;flex-direction:column;gap:0.5rem}
 .inv-hint{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius-sm);padding:1rem 1.25rem;margin-bottom:0.75rem}
 .inv-cmds{display:flex;flex-direction:column;gap:0.5rem}
-.inv-cmd{display:flex;align-items:center;gap:0.75rem;background:rgba(0,0,0,0.3);border:1px solid var(--border);border-radius:var(--radius-sm);padding:0.65rem 0.9rem}
+.inv-cmd{display:flex;align-items:center;gap:0.75rem;background:var(--inv-inset);border:1px solid var(--border);border-radius:var(--radius-sm);padding:0.65rem 0.9rem}
 .inv-cmd code{font-family:'Consolas','Monaco',monospace;font-size:0.78rem;color:var(--primary-light);flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .wr-copy-btn{background:transparent;border:1px solid var(--border);border-radius:4px;color:var(--text-muted);cursor:pointer;font-size:0.64rem;padding:2px 8px;white-space:nowrap;transition:all 0.15s;flex-shrink:0;font-family:inherit}
 .wr-copy-btn:hover{background:var(--surface-hover);color:var(--text)}
@@ -56,7 +63,7 @@
 .inv-briefing{background:rgba(245,158,11,.055);border:1px solid rgba(245,158,11,.48);border-radius:var(--radius-sm);padding:1rem 1.25rem;margin-bottom:1rem}
 .inv-briefing .inv-summary-label{color:#fbbf24}
 .inv-scope-grid{display:grid;grid-template-columns:minmax(260px,.8fr) minmax(360px,1.2fr);gap:1rem;margin-bottom:1.5rem}
-.inv-scope-card{background:linear-gradient(135deg,var(--surface),rgba(30,41,59,.7));border:1px solid var(--border);border-radius:var(--radius-sm);padding:1rem 1.25rem}
+.inv-scope-card{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius-sm);padding:1rem 1.25rem}
 .inv-scope-title{font-size:.7rem;text-transform:uppercase;letter-spacing:.6px;color:var(--primary-light);font-weight:700;margin-bottom:.75rem}
 .inv-scope-row{display:grid;grid-template-columns:130px 1fr;gap:1rem;padding:.48rem 0;border-bottom:1px solid rgba(51,65,85,.45);font-size:.8rem}
 .inv-scope-row:last-child{border-bottom:none}.inv-scope-key{color:var(--text-muted)}.inv-scope-value{color:var(--text);font-weight:500;min-width:0;overflow-wrap:anywhere}
@@ -69,7 +76,7 @@
 .inv-log-load{background:var(--primary);border:1px solid var(--primary);border-radius:var(--radius-sm);color:#fff;cursor:pointer;font:inherit;font-size:.78rem;font-weight:600;padding:.57rem .9rem}
 .inv-log-load:disabled{cursor:wait;opacity:.65}
 .inv-log-meta{color:var(--text-muted);font-size:.75rem;line-height:1.5;margin:.5rem 0}
-.inv-log-output{background:rgba(0,0,0,.3);border:1px solid var(--border);border-radius:var(--radius-sm);color:var(--text-secondary);font-family:'Consolas','Monaco',monospace;font-size:.76rem;line-height:1.55;margin:.75rem 0 0;max-height:420px;overflow:auto;padding:1rem;white-space:pre;word-break:normal}
+.inv-log-output{background:var(--inv-inset);border:1px solid var(--border);border-radius:var(--radius-sm);color:var(--text-secondary);font-family:'Consolas','Monaco',monospace;font-size:.76rem;line-height:1.55;margin:.75rem 0 0;max-height:420px;overflow:auto;padding:1rem;white-space:pre;word-break:normal}
 .inv-log-error{color:var(--danger);font-size:.8rem;margin-top:.75rem}
 .inv-evidence{display:flex;gap:1rem;flex-wrap:wrap;margin-bottom:1.5rem}
 .inv-evidence-chip{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius-sm);padding:0.6rem 1rem;min-width:120px}
@@ -81,7 +88,7 @@
 .inv-hint-header{display:flex;align-items:center;gap:0.75rem;margin-bottom:0.5rem}
 .inv-hint-title{font-size:0.88rem;font-weight:600;color:var(--text)}
 .inv-hint-reason{font-size:0.82rem;color:var(--text-muted);line-height:1.5;margin-bottom:0.5rem}
-.inv-hint-cmd{display:flex;align-items:center;gap:0.5rem;background:rgba(0,0,0,0.3);border-radius:4px;padding:0.4rem 0.75rem;font-family:monospace;font-size:0.75rem;color:var(--primary-light);margin-top:0.5rem}
+.inv-hint-cmd{display:flex;align-items:center;gap:0.5rem;background:var(--inv-inset);border-radius:4px;padding:0.4rem 0.75rem;font-family:monospace;font-size:0.75rem;color:var(--primary-light);margin-top:0.5rem}
 .inv-hint-cmd code{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .inv-conf-badge{font-size:0.65rem;font-weight:700;padding:2px 8px;border-radius:20px;text-transform:uppercase;letter-spacing:0.5px;white-space:nowrap}
 .inv-conf-high{background:rgba(239,68,68,0.15);color:#f87171}
