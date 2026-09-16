@@ -207,8 +207,18 @@ func warRoomAIEvidenceForIssue(scan *clusterScan, issue warRoomIssue) (warRoomAI
 		}
 	case store.IssueUnprotectedNamespace:
 		if scan.netAudit != nil {
+			// No RiskLevel condition here -- matches the War Room list fix
+			// (collectWarRoomIssues no longer gates unprotected_namespace
+			// existence on RiskLevel == "HIGH" either). RiskLevel is a
+			// namespace-name/pod-count heuristic (analyzeRisk in
+			// network.go), not a reliable signal that a coverage gap is
+			// real; gating evidence capture on it here reintroduced the
+			// same bug in a second place -- a namespace War Room now
+			// correctly surfaces as a finding could still fail to produce
+			// any AI evidence for it, hard-blocking generation entirely
+			// (see this function's default return, errWarRoomAISourceUnavailable).
 			for _, namespace := range scan.netAudit.UnprotectedNamespaces {
-				if namespace.Name == issue.Namespace && namespace.RiskLevel == "HIGH" {
+				if namespace.Name == issue.Namespace {
 					evidence.append(aianalysis.EvidenceItem{
 						Type: aianalysis.EvidenceConfiguration, Summary: "NetworkPolicy coverage observed",
 						Details: fmt.Sprintf("pod_count=%d; policy_count=%d; coverage_gap_pod_count=%d; ingress_restricted=%t; egress_restricted=%t; default_deny_ingress=%t; default_deny_egress=%t",
