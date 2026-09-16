@@ -60,6 +60,7 @@ type investigationTabs struct {
 	EvidenceTabHref string
 	AITabHref       string
 	AIAvailable     bool
+	AIConfigured    bool
 }
 
 // buildInvestigationSidebar builds the sidebar/navigation fields shared by

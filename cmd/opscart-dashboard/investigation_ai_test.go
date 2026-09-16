@@ -190,53 +190,49 @@ func TestInvestigationAIHrefCarriesOnlyAllowedParams(t *testing.T) {
 	}
 }
 
-// TestWarRoomAICardLinkIsOpaqueAndGatedByAIEnablement covers the War Room
-// card's compact AI link: absent while disabled, present and opaque while
-// enabled.
-func TestWarRoomAICardLinkIsOpaqueAndGatedByAIEnablement(t *testing.T) {
+// TestWarRoomAICardLinkIsOpaqueWhenDisabledOrEnabled proves supported
+// analysis remains discoverable without exposing issue identity in either
+// deployment state.
+func TestWarRoomAICardLinkIsOpaqueWhenDisabledOrEnabled(t *testing.T) {
 	scan, db := warRoomAICrashFixture("prod", 7)
-
-	disabledBody := renderWarRoomPageWithAI(scan, "prod", []string{"prod"}, nil, db, false)
-	if strings.Contains(disabledBody, `class="ai-chip"`) {
-		t.Fatal("AI chip rendered while AI disabled")
-	}
-
-	enabledBody := renderWarRoomPageWithAI(scan, "prod", []string{"prod"}, nil, db, true)
-	const marker = `class="ai-chip" href="`
-	idx := strings.Index(enabledBody, marker)
-	if idx == -1 {
-		t.Fatalf("AI chip missing while AI enabled: %s", enabledBody)
-	}
-	start := idx + len(marker)
-	end := strings.Index(enabledBody[start:], `"`)
-	if end == -1 {
-		t.Fatalf("AI chip href malformed: %s", enabledBody)
-	}
-	href := html.UnescapeString(enabledBody[start : start+end])
-	parsed, err := url.Parse(href)
-	if err != nil {
-		t.Fatal(err)
-	}
-	q := parsed.Query()
-	for _, forbidden := range []string{"ns", "pod", "container", "node"} {
-		if q.Get(forbidden) != "" {
-			t.Fatalf("AI card link exposed %q as an input: %s", forbidden, href)
+	const marker = "class=\"ai-chip\" href=\""
+	for _, enabled := range []bool{false, true} {
+		body := renderWarRoomPageWithAI(scan, "prod", []string{"prod"}, nil, db, enabled)
+		idx := strings.Index(body, marker)
+		if idx == -1 {
+			t.Fatalf("AI chip missing when enabled=%t: %s", enabled, body)
 		}
-	}
-	if q.Get("tab") != "ai" || q.Get("issue") == "" {
-		t.Fatalf("AI card link missing tab/issue: %s", href)
+		start := idx + len(marker)
+		end := strings.Index(body[start:], "\"")
+		if end == -1 {
+			t.Fatalf("AI chip href malformed: %s", body)
+		}
+		href := html.UnescapeString(body[start : start+end])
+		parsed, err := url.Parse(href)
+		if err != nil {
+			t.Fatal(err)
+		}
+		q := parsed.Query()
+		for _, forbidden := range []string{"ns", "pod", "container", "node"} {
+			if q.Get(forbidden) != "" {
+				t.Fatalf("AI card link exposed %q as an input: %s", forbidden, href)
+			}
+		}
+		if q.Get("tab") != "ai" || q.Get("issue") == "" {
+			t.Fatalf("AI card link missing tab/issue: %s", href)
+		}
 	}
 }
 
-// TestInvestigationTabsHideAIWhenDisabled and
+// TestInvestigationTabsShowSetupWhenDisabled and
 // TestInvestigationTabsHideAIForUnsupportedIssueType cover the Evidence
-// page's own AI tab gating.
-func TestInvestigationTabsHideAIWhenDisabled(t *testing.T) {
+// page's AI discovery and issue-support gating.
+func TestInvestigationTabsShowSetupWhenDisabled(t *testing.T) {
 	scan, db := warRoomAICrashFixture("prod", 7)
 	srv := newWarRoomAITestServer([]string{"prod"}, map[string]*clusterScan{"prod": scan}, db, nil)
 	tabs := srv.buildInvestigationTabs("prod", scan, store.IssueCrashLoop, "payments", "payments-0", "", "")
-	if tabs.AIAvailable || tabs.AITabHref != "" {
-		t.Fatalf("AI tab exposed while AI disabled: %+v", tabs)
+	if !tabs.AIAvailable || tabs.AIConfigured || tabs.AITabHref == "" {
+		t.Fatalf("AI setup tab missing while AI disabled: %+v", tabs)
 	}
 	if tabs.EvidenceTabHref == "" {
 		t.Fatal("Evidence tab href missing")
@@ -485,5 +481,138 @@ func TestInvestigationAIRequiresIssueAndKnownCluster(t *testing.T) {
 	srv.newMux().ServeHTTP(rec, req)
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("unknown cluster status = %d", rec.Code)
+	}
+}
+
+func TestInvestigationAIContainerLinks(t *testing.T) {
+	for _, names := range [][]string{{"main", "sidecar"}, {"sidecar", "main"}} {
+		scan := &clusterScan{secAudit: &models.SecurityAudit{}}
+		for _, name := range names {
+			scan.secAudit.Issues = append(scan.secAudit.Issues, models.SecurityIssue{
+				Type: store.IssuePrivilegedContainer, Severity: "critical", Namespace: "apps", Name: "api-0/" + name,
+			})
+		}
+		db := warRoomAITestStore{}
+		srv := newWarRoomAITestServer([]string{"prod"}, map[string]*clusterScan{"prod": scan}, db, &fakeWarRoomAIProvider{})
+		selections := collectWarRoomAISelections(scan, "prod", db)
+		if len(selections) != 2 {
+			t.Fatalf("expected two container selections, got %d", len(selections))
+		}
+		issues := []warRoomIssue{selections[0].Issue, selections[1].Issue}
+		enrichWarRoomAIHrefs(issues, scan, "prod", db)
+		if issues[0].AIHref == issues[1].AIHref {
+			t.Fatal("different containers share an AI link")
+		}
+		for _, issue := range issues {
+			aiURL, _ := url.Parse(issue.AIHref)
+			selected, err := findWarRoomAISelection(scan, "prod", db, aiURL.Query().Get("issue"))
+			if err != nil || selected.Issue.Container != issue.Container {
+				t.Fatalf("card selected wrong container: %+v, %v", selected, err)
+			}
+			for _, href := range []string{warRoomIssueURL(issue, "prod"), investigationEvidenceHref(issue, "prod", "warroom")} {
+				evidenceURL, err := url.Parse(href)
+				if err != nil {
+					t.Fatal(err)
+				}
+				q := evidenceURL.Query()
+				if q.Get("pod") != "api-0/"+issue.Container || q.Get("tab") != "" {
+					t.Fatalf("Evidence URL lost container or changed default tab: %s", href)
+				}
+				tabs := srv.buildInvestigationTabs("prod", scan, q.Get("type"), q.Get("ns"), q.Get("pod"), "", "warroom")
+				if !tabs.AIAvailable || tabs.AITabHref != issue.AIHref {
+					t.Fatalf("Evidence-to-AI round trip selected wrong container: %+v", tabs)
+				}
+			}
+		}
+		for _, pod := range []string{"api-0", "api-0/missing"} {
+			tabs := srv.buildInvestigationTabs("prod", scan, store.IssuePrivilegedContainer, "apps", pod, "", "")
+			if tabs.AIAvailable || tabs.AITabHref != "" {
+				t.Fatalf("ambiguous or nonexistent container exposed AI link: %+v", tabs)
+			}
+		}
+		scan.secAudit.Issues = scan.secAudit.Issues[:1]
+		tabs := srv.buildInvestigationTabs("prod", scan, store.IssuePrivilegedContainer, "apps", "api-0", "", "")
+		if !tabs.AIAvailable {
+			t.Fatal("unambiguous legacy URL should retain AI link")
+		}
+	}
+}
+
+func TestInvestigationAIDisabledDeepLink(t *testing.T) {
+	for _, missing := range []string{"provider", "runtime", "cache"} {
+		t.Run(missing, func(t *testing.T) {
+			scan, db := warRoomAICrashFixture("prod", 7)
+			provider := &fakeWarRoomAIProvider{response: testWarRoomAIResponse()}
+			srv := newWarRoomAITestServer([]string{"prod"}, map[string]*clusterScan{"prod": scan}, db, provider)
+			selector := collectWarRoomAISelections(scan, "prod", db)[0].Selector
+			switch missing {
+			case "provider":
+				srv.aiProvider = nil
+			case "runtime":
+				srv.aiRuntime = nil
+			case "cache":
+				srv.aiRuntime.cache = nil
+			}
+			srv.kubeClientFor = func(string, *apiCounters) (kubernetes.Interface, error) {
+				t.Fatal("disabled AI must not read Kubernetes")
+				return nil, errors.New("unexpected Kubernetes read")
+			}
+			request := httptest.NewRequest(http.MethodGet, investigationAIHref("prod", selector, "warroom"), nil)
+			request.SetBasicAuth("operator", "test-password")
+			recorder := httptest.NewRecorder()
+			srv.newMux().ServeHTTP(recorder, request)
+			if recorder.Code != http.StatusOK {
+				t.Fatalf("disabled AI deep link returned %d: %s", recorder.Code, recorder.Body.String())
+			}
+			body := recorder.Body.String()
+			for _, want := range []string{"NOT_CONFIGURED", "Configure AI analysis", "ai.enabled", "existing Kubernetes Secret"} {
+				if !strings.Contains(body, want) {
+					t.Errorf("disabled AI page missing %q", want)
+				}
+			}
+			if strings.Contains(body, "id=\"ai-generate\"") {
+				t.Fatal("disabled AI page exposed generation control")
+			}
+			data := srv.buildInvestigationAIPageData(scan, "prod", selector, "warroom")
+			if !data.AIAvailable || data.AIConfigured || data.AITabHref == "" || data.CanGenerate {
+				t.Fatalf("disabled AI builder state is unsafe: %+v", data.investigationTabs)
+			}
+			if provider.callCount() != 0 {
+				t.Fatal("disabled AI invoked provider")
+			}
+		})
+	}
+}
+
+func TestSettingsShowsSafeAIConfigurationStatus(t *testing.T) {
+	scan, db := warRoomAICrashFixture("prod", 7)
+	provider := &fakeWarRoomAIProvider{response: testWarRoomAIResponse()}
+	srv := newWarRoomAITestServer([]string{"prod"}, map[string]*clusterScan{"prod": scan}, db, provider)
+	srv.aiRuntime.providerName = "internal<script>"
+	srv.aiRuntime.model = "granite\"model"
+
+	request := httptest.NewRequest(http.MethodGet, "/settings?cluster=prod", nil)
+	recorder := httptest.NewRecorder()
+	srv.handleSettingsPage(recorder, request)
+	body := recorder.Body.String()
+	for _, want := range []string{"AI analysis", "Enabled", "internal&lt;script&gt;", "granite&#34;model", "sanitized evidence"} {
+		if !strings.Contains(body, want) {
+			t.Errorf("configured Settings page missing %q", want)
+		}
+	}
+	for _, forbidden := range []string{"OPSCART_AI_API_KEY", "OPSCART_AI_BASE_URL", "existingSecret"} {
+		if strings.Contains(body, forbidden) {
+			t.Errorf("Settings page exposed deployment detail %q", forbidden)
+		}
+	}
+
+	srv.aiProvider = nil
+	recorder = httptest.NewRecorder()
+	srv.handleSettingsPage(recorder, request)
+	body = recorder.Body.String()
+	for _, want := range []string{"Disabled", "ai.enabled=true", "existing Kubernetes Secret"} {
+		if !strings.Contains(body, want) {
+			t.Errorf("disabled Settings page missing %q", want)
+		}
 	}
 }

@@ -18,12 +18,17 @@
 .inv-tab{display:inline-flex;align-items:center;padding:.6rem 1rem;color:var(--text-muted);font-size:.85rem;font-weight:600;text-decoration:none;border-bottom:2px solid transparent;margin-bottom:-1px}
 .inv-tab:hover{color:var(--text)}
 .inv-tab.active{color:var(--primary-light);border-bottom-color:var(--primary-light)}
+.inv-tab-state{margin-left:.25rem;border-radius:999px;padding:.12rem .38rem;background:rgba(148,163,184,.12);color:var(--text-muted);font-size:.58rem;text-transform:uppercase;letter-spacing:.05em}
+.ai-setup{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius-sm);padding:1.25rem;margin-bottom:1.5rem;box-shadow:var(--inv-shadow-sm)}
+.ai-setup h2{font-size:1rem;margin-bottom:.45rem}.ai-setup p{max-width:760px;color:var(--text-secondary);font-size:.84rem;line-height:1.6}
+.ai-setup-list{margin:.9rem 0 .9rem 1.2rem;color:var(--text-secondary);font-size:.82rem;line-height:1.7}
+.ai-setup code{color:var(--primary-light);font-size:.8rem}.ai-setup a{color:var(--primary-light);font-size:.8rem;font-weight:600;text-decoration:none}.ai-setup a:hover{text-decoration:underline}
 .ai-disclaimer{display:flex;align-items:flex-start;gap:.75rem;background:rgba(245,158,11,.06);border:1px solid rgba(245,158,11,.32);border-radius:var(--radius-sm);padding:.9rem 1.1rem;margin-bottom:1.5rem;font-size:.82rem;color:var(--text)}
 .ai-disclaimer svg{flex-shrink:0;color:var(--warning);margin-top:2px}
 .ai-status-row{display:flex;align-items:center;gap:.75rem;flex-wrap:wrap;margin-bottom:1rem}
 .ai-status{display:inline-flex;align-items:center;border-radius:999px;padding:.28rem .7rem;font-size:.68rem;font-weight:750;text-transform:uppercase;letter-spacing:.06em;background:rgba(99,102,241,.12);color:var(--primary-light)}
 .ai-status.stale{background:rgba(245,158,11,.14);color:#fbbf24}
-.ai-status.error,.ai-status.not-generated{background:rgba(100,116,139,.14);color:#94a3b8}
+.ai-status.error,.ai-status.not-generated,.ai-status.not-configured{background:rgba(100,116,139,.14);color:#94a3b8}
 .ai-status.generating{background:rgba(56,189,248,.14);color:#38bdf8}
 .ai-status.generated{background:rgba(34,197,94,.14);color:#4ade80}
 .ai-message{color:var(--text-muted);font-size:.82rem;line-height:1.5}
@@ -73,15 +78,30 @@
 
   {{template "investigation-tabs" .}}
 
+  {{if .AIConfigured}}
   <div class="ai-disclaimer">
     <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/><path d="M12 8v4M12 16h.01"/></svg>
     <div>AI-generated hypothesis. Verify it against cluster evidence before acting. OpsCart did not execute any action.</div>
   </div>
+  {{end}}
 
   <div class="ai-status-row">
     <span class="ai-status {{.StatusClass}}" id="ai-status">{{.Status}}</span>
     <span class="ai-message" id="ai-message">{{if eq .Status "STALE"}}{{.StaleReason}}{{else}}{{.Message}}{{end}}</span>
   </div>
+
+  {{if not .AIConfigured}}
+  <section class="ai-setup" aria-labelledby="ai-setup-title">
+    <h2 id="ai-setup-title">Configure AI analysis</h2>
+    <p>A platform administrator can enable an approved AI provider through the OpsCart deployment configuration. Credentials stay in an existing Kubernetes Secret.</p>
+    <ol class="ai-setup-list">
+      <li>Create or select a Secret containing the provider API key.</li>
+      <li>Set <code>ai.enabled</code>, <code>ai.provider</code>, <code>ai.baseURL</code>, <code>ai.model</code>, <code>ai.existingSecret</code>, and <code>ai.apiKeyKey</code> in Helm values.</li>
+      <li>Upgrade the release and wait for the dashboard rollout to complete.</li>
+    </ol>
+    <a href="{{.SettingsHref}}">View AI configuration status →</a>
+  </section>
+  {{end}}
 
   <section class="ai-scope-card">
     {{if .NodeScoped}}
@@ -187,6 +207,7 @@
       status.textContent='ERROR';
       status.className='ai-status error';
       error.textContent=err.message||'AI analysis request failed.';
+      message.textContent=error.textContent;
       error.hidden=false;
       button.disabled=false;
       button.textContent=regenerate?'Regenerate analysis':'Generate analysis';

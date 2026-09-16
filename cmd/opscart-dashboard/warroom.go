@@ -64,9 +64,10 @@ type warRoomIssue struct {
 	HasPlacement       bool      `json:"has_placement,omitempty"`
 	ConditionStatus    string    `json:"condition_status,omitempty"`
 	// AIHref links to this issue's AI Analysis tab on the Investigation page.
-	// Populated only when AI is enabled and this issue type is supported; it
-	// is server-rendered UI state, never part of the War Room JSON API.
-	AIHref string `json:"-"`
+	// Supported issues retain this link when AI is disabled so the page can
+	// explain setup; it is never part of the War Room JSON API.
+	AIHref       string `json:"-"`
+	AIConfigured bool   `json:"-"`
 }
 
 type warRoomPageData struct {
@@ -389,19 +390,20 @@ func renderWarRoomPageWithStore(scan *clusterScan, activeCtx string, clusterList
 	return renderWarRoomPageWithAI(scan, activeCtx, clusterList, query, db, false)
 }
 
-// renderWarRoomPageWithAI additionally decorates each issue with a compact
-// AI Analysis deep link when aiEnabled is true. It never captures or hashes
-// per-issue evidence to do so — collectWarRoomAISelections only enriches
-// identity and computes the opaque selector, the same cheap step already
-// needed to run the AI issue picker before its removal from this page.
-func renderWarRoomPageWithAI(scan *clusterScan, activeCtx string, clusterList []string, query url.Values, db store.Store, aiEnabled bool) string {
+// renderWarRoomPageWithAI decorates each supported issue with a compact AI
+// link. When AI is disabled, the link leads to setup guidance. It never
+// captures or hashes per-issue evidence to do so.
+func renderWarRoomPageWithAI(scan *clusterScan, activeCtx string, clusterList []string, query url.Values, db store.Store, aiConfigured bool) string {
 	allIssues := collectWarRoomIssuesWithStore(scan, 0, db, activeCtx)
 	for i := range allIssues {
 		enrichWarRoomIdentity(&allIssues[i], scan)
 	}
 	enrichWarRoomIncidentFirstSeen(allIssues, db, activeCtx)
-	if aiEnabled {
-		enrichWarRoomAIHrefs(allIssues, scan, activeCtx, db)
+	// Supported issues remain discoverable when AI is disabled; their links
+	// lead to a read-only setup page with no generation controls.
+	enrichWarRoomAIHrefs(allIssues, scan, activeCtx, db)
+	for i := range allIssues {
+		allIssues[i].AIConfigured = aiConfigured
 	}
 	stats := warRoomStatsFor(allIssues)
 	qText := strings.TrimSpace(query.Get("q"))
@@ -496,7 +498,7 @@ func enrichWarRoomAIHrefs(issues []warRoomIssue, scan *clusterScan, cluster stri
 // warRoomAIIssueKey identifies an issue for AI-selection matching purposes,
 // independent of display-only fields such as Message or Classification.
 func warRoomAIIssueKey(issue warRoomIssue) string {
-	return fmt.Sprintf("%t\x00%s\x00%s\x00%s", issue.IsNode, issue.Namespace, issue.Resource, store.CanonicalIssueType(issue.Type))
+	return fmt.Sprintf("%t\x00%s\x00%s\x00%s\x00%s", issue.IsNode, issue.Namespace, issue.Resource, store.CanonicalIssueType(issue.Type), issue.Container)
 }
 
 func enrichWarRoomIncidentFirstSeen(issues []warRoomIssue, db store.Store, cluster string) {
@@ -880,9 +882,13 @@ func renderWarRoomCard(issue warRoomIssue, activeCtx string) string {
 			investigationHref, label))
 	}
 	if issue.AIHref != "" {
+		label, title := "AI analysis", "Open AI analysis for this issue"
+		if !issue.AIConfigured {
+			label, title = "AI setup", "AI analysis requires deployment configuration"
+		}
 		sb.WriteString(fmt.Sprintf(
-			`<a class="ai-chip" href="%s" title="AI analysis available for this issue"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round" style="vertical-align:-2px"><path d="M12 3 L14.1 9.9 L21 12 L14.1 14.1 L12 21 L9.9 14.1 L3 12 L9.9 9.9 Z"/></svg> AI analysis</a>`,
-			template.HTMLEscapeString(issue.AIHref)))
+			`<a class="ai-chip" href="%s" title="%s"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round" style="vertical-align:-2px"><path d="M12 3 L14.1 9.9 L21 12 L14.1 14.1 L12 21 L9.9 14.1 L3 12 L9.9 9.9 Z"/></svg> %s</a>`,
+			template.HTMLEscapeString(issue.AIHref), title, label))
 	}
 	sb.WriteString(`</footer></article>`)
 	return sb.String()
@@ -896,7 +902,11 @@ func warRoomIssueURL(issue warRoomIssue, activeCtx string) string {
 		}
 		return "/investigate?" + values.Encode()
 	}
-	return investigateURL(issue.Namespace, issue.Resource, issue.Type, activeCtx)
+	pod := issue.Resource
+	if issue.Container != "" {
+		pod += "/" + issue.Container
+	}
+	return investigateURL(issue.Namespace, pod, issue.Type, activeCtx)
 }
 
 // ── War Room page helpers ──────────────────────────────────────────────────────

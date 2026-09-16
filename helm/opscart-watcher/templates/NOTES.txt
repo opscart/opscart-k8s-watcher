@@ -19,3 +19,19 @@
   WARNING: persistence.enabled=false — incident history and timelines
   will be LOST on every pod restart.
 {{- end }}
+
+{{- if .Values.ai.enabled }}
+  AI analysis is ENABLED for manual, read-only generation.
+  Provider: {{ .Values.ai.provider }}
+  Model: {{ .Values.ai.model }}
+  Credential source: existing Secret "{{ .Values.ai.existingSecret }}", key "{{ .Values.ai.apiKeyKey }}"
+  Confirm rollout:
+    kubectl rollout status deployment/{{ include "opscart-watcher.fullname" . }} -n {{ .Release.Namespace }}
+{{- else }}
+  AI analysis is DISABLED by default.
+  To enable it, create a provider credential Secret and set:
+    ai.enabled=true
+    ai.provider, ai.baseURL, ai.model
+    ai.existingSecret, ai.apiKeyKey
+  See helm/opscart-watcher/README.md for the complete setup.
+{{- end }}

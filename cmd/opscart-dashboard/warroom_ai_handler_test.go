@@ -101,7 +101,7 @@ func warRoomAIPost(t *testing.T, handler http.Handler, target, selector, origin 
 	return recorder
 }
 
-func TestWarRoomAIIsDisabledAndManualOnly(t *testing.T) {
+func TestWarRoomAIIsDiscoverableAndManualOnly(t *testing.T) {
 	scan, db := warRoomAICrashFixture("prod", 7)
 	disabled := newWarRoomAITestServer([]string{"prod"}, map[string]*clusterScan{"prod": scan}, db, nil)
 
@@ -112,8 +112,17 @@ func TestWarRoomAIIsDisabledAndManualOnly(t *testing.T) {
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("disabled page status = %d, body=%s", recorder.Code, recorder.Body.String())
 	}
-	if strings.Contains(recorder.Body.String(), `class="ai-chip"`) {
-		t.Fatal("AI link rendered while AI was disabled")
+	if !strings.Contains(recorder.Body.String(), `class="ai-chip"`) {
+		t.Fatal("AI setup link missing while AI was disabled")
+	}
+	if strings.Contains(recorder.Body.String(), `id="ai-generate"`) {
+		t.Fatal("War Room page rendered a generation control while AI was disabled")
+	}
+
+	selector := collectWarRoomAISelections(scan, "prod", db)[0].Selector
+	disabledPost := warRoomAIPost(t, disabled.newMux(), "/api/warroom/ai-analysis?cluster=prod", selector, "http://example.com", true)
+	if disabledPost.Code != http.StatusServiceUnavailable {
+		t.Fatalf("disabled generation status=%d, want %d", disabledPost.Code, http.StatusServiceUnavailable)
 	}
 
 	provider := &fakeWarRoomAIProvider{response: testWarRoomAIResponse()}
@@ -130,7 +139,6 @@ func TestWarRoomAIIsDisabledAndManualOnly(t *testing.T) {
 	if strings.Contains(recorder.Body.String(), `id="ai-generate"`) {
 		t.Fatal("War Room page rendered a generation control")
 	}
-	selector := collectWarRoomAISelections(scan, "prod", db)[0].Selector
 	unauthorized := warRoomAIPost(t, enabled.newMux(), "/api/warroom/ai-analysis?cluster=prod", selector, "http://example.com", false)
 	if unauthorized.Code != http.StatusUnauthorized || provider.callCount() != 0 {
 		t.Fatalf("unauthenticated generation status=%d calls=%d", unauthorized.Code, provider.callCount())

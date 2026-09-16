@@ -26,7 +26,7 @@ type investigationAIPageData struct {
 	Selector string
 	Endpoint string
 
-	// Status is one of: NOT_GENERATED, GENERATING, GENERATED, STALE, ERROR.
+	// Status is one of: NOT_CONFIGURED, NOT_GENERATED, GENERATING, GENERATED, STALE, ERROR.
 	// StatusClass is its lowercase, hyphenated CSS-class form.
 	Status      string
 	StatusClass string
@@ -82,16 +82,30 @@ func (srv *server) buildInvestigationTabs(cluster string, scan *clusterScan, iss
 		issue.Container = ""
 	}
 
-	tabs := investigationTabs{ActiveTab: "evidence", EvidenceTabHref: investigationEvidenceHref(issue, cluster, from)}
-	if srv.aiProvider == nil || srv.aiRuntime == nil || srv.aiRuntime.cache == nil {
-		return tabs
+	configured := srv.aiProvider != nil && srv.aiRuntime != nil && srv.aiRuntime.cache != nil
+	tabs := investigationTabs{
+		ActiveTab:       "evidence",
+		EvidenceTabHref: investigationEvidenceHref(issue, cluster, from),
+		AIConfigured:    configured,
 	}
+	selector := ""
 	for _, selection := range collectWarRoomAISelections(scan, cluster, srv.db) {
-		if warRoomAIIssueKey(selection.Issue) == warRoomAIIssueKey(issue) {
-			tabs.AIAvailable = true
-			tabs.AITabHref = investigationAIHref(cluster, selection.Selector, from)
-			break
+		candidate := selection.Issue
+		// Legacy pod-only links may resolve only when the selection is unique.
+		if issue.Container == "" {
+			candidate.Container = ""
 		}
+		if warRoomAIIssueKey(candidate) != warRoomAIIssueKey(issue) {
+			continue
+		}
+		if selector != "" {
+			return tabs
+		}
+		selector = selection.Selector
+	}
+	if selector != "" {
+		tabs.AIAvailable = true
+		tabs.AITabHref = investigationAIHref(cluster, selector, from)
 	}
 	return tabs
 }
@@ -114,7 +128,11 @@ func investigationEvidenceHref(issue warRoomIssue, cluster, from string) string 
 		values.Set("ns", issue.Namespace)
 	default:
 		values.Set("ns", issue.Namespace)
-		values.Set("pod", issue.Resource)
+		pod := issue.Resource
+		if issue.Container != "" {
+			pod += "/" + issue.Container
+		}
+		values.Set("pod", pod)
 	}
 	return "/investigate?" + values.Encode()
 }
@@ -162,9 +180,16 @@ func (srv *server) handleInvestigationAIPage(w http.ResponseWriter, r *http.Requ
 }
 
 func (srv *server) buildInvestigationAIPageData(scan *clusterScan, cluster, selector, from string) investigationAIPageData {
+	enabled := srv.aiProvider != nil && srv.aiRuntime != nil && srv.aiRuntime.cache != nil
+	tabs := investigationTabs{
+		ActiveTab:    "ai",
+		AIAvailable:  true,
+		AIConfigured: enabled,
+		AITabHref:    investigationAIHref(cluster, selector, from),
+	}
 	data := investigationAIPageData{
 		investigationSidebarFields: srv.buildInvestigationSidebar(cluster, scan, from),
-		investigationTabs:          investigationTabs{ActiveTab: "ai", AIAvailable: true, AITabHref: investigationAIHref(cluster, selector, from)},
+		investigationTabs:          tabs,
 		Selector:                   selector,
 		Endpoint:                   warRoomAIEndpoint(cluster),
 		ScannedAtMs:                time.Now().UnixMilli(),
@@ -179,7 +204,7 @@ func (srv *server) buildInvestigationAIPageData(scan *clusterScan, cluster, sele
 		data.EvidenceTabHref = data.BackURL
 	}
 
-	if srv.aiRuntime != nil && srv.aiRuntime.cache != nil && srv.aiRuntime.cache.isInFlight(cluster, selector) {
+	if enabled && srv.aiRuntime.cache.isInFlight(cluster, selector) {
 		data.Status = "GENERATING"
 		data.CanGenerate = false
 		data.Message = "Generating an analysis from the captured evidence. No cluster action will be performed."
@@ -195,8 +220,13 @@ func (srv *server) buildInvestigationAIPageData(scan *clusterScan, cluster, sele
 // against the cached generation (if any) to decide GENERATED vs. STALE.
 func (srv *server) resolveInvestigationAIState(data investigationAIPageData, scan *clusterScan, cluster, selector, from string) investigationAIPageData {
 	if srv.aiProvider == nil || srv.aiRuntime == nil || srv.aiRuntime.cache == nil {
-		data.Status = "NOT_GENERATED"
-		data.Message = "AI analysis is not configured for this dashboard."
+		data.Status = "NOT_CONFIGURED"
+		data.Message = "AI analysis is disabled for this OpsCart installation."
+		selection, err := findWarRoomAISelection(scan, cluster, srv.db, selector)
+		if err == nil {
+			data.EvidenceTabHref = investigationEvidenceHref(selection.Issue, cluster, from)
+			populateInvestigationAIIdentity(&data, selection.Issue)
+		}
 		return data
 	}
 
