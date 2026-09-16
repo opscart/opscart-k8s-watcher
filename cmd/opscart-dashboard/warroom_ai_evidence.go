@@ -44,6 +44,22 @@ type warRoomAICapture struct {
 	Hash       string
 }
 
+type warRoomAIEvidenceSet struct {
+	items       []aianalysis.EvidenceItem
+	stableItems []aianalysis.EvidenceItem
+}
+
+func (set *warRoomAIEvidenceSet) append(item aianalysis.EvidenceItem) {
+	set.items = append(set.items, item)
+	set.stableItems = append(set.stableItems, item)
+}
+
+func (set *warRoomAIEvidenceSet) appendStable(item aianalysis.EvidenceItem, stableDetails string) {
+	set.items = append(set.items, item)
+	item.Details = stableDetails
+	set.stableItems = append(set.stableItems, item)
+}
+
 func collectWarRoomAISelections(scan *clusterScan, cluster string, db store.Store) []warRoomAISelection {
 	issues := collectWarRoomIssuesWithStore(scan, 0, db, cluster)
 	selections := make([]warRoomAISelection, 0, len(issues))
@@ -92,7 +108,7 @@ func captureWarRoomAIEvidence(scan *clusterScan, cluster string, db store.Store,
 		return warRoomAICapture{}, errWarRoomAIHistoryUnavailable
 	}
 
-	evidence, err := warRoomAIEvidenceItems(scan, selection.Issue)
+	evidence, err := warRoomAIEvidenceForIssue(scan, selection.Issue)
 	if err != nil {
 		return warRoomAICapture{}, err
 	}
@@ -105,13 +121,18 @@ func captureWarRoomAIEvidence(scan *clusterScan, cluster string, db store.Store,
 		Severity:      selection.Issue.Severity,
 		FirstDetected: incident.FirstSeen,
 		ReopenCount:   incident.ReopenCount,
-		Evidence:      evidence,
+		Evidence:      evidence.items,
 	}
-	encoded, err := validateAndEncodeWarRoomAIRequest(request)
+	if _, err := validateAndEncodeWarRoomAIRequest(request); err != nil {
+		return warRoomAICapture{}, err
+	}
+	stableRequest := request
+	stableRequest.Evidence = evidence.stableItems
+	stableEncoded, err := validateAndEncodeWarRoomAIRequest(stableRequest)
 	if err != nil {
 		return warRoomAICapture{}, err
 	}
-	digest := sha256.Sum256(encoded)
+	digest := sha256.Sum256(stableEncoded)
 	return warRoomAICapture{
 		Selection: selection, Request: request, CapturedAt: capturedAt,
 		Hash: hex.EncodeToString(digest[:]),
@@ -138,6 +159,11 @@ func warRoomAIIncident(db store.Store, cluster, fingerprint string, issue warRoo
 }
 
 func warRoomAIEvidenceItems(scan *clusterScan, issue warRoomIssue) ([]aianalysis.EvidenceItem, error) {
+	evidence, err := warRoomAIEvidenceForIssue(scan, issue)
+	return evidence.items, err
+}
+
+func warRoomAIEvidenceForIssue(scan *clusterScan, issue warRoomIssue) (warRoomAIEvidenceSet, error) {
 	identityDetails := fmt.Sprintf("resource_kind=%s; resource_name=%s", issue.WorkloadKind, issue.WorkloadName)
 	if !issue.IsNode && !isNamespaceFinding(issue) {
 		identityDetails += "; focus_pod=" + issue.Resource
@@ -145,9 +171,10 @@ func warRoomAIEvidenceItems(scan *clusterScan, issue warRoomIssue) ([]aianalysis
 	if issue.Container != "" {
 		identityDetails += "; container=" + issue.Container
 	}
-	evidence := []aianalysis.EvidenceItem{{
+	evidence := warRoomAIEvidenceSet{}
+	evidence.append(aianalysis.EvidenceItem{
 		Type: aianalysis.EvidenceObservation, Summary: "Selected issue identity", Details: identityDetails,
-	}}
+	})
 
 	canonicalType := store.CanonicalIssueType(issue.Type)
 	switch canonicalType {
@@ -156,10 +183,11 @@ func warRoomAIEvidenceItems(scan *clusterScan, issue warRoomIssue) ([]aianalysis
 		if scan.wasteAudit != nil {
 			for _, pod := range scan.wasteAudit.StalePods {
 				if pod.Kind == analyzer.StalePodZombie && pod.Namespace == issue.Namespace && pod.Name == issue.Resource && zombieTypeForStatus(pod.Status) == canonicalType {
-					evidence = append(evidence, aianalysis.EvidenceItem{
+					evidence.append(aianalysis.EvidenceItem{
 						Type: aianalysis.EvidenceMetric, Summary: "Observed pod counts",
 						Details: fmt.Sprintf("restart_count=%d; resource_age_days=%d", pod.RestartCount, pod.AgeDays),
 					})
+					appendWarRoomAIPodEvidence(&evidence, scan.aiPodEvidence, issue)
 					return evidence, nil
 				}
 			}
@@ -169,9 +197,10 @@ func warRoomAIEvidenceItems(scan *clusterScan, issue warRoomIssue) ([]aianalysis
 			for _, finding := range scan.secAudit.Issues {
 				pod, container := splitWarRoomContainer(finding.Name)
 				if finding.Type == store.IssuePrivilegedContainer && finding.Namespace == issue.Namespace && pod == issue.Resource && container == issue.Container {
-					evidence = append(evidence, aianalysis.EvidenceItem{
+					evidence.append(aianalysis.EvidenceItem{
 						Type: aianalysis.EvidenceConfiguration, Summary: "Privileged container observed", Details: "privileged=true",
 					})
+					appendWarRoomAIPodEvidence(&evidence, scan.aiPodEvidence, issue)
 					return evidence, nil
 				}
 			}
@@ -180,7 +209,7 @@ func warRoomAIEvidenceItems(scan *clusterScan, issue warRoomIssue) ([]aianalysis
 		if scan.netAudit != nil {
 			for _, namespace := range scan.netAudit.UnprotectedNamespaces {
 				if namespace.Name == issue.Namespace && namespace.RiskLevel == "HIGH" {
-					evidence = append(evidence, aianalysis.EvidenceItem{
+					evidence.append(aianalysis.EvidenceItem{
 						Type: aianalysis.EvidenceConfiguration, Summary: "NetworkPolicy coverage observed",
 						Details: fmt.Sprintf("pod_count=%d; policy_count=%d; coverage_gap_pod_count=%d; ingress_restricted=%t; egress_restricted=%t; default_deny_ingress=%t; default_deny_egress=%t",
 							namespace.PodCount, namespace.PolicyCount, namespace.CoverageGapPodCount,
@@ -195,7 +224,7 @@ func warRoomAIEvidenceItems(scan *clusterScan, issue warRoomIssue) ([]aianalysis
 		if scan.wasteAudit != nil {
 			for _, namespace := range scan.wasteAudit.AbandonedNamespaces {
 				if namespace.Name == issue.Namespace {
-					evidence = append(evidence, aianalysis.EvidenceItem{
+					evidence.append(aianalysis.EvidenceItem{
 						Type: aianalysis.EvidenceMetric, Summary: "Namespace activity counts observed",
 						Details: fmt.Sprintf("namespace_age_days=%d; pod_count=%d; all_pods_idle=%t", namespace.AgeDays, namespace.PodCount, namespace.AllPodsIdle),
 					})
@@ -218,14 +247,14 @@ func warRoomAIEvidenceItems(scan *clusterScan, issue warRoomIssue) ([]aianalysis
 				if !finding.LastTransitionTime.IsZero() {
 					details += "; last_transition_time=" + finding.LastTransitionTime.UTC().Format(time.RFC3339)
 				}
-				evidence = append(evidence, aianalysis.EvidenceItem{
+				evidence.append(aianalysis.EvidenceItem{
 					Type: aianalysis.EvidenceObservation, Summary: "Node condition observed", Details: details,
 				})
 				return evidence, nil
 			}
 		}
 	}
-	return nil, errWarRoomAISourceUnavailable
+	return warRoomAIEvidenceSet{}, errWarRoomAISourceUnavailable
 }
 
 func validateAndEncodeWarRoomAIRequest(request aianalysis.AnalysisRequest) ([]byte, error) {

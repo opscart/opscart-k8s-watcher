@@ -132,6 +132,11 @@ type clusterScan struct {
 	// computed once in buildClusterScan from this same snapshot's Pods.
 	namespacePodCounts map[string]int
 
+	// aiPodEvidence is the small, sanitized pod/container/Warning Event view
+	// derived once from this pass's ClusterSnapshot. It intentionally retains
+	// no Kubernetes objects and is used only for manual War Room AI requests.
+	aiPodEvidence *warRoomAIPodEvidenceIndex
+
 	// nodeOptimization is the read-only consolidation-simulation
 	// recommendation contract (see pkg/analyzer/node_optimization_recommendation.go),
 	// built from this same pass's NodeInfo/Pod snapshots and report — not a

@@ -15,7 +15,7 @@ const (
 	warRoomAICacheTTL      = 15 * time.Minute
 	// Bump this whenever the evidence mapping, provider instructions, or
 	// structured response schema changes so older results cannot be reused.
-	warRoomAIContractVersion = "warroom-ai-v1"
+	warRoomAIContractVersion = "warroom-ai-v2"
 )
 
 type warRoomAIRuntime struct {
