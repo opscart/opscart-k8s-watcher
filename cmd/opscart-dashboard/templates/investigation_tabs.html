@@ -1,0 +1,6 @@
+{{define "investigation-tabs"}}
+<nav class="inv-tabs" aria-label="Investigation view">
+  <a class="inv-tab{{if eq .ActiveTab "evidence"}} active{{end}}"{{if eq .ActiveTab "evidence"}} aria-current="page"{{end}} href="{{.EvidenceTabHref}}">Evidence</a>
+  {{if .AIAvailable}}<a class="inv-tab{{if eq .ActiveTab "ai"}} active{{end}}"{{if eq .ActiveTab "ai"}} aria-current="page"{{end}} href="{{.AITabHref}}">✨ AI Analysis</a>{{end}}
+</nav>
+{{end}}

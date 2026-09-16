@@ -15,27 +15,6 @@ import (
 
 const warRoomAIMaxFormBytes = 2 << 10
 
-type warRoomAIOption struct {
-	Selector string
-	Label    string
-}
-
-type warRoomAIPageData struct {
-	Enabled          bool
-	State            string
-	Message          string
-	Endpoint         string
-	Options          []warRoomAIOption
-	SelectedSelector string
-	SelectedIdentity string
-	EvidenceCaptured string
-	GeneratedAt      string
-	ConfidenceClass  string
-	CanGenerate      bool
-	Regenerate       bool
-	Result           *aianalysis.AnalysisResponse
-}
-
 type warRoomAIAPIResponse struct {
 	Status  string `json:"status"`
 	Message string `json:"message,omitempty"`
@@ -55,83 +34,6 @@ func (srv *server) warRoomCluster(r *http.Request) (string, bool) {
 		}
 	}
 	return "", false
-}
-
-func (srv *server) buildWarRoomAIPageData(scan *clusterScan, cluster, selector string) warRoomAIPageData {
-	data := warRoomAIPageData{State: "unavailable", Message: "AI analysis is not configured for this dashboard."}
-	if srv.aiProvider == nil || srv.aiRuntime == nil || srv.aiRuntime.cache == nil {
-		return data
-	}
-
-	data.Enabled = true
-	data.Endpoint = warRoomAIEndpoint(cluster)
-	selections := collectWarRoomAISelections(scan, cluster, srv.db)
-	for _, selection := range selections {
-		data.Options = append(data.Options, warRoomAIOption{Selector: selection.Selector, Label: selection.Identity})
-	}
-	if selector == "" {
-		if len(selections) == 0 {
-			data.Message = "No supported active issue is available for analysis."
-			return data
-		}
-		data.State = "ready"
-		data.Message = "Select an active issue to generate an evidence-bound analysis."
-		return data
-	}
-
-	data.SelectedSelector = selector
-	selection, err := findWarRoomAISelection(scan, cluster, srv.db, selector)
-	if err != nil {
-		if entry, ok := srv.aiRuntime.cache.latest(cluster, selector); ok {
-			data.Options = append(data.Options, warRoomAIOption{Selector: selector, Label: entry.IssueIdentity + " (no longer active)"})
-			applyWarRoomAIEntry(&data, entry, "stale", "This result is stale because the selected issue is no longer active.")
-			return data
-		}
-		data.Message = "The selected issue is no longer active or is not supported."
-		return data
-	}
-	data.SelectedIdentity = selection.Identity
-
-	capture, err := captureWarRoomAIEvidence(scan, cluster, srv.db, selection)
-	if err != nil {
-		if entry, ok := srv.aiRuntime.cache.latest(cluster, selector); ok {
-			applyWarRoomAIEntry(&data, entry, "stale", "This result is stale because current evidence is unavailable.")
-			return data
-		}
-		data.Message = warRoomAIUnavailableMessage(err)
-		return data
-	}
-	data.EvidenceCaptured = formatWarRoomAITime(capture.CapturedAt)
-
-	entry, found, current := srv.aiRuntime.cache.get(cluster, selector, capture.Hash, srv.aiRuntime.key())
-	if found && current {
-		applyWarRoomAIEntry(&data, entry, "complete", "Analysis generated from the current sanitized evidence.")
-		data.CanGenerate = true
-		data.Regenerate = true
-		return data
-	}
-	if found {
-		applyWarRoomAIEntry(&data, entry, "stale", "New evidence is available. Regenerate to analyze the latest observations.")
-		data.CanGenerate = true
-		data.Regenerate = true
-		return data
-	}
-
-	data.State = "ready"
-	data.Message = "Ready to analyze the selected issue using the current sanitized evidence."
-	data.CanGenerate = true
-	return data
-}
-
-func applyWarRoomAIEntry(data *warRoomAIPageData, entry warRoomAICacheEntry, state, message string) {
-	response := cloneAnalysisResponse(entry.Response)
-	data.State = state
-	data.Message = message
-	data.SelectedIdentity = entry.IssueIdentity
-	data.EvidenceCaptured = formatWarRoomAITime(entry.EvidenceCaptured)
-	data.GeneratedAt = formatWarRoomAITime(entry.GeneratedAt)
-	data.ConfidenceClass = warRoomAIConfidenceClass(response.Confidence)
-	data.Result = &response
 }
 
 func warRoomAIUnavailableMessage(err error) string {
@@ -268,7 +170,9 @@ func (srv *server) handleWarRoomAIAnalysis(w http.ResponseWriter, r *http.Reques
 	entry := warRoomAICacheEntry{
 		ClusterKey: cluster, Selector: selector, EvidenceHash: capture.Hash,
 		RuntimeKey: srv.aiRuntime.key(), IssueIdentity: selection.Identity,
+		Provider: srv.aiRuntime.providerName, Model: srv.aiRuntime.model,
 		EvidenceCaptured: capture.CapturedAt, GeneratedAt: generatedAt, Response: *response,
+		Evidence: capture.Request.Evidence,
 	}
 	srv.aiRuntime.cache.put(entry)
 

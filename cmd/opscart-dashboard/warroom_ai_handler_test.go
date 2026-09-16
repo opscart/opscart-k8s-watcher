@@ -112,8 +112,8 @@ func TestWarRoomAIIsDisabledAndManualOnly(t *testing.T) {
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("disabled page status = %d, body=%s", recorder.Code, recorder.Body.String())
 	}
-	if strings.Contains(recorder.Body.String(), `id="ai-generate"`) {
-		t.Fatal("generation control rendered while AI was disabled")
+	if strings.Contains(recorder.Body.String(), `class="ai-chip"`) {
+		t.Fatal("AI link rendered while AI was disabled")
 	}
 
 	provider := &fakeWarRoomAIProvider{response: testWarRoomAIResponse()}
@@ -124,6 +124,11 @@ func TestWarRoomAIIsDisabledAndManualOnly(t *testing.T) {
 	enabled.newMux().ServeHTTP(recorder, request)
 	if provider.callCount() != 0 {
 		t.Fatal("War Room GET invoked the provider")
+	}
+	// The War Room page never embeds a generate control itself — generation
+	// only happens from the Investigation page's AI Analysis tab.
+	if strings.Contains(recorder.Body.String(), `id="ai-generate"`) {
+		t.Fatal("War Room page rendered a generation control")
 	}
 	selector := collectWarRoomAISelections(scan, "prod", db)[0].Selector
 	unauthorized := warRoomAIPost(t, enabled.newMux(), "/api/warroom/ai-analysis?cluster=prod", selector, "http://example.com", false)
@@ -290,9 +295,9 @@ func TestWarRoomAIStaleEvidenceRequiresExplicitRegeneration(t *testing.T) {
 	if stale.Code != http.StatusOK || !strings.Contains(stale.Body.String(), `"status":"stale"`) || provider.callCount() != 1 {
 		t.Fatalf("stale request status=%d calls=%d body=%s", stale.Code, provider.callCount(), stale.Body.String())
 	}
-	page := srv.buildWarRoomAIPageData(updated, "prod", selector)
-	if page.State != "stale" || page.EvidenceCaptured != formatWarRoomAITime(scan.report.Timestamp) {
-		t.Fatalf("stale result metadata = state %q captured %q, want original evidence time %q", page.State, page.EvidenceCaptured, formatWarRoomAITime(scan.report.Timestamp))
+	page := srv.buildInvestigationAIPageData(updated, "prod", selector, "")
+	if page.Status != "STALE" || page.EvidenceCaptured != formatWarRoomAITime(scan.report.Timestamp) {
+		t.Fatalf("stale result metadata = status %q captured %q, want original evidence time %q", page.Status, page.EvidenceCaptured, formatWarRoomAITime(scan.report.Timestamp))
 	}
 	regenerated := warRoomAIPost(t, handler, "/api/warroom/ai-analysis?cluster=prod&regenerate=1", selector, "http://example.com", true)
 	if regenerated.Code != http.StatusOK || provider.callCount() != 2 || !strings.Contains(provider.lastRequest().Evidence[1].Details, "restart_count=8") {
@@ -367,33 +372,6 @@ func TestWarRoomAILateResponseIsMarkedStale(t *testing.T) {
 	}
 }
 
-func TestWarRoomAIRendersProviderTextEscaped(t *testing.T) {
-	scan, db := warRoomAICrashFixture("prod", 7)
-	provider := &fakeWarRoomAIProvider{response: testWarRoomAIResponse()}
-	srv := newWarRoomAITestServer([]string{"prod"}, map[string]*clusterScan{"prod": scan}, db, provider)
-	selection := collectWarRoomAISelections(scan, "prod", db)[0]
-	capture, err := captureWarRoomAIEvidence(scan, "prod", db, selection)
-	if err != nil {
-		t.Fatal(err)
-	}
-	response := testWarRoomAIResponse()
-	response.Summary = `<script>alert("provider")</script>`
-	response.LikelyCauses[0].Title = `<img src=x onerror=alert(1)>`
-	srv.aiRuntime.cache.put(warRoomAICacheEntry{
-		ClusterKey: "prod", Selector: selection.Selector, EvidenceHash: capture.Hash,
-		RuntimeKey: srv.aiRuntime.key(), IssueIdentity: selection.Identity,
-		EvidenceCaptured: capture.CapturedAt, GeneratedAt: srv.aiRuntime.cache.now(), Response: *response,
-	})
-	data := srv.buildWarRoomAIPageData(scan, "prod", selection.Selector)
-	body := renderWarRoomPageWithAI(scan, "prod", []string{"prod"}, nil, db, data)
-	if strings.Contains(body, response.Summary) || strings.Contains(body, response.LikelyCauses[0].Title) {
-		t.Fatal("provider-controlled model text rendered as trusted HTML")
-	}
-	if !strings.Contains(body, `&lt;script&gt;alert`) || !strings.Contains(body, `&lt;img src=x onerror=alert(1)&gt;`) {
-		t.Fatalf("escaped model text missing from page: %s", body)
-	}
-}
-
 func TestWarRoomAIProviderErrorsAreSafe(t *testing.T) {
 	scan, db := warRoomAICrashFixture("prod", 7)
 	provider := &fakeWarRoomAIProvider{response: testWarRoomAIResponse(), err: errors.New("provider-secret-and-body")}
@@ -434,7 +412,7 @@ func TestWarRoomAIRejectsInvalidProviderResponsesWithoutCaching(t *testing.T) {
 			if _, ok := srv.aiRuntime.cache.latest("prod", selection.Selector); ok {
 				t.Fatal("invalid provider response was cached")
 			}
-			page := srv.buildWarRoomAIPageData(scan, "prod", selection.Selector)
+			page := srv.buildInvestigationAIPageData(scan, "prod", selection.Selector, "")
 			if page.Result != nil {
 				t.Fatal("invalid provider response was available for rendering")
 			}

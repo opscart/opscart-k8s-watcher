@@ -72,6 +72,63 @@ func TestWarRoomAICacheCapacityAndDuplicateGeneration(t *testing.T) {
 	}
 }
 
+func TestWarRoomAICacheEvidenceIsDefensivelyCloned(t *testing.T) {
+	now := time.Date(2026, 9, 15, 12, 0, 0, 0, time.UTC)
+	cache := newWarRoomAICache(2, time.Minute, func() time.Time { return now })
+	original := []aianalysis.EvidenceItem{{Type: aianalysis.EvidenceMetric, Summary: "s", Details: "d"}}
+	cache.put(warRoomAICacheEntry{ClusterKey: "prod", Selector: "a", GeneratedAt: now, Provider: "openai", Model: "gpt", Evidence: original})
+	original[0].Details = "mutated-after-put"
+
+	got, ok := cache.latest("prod", "a")
+	if !ok {
+		t.Fatal("missing entry")
+	}
+	if got.Evidence[0].Details != "d" {
+		t.Fatalf("cache aliased the caller's slice on put: %s", got.Evidence[0].Details)
+	}
+	if got.Provider != "openai" || got.Model != "gpt" {
+		t.Fatalf("provider/model not retained: %+v", got)
+	}
+	got.Evidence[0].Details = "mutated-after-get"
+	got2, _ := cache.latest("prod", "a")
+	if got2.Evidence[0].Details != "d" {
+		t.Fatalf("cache returned mutable evidence storage: %s", got2.Evidence[0].Details)
+	}
+}
+
+func TestWarRoomAICachePreservesNonNilEmptyEvidence(t *testing.T) {
+	now := time.Date(2026, 9, 15, 12, 0, 0, 0, time.UTC)
+	cache := newWarRoomAICache(2, time.Minute, func() time.Time { return now })
+	cache.put(warRoomAICacheEntry{ClusterKey: "prod", Selector: "a", GeneratedAt: now, Evidence: []aianalysis.EvidenceItem{}})
+	got, ok := cache.latest("prod", "a")
+	if !ok {
+		t.Fatal("missing entry")
+	}
+	if got.Evidence == nil {
+		t.Fatal("non-nil empty evidence became nil")
+	}
+	if len(got.Evidence) != 0 {
+		t.Fatalf("expected empty evidence, got %+v", got.Evidence)
+	}
+}
+
+func TestWarRoomAICacheIsInFlight(t *testing.T) {
+	cache := newWarRoomAICache(2, time.Hour, time.Now)
+	if cache.isInFlight("prod", "a") {
+		t.Fatal("selector reported in-flight before begin")
+	}
+	if !cache.begin("prod", "a") {
+		t.Fatal("begin failed")
+	}
+	if !cache.isInFlight("prod", "a") {
+		t.Fatal("selector not reported in-flight after begin")
+	}
+	cache.finish("prod", "a")
+	if cache.isInFlight("prod", "a") {
+		t.Fatal("selector still reported in-flight after finish")
+	}
+}
+
 func TestCloneAnalysisResponsePreservesEmptyArrays(t *testing.T) {
 	response := aianalysis.AnalysisResponse{
 		Summary:         "summary",

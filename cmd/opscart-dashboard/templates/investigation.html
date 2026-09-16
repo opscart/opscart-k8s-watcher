@@ -7,6 +7,10 @@
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
 {{template "base" .}}
 <style>
+.inv-tabs{display:flex;gap:.5rem;margin-bottom:1.5rem;border-bottom:1px solid var(--border)}
+.inv-tab{display:inline-flex;align-items:center;padding:.6rem 1rem;color:var(--text-muted);font-size:.85rem;font-weight:600;text-decoration:none;border-bottom:2px solid transparent;margin-bottom:-1px}
+.inv-tab:hover{color:var(--text)}
+.inv-tab.active{color:var(--primary-light);border-bottom-color:var(--primary-light)}
 .inv-bar{display:flex;gap:1rem;margin-bottom:2rem;flex-wrap:wrap}
 .inv-chip{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius-sm);padding:0.75rem 1.25rem;display:flex;align-items:center;gap:0.75rem}
 .inv-chip.danger{border-color:rgba(239,68,68,0.35);background:rgba(239,68,68,0.025)}
@@ -101,6 +105,8 @@
 
     </div>
   </div>
+
+  {{template "investigation-tabs" .}}
 
   {{if .NotFound}}
 

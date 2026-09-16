@@ -40,15 +40,25 @@ func (runtime *warRoomAIRuntime) key() string {
 }
 
 type warRoomAICacheEntry struct {
-	ClusterKey       string
-	Selector         string
-	EvidenceHash     string
-	RuntimeKey       string
-	IssueIdentity    string
+	ClusterKey    string
+	Selector      string
+	EvidenceHash  string
+	RuntimeKey    string
+	IssueIdentity string
+	// Provider and Model record the runtime identity that actually produced
+	// Response, independent of whatever provider/model is currently
+	// configured — a stale entry must keep showing what generated it.
+	Provider         string
+	Model            string
 	EvidenceCaptured time.Time
 	GeneratedAt      time.Time
 	Response         aianalysis.AnalysisResponse
-	accessed         uint64
+	// Evidence is the exact sanitized evidence transmitted for this
+	// generation (see aianalysis.AnalysisRequest.Evidence). Kept alongside
+	// Response so a stale result can still show the evidence it was
+	// actually generated from, never the current scan's evidence.
+	Evidence []aianalysis.EvidenceItem
+	accessed uint64
 }
 
 type warRoomAICache struct {
@@ -95,6 +105,7 @@ func (cache *warRoomAICache) latest(cluster, selector string) (warRoomAICacheEnt
 	entry.accessed = cache.sequence
 	cache.entries[selector] = entry
 	entry.Response = cloneAnalysisResponse(entry.Response)
+	entry.Evidence = cloneEvidenceItems(entry.Evidence)
 	return entry, true
 }
 
@@ -108,6 +119,7 @@ func (cache *warRoomAICache) put(entry warRoomAICacheEntry) {
 	cache.sequence++
 	entry.accessed = cache.sequence
 	entry.Response = cloneAnalysisResponse(entry.Response)
+	entry.Evidence = cloneEvidenceItems(entry.Evidence)
 	cache.entries[entry.Selector] = entry
 	for len(cache.entries) > cache.capacity {
 		var oldestKey string
@@ -144,6 +156,19 @@ func (cache *warRoomAICache) finish(cluster, selector string) {
 	cache.mu.Unlock()
 }
 
+// isInFlight reports whether a generation is currently running for this
+// cluster/selector, so a second AI-tab request can render a GENERATING
+// status instead of a stale or not-generated one.
+func (cache *warRoomAICache) isInFlight(cluster, selector string) bool {
+	if cache == nil {
+		return false
+	}
+	cache.mu.Lock()
+	defer cache.mu.Unlock()
+	_, exists := cache.inFlight[cluster+"\x00"+selector]
+	return exists
+}
+
 func (cache *warRoomAICache) pruneExpired(now time.Time) {
 	for key, entry := range cache.entries {
 		if now.Sub(entry.GeneratedAt) > cache.ttl {
@@ -170,4 +195,17 @@ func cloneAnalysisResponse(response aianalysis.AnalysisResponse) aianalysis.Anal
 		response.MissingEvidence = append([]string{}, response.MissingEvidence...)
 	}
 	return response
+}
+
+// cloneEvidenceItems returns an independent copy of items so a caller can
+// never mutate cache-owned evidence through the returned slice. EvidenceItem
+// holds only scalar string fields, so a shallow per-element copy is a full
+// clone. A non-nil empty slice is preserved as non-nil.
+func cloneEvidenceItems(items []aianalysis.EvidenceItem) []aianalysis.EvidenceItem {
+	if items == nil {
+		return nil
+	}
+	cloned := make([]aianalysis.EvidenceItem, len(items))
+	copy(cloned, items)
+	return cloned
 }
