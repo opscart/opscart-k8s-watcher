@@ -217,7 +217,7 @@ provider and model; the base URL, Secret name, and credential are not rendered.
 | Parameter | Default | Description |
 |-----------|---------|-------------|
 | `image.repository` | `ghcr.io/opscart/opscart-dashboard` | Image repository |
-| `image.tag` | `v1.14.0` | Image tag |
+| `image.tag` | `v1.15.0` | Image tag |
 | `image.pullPolicy` | `Always` | Pull policy |
 | `persistence.enabled` | `true` | Persist incident history on a PVC |
 | `persistence.size` | `1Gi` | PVC size |
