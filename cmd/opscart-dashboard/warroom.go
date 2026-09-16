@@ -881,7 +881,7 @@ func renderWarRoomCard(issue warRoomIssue, activeCtx string) string {
 	}
 	if issue.AIHref != "" {
 		sb.WriteString(fmt.Sprintf(
-			`<a class="ai-chip" href="%s" title="AI analysis available for this issue">✨ AI analysis</a>`,
+			`<a class="ai-chip" href="%s" title="AI analysis available for this issue"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round" style="vertical-align:-2px"><path d="M12 3 L14.1 9.9 L21 12 L14.1 14.1 L12 21 L9.9 14.1 L3 12 L9.9 9.9 Z"/></svg> AI analysis</a>`,
 			template.HTMLEscapeString(issue.AIHref)))
 	}
 	sb.WriteString(`</footer></article>`)
