@@ -161,24 +161,24 @@ sends only the sanitized evidence assembled by OpsCart. It does not send
 Secrets, environment variables, raw Kubernetes objects, or raw logs, and it
 does not execute cluster actions.
 
+An internal-hosted, OpenAI-API-compatible endpoint is the recommended
+default — sanitized evidence never leaves your cluster or private network.
+A third-party provider such as OpenAI is also supported, but sends that
+evidence outside your environment; treat enabling it as a deliberate
+data-governance decision for your organization, not a configuration choice.
+
 Create the credential Secret in the release namespace:
 
 ~~~bash
 kubectl create secret generic opscart-ai --namespace opscart --from-literal=api-key='replace-with-provider-key'
 ~~~
 
-Keep installation-specific values outside the chart defaults:
+Copy the example file and edit it for your environment — see
+`values-ai.example.yaml` for the internal-hosted and third-party patterns,
+with the trade-off documented inline:
 
-~~~yaml
-# values-ai.yaml
-ai:
-  enabled: true
-  provider: openai
-  baseURL: https://api.openai.com/v1
-  model: gpt-4.1-mini
-  timeout: 30s
-  existingSecret: opscart-ai
-  apiKeyKey: api-key
+~~~bash
+cp helm/opscart-watcher/values-ai.example.yaml helm/opscart-watcher/values-ai.yaml
 ~~~
 
 From the repository root, apply that file with its actual path:
