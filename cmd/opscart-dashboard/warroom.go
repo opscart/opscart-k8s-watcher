@@ -63,6 +63,11 @@ type warRoomIssue struct {
 	ColocatedPods      int       `json:"colocated_pods,omitempty"`
 	HasPlacement       bool      `json:"has_placement,omitempty"`
 	ConditionStatus    string    `json:"condition_status,omitempty"`
+	// AIHref links to this issue's AI Analysis tab on the Investigation page.
+	// Supported issues retain this link when AI is disabled so the page can
+	// explain setup; it is never part of the War Room JSON API.
+	AIHref       string `json:"-"`
+	AIConfigured bool   `json:"-"`
 }
 
 type warRoomPageData struct {
@@ -108,6 +113,9 @@ type warRoomStats struct {
 }
 
 func collectWarRoomIssues(scan *clusterScan, limit int) []warRoomIssue {
+	if scan == nil {
+		return nil
+	}
 	var issues []warRoomIssue
 
 	// 1. Crash-looping / zombie pods
@@ -158,32 +166,60 @@ func collectWarRoomIssues(scan *clusterScan, limit int) []warRoomIssue {
 
 	// 3. High-risk unprotected namespaces
 	if scan.netAudit != nil {
+		// Every namespace NetworkPolicyAudit flagged as unprotected is a
+		// real, current coverage gap — surface all of them, same as
+		// idle_namespace below and the Namespaces page's Governance column
+		// (namespaceGovernanceStates), neither of which gates on RiskLevel.
+		// RiskLevel comes from analyzeRisk's namespace-name/pod-count
+		// heuristic (network.go) — a reasonable prioritization signal, but
+		// not a reliable "is this actually a finding" gate: a namespace
+		// like "payments" with 5 pods and no "prod"/"staging" substring in
+		// its name computes RiskLevel "LOW" despite being a real gap, which
+		// used to make it silently vanish from War Room's own issue list
+		// while the Namespaces page kept showing it as "Unprotected" —
+		// two pages disagreeing about the same evidence. Previously gated
+		// on ns.RiskLevel == "HIGH" only.
 		for _, ns := range scan.netAudit.UnprotectedNamespaces {
-			if ns.RiskLevel == "HIGH" {
-				classification := "Missing NetworkPolicy"
-				message := fmt.Sprintf("%d pods in namespace, no NetworkPolicy present", ns.PodCount)
-				if ns.PolicyCount > 0 {
-					// This namespace HAS policies — the gap is coverage,
-					// not absence. Never claim "missing" when a policy
-					// exists; state the actual gap.
-					classification = "Incomplete NetworkPolicy coverage"
-					policyWord := "policy"
-					if ns.PolicyCount != 1 {
-						policyWord = "policies"
-					}
-					message = fmt.Sprintf("%d of %d observed pods lack configured ingress and egress coverage (%d %s present)",
-						ns.CoverageGapPodCount, ns.PodCount, ns.PolicyCount, policyWord)
+			// Severity is driven by the same evidence the message text
+			// already branches on — zero NetworkPolicies at all (no
+			// protection whatsoever) vs. partial coverage (some protection
+			// exists, the gap is narrower) — not by RiskLevel. RiskLevel is
+			// a namespace-name/pod-count heuristic (analyzeRisk in
+			// network.go); using it for severity would just move the same
+			// unreliable "does this look important" guess from the
+			// existence gate this fix removed to the urgency shown here.
+			// Every other severity assignment in this codebase (pod-level
+			// findings in waste_probe_evidence.go, host_network in
+			// security.go) is driven by evidence directness/confirmation,
+			// never by an environment-name guess — PolicyCount == 0 is
+			// direct, unambiguous evidence of zero protection, matching
+			// the "critical"-tier pattern elsewhere; a namespace with some
+			// policies but a coverage gap is a narrower, softer finding.
+			classification := "Missing NetworkPolicy"
+			severity := "high"
+			message := fmt.Sprintf("%d pods in namespace, no NetworkPolicy present", ns.PodCount)
+			if ns.PolicyCount > 0 {
+				// This namespace HAS policies — the gap is coverage,
+				// not absence. Never claim "missing" when a policy
+				// exists; state the actual gap.
+				classification = "Incomplete NetworkPolicy coverage"
+				severity = "medium"
+				policyWord := "policy"
+				if ns.PolicyCount != 1 {
+					policyWord = "policies"
 				}
-				issues = append(issues, warRoomIssue{
-					Severity:       "high",
-					Type:           "unprotected_namespace",
-					Namespace:      ns.Name,
-					Resource:       "namespace",
-					Message:        message,
-					KubectlCmd:     fmt.Sprintf("kubectl get networkpolicies -n %s", ns.Name),
-					Classification: classification,
-				})
+				message = fmt.Sprintf("%d of %d observed pods lack configured ingress and egress coverage (%d %s present)",
+					ns.CoverageGapPodCount, ns.PodCount, ns.PolicyCount, policyWord)
 			}
+			issues = append(issues, warRoomIssue{
+				Severity:       severity,
+				Type:           "unprotected_namespace",
+				Namespace:      ns.Name,
+				Resource:       "namespace",
+				Message:        message,
+				KubectlCmd:     fmt.Sprintf("kubectl get networkpolicies -n %s", ns.Name),
+				Classification: classification,
+			})
 		}
 	}
 	// 4. Idle/abandoned namespaces are posture findings, not workloads.
@@ -316,7 +352,11 @@ func (srv *server) handleWarRoomPage(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, target, http.StatusSeeOther)
 		return
 	}
-	ctx := srv.activeCtx(r)
+	ctx, ok := srv.warRoomCluster(r)
+	if !ok {
+		http.Error(w, "unknown cluster", http.StatusBadRequest)
+		return
+	}
 	state := srv.getState(ctx)
 
 	state.mu.RLock()
@@ -334,7 +374,8 @@ func (srv *server) handleWarRoomPage(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	fmt.Fprint(w, renderWarRoomPageWithStore(scan, ctx, srv.clusterList, r.URL.Query(), srv.db))
+	aiEnabled := srv.aiProvider != nil && srv.aiRuntime != nil && srv.aiRuntime.cache != nil
+	fmt.Fprint(w, renderWarRoomPageWithAI(scan, ctx, srv.clusterList, r.URL.Query(), srv.db, aiEnabled))
 }
 
 func renderWarRoomPage(scan *clusterScan, activeCtx string, clusterList []string) string {
@@ -346,11 +387,24 @@ func renderWarRoomPageWithFilters(scan *clusterScan, activeCtx string, clusterLi
 }
 
 func renderWarRoomPageWithStore(scan *clusterScan, activeCtx string, clusterList []string, query url.Values, db store.Store) string {
+	return renderWarRoomPageWithAI(scan, activeCtx, clusterList, query, db, false)
+}
+
+// renderWarRoomPageWithAI decorates each supported issue with a compact AI
+// link. When AI is disabled, the link leads to setup guidance. It never
+// captures or hashes per-issue evidence to do so.
+func renderWarRoomPageWithAI(scan *clusterScan, activeCtx string, clusterList []string, query url.Values, db store.Store, aiConfigured bool) string {
 	allIssues := collectWarRoomIssuesWithStore(scan, 0, db, activeCtx)
 	for i := range allIssues {
 		enrichWarRoomIdentity(&allIssues[i], scan)
 	}
 	enrichWarRoomIncidentFirstSeen(allIssues, db, activeCtx)
+	// Supported issues remain discoverable when AI is disabled; their links
+	// lead to a read-only setup page with no generation controls.
+	enrichWarRoomAIHrefs(allIssues, scan, activeCtx, db)
+	for i := range allIssues {
+		allIssues[i].AIConfigured = aiConfigured
+	}
 	stats := warRoomStatsFor(allIssues)
 	qText := strings.TrimSpace(query.Get("q"))
 	severity := strings.ToLower(strings.TrimSpace(query.Get("severity")))
@@ -419,6 +473,32 @@ func renderWarRoomPageWithStore(scan *clusterScan, activeCtx string, clusterList
 		return ""
 	}
 	return buf.String()
+}
+
+// enrichWarRoomAIHrefs sets AIHref on every issue that has a currently
+// supported, active AI selection. It calls collectWarRoomAISelections once
+// for the whole page rather than per card — that call only enriches identity
+// and computes the opaque selector (warRoomAIFingerprint/warRoomAISelector),
+// it never captures or hashes evidence, so this stays cheap regardless of
+// issue count.
+func enrichWarRoomAIHrefs(issues []warRoomIssue, scan *clusterScan, cluster string, db store.Store) {
+	selections := collectWarRoomAISelections(scan, cluster, db)
+	if len(selections) == 0 {
+		return
+	}
+	hrefs := make(map[string]string, len(selections))
+	for _, selection := range selections {
+		hrefs[warRoomAIIssueKey(selection.Issue)] = investigationAIHref(cluster, selection.Selector, "warroom")
+	}
+	for i := range issues {
+		issues[i].AIHref = hrefs[warRoomAIIssueKey(issues[i])]
+	}
+}
+
+// warRoomAIIssueKey identifies an issue for AI-selection matching purposes,
+// independent of display-only fields such as Message or Classification.
+func warRoomAIIssueKey(issue warRoomIssue) string {
+	return fmt.Sprintf("%t\x00%s\x00%s\x00%s\x00%s", issue.IsNode, issue.Namespace, issue.Resource, store.CanonicalIssueType(issue.Type), issue.Container)
 }
 
 func enrichWarRoomIncidentFirstSeen(issues []warRoomIssue, db store.Store, cluster string) {
@@ -801,6 +881,15 @@ func renderWarRoomCard(issue warRoomIssue, activeCtx string) string {
 			`<a class="investigate-btn" href="%s">%s</a>`,
 			investigationHref, label))
 	}
+	if issue.AIHref != "" {
+		label, title := "AI analysis", "Open AI analysis for this issue"
+		if !issue.AIConfigured {
+			label, title = "AI setup", "AI analysis requires deployment configuration"
+		}
+		sb.WriteString(fmt.Sprintf(
+			`<a class="ai-chip" href="%s" title="%s"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round" style="vertical-align:-2px"><path d="M12 3 L14.1 9.9 L21 12 L14.1 14.1 L12 21 L9.9 14.1 L3 12 L9.9 9.9 Z"/></svg> %s</a>`,
+			template.HTMLEscapeString(issue.AIHref), title, label))
+	}
 	sb.WriteString(`</footer></article>`)
 	return sb.String()
 }
@@ -813,7 +902,11 @@ func warRoomIssueURL(issue warRoomIssue, activeCtx string) string {
 		}
 		return "/investigate?" + values.Encode()
 	}
-	return investigateURL(issue.Namespace, issue.Resource, issue.Type, activeCtx)
+	pod := issue.Resource
+	if issue.Container != "" {
+		pod += "/" + issue.Container
+	}
+	return investigateURL(issue.Namespace, pod, issue.Type, activeCtx)
 }
 
 // ── War Room page helpers ──────────────────────────────────────────────────────

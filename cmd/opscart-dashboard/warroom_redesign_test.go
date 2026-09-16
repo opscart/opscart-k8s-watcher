@@ -101,6 +101,40 @@ func TestNamespacePostureEvidenceAndIdentity(t *testing.T) {
 	}
 }
 
+// TestNamespaceUnprotectedFindingSurfacesRegardlessOfRiskLevel pins the fix
+// for a real cross-page disagreement: a small, non-"prod"-named namespace
+// (e.g. "payments", 5 pods) computes analyzeRisk's RiskLevel as LOW, but the
+// Namespaces page's Governance column (namespaceGovernanceStates) already
+// shows it "Unprotected" unconditionally, straight from the same
+// NetworkPolicyAudit evidence, with no RiskLevel gate at all. War Room used
+// to additionally gate on RiskLevel == "HIGH" before creating the
+// unprotected_namespace issue, so a real, currently-observed coverage gap
+// could be visible on one OpsCart page and invisible on War Room/the
+// Namespaces page's own Health column (namespaceIssueSummaries reuses this
+// same collection) for the exact same namespace, at the exact same scan.
+// Every RiskLevel must produce the issue — idle_namespace, the sibling
+// namespace-finding type below this one, already has no such gate.
+func TestNamespaceUnprotectedFindingSurfacesRegardlessOfRiskLevel(t *testing.T) {
+	for _, riskLevel := range []string{"HIGH", "MEDIUM", "LOW"} {
+		scan := &clusterScan{
+			netAudit: &analyzer.NetworkPolicyAudit{UnprotectedNamespaces: []analyzer.NamespaceNetworkStatus{
+				{Name: "payments", RiskLevel: riskLevel, PodCount: 5},
+			}},
+		}
+		issues := collectWarRoomIssues(scan, 0)
+		if len(issues) != 1 || issues[0].Type != "unprotected_namespace" || issues[0].Namespace != "payments" {
+			t.Errorf("RiskLevel %s: got %d issues %+v, want one unprotected_namespace issue for payments", riskLevel, len(issues), issues)
+		}
+		// Severity must come from PolicyCount (direct evidence: zero
+		// policies at all), never from RiskLevel — this fixture has
+		// PolicyCount 0 at every RiskLevel, so severity must stay "high"
+		// regardless of which RiskLevel is under test.
+		if issues[0].Severity != "high" {
+			t.Errorf("RiskLevel %s: got severity %q for a zero-policy namespace, want \"high\" regardless of RiskLevel", riskLevel, issues[0].Severity)
+		}
+	}
+}
+
 func TestNamespacePartialPolicyCoverageUsesDirectionalGapEverywhere(t *testing.T) {
 	scan := &clusterScan{
 		netAudit: &analyzer.NetworkPolicyAudit{
@@ -115,6 +149,9 @@ func TestNamespacePartialPolicyCoverageUsesDirectionalGapEverywhere(t *testing.T
 	issues := collectWarRoomIssues(scan, 0)
 	if len(issues) != 1 {
 		t.Fatalf("expected one namespace coverage finding, got: %+v", issues)
+	}
+	if issues[0].Severity != "medium" {
+		t.Fatalf("partial coverage (PolicyCount > 0) must be \"medium\", not the zero-policy \"high\" tier: got %q", issues[0].Severity)
 	}
 	if issues[0].Classification != "Incomplete NetworkPolicy coverage" ||
 		!strings.Contains(issues[0].Message, "2 of 2 observed pods") ||
@@ -253,7 +290,7 @@ func TestWarRoomDenseEqualCardsAndResetVisibility(t *testing.T) {
 		`class="wr-card c wr-type-crash-loop"`,
 		`class="wr-evidence"`, "Classification", "Active For", "Restarts",
 		`<footer class="wr-actions">`, `title="Focus Pod: api-7cddf79d98-jxmtx"`,
-		`min-height:260px`,
+		`min-height:190px`,
 	} {
 		if !strings.Contains(body, want) {
 			t.Errorf("dense card rendering missing %q", want)

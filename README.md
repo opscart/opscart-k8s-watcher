@@ -71,6 +71,8 @@ Instead of requiring operators to correlate several dashboards during triage, Op
 
 OpsCart is designed for platform engineers managing Kubernetes clusters who want faster operational triage without deploying node agents or modifying application workloads.
 
+An optional, manual, read-only AI analysis feature can generate an evidence-bound hypothesis for a selected issue — disabled by default; see the [chart README](helm/opscart-watcher/README.md#ai-analysis) for setup.
+
 ---
 
 ## Quick Start

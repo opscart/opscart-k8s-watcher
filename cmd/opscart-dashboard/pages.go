@@ -36,6 +36,9 @@ type stubPageData struct {
 	Clusters        []sidebarCluster
 	DiagnosticsHref string
 	SettingsHref    string
+	AIConfigured    bool
+	AIProvider      string
+	AIModel         string
 }
 
 var getStubTmpl = sync.OnceValue(func() *template.Template {
@@ -99,14 +102,20 @@ func (srv *server) handleSettingsPage(w http.ResponseWriter, r *http.Request) {
 	scan := state.scan
 	state.mu.RUnlock()
 	q := "?cluster=" + url.QueryEscape(ctx)
+	aiConfigured := srv.aiProvider != nil && srv.aiRuntime != nil && srv.aiRuntime.cache != nil
 	data := stubPageData{
 		Title: "Settings", ActivePage: "settings", DashHref: "/" + q, WrHref: "/warroom" + q,
-		CostsHref: "/costs" + q, InfraHref: "/infrastructure" + q, NsHref: "/namespaces" + q,
+		AIConfigured: aiConfigured,
+		CostsHref:    "/costs" + q, InfraHref: "/infrastructure" + q, NsHref: "/namespaces" + q,
 		OptHref: "/node-optimization" + q, WasteHref: "/waste" + q, SecurityHref: "/security" + q,
 		IncidentsHref: "/incidents" + q, ClusterName: displayName(ctx), CriticalCount: countCriticalIssues(scan),
 		Clusters:        convertToSidebarClusters(srv.clusterList, ctx, "/settings"),
 		DiagnosticsHref: "/settings/diagnostics" + q,
 		SettingsHref:    "/settings" + q,
+	}
+	if aiConfigured {
+		data.AIProvider = srv.aiRuntime.providerName
+		data.AIModel = srv.aiRuntime.model
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-cache, no-store, must-revalidate")

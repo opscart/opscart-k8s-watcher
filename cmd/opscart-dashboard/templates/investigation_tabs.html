@@ -1,0 +1,6 @@
+{{define "investigation-tabs"}}
+<nav class="inv-tabs" aria-label="Investigation view">
+  <a class="inv-tab{{if eq .ActiveTab "evidence"}} active{{end}}"{{if eq .ActiveTab "evidence"}} aria-current="page"{{end}} href="{{.EvidenceTabHref}}">Evidence</a>
+  {{if .AIAvailable}}<a class="inv-tab{{if eq .ActiveTab "ai"}} active{{end}}"{{if eq .ActiveTab "ai"}} aria-current="page"{{end}} href="{{.AITabHref}}"{{if not .AIConfigured}} title="AI analysis requires deployment configuration"{{end}}><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round" style="vertical-align:-2px"><path d="M12 3 L14.1 9.9 L21 12 L14.1 14.1 L12 21 L9.9 14.1 L3 12 L9.9 9.9 Z"/></svg> AI Analysis{{if not .AIConfigured}} <span class="inv-tab-state">Setup</span>{{end}}</a>{{end}}
+</nav>
+{{end}}

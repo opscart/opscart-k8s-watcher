@@ -1,0 +1,64 @@
+
+# values-ai.example.yaml
+#
+# Example configuration for enabling manual, read-only AI analysis.
+# Copy this file, do not edit it in place:
+#
+#   cp helm/opscart-watcher/values-ai.example.yaml helm/opscart-watcher/values-ai.yaml
+#
+# Then edit your own values-ai.yaml with real settings for your environment.
+# values-ai.yaml is already excluded from version control on purpose — this
+# example file is the one that's committed and shared.
+#
+# AI analysis is disabled by default. It is manual and read-only: an operator
+# must select Generate or Regenerate for a supported active issue. OpsCart
+# sends only the sanitized evidence it already assembled for that issue — no
+# Secrets, environment variables, raw Kubernetes objects, or raw logs — and
+# never executes any cluster action based on the response.
+#
+# The credential itself is never stored by OpsCart. Create it as a Secret in
+# the release namespace first:
+#
+#   kubectl create secret generic opscart-ai \
+#     --namespace opscart \
+#     --from-literal=api-key='replace-with-provider-key'
+ 
+# ── Option A (recommended default): an internal-hosted, OpenAI-API-compatible
+# endpoint — e.g. a self-hosted model server (vLLM, TGI, etc.) reachable only
+# inside your cluster or private network. Evidence never leaves your
+# environment with this option.
+ai:
+  enabled: true
+  provider: openai          # the only supported adapter value today; it
+                             # speaks the OpenAI-compatible Responses API —
+                             # "internal vs external" is entirely determined
+                             # by baseURL below, not by this field.
+  baseURL: http://your-internal-model-service.your-namespace.svc.cluster.local:8000/v1
+  model: your-internal-model-name
+  timeout: 30s
+  existingSecret: opscart-ai
+  apiKeyKey: api-key
+ 
+# ── Option B: a third-party hosted provider (e.g. OpenAI's own API).
+# Only use this if you have explicitly decided sanitized evidence for
+# selected issues is allowed to leave your cluster to a named third party.
+# That is a data-governance decision, not a configuration detail — confirm
+# it with whoever owns that decision for your environment before enabling.
+# Uncomment and use in place of Option A above, never both at once:
+#
+# ai:
+#   enabled: true
+#   provider: openai
+#   baseURL: https://api.openai.com/v1
+#   model: gpt-4.1-mini
+#   timeout: 30s
+#   existingSecret: opscart-ai
+#   apiKeyKey: api-key
+ 
+# Your chosen internal endpoint must implement the Responses API this
+# adapter uses (POST /responses, strict structured output, the completed
+# response envelope) — Chat Completions compatibility alone is not enough.
+#
+# Within the dashboard Pod, 127.0.0.1 refers to the Pod itself, not your
+# laptop or a separate host — use a cluster-reachable DNS name or Service.
+ 

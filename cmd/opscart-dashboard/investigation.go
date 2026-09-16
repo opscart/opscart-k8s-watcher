@@ -31,8 +31,9 @@ type investigationEvent struct {
 	Count   int32
 }
 
-type investigationPageData struct {
-	// Sidebar fields
+// investigationSidebarFields is the sidebar/navigation state shared by the
+// Evidence and AI Analysis tabs of the Investigation page.
+type investigationSidebarFields struct {
 	DashHref        string
 	WrHref          string
 	CostsHref       string
@@ -48,6 +49,51 @@ type investigationPageData struct {
 	OptHref         string
 	CriticalCount   int
 	Clusters        []sidebarCluster
+}
+
+// investigationTabs is the server-rendered tab-bar state shared by the
+// Evidence and AI Analysis tabs. Navigation between tabs is always a real
+// link to a canonical URL — see investigation_ai.go — never client-side
+// tab switching.
+type investigationTabs struct {
+	ActiveTab       string // "evidence" or "ai"
+	EvidenceTabHref string
+	AITabHref       string
+	AIAvailable     bool
+	AIConfigured    bool
+}
+
+// buildInvestigationSidebar builds the sidebar/navigation fields shared by
+// both Investigation tabs. from is the "from" query parameter ("incidents"
+// or "warroom"/empty) that selects which page Back links to.
+func (srv *server) buildInvestigationSidebar(cluster string, scan *clusterScan, from string) investigationSidebarFields {
+	activePage := "warroom"
+	if from == "incidents" {
+		activePage = "incidents"
+	}
+	q := "?cluster=" + url.QueryEscape(cluster)
+	return investigationSidebarFields{
+		DashHref:        "/" + q,
+		WrHref:          "/warroom" + q,
+		CostsHref:       "/costs" + q,
+		InfraHref:       "/infrastructure" + q,
+		WasteHref:       "/waste" + q,
+		SecurityHref:    "/security" + q,
+		IncidentsHref:   "/incidents" + q,
+		DiagnosticsHref: "/settings/diagnostics" + q,
+		SettingsHref:    "/settings" + q,
+		NsHref:          "/namespaces" + q,
+		OptHref:         "/node-optimization" + q,
+		ActivePage:      activePage,
+		ClusterName:     displayName(cluster),
+		CriticalCount:   countCriticalIssues(scan),
+		Clusters:        convertToSidebarClusters(srv.clusterList, cluster, sidebarBasePath(activePage)),
+	}
+}
+
+type investigationPageData struct {
+	investigationSidebarFields
+	investigationTabs
 
 	// Pod identity
 	PodName          string
@@ -875,6 +921,17 @@ func (srv *server) handleNodeInvestigation(w http.ResponseWriter, ctx, nodeName,
 }
 
 func (srv *server) handleInvestigationPage(w http.ResponseWriter, r *http.Request) {
+	switch r.URL.Query().Get("tab") {
+	case "", "evidence":
+		// fall through to the Evidence tab below.
+	case "ai":
+		srv.handleInvestigationAIPage(w, r)
+		return
+	default:
+		http.Error(w, "unknown tab", http.StatusBadRequest)
+		return
+	}
+
 	ctx := srv.activeCtx(r)
 	podName := r.URL.Query().Get("pod")
 	nodeName := r.URL.Query().Get("node")
@@ -896,40 +953,22 @@ func (srv *server) handleInvestigationPage(w http.ResponseWriter, r *http.Reques
 	scan := state.scan
 	state.mu.RUnlock()
 
-	q := "?cluster=" + url.QueryEscape(ctx)
 	from := r.URL.Query().Get("from")
-	activePage := "warroom"
+	backURL := "/warroom?cluster=" + url.QueryEscape(ctx)
 	if from == "incidents" {
-		activePage = "incidents"
-	}
-	backURL := "/warroom" + q
-	if from == "incidents" {
-		backURL = "/incidents" + q
+		backURL = "/incidents?cluster=" + url.QueryEscape(ctx)
 	}
 	data := investigationPageData{
-		DashHref:        "/" + q,
-		WrHref:          "/warroom" + q,
-		CostsHref:       "/costs" + q,
-		InfraHref:       "/infrastructure" + q,
-		WasteHref:       "/waste" + q,
-		SecurityHref:    "/security" + q,
-		IncidentsHref:   "/incidents" + q,
-		DiagnosticsHref: "/settings/diagnostics" + q,
-		SettingsHref:    "/settings" + q,
-		NsHref:          "/namespaces" + q,
-		OptHref:         "/node-optimization" + q,
-		ActivePage:      activePage,
-		ClusterName:     displayName(ctx),
-		CriticalCount:   countCriticalIssues(scan),
-		Clusters:        convertToSidebarClusters(srv.clusterList, ctx, sidebarBasePath(activePage)),
-		PodName:         podName,
-		Namespace:       namespace,
-		IssueType:       issueType,
-		WorkloadLabel:   "Workload/" + store.OwnerNameFromPod(podName),
-		TrackingLabel:   "Workload scoped",
-		BackURL:         backURL,
-		ScannedAtMs:     time.Now().UnixMilli(),
+		investigationSidebarFields: srv.buildInvestigationSidebar(ctx, scan, from),
+		PodName:                    podName,
+		Namespace:                  namespace,
+		IssueType:                  issueType,
+		WorkloadLabel:              "Workload/" + store.OwnerNameFromPod(podName),
+		TrackingLabel:              "Workload scoped",
+		BackURL:                    backURL,
+		ScannedAtMs:                time.Now().UnixMilli(),
 	}
+	data.investigationTabs = srv.buildInvestigationTabs(ctx, scan, issueType, namespace, podName, nodeName, from)
 	if nodeName != "" {
 		srv.handleNodeInvestigation(w, ctx, nodeName, issueType, scan, data)
 		return
@@ -1136,6 +1175,7 @@ var getInvestigationTmpl = sync.OnceValue(func() *template.Template {
 			ParseFS(templateFS,
 				"templates/base.html",
 				"templates/sidebar.html",
+				"templates/investigation_tabs.html",
 				"templates/investigation.html"),
 	)
 })

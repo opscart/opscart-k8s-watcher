@@ -63,6 +63,15 @@ func buildClusterScan(state *dashboardState, snapshot *clusterstate.ClusterSnaps
 	// reported CPU/memory requested evidence.
 	scan.nodePodCounts = countPodsByNode(resources.Pods)
 	scan.namespacePodCounts = countPodsByNamespace(resources.Pods)
+	podState, podStateKnown := snapshot.ResourceState(clusterstate.ResourcePods)
+	eventState, eventStateKnown := snapshot.ResourceState(clusterstate.ResourcePodWarningEvents)
+	scan.aiPodEvidence = buildWarRoomAIPodEvidenceIndex(
+		resources.Pods,
+		resources.PodWarningEvents,
+		(resources.Pods != nil) || (podStateKnown && podState.Synced),
+		(resources.PodWarningEvents != nil) || (eventStateKnown && eventState.Synced),
+		report.Timestamp,
+	)
 
 	resourceAnalysis := buildResourceAnalysis(resources, namespace)
 	scan.AllWorkloads = resourceAnalysis.Workloads

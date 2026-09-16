@@ -153,6 +153,65 @@ limited to the last 200 lines and 256 KiB. Logs are fetched directly from
 Kubernetes, returned with `Cache-Control: no-store`, and never written to the
 OpsCart SQLite database. There is no combined-container view or download.
 
+## AI analysis
+
+AI analysis is disabled by default. It is manual and read-only: an operator
+must select Generate or Regenerate for a supported active issue. The dashboard
+sends only the sanitized evidence assembled by OpsCart. It does not send
+Secrets, environment variables, raw Kubernetes objects, or raw logs, and it
+does not execute cluster actions.
+
+An internal-hosted, OpenAI-API-compatible endpoint is the recommended
+default — sanitized evidence never leaves your cluster or private network.
+A third-party provider such as OpenAI is also supported, but sends that
+evidence outside your environment; treat enabling it as a deliberate
+data-governance decision for your organization, not a configuration choice.
+
+Create the credential Secret in the release namespace:
+
+~~~bash
+kubectl create secret generic opscart-ai --namespace opscart --from-literal=api-key='replace-with-provider-key'
+~~~
+
+Copy the example file and edit it for your environment — see
+`values-ai.example.yaml` for the internal-hosted and third-party patterns,
+with the trade-off documented inline:
+
+~~~bash
+cp helm/opscart-watcher/values-ai.example.yaml helm/opscart-watcher/values-ai.yaml
+~~~
+
+From the repository root, apply that file with its actual path:
+
+~~~bash
+helm upgrade --install opscart helm/opscart-watcher --namespace opscart --create-namespace -f helm/opscart-watcher/values-ai.yaml
+~~~
+
+The chart never creates, renders, or persists the provider credential. It reads
+the selected key from the existing Secret into the dashboard process.
+
+The current provider value is openai. The configured baseURL determines the
+actual destination, so it may point to an approved internal service. That
+service must implement the Responses API used by this adapter, including
+POST /responses, strict structured output, and the completed response envelope.
+Chat Completions compatibility alone is insufficient.
+
+For an internal endpoint, use a cluster-reachable HTTPS URL. Within the
+dashboard Pod, 127.0.0.1 refers to the Pod itself and does not reach a laptop or
+a separate GPU VM.
+
+Verify the rendered configuration without printing the Secret value:
+
+~~~bash
+kubectl rollout status deployment/opscart-watcher -n opscart
+
+kubectl get deployment opscart-watcher -n opscart -o jsonpath='{range .spec.template.spec.containers[0].env[*]}{.name}{"\n"}{end}' |
+  grep '^OPSCART_AI_'
+~~~
+
+The Settings page reports Enabled or Disabled. When enabled it shows only the
+provider and model; the base URL, Secret name, and credential are not rendered.
+
 ## Configuration
 
 | Parameter | Default | Description |
@@ -165,6 +224,13 @@ OpsCart SQLite database. There is no combined-container view or download.
 | `persistence.storageClassName` | `""` | StorageClass (empty = cluster default) |
 | `persistence.existingClaim` | `""` | Use a pre-created PVC |
 | `logs.enabled` | `true` | Enable bounded, non-persistent current/previous container log preview |
+| `ai.enabled` | `false` | Enable manual AI analysis |
+| `ai.provider` | `openai` | Provider adapter |
+| `ai.baseURL` | `https://api.openai.com/v1` | Responses API base URL |
+| `ai.model` | `""` | Required model name when enabled |
+| `ai.timeout` | `30s` | Provider request timeout |
+| `ai.existingSecret` | `""` | Existing Secret containing the provider credential |
+| `ai.apiKeyKey` | `api-key` | Credential key within the existing Secret |
 | `volumePermissions.enabled` | `false` | Root init container to chown the data volume |
 | `nodeSelector` | `{}` | Pod node selector |
 | `service.type` | `ClusterIP` | Service type |

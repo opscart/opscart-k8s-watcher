@@ -16,26 +16,26 @@ rules:
       - persistentvolumes
       - replicationcontrollers
       - events
-    verbs: ["get", "list"]
+    verbs: ["get", "list", "watch"]
   - apiGroups: ["apps"]
     resources:
       - deployments
       - statefulsets
       - daemonsets
       - replicasets
-    verbs: ["get", "list"]
+    verbs: ["get", "list", "watch"]
   - apiGroups: ["batch"]
     resources: ["jobs", "cronjobs"]
-    verbs: ["get", "list"]
+    verbs: ["get", "list", "watch"]
   - apiGroups: ["autoscaling"]
     resources: ["horizontalpodautoscalers"]
-    verbs: ["get", "list"]
+    verbs: ["get", "list", "watch"]
   - apiGroups: ["networking.k8s.io"]
     resources: ["networkpolicies", "ingresses"]
-    verbs: ["get", "list"]
+    verbs: ["get", "list", "watch"]
   - apiGroups: ["discovery.k8s.io"]
     resources: ["endpointslices"]
-    verbs: ["get", "list"]
+    verbs: ["get", "list", "watch"]
   {{- if .Values.logs.enabled }}
   - apiGroups: [""]
     resources: ["pods/log"]
