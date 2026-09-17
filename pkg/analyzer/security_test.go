@@ -38,6 +38,17 @@ func securityPodListCount(client *fake.Clientset) int {
 	return count
 }
 
+func securityIssueByType(t *testing.T, issues []models.SecurityIssue, issueType string) models.SecurityIssue {
+	t.Helper()
+	for _, issue := range issues {
+		if issue.Type == issueType {
+			return issue
+		}
+	}
+	t.Fatalf("%s issue not found in %+v", issueType, issues)
+	return models.SecurityIssue{}
+}
+
 func TestSecurityClusterWidePodSnapshotAvoidsListAndPreservesFindings(t *testing.T) {
 	pods := []corev1.Pod{
 		*securityTestPod("privileged", "app", true),
@@ -253,6 +264,142 @@ func TestHostPathFindingPreservesEvidenceWithoutCriticalClaim(t *testing.T) {
 		}
 	}
 	t.Fatal("hostPath finding not produced")
+}
+
+func TestAuditPodDetectsHostNamespacesWithoutPodSecurityContext(t *testing.T) {
+	tests := []struct {
+		name      string
+		issueType string
+		configure func(*corev1.PodSpec)
+		riskCount func(models.SecurityRisks) int
+		severity  string
+	}{
+		{
+			name:      "host network",
+			issueType: "host_network",
+			configure: func(spec *corev1.PodSpec) { spec.HostNetwork = true },
+			riskCount: func(risks models.SecurityRisks) int { return risks.HostNetwork },
+			severity:  "critical",
+		},
+		{
+			name:      "host PID",
+			issueType: "host_pid",
+			configure: func(spec *corev1.PodSpec) { spec.HostPID = true },
+			riskCount: func(risks models.SecurityRisks) int { return risks.HostPID },
+			severity:  "critical",
+		},
+		{
+			name:      "host IPC",
+			issueType: "host_ipc",
+			configure: func(spec *corev1.PodSpec) { spec.HostIPC = true },
+			riskCount: func(risks models.SecurityRisks) int { return risks.HostIPC },
+			severity:  "high",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			pod := corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "api", Namespace: "payments"}}
+			tc.configure(&pod.Spec)
+			if pod.Spec.SecurityContext != nil {
+				t.Fatal("test fixture unexpectedly has a PodSecurityContext")
+			}
+
+			audit := AnalyzeSecurity([]corev1.Pod{pod})
+			issue := securityIssueByType(t, audit.Issues, tc.issueType)
+			if issue.Severity != tc.severity {
+				t.Fatalf("severity = %q, want %q", issue.Severity, tc.severity)
+			}
+			if got := tc.riskCount(audit.Risks); got != 1 {
+				t.Fatalf("risk count = %d, want 1", got)
+			}
+		})
+	}
+}
+
+func TestHostNetworkClassificationRequiresRecognizedInfrastructureComponent(t *testing.T) {
+	tests := []struct {
+		name         string
+		podName      string
+		namespace    string
+		ownerKind    string
+		wantSeverity string
+		wantExpected bool
+	}{
+		{name: "Calico node", podName: "calico-node-abc", namespace: "calico-system", ownerKind: "DaemonSet", wantSeverity: "high", wantExpected: true},
+		{name: "Calico controller", podName: "calico-kube-controllers-abc", namespace: "calico-system", ownerKind: "ReplicaSet", wantSeverity: "high", wantExpected: true},
+		{name: "CSI node", podName: "csi-azuredisk-node-abc", namespace: "csi", ownerKind: "DaemonSet", wantSeverity: "high", wantExpected: true},
+		{name: "Prometheus node exporter", podName: "prometheus-node-exporter-abc", namespace: "prometheus", ownerKind: "DaemonSet", wantSeverity: "high", wantExpected: true},
+		{name: "Tigera operator", podName: "tigera-operator-abc", namespace: "tigera-operator", ownerKind: "ReplicaSet", wantSeverity: "high", wantExpected: true},
+		{name: "known kube proxy", podName: "kube-proxy-abc", namespace: "kube-system", ownerKind: "DaemonSet", wantSeverity: "high", wantExpected: true},
+		{name: "unknown system DaemonSet", podName: "custom-agent-abc", namespace: "kube-system", ownerKind: "DaemonSet", wantSeverity: "critical", wantExpected: false},
+		{name: "known name outside infrastructure", podName: "calico-node-spoof", namespace: "payments", ownerKind: "DaemonSet", wantSeverity: "critical", wantExpected: false},
+		{name: "application workload", podName: "checkout-api-abc", namespace: "payments", ownerKind: "ReplicaSet", wantSeverity: "critical", wantExpected: false},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			pod := corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      tc.podName,
+					Namespace: tc.namespace,
+					OwnerReferences: []metav1.OwnerReference{{
+						Kind: tc.ownerKind,
+					}},
+				},
+				Spec: corev1.PodSpec{HostNetwork: true},
+			}
+
+			issue := securityIssueByType(t, auditPod(pod), "host_network")
+			if issue.Severity != tc.wantSeverity {
+				t.Fatalf("severity = %q, want %q", issue.Severity, tc.wantSeverity)
+			}
+			gotExpected := strings.Contains(issue.Description, "(expected for this infrastructure component)")
+			if gotExpected != tc.wantExpected {
+				t.Fatalf("expected marker = %v, want %v; description = %q", gotExpected, tc.wantExpected, issue.Description)
+			}
+		})
+	}
+}
+
+func TestHostPIDClassificationRequiresRecognizedInfrastructureComponent(t *testing.T) {
+	tests := []struct {
+		name         string
+		podName      string
+		namespace    string
+		ownerKind    string
+		wantSeverity string
+		wantExpected bool
+	}{
+		{name: "Prometheus node exporter", podName: "prometheus-node-exporter-abc", namespace: "prometheus", ownerKind: "DaemonSet", wantSeverity: "high", wantExpected: true},
+		{name: "Azure monitor node agent", podName: "ama-metrics-node-abc", namespace: "kube-system", ownerKind: "DaemonSet", wantSeverity: "high", wantExpected: true},
+		{name: "unknown system DaemonSet", podName: "custom-agent-abc", namespace: "kube-system", ownerKind: "DaemonSet", wantSeverity: "critical", wantExpected: false},
+		{name: "application workload", podName: "checkout-api-abc", namespace: "payments", ownerKind: "ReplicaSet", wantSeverity: "critical", wantExpected: false},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			pod := corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      tc.podName,
+					Namespace: tc.namespace,
+					OwnerReferences: []metav1.OwnerReference{{
+						Kind: tc.ownerKind,
+					}},
+				},
+				Spec: corev1.PodSpec{HostPID: true},
+			}
+
+			issue := securityIssueByType(t, auditPod(pod), "host_pid")
+			if issue.Severity != tc.wantSeverity {
+				t.Fatalf("severity = %q, want %q", issue.Severity, tc.wantSeverity)
+			}
+			gotExpected := strings.Contains(issue.Description, "(expected for this infrastructure component)")
+			if gotExpected != tc.wantExpected {
+				t.Fatalf("expected marker = %v, want %v; description = %q", gotExpected, tc.wantExpected, issue.Description)
+			}
+		})
+	}
 }
 
 func TestIsExpectedPrivileged(t *testing.T) {

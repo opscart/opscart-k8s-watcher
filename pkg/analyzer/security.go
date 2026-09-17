@@ -114,50 +114,56 @@ func auditPod(pod corev1.Pod) []models.SecurityIssue {
 		}
 	}
 
-	// Check pod-level security context
-	if pod.Spec.SecurityContext != nil {
-		// Host network
-		if pod.Spec.HostNetwork {
-			severity := "high"
-			if !isSystemNamespace {
-				severity = "critical"
-			}
-			issues = append(issues, models.SecurityIssue{
-				Type:        "host_network",
-				Severity:    severity,
-				Resource:    "pod",
-				Namespace:   pod.Namespace,
-				Name:        pod.Name,
-				Description: "Pod uses host network namespace",
-				Remediation: "Remove hostNetwork: true unless absolutely necessary",
-			})
+	// Host namespace settings are top-level PodSpec fields. Their evidence is
+	// independent of whether the Pod also defines a PodSecurityContext.
+	if pod.Spec.HostNetwork {
+		severity := "critical"
+		description := "Pod uses host network namespace"
+		if isExpectedHostNetwork(pod) {
+			severity = "high"
+			description += " (expected for this infrastructure component)"
 		}
+		issues = append(issues, models.SecurityIssue{
+			Type:        "host_network",
+			Severity:    severity,
+			Resource:    "pod",
+			Namespace:   pod.Namespace,
+			Name:        pod.Name,
+			Description: description,
+			Remediation: "Remove hostNetwork: true unless absolutely necessary",
+		})
+	}
 
-		// Host PID
-		if pod.Spec.HostPID {
-			issues = append(issues, models.SecurityIssue{
-				Type:        "host_pid",
-				Severity:    "critical",
-				Resource:    "pod",
-				Namespace:   pod.Namespace,
-				Name:        pod.Name,
-				Description: "Pod uses host PID namespace",
-				Remediation: "Remove hostPID: true",
-			})
+	if pod.Spec.HostPID {
+		severity := "critical"
+		description := "Pod uses host PID namespace"
+		if isExpectedHostPID(pod) {
+			severity = "high"
+			description += " (expected for this infrastructure component)"
 		}
+		issues = append(issues, models.SecurityIssue{
+			Type:        "host_pid",
+			Severity:    severity,
+			Resource:    "pod",
+			Namespace:   pod.Namespace,
+			Name:        pod.Name,
+			Description: description,
+			Remediation: "Remove hostPID: true",
+		})
+	}
 
-		// Host IPC
-		if pod.Spec.HostIPC {
-			issues = append(issues, models.SecurityIssue{
-				Type:        "host_ipc",
-				Severity:    "high",
-				Resource:    "pod",
-				Namespace:   pod.Namespace,
-				Name:        pod.Name,
-				Description: "Pod uses host IPC namespace",
-				Remediation: "Remove hostIPC: true",
-			})
-		}
+	// Host IPC remains high severity in every scope until real evidence
+	// justifies a capability-specific infrastructure exception.
+	if pod.Spec.HostIPC {
+		issues = append(issues, models.SecurityIssue{
+			Type:        "host_ipc",
+			Severity:    "high",
+			Resource:    "pod",
+			Namespace:   pod.Namespace,
+			Name:        pod.Name,
+			Description: "Pod uses host IPC namespace",
+			Remediation: "Remove hostIPC: true",
+		})
 	}
 
 	// Check each container
@@ -524,6 +530,43 @@ func isExpectedPrivileged(podName, namespace string) bool {
 		return true
 	}
 
+	return false
+}
+
+// isExpectedHostNetwork recognizes infrastructure components whose node-level
+// role commonly requires host networking. Namespace establishes scope only;
+// component identity is also required so an arbitrary Pod in a system
+// namespace is not trusted automatically.
+func isExpectedHostNetwork(pod corev1.Pod) bool {
+	return isRecognizedInfrastructureComponent(pod, []string{
+		"kube-proxy", "calico-node", "calico-kube-controllers", "calico-typha",
+		"cilium", "flannel", "weave", "canal", "kindnet", "tigera-operator", "csi-",
+		"node-exporter", "ama-logs", "ama-metrics", "datadog-agent", "newrelic-agent", "dynatrace-agent",
+	})
+}
+
+// isExpectedHostPID recognizes node-level observability and diagnostic
+// components that commonly require process visibility. Other Pods, including
+// arbitrary Pods in system namespaces, remain critical findings.
+func isExpectedHostPID(pod corev1.Pod) bool {
+	return isRecognizedInfrastructureComponent(pod, []string{
+		"node-exporter", "process-exporter", "node-problem-detector", "ama-logs", "ama-metrics",
+		"datadog-agent", "newrelic-agent", "dynatrace-agent", "sysdig", "falco",
+	})
+}
+
+func isRecognizedInfrastructureComponent(pod corev1.Pod, namePatterns []string) bool {
+	namespace := strings.ToLower(pod.Namespace)
+	if namespace != "csi" && detectEnvironment(namespace) != "SYSTEM" {
+		return false
+	}
+
+	name := strings.ToLower(pod.Name)
+	for _, pattern := range namePatterns {
+		if strings.Contains(name, pattern) {
+			return true
+		}
+	}
 	return false
 }
 
