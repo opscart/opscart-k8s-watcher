@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/opscart/opscart-k8s-watcher/pkg/acquisition"
+	"github.com/opscart/opscart-k8s-watcher/pkg/billing"
 	"github.com/opscart/opscart-k8s-watcher/pkg/clusterstate"
 	"github.com/opscart/opscart-k8s-watcher/pkg/store"
 )
@@ -187,7 +188,11 @@ func runAnalysisPass(state *dashboardState, snapshot *clusterstate.ClusterSnapsh
 // exactly as safe as "greater generation always wins" — see
 // pkg/clusterstate/coordinator.go's Run.
 func publishScan(state *dashboardState, scan *clusterScan, clusterList []string) {
-	page := renderHTML(scan, state.ctx, clusterList)
+	var billingSnapshot billing.Snapshot
+	if state.billingRuntime != nil {
+		billingSnapshot = state.billingRuntime.Snapshot()
+	}
+	page := renderHTML(scan, state.ctx, clusterList, billingSnapshot, state.billingRuntime != nil)
 
 	state.mu.Lock()
 	defer state.mu.Unlock()

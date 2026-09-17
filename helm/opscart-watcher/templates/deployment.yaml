@@ -18,6 +18,9 @@ spec:
     metadata:
       labels:
         {{- include "opscart-watcher.selectorLabels" . | nindent 8 }}
+        {{- if .Values.azureBilling.workloadIdentity.enabled }}
+        azure.workload.identity/use: "true"
+        {{- end }}
     spec:
       serviceAccountName: {{ include "opscart-watcher.serviceAccountName" . }}
       securityContext:
@@ -70,6 +73,10 @@ spec:
                   name: {{ required "ai.existingSecret is required when AI is enabled" .Values.ai.existingSecret | quote }}
                   key: {{ .Values.ai.apiKeyKey | quote }}
             {{- end }}
+            {{- if .Values.azureBilling.enabled }}
+            - name: OPSCART_AZURE_BILLING_CONFIG
+              value: {{ .Values.azureBilling.configPath | quote }}
+            {{- end }}
           ports:
             - name: http
               containerPort: {{ .Values.service.targetPort }}
@@ -82,6 +89,12 @@ spec:
             - name: auth-secret
               mountPath: /etc/opscart/auth
               readOnly: true
+            {{- if .Values.azureBilling.enabled }}
+            - name: azure-billing-config
+              mountPath: {{ .Values.azureBilling.configPath }}
+              subPath: azure-billing.yaml
+              readOnly: true
+            {{- end }}
           readinessProbe:
             httpGet:
               path: {{ .Values.probes.readiness.path }}
@@ -111,3 +124,8 @@ spec:
         - name: auth-secret
           secret:
             secretName: {{ include "opscart-watcher.authSecretName" . }}
+        {{- if .Values.azureBilling.enabled }}
+        - name: azure-billing-config
+          configMap:
+            name: {{ include "opscart-watcher.azureBillingConfigMapName" . }}
+        {{- end }}

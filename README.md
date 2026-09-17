@@ -235,6 +235,8 @@ Node/workload relationships are labeled **correlated by node placement — not a
 
 **Cost Intelligence** — Provider-aware worker-node estimates with namespace allocation, embedded Azure pricing with Azure Retail Prices API fallback, and optional AWS public pricing. See [Cost Intelligence](docs/07-Cost-Intelligence.md).
 
+**Azure Billing** — Optional, disabled-by-default real Azure Cost Management billing for an AKS cluster's resource group and node resource group, shown alongside (never in place of) the public/list-price estimate above. See [Azure Billing](docs/08-Azure-Billing.md).
+
 ### Platform
 
 **Operational Memory** — OpsCart remembers what happened. A lightweight local database tracks cluster snapshots, incident lifecycle (detected → milestones → resolved → reopened) as an append-only event journal, and analysis metadata. Powers trend arrows, sparklines, incident age, and the per-incident timeline. Backed by SQLite, persisted on a PVC that survives pod restarts and `helm uninstall`. Configurable retention (90 days by default) keeps the database from growing unbounded.

@@ -71,3 +71,12 @@ release-managed Secret whose data is retained with lookup on upgrades.
 {{- printf "%s-auth" (include "opscart-watcher.fullname" .) }}
 {{- end }}
 {{- end }}
+
+{{/*
+Azure billing ConfigMap name — holds only the non-secret pkg/billing.Config
+YAML (Azure resource identifiers and reporting settings; never a
+credential).
+*/}}
+{{- define "opscart-watcher.azureBillingConfigMapName" -}}
+{{- printf "%s-azure-billing" (include "opscart-watcher.fullname" .) }}
+{{- end }}

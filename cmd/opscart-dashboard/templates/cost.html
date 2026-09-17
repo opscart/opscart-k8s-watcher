@@ -28,8 +28,20 @@
 {{if eq .ProviderDetectionMode "manual"}}<div class="warning"><strong>Manual provider override:</strong> {{if .ProviderWarning}}{{.ProviderWarning}}{{else}}{{.Provider}} pricing is enabled manually. Detected provider: {{.DetectedProvider}}.{{end}}</div>{{end}}
 {{range .PricingWarnings}}<div class="warning">{{.}}</div>{{end}}
 
+{{if .Billing.Configured}}
 <section class="cost-hero">
-<div><div class="hero-kicker">Estimated worker-node compute</div><div class="hero-value">{{if gt .MatchedNodes 0}}${{money .MonthlyCost}}<span class="hero-unit"> / month</span>{{else}}<span class="unavailable">Pricing unavailable</span>{{end}}</div><div class="hero-source">Public/list-rate monthly run-rate projection · {{.Currency}}</div></div>
+<div><div class="hero-kicker">Azure billing · {{.Billing.CostBasisLabel}} · {{.Billing.StatusLabel}}</div><div class="hero-value">{{if or (eq .Billing.Status "available") (eq .Billing.Status "stale")}}${{money .Billing.Total}}<span class="hero-unit"> {{.Billing.Currency}}</span>{{else if eq .Billing.Status "no_data"}}<span class="unavailable">No billed usage for this period</span>{{else}}<span class="unavailable">Azure billing unavailable</span>{{end}}</div><div class="hero-source">{{.Billing.PeriodLabel}} · {{.Billing.Source}}</div></div>
+<div><div class="composition-head"><div class="composition-title">Billing scope</div></div><div class="section-note" style="margin:0">{{.Billing.Coverage}}</div></div>
+</section>
+{{if .Billing.Stale}}<div class="warning">Azure billing could not refresh and is showing the last successful result{{if .Billing.UnavailableReason}}: {{.Billing.UnavailableReason}}{{end}}.</div>{{else if eq .Billing.Status "unavailable"}}<div class="warning">Azure billing is unavailable{{if .Billing.UnavailableReason}}: {{.Billing.UnavailableReason}}{{end}}. The estimate below reflects public/list pricing only.</div>{{end}}
+{{range .Billing.Disclosures}}<div class="section-note">{{.}}</div>{{end}}
+{{if not .Billing.LastRefresh.IsZero}}<div class="section-note">Azure billing last refreshed {{.Billing.LastRefresh.Format "2006-01-02 15:04 MST"}}.</div>{{end}}
+{{else}}
+<div class="section-note">Estimate-only mode: Azure billing is not configured for this cluster. Figures below are public/list-rate estimates, not billing data.</div>
+{{end}}
+
+<section class="cost-hero">
+<div><div class="hero-kicker">Current retail node run-rate (estimate)</div><div class="hero-value">{{if gt .MatchedNodes 0}}${{money .MonthlyCost}}<span class="hero-unit"> / month</span>{{else}}<span class="unavailable">Pricing unavailable</span>{{end}}</div><div class="hero-source">Public/list-rate monthly run-rate projection · {{.Currency}}</div></div>
 <div><div class="composition-head"><div class="composition-title">Cost composition</div><div class="composition-total">Resolved compute = allocated + idle + unallocated</div></div><div class="composition-bar"><div class="composition-seg seg-allocated" style="{{.AllocatedWidthStyle}}"></div><div class="composition-seg seg-idle" style="{{.IdleWidthStyle}}"></div><div class="composition-seg seg-unallocated" style="{{.UnallocatedWidthStyle}}"></div></div><div class="composition-legend"><div class="legend-item"><div class="legend-label">Allocated</div><div class="legend-value allocated"><span>${{money .AllocatedCost}}</span><span class="metric-sep">|</span><span class="metric-pct">{{printf "%.1f" .AllocatedPct}}%</span></div></div><div class="legend-item"><div class="legend-label">Idle</div><div class="legend-value idle"><span>${{money .IdleCost}}</span><span class="metric-sep">|</span><span class="metric-pct">{{printf "%.1f" .IdlePct}}%</span></div></div><div class="legend-item"><div class="legend-label">Unallocated</div><div class="legend-value unallocated"><span>${{money .UnallocatedCost}}</span><span class="metric-sep">|</span><span class="metric-pct">{{printf "%.1f" .UnallocatedPct}}%</span></div></div></div></div>
 </section>
 
