@@ -80,6 +80,21 @@ func NodeConditionIncidents(findings []models.NodeConditionFinding) []store.Inci
 // snapshots and returns unhealthy Node conditions with placement correlation.
 // It has no persistence or presentation side effects.
 func (s *Scanner) FindNodeHealthConditions() ([]models.NodeConditionFinding, error) {
+	return s.findNodeHealthConditions(nil, nil, false)
+}
+
+// FindNodeHealthConditionsWithSnapshot reuses a previously retrieved,
+// genuinely cluster-wide Pod and Job snapshot (e.g. from
+// FindEmergencyIssues' PodSnapshot/JobSnapshot) instead of re-fetching Pods
+// and Jobs when unhealthy Node conditions are found. Nodes are always
+// fetched fresh here regardless -- Node data isn't otherwise available to
+// callers of this package the way Pods and Jobs are, and Node lists are
+// typically small, so there is no redundant fetch worth avoiding for them.
+func (s *Scanner) FindNodeHealthConditionsWithSnapshot(pods []corev1.Pod, jobs []batchv1.Job) ([]models.NodeConditionFinding, error) {
+	return s.findNodeHealthConditions(pods, jobs, true)
+}
+
+func (s *Scanner) findNodeHealthConditions(pods []corev1.Pod, jobs []batchv1.Job, useSnapshot bool) ([]models.NodeConditionFinding, error) {
 	nodes, err := s.clientset.CoreV1().Nodes().List(s.ctx, metav1.ListOptions{})
 	if err != nil {
 		return nil, fmt.Errorf("failed to list nodes: %w", err)
@@ -89,11 +104,14 @@ func (s *Scanner) FindNodeHealthConditions() ([]models.NodeConditionFinding, err
 	if len(findings) == 0 {
 		return findings, nil
 	}
-	pods, err := s.clientset.CoreV1().Pods("").List(s.ctx, metav1.ListOptions{})
+	if useSnapshot {
+		return CorrelateNodeWorkloads(findings, pods, jobs), nil
+	}
+	podList, err := s.clientset.CoreV1().Pods("").List(s.ctx, metav1.ListOptions{})
 	if err != nil {
 		return nil, fmt.Errorf("failed to list pods for node correlation: %w", err)
 	}
-	return correlateNodeWorkloadsWithOwners(findings, pods.Items, s.jobOwnerIndex("")), nil
+	return correlateNodeWorkloadsWithOwners(findings, podList.Items, s.jobOwnerIndex("")), nil
 }
 
 // NodeSnapshot returns a copy of the Node snapshot most recently retrieved by

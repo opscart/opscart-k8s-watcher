@@ -7,6 +7,7 @@ import (
 
 	"github.com/opscart/opscart-k8s-watcher/pkg/analyzer"
 	"github.com/opscart/opscart-k8s-watcher/pkg/report"
+	corev1 "k8s.io/api/core/v1"
 )
 
 func runReportGeneration(clusterContext string, clusterName string) error {
@@ -28,10 +29,25 @@ func runReportGeneration(clusterContext string, clusterName string) error {
 		resourceAnalysis = nil
 	}
 
+	// Reuse the Pod snapshot ResourceAnalyzer already fetched above for the
+	// Security and NetworkPolicy audits below, instead of each analyzer
+	// independently re-fetching every Pod. Only safe when this run's
+	// namespace flag was empty -- ResourceAnalyzer's own PodSnapshot() is
+	// scoped to whatever --namespace was passed, and a namespace-scoped
+	// snapshot must never stand in for a cluster-wide audit.
+	clusterWide := namespace == "" && resourceAnalysis != nil
+	var podSnapshot []corev1.Pod
+	if clusterWide {
+		podSnapshot = ra.PodSnapshot()
+	}
+
 	// Run REAL security audit
 	fmt.Println("  🛡️  Running security audit...")
 	sa := analyzer.NewSecurityAuditor(clientset)
-	audit, err := sa.AuditClusterSecurity(namespace)
+	// AuditClusterSecurityWithPodSnapshot falls back to its own fresh
+	// Pods(namespace).List internally whenever clusterWide is false, so
+	// this one call is correct and safe in both cases.
+	audit, err := sa.AuditClusterSecurityWithPodSnapshot(namespace, podSnapshot, clusterWide)
 	if err != nil {
 		return fmt.Errorf("security audit failed: %w", err)
 	}
@@ -39,7 +55,18 @@ func runReportGeneration(clusterContext string, clusterName string) error {
 	// Run network policy audit for CIS 5.7.3 — real coverage data
 	fmt.Println("  🌐 Running network policy audit (CIS 5.7.3)...")
 	npa := analyzer.NewNetworkPolicyAuditor(clientset)
-	netAudit, netErr := npa.AuditNetworkPolicies(namespace)
+	// Unlike Security's variant above, AuditNetworkPoliciesWithPods always
+	// treats its Pod argument as an authoritative supplied snapshot -- an
+	// empty/nil slice would be read as "no Pods anywhere" rather than
+	// "please fetch them yourself". So the clusterWide branch stays
+	// explicit here rather than being pushed into the analyzer call.
+	var netAudit *analyzer.NetworkPolicyAudit
+	var netErr error
+	if clusterWide {
+		netAudit, netErr = npa.AuditNetworkPoliciesWithPods(namespace, podSnapshot)
+	} else {
+		netAudit, netErr = npa.AuditNetworkPolicies(namespace)
+	}
 	if netErr != nil {
 		fmt.Printf("  ⚠️  Network policy audit skipped: %v\n", netErr)
 		netAudit = nil
