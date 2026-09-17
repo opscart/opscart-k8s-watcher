@@ -51,7 +51,18 @@ func runEmergencyScan(clusterContext string) error {
 	if err != nil {
 		return fmt.Errorf("scanning cluster: %w", err)
 	}
-	nodeHealth, err := s.FindNodeHealthConditions()
+	// Reuse the Pod and Job snapshot FindEmergencyIssues already fetched
+	// above, instead of independently re-fetching both when this run finds
+	// unhealthy Node conditions. Only safe when this run's namespace flag
+	// was empty -- FindEmergencyIssues' snapshot is scoped to whatever
+	// --namespace was passed, and Node-health correlation needs every
+	// namespace's workloads, not just one.
+	var nodeHealth []models.NodeConditionFinding
+	if namespace == "" {
+		nodeHealth, err = s.FindNodeHealthConditionsWithSnapshot(s.PodSnapshot(), s.JobSnapshot())
+	} else {
+		nodeHealth, err = s.FindNodeHealthConditions()
+	}
 	if err != nil {
 		return fmt.Errorf("scanning node health: %w", err)
 	}

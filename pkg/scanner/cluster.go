@@ -24,6 +24,18 @@ type Scanner struct {
 	// nodes is the raw Node snapshot most recently retrieved by
 	// FindNodeHealthConditions. See NodeSnapshot.
 	nodes []corev1.Node
+
+	// pods is the raw Pod snapshot most recently retrieved by
+	// FindEmergencyIssues. See PodSnapshot. Only trustworthy as a
+	// cluster-wide snapshot when the namespace that FindEmergencyIssues
+	// was called with was empty -- callers reusing it must check that
+	// themselves, the same way ResourceAnalyzer.PodSnapshot() callers do.
+	pods []corev1.Pod
+
+	// jobs is the raw Job snapshot most recently retrieved by
+	// jobOwnerIndex. See JobSnapshot. Same cluster-wide caveat as pods
+	// above.
+	jobs []batchv1.Job
 }
 
 // NewScannerWithClientset reuses an already-configured Kubernetes client for
@@ -72,6 +84,7 @@ func (s *Scanner) FindEmergencyIssues(namespace string) ([]models.EmergencyIssue
 	if err != nil {
 		return nil, fmt.Errorf("failed to list pods: %w", err)
 	}
+	s.pods = podList.Items
 
 	jobOwners := s.jobOwnerIndex(namespace)
 	// Analyze each pod for problems
@@ -110,6 +123,24 @@ func (s *Scanner) FindEmergencyIssues(namespace string) ([]models.EmergencyIssue
 	}
 
 	return issues, nil
+}
+
+// PodSnapshot returns a copy of the Pod snapshot most recently retrieved by
+// FindEmergencyIssues, so other scan-pipeline consumers (e.g. node-health
+// workload correlation) can reuse it instead of listing Pods again. It is
+// nil until FindEmergencyIssues has been called, and it reflects whatever
+// namespace FindEmergencyIssues was called with -- callers must confirm
+// that was empty (cluster-wide) before treating this as a full-cluster
+// snapshot.
+func (s *Scanner) PodSnapshot() []corev1.Pod {
+	return append([]corev1.Pod(nil), s.pods...)
+}
+
+// JobSnapshot returns a copy of the Job snapshot most recently retrieved by
+// jobOwnerIndex (called from FindEmergencyIssues), with the same
+// cluster-wide caveat as PodSnapshot.
+func (s *Scanner) JobSnapshot() []batchv1.Job {
+	return append([]batchv1.Job(nil), s.jobs...)
 }
 
 type deploymentKey struct {
@@ -292,6 +323,7 @@ func (s *Scanner) jobOwnerIndex(namespace string) map[string]workloadOwner {
 	if err != nil {
 		return nil
 	}
+	s.jobs = jobs.Items
 	return jobOwnersFromJobs(jobs.Items)
 }
 
