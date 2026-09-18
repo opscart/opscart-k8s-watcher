@@ -15,7 +15,10 @@ const (
 	warRoomAICacheTTL      = 15 * time.Minute
 	// Bump this whenever the evidence mapping, provider instructions, or
 	// structured response schema changes so older results cannot be reused.
-	warRoomAIContractVersion = "warroom-ai-v2"
+	// v3: tightened analysisInstructions (pkg/aianalysis/openai.go) — a
+	// result generated under the old instructions must not be presented as
+	// current.
+	warRoomAIContractVersion = "warroom-ai-v3"
 )
 
 type warRoomAIRuntime struct {

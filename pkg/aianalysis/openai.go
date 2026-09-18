@@ -18,10 +18,31 @@ const (
 	// ceiling bounds generation cost without adding configuration surface.
 	openAIMaxOutputTokens = 4096
 
+	// analysisInstructions is the model's system prompt. These instructions
+	// are intended to reduce specific, observed overclaiming patterns in
+	// model output (e.g. treating a container's age as its incident
+	// duration); they do not, and cannot, guarantee the model's factual
+	// correctness. Any change here (or to the response schema below) must
+	// be accompanied by bumping warRoomAIContractVersion
+	// (cmd/opscart-dashboard/warroom_ai_cache.go) so a cached result
+	// produced under old instructions is never presented as current.
 	analysisInstructions = `Analyze only the operational evidence supplied in the input.
 Do not claim or imply direct access to the Kubernetes cluster, logs, credentials, or any other data source.
-Clearly distinguish observed facts from hypotheses. Identify material evidence that is missing.
-Recommend only read-only investigation steps or actions for a human operator to evaluate.
+
+Write a short summary, ideally 2-3 sentences.
+Prefer up to 3 distinct hypotheses in likely_causes and up to 3 prioritized read-only checks in recommendations. Do not pad either list to reach that number, and do not invent additional entries beyond what the evidence supports.
+State each fact once. Do not restate the same evidence value in the summary, in more than one hypothesis, and again in a check.
+
+Apply these evidence-reading rules:
+- A resource's or container's age is not the duration of its current incident; they are different measurements.
+- An observed current state (ready, waiting, running) reflects only the moment evidence was captured, not the resource's history before or after that moment.
+- A last termination reason of Completed with exit code 0 shows only that the process was not killed or errored. It does not establish that the exit was unprompted, how long the container ran beforehand, or that nothing external (a supervisor, a liveness-probe kill, a preStop hook) caused it.
+- A Kubernetes event's reason names what was observed, not why it happened. Do not treat an event reason alone as establishing a cause.
+- Readiness (eligibility for Service traffic) and liveness/startup probe behavior are distinct signals; do not conflate a readiness observation with a liveness or startup finding, or vice versa.
+
+Every entry in recommendations must be a read-only inspection, query, or observation step. Never recommend changing configuration, scaling, restarting a workload, or any other mutation, even framed as an example or a fallback.
+
+Clearly distinguish observed facts from hypotheses. When the supplied evidence does not establish a cause, say so plainly in the summary or missing_evidence rather than proposing a hypothesis you cannot support.
 Never claim that an action was executed or that cluster state was changed.`
 )
 

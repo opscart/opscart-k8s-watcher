@@ -349,22 +349,31 @@ func TestInvestigationAIIdentityRendersConditionally(t *testing.T) {
 		mustNotContain []string
 	}{
 		{
+			// A workload/pod issue shows the pod in the (conditionally
+			// rendered) pod-details disclosure, but no container row since
+			// this fixture's issue carries no container.
 			name:           "pod",
 			fixture:        func() (*clusterScan, warRoomAITestStore) { return warRoomAICrashFixture("prod", 7) },
-			mustContain:    []string{"payments-0"},
-			mustNotContain: []string{`<span class="ai-scope-key">Container</span>`},
+			mustContain:    []string{"payments-0", `class="ai-pod-details"`, `<span>Pod</span>`, `class="ai-head-ns"`},
+			mustNotContain: []string{`<span>Container</span>`},
 		},
 		{
+			// A namespace-scoped issue has no pod/container at all — the
+			// entire pod-details disclosure must be omitted, not merely
+			// left with empty rows — and no separate namespace badge next
+			// to the resource name, since the resource name already reads
+			// "Namespace/payments".
 			name:           "namespace",
 			fixture:        func() (*clusterScan, warRoomAITestStore) { return warRoomAINamespaceFixture("prod") },
-			mustContain:    []string{"payments"},
-			mustNotContain: []string{`<span class="ai-scope-key">Pod</span>`, `<span class="ai-scope-key">Container</span>`},
+			mustContain:    []string{"Namespace/payments"},
+			mustNotContain: []string{`class="ai-pod-details"`, `<span>Pod</span>`, `<span>Container</span>`, `class="ai-head-ns"`},
 		},
 		{
+			// A node-scoped issue has no namespace, pod, or container.
 			name:           "node",
 			fixture:        func() (*clusterScan, warRoomAITestStore) { return warRoomAINodeFixture("prod") },
-			mustContain:    []string{"worker-1"},
-			mustNotContain: []string{`<span class="ai-scope-key">Pod</span>`, `<span class="ai-scope-key">Namespace</span>`},
+			mustContain:    []string{"Node/worker-1"},
+			mustNotContain: []string{`class="ai-pod-details"`, `<span>Pod</span>`, `<span>Container</span>`, `class="ai-head-ns"`, "Namespace/"},
 		},
 	}
 	for _, tc := range cases {
@@ -614,5 +623,159 @@ func TestSettingsShowsSafeAIConfigurationStatus(t *testing.T) {
 		if !strings.Contains(body, want) {
 			t.Errorf("disabled Settings page missing %q", want)
 		}
+	}
+}
+
+// TestInvestigationAIRendersGeneratingState covers the GENERATING status: an
+// in-flight generation (cache.begin, not yet finished) must render
+// GENERATING with no generate/regenerate control, and rendering it must
+// never itself invoke the provider.
+func TestInvestigationAIRendersGeneratingState(t *testing.T) {
+	scan, db := warRoomAICrashFixture("prod", 7)
+	provider := &fakeWarRoomAIProvider{response: testWarRoomAIResponse()}
+	srv := newWarRoomAITestServer([]string{"prod"}, map[string]*clusterScan{"prod": scan}, db, provider)
+	selector := collectWarRoomAISelections(scan, "prod", db)[0].Selector
+
+	if !srv.aiRuntime.cache.begin("prod", selector) {
+		t.Fatal("setup: expected begin to succeed")
+	}
+	defer srv.aiRuntime.cache.finish("prod", selector)
+
+	req := httptest.NewRequest(http.MethodGet, "/investigate?cluster=prod&tab=ai&issue="+selector, nil)
+	req.SetBasicAuth("operator", "test-password")
+	rec := httptest.NewRecorder()
+	srv.newMux().ServeHTTP(rec, req)
+	body := rec.Body.String()
+
+	if !strings.Contains(body, `class="ai-status generating"`) || !strings.Contains(body, ">GENERATING<") {
+		t.Fatalf("expected a GENERATING status: %s", body)
+	}
+	if strings.Contains(body, `id="ai-generate"`) {
+		t.Fatal("GENERATING state must not expose a generate/regenerate control")
+	}
+	if provider.callCount() != 0 {
+		t.Fatal("rendering the GENERATING state invoked the provider")
+	}
+}
+
+// TestInvestigationAIRendersCompleteGenerationEvidence proves every
+// generation-time evidence item is rendered in "Evidence supplied by
+// OpsCart" — none dropped or truncated — by counting rendered evidence rows
+// against the cached entry's own Evidence slice and the model's own
+// EvidenceUsed slice (rendered in the separate "Evidence cited by AI"
+// section).
+func TestInvestigationAIRendersCompleteGenerationEvidence(t *testing.T) {
+	scan, db := warRoomAICrashFixture("prod", 7)
+	provider := &fakeWarRoomAIProvider{response: testWarRoomAIResponse()}
+	srv := newWarRoomAITestServer([]string{"prod"}, map[string]*clusterScan{"prod": scan}, db, provider)
+	selection := collectWarRoomAISelections(scan, "prod", db)[0]
+	capture, err := captureWarRoomAIEvidence(scan, "prod", db, selection)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(capture.Request.Evidence) < 3 {
+		t.Fatalf("setup: fixture produced too few evidence items to prove completeness: %d", len(capture.Request.Evidence))
+	}
+	response := testWarRoomAIResponse()
+	srv.aiRuntime.cache.put(warRoomAICacheEntry{
+		ClusterKey: "prod", Selector: selection.Selector, EvidenceHash: capture.Hash,
+		RuntimeKey: srv.aiRuntime.key(), IssueIdentity: selection.Identity,
+		Provider: "openai", Model: "synthetic-model",
+		EvidenceCaptured: capture.CapturedAt, GeneratedAt: srv.aiRuntime.cache.now(),
+		Response: *response, Evidence: capture.Request.Evidence,
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/investigate?cluster=prod&tab=ai&issue="+selection.Selector, nil)
+	req.SetBasicAuth("operator", "test-password")
+	rec := httptest.NewRecorder()
+	srv.newMux().ServeHTTP(rec, req)
+	body := rec.Body.String()
+
+	got := strings.Count(body, `class="ai-ev-row"`)
+	want := len(capture.Request.Evidence) + len(response.EvidenceUsed)
+	if got != want {
+		t.Fatalf("rendered %d evidence rows, want %d (evidence supplied %d + evidence cited %d): %s", got, want, len(capture.Request.Evidence), len(response.EvidenceUsed), body)
+	}
+}
+
+// TestInvestigationAIDisclosuresAreNativeOnly proves the pod-details and
+// evidence sections are plain native <details>/<summary> with no JS wiring:
+// expanding them can never trigger a network call, since nothing listens
+// for it. Combined with generating an analysis beforehand and resetting the
+// provider's call counter, a zero count after the page GET also confirms
+// page rendering itself never calls the provider.
+func TestInvestigationAIDisclosuresAreNativeOnly(t *testing.T) {
+	scan, db := warRoomAICrashFixture("prod", 7)
+	provider := &fakeWarRoomAIProvider{response: testWarRoomAIResponse()}
+	srv := newWarRoomAITestServer([]string{"prod"}, map[string]*clusterScan{"prod": scan}, db, provider)
+	selector := collectWarRoomAISelections(scan, "prod", db)[0].Selector
+	if rec := warRoomAIPost(t, srv.newMux(), "/api/warroom/ai-analysis?cluster=prod", selector, "http://example.com", true); rec.Code != http.StatusOK {
+		t.Fatalf("generation status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	provider.mu.Lock()
+	provider.calls = 0 // reset after the setup generation above
+	provider.mu.Unlock()
+
+	req := httptest.NewRequest(http.MethodGet, "/investigate?cluster=prod&tab=ai&issue="+selector, nil)
+	req.SetBasicAuth("operator", "test-password")
+	rec := httptest.NewRecorder()
+	srv.newMux().ServeHTTP(rec, req)
+	body := rec.Body.String()
+
+	// base.html contributes its own earlier <script> block, so the LAST
+	// <script>...</script> pair (this page's own) must be isolated, not
+	// everything from the first <script> tag onward — that range would
+	// wrongly include this page's own subsequent HTML (e.g. the literal
+	// class name text "ai-pod-details").
+	scriptStart := strings.LastIndex(body, "<script>")
+	scriptEnd := strings.LastIndex(body, "</script>")
+	if scriptStart == -1 || scriptEnd == -1 || scriptEnd < scriptStart {
+		t.Fatal("expected a script block")
+	}
+	script := body[scriptStart:scriptEnd]
+	for _, forbidden := range []string{"ai-pod-details", "ai-evidence-toggle", "ontoggle", "'toggle'"} {
+		if strings.Contains(script, forbidden) {
+			t.Fatalf("script wires JS behavior to a disclosure element (%q) — expanding it must never trigger a request", forbidden)
+		}
+	}
+	if provider.callCount() != 0 {
+		t.Fatal("rendering the page invoked the provider")
+	}
+}
+
+// TestInvestigationAICacheVersionBumpInvalidatesOldResults proves the
+// warRoomAIContractVersion mechanism actually works: a cache entry produced
+// under an older contract version — matching provider/model, and even
+// matching the current evidence hash — must never be presented as
+// GENERATED, only STALE, so tightened generation instructions can never be
+// silently bypassed by a result produced under the old instructions.
+func TestInvestigationAICacheVersionBumpInvalidatesOldResults(t *testing.T) {
+	scan, db := warRoomAICrashFixture("prod", 7)
+	provider := &fakeWarRoomAIProvider{response: testWarRoomAIResponse()}
+	srv := newWarRoomAITestServer([]string{"prod"}, map[string]*clusterScan{"prod": scan}, db, provider)
+	selection := collectWarRoomAISelections(scan, "prod", db)[0]
+	capture, err := captureWarRoomAIEvidence(scan, "prod", db, selection)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	const oldRuntimeKey = "openai\x00synthetic-model\x00warroom-ai-v2"
+	if oldRuntimeKey == srv.aiRuntime.key() {
+		t.Fatal("setup: old and current runtime keys must differ for this test to be meaningful")
+	}
+	srv.aiRuntime.cache.put(warRoomAICacheEntry{
+		ClusterKey: "prod", Selector: selection.Selector, EvidenceHash: capture.Hash,
+		RuntimeKey: oldRuntimeKey, IssueIdentity: selection.Identity,
+		Provider: "openai", Model: "synthetic-model",
+		EvidenceCaptured: capture.CapturedAt, GeneratedAt: srv.aiRuntime.cache.now(),
+		Response: *testWarRoomAIResponse(), Evidence: capture.Request.Evidence,
+	})
+
+	page := srv.buildInvestigationAIPageData(scan, "prod", selection.Selector, "")
+	if page.Status != "STALE" {
+		t.Fatalf("status = %q, want STALE — a result generated under an old contract version must not be shown as current even though its evidence hash matches", page.Status)
+	}
+	if !page.CanGenerate || !page.Regenerate {
+		t.Fatalf("expected regeneration to be offered: %+v", page)
 	}
 }

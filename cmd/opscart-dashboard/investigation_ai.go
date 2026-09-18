@@ -326,7 +326,13 @@ func populateInvestigationAIFromEntry(data *investigationAIPageData, entry warRo
 var getInvestigationAITmpl = sync.OnceValue(func() *template.Template {
 	return template.Must(
 		template.New("investigation_ai.html").
-			Funcs(template.FuncMap{"issueTypeLabel": issueTypeLabel}).
+			Funcs(template.FuncMap{
+				"issueTypeLabel": issueTypeLabel,
+				// inc turns a template range's 0-based index into a 1-based
+				// display number for causes/checks — html/template has no
+				// arithmetic operators of its own.
+				"inc": func(i int) int { return i + 1 },
+			}).
 			ParseFS(templateFS,
 				"templates/base.html",
 				"templates/sidebar.html",
