@@ -64,9 +64,20 @@ func TestOpenAIProviderSendsConfiguredRequestAndMapsResponse(t *testing.T) {
 			"only the operational evidence supplied",
 			"Do not claim or imply direct access",
 			"distinguish observed facts from hypotheses",
-			"evidence that is missing",
-			"only read-only investigation steps",
+			"missing_evidence",
+			"Every entry in recommendations must be a read-only inspection, query, or observation step",
+			"Never recommend changing configuration, scaling, restarting a workload, or any other mutation",
 			"Never claim that an action was executed",
+			// Tightened overclaiming guardrails (feature/ai-analysis-redesign):
+			// each must survive verbatim, since these are the specific
+			// behaviors the redesign's generation-instruction tightening
+			// targets.
+			"age is not the duration of its current incident",
+			"reflects only the moment evidence was captured, not the resource's history",
+			"does not establish that the exit was unprompted",
+			"event's reason names what was observed, not why it happened",
+			"Readiness (eligibility for Service traffic) and liveness/startup probe behavior are distinct signals",
+			"Prefer up to 3 distinct hypotheses",
 		} {
 			if !strings.Contains(request.Instructions, constraint) {
 				t.Errorf("instructions missing %q: %q", constraint, request.Instructions)

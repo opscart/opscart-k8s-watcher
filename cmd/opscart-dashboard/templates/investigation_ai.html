@@ -9,11 +9,10 @@
 <style>
 .main{
   --bg:#0b0f1a;--surface:#141a2c;--surface-hover:#202844;--border:#232b45;
-  --text-muted:#8a96ad;--inv-inset:#0e1424;
+  --text-muted:#8a96ad;--text-secondary:#aab4c8;--inv-inset:#0e1424;
   --inv-shadow-sm:0 1px 2px rgba(0,0,0,.4);
   background:var(--bg);
 }
-.ai-scope-card,.ai-result-block{box-shadow:var(--inv-shadow-sm)}
 .inv-tabs{display:flex;gap:.5rem;margin-bottom:1.5rem;border-bottom:1px solid var(--border)}
 .inv-tab{display:inline-flex;align-items:center;padding:.6rem 1rem;color:var(--text-muted);font-size:.85rem;font-weight:600;text-decoration:none;border-bottom:2px solid transparent;margin-bottom:-1px}
 .inv-tab:hover{color:var(--text)}
@@ -25,41 +24,87 @@
 .ai-setup code{color:var(--primary-light);font-size:.8rem}.ai-setup a{color:var(--primary-light);font-size:.8rem;font-weight:600;text-decoration:none}.ai-setup a:hover{text-decoration:underline}
 .ai-disclaimer{display:flex;align-items:flex-start;gap:.75rem;background:rgba(245,158,11,.06);border:1px solid rgba(245,158,11,.32);border-radius:var(--radius-sm);padding:.9rem 1.1rem;margin-bottom:1.5rem;font-size:.82rem;color:var(--text)}
 .ai-disclaimer svg{flex-shrink:0;color:var(--warning);margin-top:2px}
-.ai-status-row{display:flex;align-items:center;gap:.75rem;flex-wrap:wrap;margin-bottom:1rem}
+
+/* --- compact header: identity, status, generate button, meta, pod details --- */
+.ai-head{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:1rem 1.25rem;margin-bottom:1.5rem;box-shadow:var(--inv-shadow-sm)}
+.ai-head-top{display:flex;justify-content:space-between;align-items:center;gap:1rem;flex-wrap:wrap}
+.ai-head-left{display:flex;align-items:center;gap:.6rem;flex-wrap:wrap;min-width:0}
+.ai-head-resource{font-weight:700;font-size:1rem;color:var(--text);overflow-wrap:anywhere}
+.ai-head-ns{color:var(--text-muted);font-size:.85rem;overflow-wrap:anywhere}
+.ai-head-class{background:var(--primary-bg);color:var(--primary-light);border-radius:999px;padding:.2rem .65rem;font-size:.72rem;font-weight:700}
+.ai-head-right{display:flex;align-items:center;gap:.6rem;flex-shrink:0}
 .ai-status{display:inline-flex;align-items:center;border-radius:999px;padding:.28rem .7rem;font-size:.68rem;font-weight:750;text-transform:uppercase;letter-spacing:.06em;background:rgba(99,102,241,.12);color:var(--primary-light)}
 .ai-status.stale{background:rgba(245,158,11,.14);color:#fbbf24}
 .ai-status.error,.ai-status.not-generated,.ai-status.not-configured{background:rgba(100,116,139,.14);color:#94a3b8}
 .ai-status.generating{background:rgba(56,189,248,.14);color:#38bdf8}
 .ai-status.generated{background:rgba(34,197,94,.14);color:#4ade80}
-.ai-message{color:var(--text-muted);font-size:.82rem;line-height:1.5}
-.ai-scope-card{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius-sm);padding:1rem 1.25rem;margin-bottom:1.5rem}
-.ai-scope-row{display:grid;grid-template-columns:150px 1fr;gap:1rem;padding:.4rem 0;border-bottom:1px solid rgba(51,65,85,.45);font-size:.82rem}
-.ai-scope-row:last-child{border-bottom:none}
-.ai-scope-key{color:var(--text-muted)}
-.ai-scope-value{color:var(--text);font-weight:500;overflow-wrap:anywhere}
-.ai-actions{display:flex;align-items:center;gap:.75rem;flex-wrap:wrap;margin-bottom:1.5rem}
-.ai-generate-btn{height:40px;border:1px solid var(--primary);border-radius:var(--radius-xs);background:var(--primary);color:#fff;padding:0 1.1rem;font:inherit;font-size:.82rem;font-weight:700;cursor:pointer}
+.ai-generate-btn{height:32px;border:1px solid var(--primary);border-radius:var(--radius-xs);background:var(--primary);color:#fff;padding:0 .9rem;font:inherit;font-size:.78rem;font-weight:700;cursor:pointer}
 .ai-generate-btn:hover{background:var(--primary-light);border-color:var(--primary-light)}
 .ai-generate-btn:disabled{opacity:.55;cursor:wait}
-.ai-error{color:var(--danger);font-size:.82rem}
-.ai-result-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:1rem;margin-bottom:1.5rem}
-.ai-result-block{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius-sm);padding:1rem 1.25rem}
-.ai-result-block.wide{grid-column:1/-1}
-.ai-result-block h3{font-size:.72rem;color:var(--text-muted);text-transform:uppercase;letter-spacing:.06em;margin-bottom:.6rem}
-.ai-result-block p,.ai-result-block li{color:var(--text-secondary);font-size:.85rem;line-height:1.6}
-.ai-result-block ol,.ai-result-block ul{margin:0 0 0 1.1rem}
-.ai-result-block li+li{margin-top:.5rem}
-.ai-result-block b{color:var(--text);font-weight:650}
-.ai-confidence{display:inline-flex;border-radius:999px;padding:.18rem .55rem;font-size:.66rem;font-weight:750;text-transform:uppercase}
-.ai-confidence.high{background:rgba(34,197,94,.12);color:#4ade80}
-.ai-confidence.medium{background:rgba(245,158,11,.12);color:#fbbf24}
-.ai-confidence.low{background:rgba(148,163,184,.12);color:#94a3b8}
-.ai-meta-row{display:flex;flex-wrap:wrap;gap:.5rem 1.25rem;color:var(--text-muted);font-size:.74rem;margin-bottom:1rem}
-.ai-unverified{font-size:.72rem;color:var(--text-muted);font-style:italic;margin-bottom:.5rem}
-.ai-evidence-item{padding:.5rem 0;border-bottom:1px solid rgba(51,65,85,.4);font-size:.82rem}
-.ai-evidence-item:last-child{border-bottom:none}
-.ai-evidence-type{display:inline-block;color:var(--text-muted);font-size:.65rem;text-transform:uppercase;letter-spacing:.05em;margin-right:.5rem}
-@media(max-width:768px){.ai-result-grid{grid-template-columns:1fr}.ai-scope-row{grid-template-columns:120px 1fr}}
+.ai-message{color:var(--text-secondary);font-size:.82rem;line-height:1.5;margin-top:.5rem}
+.ai-head-meta{margin-top:.35rem;font-size:.72rem;color:var(--text-muted);overflow-wrap:anywhere}
+.ai-error{display:block;color:var(--danger);font-size:.82rem;margin-top:.4rem}
+.ai-pod-details{margin-top:.6rem}
+.ai-pod-details summary{cursor:pointer;font-size:.76rem;color:var(--primary-light);list-style:none;display:inline-flex;align-items:center;gap:.3rem}
+.ai-pod-details summary::-webkit-details-marker{display:none}
+.ai-pod-details summary::before{content:"▸";display:inline-block;transition:transform .12s}
+.ai-pod-details[open] summary::before{transform:rotate(90deg)}
+.ai-pod-body{margin-top:.5rem;font-size:.78rem;color:var(--text-secondary);font-family:ui-monospace,Menlo,monospace}
+.ai-pod-row{display:flex;gap:.5rem;padding:.22rem 0;overflow-wrap:anywhere}
+.ai-pod-row span:first-child{color:var(--text-muted);min-width:110px;flex-shrink:0}
+
+/* --- AI assessment --- */
+.ai-assessment{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:1rem 1.25rem;margin-bottom:1.25rem;box-shadow:var(--inv-shadow-sm)}
+.ai-assessment h2{font-size:.72rem;text-transform:uppercase;letter-spacing:.06em;color:var(--text-muted);margin-bottom:.6rem;font-weight:700}
+.ai-assessment p{color:var(--text-secondary);font-size:.9rem;line-height:1.6;overflow-wrap:anywhere}
+
+/* --- possible causes / read-only checks, side by side --- */
+.ai-two-col{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:1rem;margin-bottom:1.25rem}
+.ai-panel{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:1rem 1.1rem;box-shadow:var(--inv-shadow-sm);min-width:0}
+.ai-panel h2{font-size:.72rem;text-transform:uppercase;letter-spacing:.06em;color:var(--text-muted);margin:0 0 .75rem;font-weight:700}
+.ai-panel>p{color:var(--text-secondary);font-size:.85rem}
+.ai-item{margin-bottom:.65rem}
+.ai-item:last-child{margin-bottom:0}
+.ai-item-line{font-size:.85rem;display:flex;gap:.4rem;color:var(--text-secondary);overflow-wrap:anywhere}
+.ai-item-line b{color:var(--text);flex-shrink:0}
+.ai-item details{margin-top:.25rem}
+.ai-item details summary{cursor:pointer;font-size:.72rem;color:var(--primary-light);list-style:none}
+.ai-item details summary::-webkit-details-marker{display:none}
+.ai-item details[open] summary{margin-bottom:.3rem}
+.ai-item-full{font-size:.78rem;color:var(--text-secondary);padding-left:.1rem;line-height:1.55;overflow-wrap:anywhere}
+
+.ai-needed{margin-top:.85rem;padding-top:.75rem;border-top:1px solid var(--border)}
+.ai-needed h3{font-size:.68rem;text-transform:uppercase;letter-spacing:.05em;color:var(--text-muted);margin:0 0 .4rem;font-weight:700}
+.ai-needed ul{margin:0;padding-left:1.05rem;font-size:.78rem;color:var(--text-secondary)}
+.ai-needed li{margin-bottom:.2rem;overflow-wrap:anywhere}
+
+/* --- collapsed evidence sections --- */
+.ai-evidence-toggle{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);margin-bottom:.75rem;overflow:hidden}
+.ai-evidence-toggle summary{cursor:pointer;padding:.85rem 1.1rem;font-size:.85rem;font-weight:700;color:var(--text);display:flex;justify-content:space-between;align-items:center;list-style:none}
+.ai-evidence-toggle summary::-webkit-details-marker{display:none}
+.ai-evidence-toggle summary .ai-chev{color:var(--text-muted);font-size:.78rem;transition:transform .12s}
+.ai-evidence-toggle[open] summary .ai-chev{transform:rotate(90deg)}
+.ai-evidence-body{padding:0 1.1rem 1rem;border-top:1px solid var(--border)}
+.ai-ev-row{padding:.55rem 0;border-bottom:1px solid rgba(35,42,69,.6);font-size:.82rem}
+.ai-ev-row:last-child{border-bottom:none}
+.ai-ev-label{color:var(--text-muted);font-size:.66rem;text-transform:uppercase;letter-spacing:.04em;margin-bottom:.15rem}
+.ai-ev-value{font-family:ui-monospace,Menlo,monospace;font-size:.78rem;color:var(--text-secondary);overflow-wrap:anywhere}
+.ai-ev-note{font-size:.72rem;color:var(--text-muted);font-style:italic;padding:.7rem 0 .2rem}
+
+/* --- accessibility: visible keyboard focus on every interactive element this page adds --- */
+.main .ai-generate-btn:focus-visible,
+.main .inv-tab:focus-visible,
+.main .ai-pod-details summary:focus-visible,
+.main .ai-item details summary:focus-visible,
+.main .ai-evidence-toggle summary:focus-visible,
+.main .ai-setup a:focus-visible{
+  outline:2px solid var(--primary-light);outline-offset:2px;border-radius:var(--radius-xs);
+}
+
+@media(max-width:768px){
+  .ai-two-col{grid-template-columns:1fr}
+  .ai-head-top{align-items:flex-start}
+}
 </style>
 </head>
 <body>
@@ -85,11 +130,6 @@
   </div>
   {{end}}
 
-  <div class="ai-status-row">
-    <span class="ai-status {{.StatusClass}}" id="ai-status">{{.Status}}</span>
-    <span class="ai-message" id="ai-message">{{if eq .Status "STALE"}}{{.StaleReason}}{{else}}{{.Message}}{{end}}</span>
-  </div>
-
   {{if not .AIConfigured}}
   <section class="ai-setup" aria-labelledby="ai-setup-title">
     <h2 id="ai-setup-title">Configure AI analysis</h2>
@@ -103,72 +143,94 @@
   </section>
   {{end}}
 
-  <section class="ai-scope-card">
-    {{if .NodeScoped}}
-    <div class="ai-scope-row"><span class="ai-scope-key">Entity type</span><span class="ai-scope-value">Node</span></div>
-    <div class="ai-scope-row"><span class="ai-scope-key">Node name</span><span class="ai-scope-value">{{.NodeName}}</span></div>
-    <div class="ai-scope-row"><span class="ai-scope-key">Condition</span><span class="ai-scope-value">{{.IssueType}}</span></div>
-    {{else if .NamespaceScoped}}
-    <div class="ai-scope-row"><span class="ai-scope-key">Entity type</span><span class="ai-scope-value">Namespace</span></div>
-    <div class="ai-scope-row"><span class="ai-scope-key">Namespace</span><span class="ai-scope-value">{{.Namespace}}</span></div>
-    <div class="ai-scope-row"><span class="ai-scope-key">Finding</span><span class="ai-scope-value">{{issueTypeLabel .IssueType}}</span></div>
-    {{else}}
-    <div class="ai-scope-row"><span class="ai-scope-key">Entity type</span><span class="ai-scope-value">Workload</span></div>
-    {{if .WorkloadLabel}}<div class="ai-scope-row"><span class="ai-scope-key">Workload</span><span class="ai-scope-value">{{.WorkloadLabel}}</span></div>{{end}}
-    <div class="ai-scope-row"><span class="ai-scope-key">Namespace</span><span class="ai-scope-value">{{.Namespace}}</span></div>
-    {{if .PodName}}<div class="ai-scope-row"><span class="ai-scope-key">Pod</span><span class="ai-scope-value">{{.PodName}}</span></div>{{end}}
-    {{if .ContainerName}}<div class="ai-scope-row"><span class="ai-scope-key">Container</span><span class="ai-scope-value">{{.ContainerName}}</span></div>{{end}}
-    <div class="ai-scope-row"><span class="ai-scope-key">Classification</span><span class="ai-scope-value">{{issueTypeLabel .IssueType}}</span></div>
+  <section class="ai-head">
+    <div class="ai-head-top">
+      <div class="ai-head-left">
+        <span class="ai-head-resource">{{if .NodeScoped}}Node/{{.NodeName}}{{else if .NamespaceScoped}}Namespace/{{.Namespace}}{{else}}{{.WorkloadLabel}}{{end}}</span>
+        {{if and (not .NodeScoped) (not .NamespaceScoped)}}<span class="ai-head-ns">{{.Namespace}}</span>{{end}}
+        <span class="ai-head-class">{{issueTypeLabel .IssueType}}</span>
+        <span class="ai-status {{.StatusClass}}" id="ai-status">{{.Status}}</span>
+      </div>
+      <div class="ai-head-right">
+        {{if .CanGenerate}}<button class="ai-generate-btn" id="ai-generate" type="button" data-endpoint="{{.Endpoint}}" data-selector="{{.Selector}}" data-regenerate="{{if .Regenerate}}1{{else}}0{{end}}">{{if .Regenerate}}Regenerate{{else}}Generate{{end}}</button>{{end}}
+      </div>
+    </div>
+    <div class="ai-message" id="ai-message">{{if eq .Status "STALE"}}{{.StaleReason}}{{else}}{{.Message}}{{end}}</div>
+    {{if or .EvidenceCaptured .GeneratedAt .Provider}}
+    <div class="ai-head-meta">{{if .EvidenceCaptured}}Evidence captured {{.EvidenceCaptured}}{{end}}{{if .GeneratedAt}} · Generated {{.GeneratedAt}}{{end}}{{if .Provider}} · Provider: {{.Provider}} · {{.Model}}{{end}}{{if .Result}} · Model-reported confidence: {{.Result.Confidence}}{{end}}</div>
+    {{end}}
+    <span class="ai-error" id="ai-error" role="alert" hidden></span>
+    {{if or .PodName .ContainerName}}
+    <details class="ai-pod-details">
+      <summary>Pod details</summary>
+      <div class="ai-pod-body">
+        {{if .PodName}}<div class="ai-pod-row"><span>Pod</span><span>{{.PodName}}</span></div>{{end}}
+        {{if .ContainerName}}<div class="ai-pod-row"><span>Container</span><span>{{.ContainerName}}</span></div>{{end}}
+      </div>
+    </details>
     {{end}}
   </section>
 
-  <div class="ai-actions">
-    {{if .CanGenerate}}
-    <button class="ai-generate-btn" id="ai-generate" type="button" data-endpoint="{{.Endpoint}}" data-selector="{{.Selector}}" data-regenerate="{{if .Regenerate}}1{{else}}0{{end}}">{{if .Regenerate}}Regenerate analysis{{else}}Generate analysis{{end}}</button>
-    {{end}}
-    <span class="ai-error" id="ai-error" role="alert" hidden></span>
-  </div>
-
   {{if .Result}}
-  <div class="ai-meta-row">
-    <span>Evidence captured {{if .EvidenceCaptured}}{{.EvidenceCaptured}}{{else}}unknown{{end}}</span>
-    <span>Analysis generated {{if .GeneratedAt}}{{.GeneratedAt}}{{else}}unknown{{end}}</span>
-    <span>Provider: {{.Provider}} · Model: {{.Model}}</span>
-    <span class="ai-confidence {{.ConfidenceClass}}">{{.Result.Confidence}} confidence</span>
+  <section class="ai-assessment">
+    <h2>AI assessment</h2>
+    <p>{{.Result.Summary}}</p>
+  </section>
+
+  <div class="ai-two-col">
+    <section class="ai-panel">
+      <h2>Possible causes</h2>
+      {{if .Result.LikelyCauses}}
+      {{range $i, $cause := .Result.LikelyCauses}}
+      <div class="ai-item">
+        <div class="ai-item-line"><b>{{inc $i}}.</b><span>{{$cause.Title}}</span></div>
+        {{if $cause.Rationale}}<details><summary>More</summary><div class="ai-item-full">{{$cause.Rationale}}</div></details>{{end}}
+      </div>
+      {{end}}
+      {{else}}<p>No likely causes identified from the supplied evidence.</p>{{end}}
+    </section>
+    <section class="ai-panel">
+      <h2>Read-only checks</h2>
+      {{if .Result.Recommendations}}
+      {{range $i, $rec := .Result.Recommendations}}
+      <div class="ai-item">
+        <div class="ai-item-line"><b>{{inc $i}}.</b><span>{{$rec.Action}}</span></div>
+        {{if $rec.Rationale}}<details><summary>More</summary><div class="ai-item-full">{{$rec.Rationale}}</div></details>{{end}}
+      </div>
+      {{end}}
+      {{else}}<p>No recommendations returned.</p>{{end}}
+      {{if .Result.MissingEvidence}}
+      <div class="ai-needed">
+        <h3>What's needed next</h3>
+        <ul>{{range .Result.MissingEvidence}}<li>{{.}}</li>{{end}}</ul>
+      </div>
+      {{end}}
+    </section>
   </div>
 
-  <div class="ai-result-grid">
-    <section class="ai-result-block wide">
-      <h3>Executive summary</h3>
-      <p>{{.Result.Summary}}</p>
-    </section>
-    <section class="ai-result-block">
-      <h3>Likely causes</h3>
-      {{if .Result.LikelyCauses}}<ol>{{range .Result.LikelyCauses}}<li><b>{{.Title}}</b> — {{.Rationale}}</li>{{end}}</ol>{{else}}<p>No likely causes identified from the supplied evidence.</p>{{end}}
-    </section>
-    <section class="ai-result-block">
-      <h3>Recommended next steps (read-only)</h3>
-      {{if .Result.Recommendations}}<ol>{{range .Result.Recommendations}}<li><b>{{.Action}}</b> — {{.Rationale}}</li>{{end}}</ol>{{else}}<p>No recommendations returned.</p>{{end}}
-    </section>
-    <section class="ai-result-block">
-      <h3>Evidence supplied by OpsCart</h3>
-      {{if .GenerationEvidence}}<div>{{range .GenerationEvidence}}<div class="ai-evidence-item"><span class="ai-evidence-type">{{.Type}}</span><b>{{.Summary}}</b><div>{{.Details}}</div></div>{{end}}</div>{{else}}<p>Generation-time evidence was not retained.</p>{{end}}
-    </section>
-    <section class="ai-result-block">
-      <h3>Evidence cited by AI</h3>
-      <div class="ai-unverified">Unverified — the model's own claim of what it used, not server-confirmed provenance.</div>
-      {{if .Result.EvidenceUsed}}<ul>{{range .Result.EvidenceUsed}}<li>{{.}}</li>{{end}}</ul>{{else}}<p>No evidence references returned.</p>{{end}}
-    </section>
-    <section class="ai-result-block">
-      <h3>Missing evidence</h3>
-      {{if .Result.MissingEvidence}}<ul>{{range .Result.MissingEvidence}}<li>{{.}}</li>{{end}}</ul>{{else}}<p>No missing evidence identified.</p>{{end}}
-    </section>
-  </div>
+  <details class="ai-evidence-toggle">
+    <summary>Evidence supplied by OpsCart <span class="ai-chev">▸</span></summary>
+    <div class="ai-evidence-body">
+      {{if .GenerationEvidence}}{{range .GenerationEvidence}}<div class="ai-ev-row"><div class="ai-ev-label">{{.Summary}}</div><div class="ai-ev-value">{{.Details}}</div></div>{{end}}{{else}}<div class="ai-ev-note">Generation-time evidence was not retained.</div>{{end}}
+    </div>
+  </details>
+
+  <details class="ai-evidence-toggle">
+    <summary>Evidence cited by AI <span class="ai-chev">▸</span></summary>
+    <div class="ai-evidence-body">
+      <div class="ai-ev-note">Unverified — the model's own claim of what it used, not server-confirmed provenance.</div>
+      {{if .Result.EvidenceUsed}}{{range .Result.EvidenceUsed}}<div class="ai-ev-row"><div class="ai-ev-value">{{.}}</div></div>{{end}}{{else}}<div class="ai-ev-note">No evidence references returned.</div>{{end}}
+    </div>
+  </details>
+
   {{else if .CurrentEvidence}}
-  <div class="ai-result-block" style="margin-bottom:1.5rem">
-    <h3>Current sanitized evidence (prepared for generation)</h3>
-    <div>{{range .CurrentEvidence}}<div class="ai-evidence-item"><span class="ai-evidence-type">{{.Type}}</span><b>{{.Summary}}</b><div>{{.Details}}</div></div>{{end}}</div>
-  </div>
+  <details class="ai-evidence-toggle">
+    <summary>Evidence supplied by OpsCart <span class="ai-chev">▸</span></summary>
+    <div class="ai-evidence-body">
+      <div class="ai-ev-note">Prepared for generation — not yet analyzed.</div>
+      {{range .CurrentEvidence}}<div class="ai-ev-row"><div class="ai-ev-label">{{.Summary}}</div><div class="ai-ev-value">{{.Details}}</div></div>{{end}}
+    </div>
+  </details>
   {{end}}
 
   <div class="footer">OpsCart FinOps Engine &middot; AI Analysis &middot; {{.Identity}}</div>
@@ -210,7 +272,7 @@
       message.textContent=error.textContent;
       error.hidden=false;
       button.disabled=false;
-      button.textContent=regenerate?'Regenerate analysis':'Generate analysis';
+      button.textContent=regenerate?'Regenerate':'Generate';
     });
   });
 })();
