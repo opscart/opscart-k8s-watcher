@@ -10,6 +10,7 @@ import (
 
 	"github.com/opscart/opscart-k8s-watcher/pkg/acquisition"
 	"github.com/opscart/opscart-k8s-watcher/pkg/analyzer"
+	"github.com/opscart/opscart-k8s-watcher/pkg/billing"
 	"github.com/opscart/opscart-k8s-watcher/pkg/clusterstate"
 	"github.com/opscart/opscart-k8s-watcher/pkg/models"
 	"github.com/opscart/opscart-k8s-watcher/pkg/scanner"
@@ -198,6 +199,16 @@ type dashboardState struct {
 	// The type's own mutex protects it against the concurrent access this
 	// sharing introduces (see NodePoolCostAnalyzer's doc comment).
 	costAnalyzer *analyzer.NodePoolCostAnalyzer
+
+	// billingRuntime is this cluster's process-owned Azure billing refresh
+	// loop (pkg/billing), entirely separate from acquisition/coordinator
+	// above and from costAnalyzer: it never touches Kubernetes and is never
+	// called from a page-render or scan path (see billing_runtime.go). It
+	// is nil unless Azure billing is configured and enabled for this
+	// cluster context — set once in startBilling, before any concurrent
+	// reader could observe it, and never reassigned afterward, same no-lock
+	// convention as acquisition/coordinator/costAnalyzer above.
+	billingRuntime *billing.Runtime
 
 	// lastPersistedAt is the wall-clock time persistAnalysis
 	// (acquisition_runtime.go) last actually wrote incidents/history for

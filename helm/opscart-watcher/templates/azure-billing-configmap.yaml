@@ -1,0 +1,12 @@
+{{- if .Values.azureBilling.enabled }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "opscart-watcher.azureBillingConfigMapName" . }}
+  namespace: {{ include "opscart-watcher.namespace" . }}
+  labels:
+    {{- include "opscart-watcher.labels" . | nindent 4 }}
+data:
+  azure-billing.yaml: |
+    {{- .Values.azureBilling.config | nindent 4 }}
+{{- end }}

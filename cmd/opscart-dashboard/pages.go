@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/opscart/opscart-k8s-watcher/pkg/analyzer"
+	"github.com/opscart/opscart-k8s-watcher/pkg/billing"
 	"github.com/opscart/opscart-k8s-watcher/pkg/models"
 	"github.com/opscart/opscart-k8s-watcher/pkg/store"
 	corev1 "k8s.io/api/core/v1"
@@ -2181,6 +2182,8 @@ type costPageData struct {
 	ScannedAtMS int64
 	Timestamp   time.Time
 
+	Billing billingPageData
+
 	MonthlyCost              float64
 	SavingsPotential         float64
 	ClusterCount             int
@@ -2403,7 +2406,7 @@ var getCostTmpl = sync.OnceValue(func() *template.Template {
 			ParseFS(templateFS, "templates/base.html", "templates/cost.html"))
 })
 
-func buildCostPageData(scan *clusterScan, activeCtx string, clusterList []string) costPageData {
+func buildCostPageData(scan *clusterScan, activeCtx string, clusterList []string, billingSnapshot billing.Snapshot, billingConfigured bool) costPageData {
 	q := ""
 	if activeCtx != "" {
 		q = "?cluster=" + url.QueryEscape(activeCtx)
@@ -2417,6 +2420,7 @@ func buildCostPageData(scan *clusterScan, activeCtx string, clusterList []string
 		WasteURL: "/waste" + q, ActivePage: "costs", Version: Version,
 		Currency: "USD", Provider: "Unknown", Region: "Not detected",
 		PricingCoverage: "Pricing unavailable", CapacityTypes: "None",
+		Billing: buildBillingPageData(billingSnapshot, billingConfigured),
 	}
 
 	if scan != nil && scan.report != nil {
@@ -2589,8 +2593,8 @@ func titleProvider(provider string) string {
 	}
 }
 
-func renderCostPage(scan *clusterScan, activeCtx string, clusterList []string) string {
-	data := buildCostPageData(scan, activeCtx, clusterList)
+func renderCostPage(scan *clusterScan, activeCtx string, clusterList []string, billingSnapshot billing.Snapshot, billingConfigured bool) string {
+	data := buildCostPageData(scan, activeCtx, clusterList, billingSnapshot, billingConfigured)
 	var buf strings.Builder
 	if err := getCostTmpl().Execute(&buf, data); err != nil {
 		log.Printf("cost template: %v", err)

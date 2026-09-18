@@ -19,6 +19,7 @@ import (
 	awspricing "github.com/aws/aws-sdk-go-v2/service/pricing"
 	"github.com/opscart/opscart-k8s-watcher/pkg/aianalysis"
 	"github.com/opscart/opscart-k8s-watcher/pkg/analyzer"
+	"github.com/opscart/opscart-k8s-watcher/pkg/billing"
 	"github.com/opscart/opscart-k8s-watcher/pkg/models"
 	"github.com/opscart/opscart-k8s-watcher/pkg/store"
 	"k8s.io/client-go/kubernetes"
@@ -94,6 +95,12 @@ type server struct {
 	podLogReader        podLogReaderFunc
 	investigationMu     sync.RWMutex
 	latestInvestigation investigationObservation
+
+	// billingConfig is the validated Azure billing configuration loaded at
+	// startup (see billing_runtime.go, main.go) — nil when
+	// OPSCART_AZURE_BILLING_CONFIG is unset, meaning billing stays disabled
+	// for every cluster, the documented default. Read-only after startup.
+	billingConfig *billing.Config
 }
 
 func newServer(clusterList []string, db store.Store, retentionDays int, dbPersistent bool) *server {
@@ -1927,8 +1934,8 @@ var getOverviewTmpl = sync.OnceValue(func() *template.Template {
 	)
 })
 
-func renderHTML(scan *clusterScan, activeCtx string, clusterList []string) string {
-	return renderCostPage(scan, activeCtx, clusterList)
+func renderHTML(scan *clusterScan, activeCtx string, clusterList []string, billingSnapshot billing.Snapshot, billingConfigured bool) string {
+	return renderCostPage(scan, activeCtx, clusterList, billingSnapshot, billingConfigured)
 }
 
 func confidenceColorHex(pct int) string {

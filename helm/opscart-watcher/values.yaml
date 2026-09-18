@@ -17,6 +17,10 @@ fullnameOverride: ""
 serviceAccount:
   create: true
   name: opscart-dashboard
+  # Required for Azure Workload Identity when azureBilling.enabled is true:
+  # azure.workload.identity/client-id: "<the workload identity's client ID>"
+  # See docs/09-Azure-Billing.md for the full federated-credential setup.
+  annotations: {}
 
 service:
   type: ClusterIP
@@ -45,6 +49,35 @@ ai:
   timeout: 30s
   existingSecret: ""         # required when enabled; Secret is managed outside this chart
   apiKeyKey: api-key          # key within existingSecret
+
+azureBilling:
+  # Real Azure Cost Management billing, disabled by default. See
+  # docs/09-Azure-Billing.md for the required Azure permissions, Workload
+  # Identity federated-credential setup, and how to reconcile figures
+  # against the Azure Portal.
+  enabled: false
+  # Path inside the container where the billing config (pkg/billing.Config
+  # YAML: per-cluster subscription/AKS resource identity, cost basis,
+  # reporting period, refresh interval) is mounted. Only meaningful when
+  # enabled is true.
+  configPath: /etc/opscart/azure-billing.yaml
+  # Raw YAML content for the billing config, rendered into a ConfigMap and
+  # mounted read-only at configPath. Contains no secrets — only Azure
+  # resource identifiers and reporting settings. Example:
+  #   clusters:
+  #     - cluster: my-context
+  #       enabled: true
+  #       authMode: workload-identity   # or azure-cli for local dashboard use; no default, no fallback between them
+  #       subscriptionId: "<subscription-id>"
+  #       aksResourceId: "/subscriptions/<sub>/resourceGroups/<rg>/providers/Microsoft.ContainerService/managedClusters/<name>"
+  config: ""
+  workloadIdentity:
+    # Adds the azure.workload.identity/use: "true" pod label AKS's Workload
+    # Identity webhook requires to inject the federated token volume.
+    # serviceAccount.annotations must also carry
+    # azure.workload.identity/client-id for authentication to actually
+    # succeed — this chart never sets that annotation itself.
+    enabled: false
 
 resources:
   requests:

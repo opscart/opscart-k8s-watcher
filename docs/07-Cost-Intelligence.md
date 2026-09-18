@@ -4,6 +4,10 @@ OpsCart estimates Kubernetes worker-node compute costs from node metadata and
 allocates the priced total across namespaces and workloads. The figures use
 public/list pricing and are not invoice or billing data.
 
+For an AKS cluster, OpsCart can also show the cluster's actual Azure billing
+total alongside this estimate — a separate, disabled-by-default feature. See
+[Azure Billing](08-Azure-Billing.md).
+
 ## Provider and pricing support
 
 | Provider | Detection evidence | Pricing source | Initial coverage |
