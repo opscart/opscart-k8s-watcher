@@ -3,6 +3,7 @@ package billing
 import (
 	"context"
 	"fmt"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -112,6 +113,45 @@ func TestRuntimeFailureWithNoPriorSnapshotIsUnavailable(t *testing.T) {
 	}
 }
 
+func TestRuntimeUnavailableNeverSetsLastSuccessfulRefresh(t *testing.T) {
+	provider := &fakeProvider{err: fmt.Errorf("azure unreachable")}
+	rt := newTestRuntime(provider)
+	rt.refreshOnce(context.Background())
+
+	snap := rt.Snapshot()
+	if !snap.RetrievedAt.IsZero() {
+		t.Errorf("RetrievedAt = %v, want zero — no refresh has ever succeeded", snap.RetrievedAt)
+	}
+	if snap.LastAttemptedAt.IsZero() {
+		t.Error("LastAttemptedAt is zero, want the time of this failed attempt")
+	}
+}
+
+func TestRuntimeDistinguishesLastAttemptedFromLastSuccessfulRefresh(t *testing.T) {
+	provider := &fakeProvider{result: Result{Total: 100, Currency: "USD", RowCount: 1, RetrievedAt: time.Now()}}
+	rt := newTestRuntime(provider)
+	rt.refreshOnce(context.Background())
+
+	firstSuccess := rt.Snapshot().RetrievedAt
+	if firstSuccess.IsZero() {
+		t.Fatal("setup: expected RetrievedAt to be set after a successful refresh")
+	}
+
+	provider.mu.Lock()
+	provider.err = fmt.Errorf("throttled")
+	provider.mu.Unlock()
+	time.Sleep(time.Millisecond) // ensure a distinguishable, later LastAttemptedAt
+	rt.refreshOnce(context.Background())
+
+	snap := rt.Snapshot()
+	if !snap.RetrievedAt.Equal(firstSuccess) {
+		t.Errorf("RetrievedAt changed to %v after a failed attempt, want it to stay at %v (last SUCCESSFUL refresh)", snap.RetrievedAt, firstSuccess)
+	}
+	if !snap.LastAttemptedAt.After(firstSuccess) {
+		t.Errorf("LastAttemptedAt = %v, want it to advance past the first successful refresh at %v", snap.LastAttemptedAt, firstSuccess)
+	}
+}
+
 func TestRuntimeRetainsLastSnapshotAndMarksStaleOnFailure(t *testing.T) {
 	provider := &fakeProvider{result: Result{Total: 100, Currency: "USD", RowCount: 1, RetrievedAt: time.Now()}}
 	rt := newTestRuntime(provider)
@@ -207,4 +247,129 @@ func TestRuntimeStartAndStopLifecycle(t *testing.T) {
 	}
 	rt.Stop()
 	<-rt.done
+}
+
+func TestRuntimeDeferredFailureSuppressesRefreshUntilCooldownElapses(t *testing.T) {
+	provider := &fakeProvider{err: &DeferredError{
+		Operation: "test", RetryAfter: 50 * time.Millisecond, NotBefore: time.Now().Add(50 * time.Millisecond),
+		StatusCode: 429, RequestID: "req-cooldown",
+	}}
+	rt := newTestRuntime(provider)
+
+	rt.refreshOnce(context.Background())
+	if calls := atomic.LoadInt32(&provider.calls); calls != 1 {
+		t.Fatalf("calls after the first (deferred) attempt = %d, want 1", calls)
+	}
+	firstAttempt := rt.Snapshot().LastAttemptedAt
+	if firstAttempt.IsZero() {
+		t.Fatal("expected LastAttemptedAt to be set after the deferred attempt")
+	}
+	// The status and request ID the query client preserved on the
+	// DeferredError must reach the dashboard-facing text, not just the
+	// cooldown timing.
+	reason := rt.Snapshot().UnavailableReason
+	if !strings.Contains(reason, "429") || !strings.Contains(reason, "req-cooldown") {
+		t.Errorf("UnavailableReason = %q, want it to retain the status and request ID", reason)
+	}
+
+	// A refresh tick during the cooldown must be a complete no-op: no
+	// provider call, no LastAttemptedAt change — a configured
+	// refreshInterval shorter than Azure's mandated delay must not cause
+	// an early request.
+	rt.refreshOnce(context.Background())
+	if calls := atomic.LoadInt32(&provider.calls); calls != 1 {
+		t.Errorf("calls after a tick during cooldown = %d, want still 1", calls)
+	}
+	if got := rt.Snapshot().LastAttemptedAt; !got.Equal(firstAttempt) {
+		t.Errorf("LastAttemptedAt changed to %v during a skipped (cooldown) tick, want unchanged at %v", got, firstAttempt)
+	}
+
+	time.Sleep(60 * time.Millisecond)
+	provider.mu.Lock()
+	provider.err = nil
+	provider.result = Result{Total: 1, Currency: "USD", RowCount: 1, RetrievedAt: time.Now()}
+	provider.mu.Unlock()
+
+	rt.refreshOnce(context.Background())
+	if calls := atomic.LoadInt32(&provider.calls); calls != 2 {
+		t.Errorf("calls after the cooldown elapsed = %d, want 2 (a real attempt was made)", calls)
+	}
+	if got := rt.Snapshot().Status; got != StatusAvailable {
+		t.Errorf("Status = %q, want available", got)
+	}
+}
+
+func TestRuntimeSuccessClearsCooldown(t *testing.T) {
+	provider := &fakeProvider{err: &DeferredError{Operation: "test", RetryAfter: time.Millisecond, NotBefore: time.Now().Add(-time.Hour)}} // already elapsed
+	rt := newTestRuntime(provider)
+	rt.refreshOnce(context.Background())
+
+	rt.mu.Lock()
+	notBefore := rt.notBefore
+	rt.mu.Unlock()
+	if notBefore.IsZero() {
+		t.Fatal("setup: expected the deferred failure to set a cooldown")
+	}
+
+	provider.mu.Lock()
+	provider.err = nil
+	provider.result = Result{Total: 1, Currency: "USD", RowCount: 1, RetrievedAt: time.Now()}
+	provider.mu.Unlock()
+
+	rt.refreshOnce(context.Background())
+
+	rt.mu.Lock()
+	notBefore = rt.notBefore
+	rt.mu.Unlock()
+	if !notBefore.IsZero() {
+		t.Errorf("notBefore = %v after a successful refresh, want zero (cleared)", notBefore)
+	}
+}
+
+func TestRuntimeStartupJitterDelaysFirstRefresh(t *testing.T) {
+	provider := &fakeProvider{result: Result{Total: 1, Currency: "USD", RowCount: 1}}
+	rt := newTestRuntime(provider)
+	rt.startupJitter = 200 * time.Millisecond
+
+	// Deterministic jitter (see runtime.go's randomJitter doc comment) —
+	// asserting timing against real randomness would be flaky, since a
+	// genuinely random delay can legitimately land near zero.
+	oldJitter := randomJitter
+	randomJitter = func(time.Duration) time.Duration { return 100 * time.Millisecond }
+	defer func() { randomJitter = oldJitter }()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	rt.Start(ctx)
+
+	time.Sleep(30 * time.Millisecond)
+	if calls := atomic.LoadInt32(&provider.calls); calls != 0 {
+		t.Errorf("calls = %d shortly after Start with jitter configured, want 0 (still within the jitter window)", calls)
+	}
+
+	deadline := time.After(2 * time.Second)
+	for atomic.LoadInt32(&provider.calls) == 0 {
+		select {
+		case <-deadline:
+			t.Fatal("jittered first refresh never happened")
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
+}
+
+func TestRuntimeZeroJitterRefreshesImmediately(t *testing.T) {
+	provider := &fakeProvider{result: Result{Total: 1, Currency: "USD", RowCount: 1}}
+	rt := newTestRuntime(provider) // startupJitter left at its zero value
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	rt.Start(ctx)
+
+	deadline := time.After(time.Second)
+	for atomic.LoadInt32(&provider.calls) == 0 {
+		select {
+		case <-deadline:
+			t.Fatal("Start with zero jitter did not refresh promptly")
+		case <-time.After(5 * time.Millisecond):
+		}
+	}
 }

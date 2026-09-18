@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -15,9 +16,18 @@ import (
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore/policy"
 )
 
+// errRedirectRejected is CheckRedirect's underlying error for every ARM
+// http.Client this package constructs (see newARMHTTPClient). A redirect
+// is never transient for these endpoints — the same redirect would happen
+// again identically — so doWithRetry treats it as a permanent failure
+// rather than retrying with backoff.
+var errRedirectRejected = errors.New("refusing to follow redirect")
+
 // defaultManagementEndpoint is the public Azure Commercial cloud ARM
-// endpoint. ClusterConfig.ManagementEndpoint can override it for sovereign
-// clouds or tests.
+// endpoint — the only one allowedManagementHosts (config.go) currently
+// accepts; see that var's doc comment for why sovereign clouds are not yet
+// supported. ClusterConfig.ManagementEndpoint exists mainly for tests to
+// point this package at an httptest server.
 const defaultManagementEndpoint = "https://management.azure.com"
 
 // costManagementAPIVersion pins the Cost Management Query API contract this
@@ -32,11 +42,56 @@ const costManagementAPIVersion = "2023-11-01"
 // read.
 const armTokenScope = "https://management.azure.com/.default"
 
+// maxResponseBytes bounds a single HTTP response body this package will
+// ever read into memory (a Cost Management query page or the AKS
+// managedClusters read). A resource-group-scoped response for a real
+// cluster is at most a few thousand rows of JSON — this is generous
+// headroom while still bounding worst-case memory per response,
+// independent of the page/attempt/scope multipliers requestBudget bounds
+// separately. A var, not a const, so tests can shrink it to exercise the
+// bound without allocating a real 10 MiB response body.
+var maxResponseBytes int64 = 10 << 20 // 10 MiB
+
+// maxTotalRows bounds the rows accumulated across every page of a single
+// scope (one resource-group) query — FetchBilling calls query() up to
+// twice per refresh (cluster resource group, node resource group), each
+// with its own independent maxTotalRows budget, so the worst case across
+// one refresh is 2x this value, not this value. Two resource groups
+// belonging to one AKS cluster should never approach even one scope's
+// share of this; it exists only to bound worst-case memory if Azure (or a
+// misconfigured endpoint) ever returned far more than expected. A var for
+// the same test-tunability reason as maxResponseBytes.
+var maxTotalRows = 50000
+
+// maxPages bounds pagination per scope query — a malformed or hostile
+// nextLink chain cannot loop forever — independent of maxRetryAttempts and
+// requestBudget, which bound different things (retries per HTTP attempt,
+// and total HTTP attempts across an entire FetchBilling call,
+// respectively).
+const maxPages = 20
+
+// newARMHTTPClient returns the http.Client every production ARM call in
+// this package uses. It never follows redirects: ARM does not legitimately
+// redirect these endpoints, and Go's default Client.Do follows redirects
+// automatically — including forwarding the Authorization header when the
+// redirect target's host matches under Go's own same-domain/subdomain
+// rule (https://pkg.go.dev/net/http#Client) — so silently allowing that
+// would let an unexpected redirect exfiltrate a bearer token to a
+// destination this package never validated.
+func newARMHTTPClient() *http.Client {
+	return &http.Client{
+		Timeout: 30 * time.Second,
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			return fmt.Errorf("%w to %s", errRedirectRejected, req.URL.Host)
+		},
+	}
+}
+
 // queryClient issues Azure Cost Management Query API calls over plain
 // net/http, rather than the armcostmanagement SDK's own pager: this client
-// validates every pagination continuation URL's host before ever attaching
-// an Authorization header to it (see followNextLink), which the SDK's
-// generic pager does not do.
+// validates every pagination continuation URL's host and path before ever
+// attaching an Authorization header to it (see validatedContinuationURL),
+// which the SDK's generic pager does not do.
 type queryClient struct {
 	httpClient *http.Client
 	credential azcore.TokenCredential
@@ -46,7 +101,7 @@ type queryClient struct {
 
 func newQueryClient(httpClient *http.Client, credential azcore.TokenCredential, endpoint string) *queryClient {
 	if httpClient == nil {
-		httpClient = &http.Client{Timeout: 30 * time.Second}
+		httpClient = newARMHTTPClient()
 	}
 	if endpoint == "" {
 		endpoint = defaultManagementEndpoint
@@ -141,23 +196,26 @@ func resourceGroupScope(subscriptionID, resourceGroup string) string {
 }
 
 // query runs one Cost Management Query - Usage call at scope, following
-// pagination up to a bounded number of pages, and returns every row across
-// all pages addressed by column name.
-func (c *queryClient) query(ctx context.Context, scope string, body queryRequestBody) ([]queryRow, error) {
-	requestURL := c.endpoint + scope + "/providers/Microsoft.CostManagement/query?api-version=" + c.apiVersion
+// pagination up to maxPages, bounded by budget across every HTTP attempt
+// it makes (including retries), and returns every row across all pages
+// addressed by column name. operation labels every error this call
+// produces (e.g. naming which resource group failed).
+func (c *queryClient) query(ctx context.Context, scope string, body queryRequestBody, budget *requestBudget, operation string) ([]queryRow, error) {
+	expectedPath := scope + "/providers/Microsoft.CostManagement/query"
+	requestURL := c.endpoint + expectedPath + "?api-version=" + c.apiVersion
 	payload, err := json.Marshal(body)
 	if err != nil {
-		return nil, fmt.Errorf("encoding Cost Management query for scope %q: %w", scope, err)
+		return nil, newSafeError(operation, safeReasonInvalidRequest, err)
 	}
 
 	var rows []queryRow
-	const maxPages = 20 // bounded pagination: a malformed or hostile nextLink chain cannot loop forever
+	seen := map[string]bool{requestURL: true}
 	for page := 0; ; page++ {
 		if page >= maxPages {
-			return nil, fmt.Errorf("Cost Management query for scope %q exceeded %d pages without terminating", scope, maxPages)
+			return nil, newSafeError(operation, "exceeded page limit without terminating", nil)
 		}
 
-		respBody, statusCode, err := c.doWithRetry(ctx, http.MethodPost, requestURL, payload)
+		respBody, statusCode, err := c.doWithRetry(ctx, http.MethodPost, requestURL, payload, operation, budget)
 		if err != nil {
 			return nil, err
 		}
@@ -166,67 +224,129 @@ func (c *queryClient) query(ctx context.Context, scope string, body queryRequest
 			return rows, nil // 204: successful query, no matching data for this scope/period
 		}
 
-		var decoded queryResponseBody
-		decodeErr := json.NewDecoder(respBody).Decode(&decoded)
+		raw, err := readBounded(respBody, operation)
 		closeErr := respBody.Close()
-		if decodeErr != nil {
-			return nil, fmt.Errorf("decoding Cost Management response for scope %q: %w", scope, decodeErr)
+		if err != nil {
+			return nil, err
 		}
 		if closeErr != nil {
-			return nil, fmt.Errorf("closing Cost Management response body for scope %q: %w", scope, closeErr)
+			return nil, newSafeError(operation, safeReasonNetwork, closeErr)
+		}
+
+		var decoded queryResponseBody
+		if err := json.Unmarshal(raw, &decoded); err != nil {
+			return nil, newSafeError(operation, safeReasonInvalidResponse, err)
 		}
 
 		pageRows, err := rowsFromColumns(decoded.Properties.Columns, decoded.Properties.Rows)
 		if err != nil {
-			return nil, fmt.Errorf("Cost Management response for scope %q: %w", scope, err)
+			return nil, newSafeError(operation, safeReasonInvalidResponse, err)
 		}
 		rows = append(rows, pageRows...)
+		if len(rows) > maxTotalRows {
+			return nil, newSafeError(operation, safeReasonTooManyRows, nil)
+		}
 
 		if decoded.Properties.NextLink == "" {
 			return rows, nil
 		}
-		nextURL, err := validatedContinuationURL(decoded.Properties.NextLink, c.endpoint)
+		nextURL, err := validatedContinuationURL(decoded.Properties.NextLink, c.endpoint, expectedPath)
 		if err != nil {
-			return nil, fmt.Errorf("Cost Management pagination for scope %q: %w", scope, err)
+			return nil, newSafeError(operation, safeReasonInvalidContinuation, err)
 		}
+		if seen[nextURL] {
+			return nil, newSafeError(operation, safeReasonInvalidContinuation, fmt.Errorf("nextLink repeated"))
+		}
+		seen[nextURL] = true
 		requestURL = nextURL
 		payload = nil // continuation requests carry no body (GET-style nextLink semantics)
 	}
 }
 
-// validatedContinuationURL rejects any nextLink whose scheme or host does
-// not match the configured ARM endpoint, before the caller ever attaches a
-// bearer token to a request against it. This is the explicit "validate
-// continuation destinations before sending authorization headers"
-// requirement — the reason this package does not use the armcostmanagement
-// SDK's own pager, which does not perform this check.
-func validatedContinuationURL(nextLink, endpoint string) (string, error) {
+// readBounded reads at most maxResponseBytes+1 from body, returning a safe
+// "response exceeded size limit" error (never the partial content) if that
+// bound is exceeded.
+func readBounded(body io.Reader, operation string) ([]byte, error) {
+	raw, err := io.ReadAll(io.LimitReader(body, maxResponseBytes+1))
+	if err != nil {
+		return nil, newSafeError(operation, safeReasonNetwork, err)
+	}
+	if int64(len(raw)) > maxResponseBytes {
+		return nil, newSafeError(operation, safeReasonResponseTooLarge, nil)
+	}
+	return raw, nil
+}
+
+// validatedContinuationURL rejects any nextLink that does not target the
+// exact same host AND the exact same resource-group-scoped Cost Management
+// query path as the original request, before the caller ever attaches a
+// bearer token to a request against it. A same-host continuation pointing
+// at a different subscription, resource group, or ARM operation must never
+// be followed with this request's token — matching the host alone (the
+// package's original check) is not sufficient. This is the explicit
+// "validate continuation destinations before sending authorization
+// headers" requirement — the reason this package does not use the
+// armcostmanagement SDK's own pager, which performs neither check.
+func validatedContinuationURL(nextLink, endpoint, expectedPath string) (string, error) {
 	parsedNext, err := url.Parse(nextLink)
 	if err != nil {
-		return "", fmt.Errorf("invalid nextLink %q: %w", nextLink, err)
+		return "", fmt.Errorf("invalid nextLink: %w", err)
 	}
 	parsedEndpoint, err := url.Parse(endpoint)
 	if err != nil {
-		return "", fmt.Errorf("invalid configured endpoint %q: %w", endpoint, err)
+		return "", fmt.Errorf("invalid configured endpoint: %w", err)
 	}
-	if parsedNext.Scheme != "https" && parsedNext.Scheme != parsedEndpoint.Scheme {
-		return "", fmt.Errorf("nextLink %q uses disallowed scheme %q", nextLink, parsedNext.Scheme)
+	if parsedNext.Scheme != parsedEndpoint.Scheme {
+		return "", fmt.Errorf("nextLink scheme %q does not match configured endpoint scheme %q", parsedNext.Scheme, parsedEndpoint.Scheme)
 	}
 	if !strings.EqualFold(parsedNext.Host, parsedEndpoint.Host) {
-		return "", fmt.Errorf("nextLink %q host %q does not match configured endpoint host %q; refusing to send credentials", nextLink, parsedNext.Host, parsedEndpoint.Host)
+		return "", fmt.Errorf("nextLink host %q does not match configured endpoint host %q", parsedNext.Host, parsedEndpoint.Host)
+	}
+	if !strings.EqualFold(strings.TrimRight(parsedNext.Path, "/"), strings.TrimRight(expectedPath, "/")) {
+		return "", fmt.Errorf("nextLink path %q is outside the queried scope %q", parsedNext.Path, expectedPath)
 	}
 	return nextLink, nil
 }
 
 // doWithRetry sends one request, acquiring a fresh bearer token each
-// attempt, and retries a bounded number of times on 429/5xx honoring
-// Retry-After. On success the caller must close the returned body.
-func (c *queryClient) doWithRetry(ctx context.Context, method, requestURL string, body []byte) (io.ReadCloser, int, error) {
+// attempt, and retries a bounded number of times on 429/5xx, honoring
+// whichever documented retry-after delay Azure mandates (see
+// nextRetryDelay) — deferring rather than retrying early when that delay
+// would not fit in ctx's remaining deadline. Every attempt (including the
+// first) consumes one unit of budget; once exhausted, this fails
+// immediately rather than making another request. A retryable response's
+// mandated delay is preserved as a *DeferredError even when this call
+// terminates for an unrelated reason — attempts or budget exhausted — so
+// the caller (Runtime) never loses track of a cooldown Azure actually
+// asked for. On success the caller must close the returned body. Every
+// returned error is an *AzureAPIError, a *SafeError, a *DeferredError, or
+// ctx's own cancellation/deadline error — never raw Azure response content
+// or an unsanitized underlying error's literal text.
+func (c *queryClient) doWithRetry(ctx context.Context, method, requestURL string, body []byte, operation string, budget *requestBudget) (io.ReadCloser, int, error) {
 	var lastErr error
+	// pendingCooldown is the most recent mandated retry delay seen from
+	// any retryable response this call has received, regardless of
+	// whether that attempt went on to be retried. It must survive to
+	// whichever bound ends this loop first — maxRetryAttempts or the
+	// shared budget — because a mandated delay is a fact about Azure's
+	// server-side state, not about this call's own retry budget: losing
+	// it at the boundary would let the caller (and eventually Runtime's
+	// own ticker) retry again before that delay has actually elapsed.
+	var pendingCooldown *DeferredError
 	for attempt := 1; attempt <= maxRetryAttempts; attempt++ {
+		if !budget.take() {
+			if pendingCooldown != nil {
+				return nil, 0, pendingCooldown
+			}
+			return nil, 0, newSafeError(operation, safeReasonBudgetExhausted, nil)
+		}
+
 		token, err := acquireToken(ctx, c.credential)
 		if err != nil {
-			return nil, 0, fmt.Errorf("acquiring Azure token: %w", err)
+			if ctx.Err() != nil {
+				return nil, 0, ctx.Err()
+			}
+			return nil, 0, newSafeError(operation, safeReasonAuthentication, err)
 		}
 
 		var bodyReader io.Reader
@@ -235,7 +355,7 @@ func (c *queryClient) doWithRetry(ctx context.Context, method, requestURL string
 		}
 		req, err := http.NewRequestWithContext(ctx, method, requestURL, bodyReader)
 		if err != nil {
-			return nil, 0, fmt.Errorf("building request to %q: %w", requestURL, err)
+			return nil, 0, newSafeError(operation, safeReasonInvalidRequest, err)
 		}
 		req.Header.Set("Authorization", "Bearer "+token)
 		if body != nil {
@@ -244,14 +364,24 @@ func (c *queryClient) doWithRetry(ctx context.Context, method, requestURL string
 
 		resp, err := c.httpClient.Do(req)
 		if err != nil {
-			lastErr = fmt.Errorf("calling %q: %w", requestURL, err)
 			if ctx.Err() != nil {
 				return nil, 0, ctx.Err()
 			}
+			if errors.Is(err, errRedirectRejected) {
+				// A rejected redirect is deterministic — the same
+				// redirect would happen again identically — so this is a
+				// permanent failure, never retried.
+				return nil, 0, newSafeError(operation, safeReasonNetwork, err)
+			}
+			lastErr = newSafeError(operation, safeReasonNetwork, err)
 			if attempt == maxRetryAttempts {
 				break
 			}
-			if waitErr := waitForRetry(ctx, retryDelay(nil, attempt)); waitErr != nil {
+			delay, deferred := nextRetryDelay(ctx, nil, attempt)
+			if deferred {
+				return nil, 0, errRetryDeferred(operation, delay, nil)
+			}
+			if waitErr := waitForRetry(ctx, delay); waitErr != nil {
 				return nil, 0, waitErr
 			}
 			continue
@@ -261,16 +391,39 @@ func (c *queryClient) doWithRetry(ctx context.Context, method, requestURL string
 			return resp.Body, resp.StatusCode, nil
 		}
 
-		responseSnippet, _ := io.ReadAll(io.LimitReader(resp.Body, 2048))
+		// Drain without ever retaining or exposing body content: errors
+		// from this call are a safe status/operation/request ID only.
+		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 2048))
 		resp.Body.Close()
-		lastErr = fmt.Errorf("%q returned HTTP %d: %s", requestURL, resp.StatusCode, strings.TrimSpace(string(responseSnippet)))
+		apiErr := newAzureAPIError(operation, resp)
 
-		if !retryableStatus(resp.StatusCode) || attempt == maxRetryAttempts {
-			return nil, 0, lastErr
+		if !retryableStatus(resp.StatusCode) {
+			return nil, 0, apiErr
 		}
-		if waitErr := waitForRetry(ctx, retryDelay(resp, attempt)); waitErr != nil {
+
+		// Capture the mandated delay before any terminal return below —
+		// including the maxRetryAttempts case right after this — so the
+		// last attempt's own cooldown (e.g. an 8-hour Retry-After on
+		// attempt 4) is never silently dropped in favor of a plain
+		// terminal error that carries no timing information at all.
+		if mandated, ok := mandatedRetryDelay(resp); ok {
+			pendingCooldown = errRetryDeferred(operation, mandated, resp)
+		}
+
+		if attempt == maxRetryAttempts {
+			if pendingCooldown != nil {
+				return nil, 0, pendingCooldown
+			}
+			return nil, 0, apiErr
+		}
+		delay, deferred := nextRetryDelay(ctx, resp, attempt)
+		if deferred {
+			return nil, 0, errRetryDeferred(operation, delay, resp)
+		}
+		if waitErr := waitForRetry(ctx, delay); waitErr != nil {
 			return nil, 0, waitErr
 		}
+		lastErr = apiErr
 	}
 	return nil, 0, lastErr
 }

@@ -29,7 +29,13 @@ type billingPageData struct {
 
 	Stale             bool
 	UnavailableReason string
-	LastRefresh       time.Time
+	// LastSuccess is when the last SUCCESSFUL refresh completed — zero if
+	// billing has never once succeeded. LastAttempt is when the most
+	// recent refresh attempt finished, success or failure, so a viewer can
+	// tell "billing has been failing for days" from "billing just
+	// refreshed" instead of seeing only one ambiguous timestamp.
+	LastSuccess time.Time
+	LastAttempt time.Time
 }
 
 func buildBillingPageData(snapshot billing.Snapshot, configured bool) billingPageData {
@@ -39,7 +45,8 @@ func buildBillingPageData(snapshot billing.Snapshot, configured bool) billingPag
 	}
 	data.Stale = snapshot.Stale
 	data.UnavailableReason = snapshot.UnavailableReason
-	data.LastRefresh = snapshot.RetrievedAt
+	data.LastSuccess = snapshot.RetrievedAt
+	data.LastAttempt = snapshot.LastAttemptedAt
 
 	switch snapshot.Status {
 	case billing.StatusAvailable, billing.StatusStale, billing.StatusNoData:

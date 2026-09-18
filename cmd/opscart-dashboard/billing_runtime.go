@@ -30,17 +30,27 @@ func (srv *server) startBillingRuntimes(ctx context.Context) {
 // for this cluster context): only a cluster explicitly enabled in the
 // billing config, but whose credential cannot be acquired, is logged — an
 // operator who enabled billing needs to see why it never started.
+//
+// The configured authMode's credential is used exactly as configured, with
+// no fallback to any other credential type: if azure-cli or
+// workload-identity fails here, billing for this cluster stays disabled
+// until that's fixed, rather than silently trying some other ambient
+// identity.
 func (srv *server) startBilling(ctx context.Context, clusterCtx string) {
 	cfg, ok := srv.billingConfig.ClusterByContext(clusterCtx)
 	if !ok {
 		return
 	}
-	credential, err := billing.DefaultCredential()
+	credential, err := billing.NewCredential(cfg.EffectiveAuthMode())
 	if err != nil {
 		log.Printf("[%s] azure billing: credential unavailable, disabled: %v", displayName(clusterCtx), err)
 		return
 	}
-	provider := billing.NewAzureProvider(cfg, credential)
+	provider, err := billing.NewAzureProvider(cfg, credential)
+	if err != nil {
+		log.Printf("[%s] azure billing: invalid configuration, disabled: %v", displayName(clusterCtx), err)
+		return
+	}
 	rt := billing.NewRuntime(cfg, provider)
 	rt.Start(ctx)
 	state := srv.getState(clusterCtx)

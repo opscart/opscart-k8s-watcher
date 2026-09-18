@@ -2,6 +2,8 @@ package billing
 
 import (
 	"context"
+	"errors"
+	"math/rand"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -12,6 +14,25 @@ import (
 // refresh interval itself is, so one slow or hanging Azure call can never
 // block the next scheduled refresh indefinitely.
 const defaultRefreshTimeout = 60 * time.Second
+
+// defaultStartupJitter bounds a random delay before each Runtime's very
+// first refresh, so that many clusters (or several independent dashboard
+// processes) starting at the same instant — a rolling restart, say — do
+// not all call the Cost Management API in the same moment and risk
+// correlated throttling.
+const defaultStartupJitter = 30 * time.Second
+
+// randomJitter picks the actual startup delay within [0, max). A package
+// var rather than a direct math/rand call inline in loop, so tests can
+// substitute a deterministic value instead of asserting timing behavior
+// against real randomness (which is inherently flaky: a random delay can
+// legitimately land near zero).
+var randomJitter = func(max time.Duration) time.Duration {
+	if max <= 0 {
+		return 0
+	}
+	return time.Duration(rand.Int63n(int64(max)))
+}
 
 // Runtime is the process-owned, per-cluster background billing refresh
 // loop. It is deliberately separate from pkg/clusterstate.Coordinator and
@@ -24,15 +45,21 @@ const defaultRefreshTimeout = 60 * time.Second
 // own cached Snapshot — never shared across clusters, matching the
 // acquisition.Runtime per-cluster isolation convention.
 type Runtime struct {
-	provider Provider
-	interval time.Duration
-	timeout  time.Duration
-	basis    CostBasis
-	period   func(now time.Time) (start, end time.Time, err error)
+	provider      Provider
+	interval      time.Duration
+	timeout       time.Duration
+	basis         CostBasis
+	period        func(now time.Time) (start, end time.Time, err error)
+	startupJitter time.Duration
 
 	mu          sync.Mutex
 	snapshot    Snapshot
 	hasSnapshot bool
+	// notBefore, when non-zero, is a mandated Azure retry cooldown
+	// (DeferredError.NotBefore) this Runtime must not attempt a refresh
+	// before — set by recordFailure, cleared by recordSuccess or by any
+	// non-deferred failure. refreshOnce checks it before doing any work.
+	notBefore time.Time
 
 	refreshing atomic.Bool
 	cancel     context.CancelFunc
@@ -45,13 +72,14 @@ type Runtime struct {
 func NewRuntime(cfg ClusterConfig, provider Provider) *Runtime {
 	basis := cfg.EffectiveCostBasis()
 	return &Runtime{
-		provider: provider,
-		interval: cfg.EffectiveRefreshInterval(),
-		timeout:  defaultRefreshTimeout,
-		basis:    basis,
-		period:   cfg.ResolvePeriod,
-		snapshot: Snapshot{Status: StatusDisabled},
-		done:     make(chan struct{}),
+		provider:      provider,
+		interval:      cfg.EffectiveRefreshInterval(),
+		timeout:       defaultRefreshTimeout,
+		basis:         basis,
+		period:        cfg.ResolvePeriod,
+		startupJitter: defaultStartupJitter,
+		snapshot:      Snapshot{Status: StatusDisabled},
+		done:          make(chan struct{}),
 	}
 }
 
@@ -67,6 +95,13 @@ func (r *Runtime) Start(ctx context.Context) {
 
 func (r *Runtime) loop(ctx context.Context) {
 	defer close(r.done)
+	if r.startupJitter > 0 {
+		select {
+		case <-time.After(randomJitter(r.startupJitter)):
+		case <-ctx.Done():
+			return
+		}
+	}
 	r.refreshOnce(ctx)
 	ticker := time.NewTicker(r.interval)
 	defer ticker.Stop()
@@ -91,12 +126,24 @@ func (r *Runtime) Stop() {
 
 // refreshOnce is single-flighted: a refresh already in flight (whether
 // clock-triggered or the initial Start call) makes a concurrent call a
-// no-op instead of a duplicate outbound Azure query.
+// no-op instead of a duplicate outbound Azure query. It is also a no-op —
+// no attempt made at all, LastAttemptedAt left unchanged — while a
+// mandated Azure retry cooldown (r.notBefore) has not yet elapsed: a
+// refreshInterval configured shorter than that cooldown (or a mandated
+// delay longer than the interval) must not cause an early request that
+// would just be throttled again.
 func (r *Runtime) refreshOnce(ctx context.Context) {
 	if !r.refreshing.CompareAndSwap(false, true) {
 		return
 	}
 	defer r.refreshing.Store(false)
+
+	r.mu.Lock()
+	notBefore := r.notBefore
+	r.mu.Unlock()
+	if !notBefore.IsZero() && time.Now().Before(notBefore) {
+		return
+	}
 
 	start, end, err := r.period(time.Now())
 	if err != nil {
@@ -116,21 +163,36 @@ func (r *Runtime) refreshOnce(ctx context.Context) {
 }
 
 func (r *Runtime) recordFailure(err error) {
+	attemptedAt := time.Now()
+	var notBefore time.Time
+	var deferred *DeferredError
+	if errors.As(err, &deferred) {
+		notBefore = deferred.NotBefore
+	}
+
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	// Always recomputed from this attempt's outcome: a zero value (this
+	// wasn't a deferral) clears any earlier cooldown, and a new one
+	// overwrites a stale earlier cooldown.
+	r.notBefore = notBefore
 	if r.hasSnapshot && r.snapshot.Status != StatusUnavailable {
 		// A prior successful (or previously stale) snapshot exists — retain
 		// and mark it stale rather than discarding known-good data or
-		// fabricating a $0 result.
+		// fabricating a $0 result. RetrievedAt (last SUCCESSFUL refresh)
+		// is deliberately left untouched here.
 		r.snapshot.Status = StatusStale
 		r.snapshot.Stale = true
 		r.snapshot.UnavailableReason = err.Error()
+		r.snapshot.LastAttemptedAt = attemptedAt
 		return
 	}
 	r.snapshot = Snapshot{
 		Status:            StatusUnavailable,
 		UnavailableReason: err.Error(),
-		RetrievedAt:       time.Now(),
+		LastAttemptedAt:   attemptedAt,
+		// RetrievedAt stays zero: no refresh has ever succeeded, so there
+		// is no "last successful refresh" fact to report yet.
 	}
 	r.hasSnapshot = true
 }
@@ -142,19 +204,21 @@ func (r *Runtime) recordSuccess(result Result) {
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	r.notBefore = time.Time{}
 	r.snapshot = Snapshot{
-		Status:      status,
-		Total:       result.Total,
-		Currency:    result.Currency,
-		CostBasis:   result.CostBasis,
-		PeriodStart: result.PeriodStart,
-		PeriodEnd:   result.PeriodEnd,
-		Source:      result.Source,
-		Scope:       result.Scope,
-		Coverage:    result.Coverage,
-		Disclosures: result.Disclosures,
-		RowCount:    result.RowCount,
-		RetrievedAt: result.RetrievedAt,
+		Status:          status,
+		Total:           result.Total,
+		Currency:        result.Currency,
+		CostBasis:       result.CostBasis,
+		PeriodStart:     result.PeriodStart,
+		PeriodEnd:       result.PeriodEnd,
+		Source:          result.Source,
+		Scope:           result.Scope,
+		Coverage:        result.Coverage,
+		Disclosures:     result.Disclosures,
+		RowCount:        result.RowCount,
+		RetrievedAt:     result.RetrievedAt,
+		LastAttemptedAt: result.RetrievedAt,
 	}
 	r.hasSnapshot = true
 }

@@ -3,7 +3,6 @@ package billing
 import (
 	"context"
 	"fmt"
-	"net/http"
 	"strings"
 	"time"
 
@@ -25,15 +24,23 @@ type AzureProvider struct {
 
 // NewAzureProvider constructs the production Azure billing provider for one
 // cluster's configuration, using credential for both the Cost Management
-// query and the node-resource-group lookup.
-func NewAzureProvider(cfg ClusterConfig, credential azcore.TokenCredential) *AzureProvider {
+// query and the node-resource-group lookup. It validates the effective
+// management endpoint against allowedManagementHosts (config.go) — this is
+// the actual point an ARM bearer token is ever handed to an http.Client, so
+// it is validated here as well as at config-load time (defense in depth),
+// even though every production ClusterConfig reaching this constructor was
+// already validated once by Load/Validate.
+func NewAzureProvider(cfg ClusterConfig, credential azcore.TokenCredential) (*AzureProvider, error) {
 	endpoint := cfg.EffectiveManagementEndpoint()
-	httpClient := &http.Client{Timeout: 30 * time.Second}
+	if err := validateManagementEndpoint(endpoint); err != nil {
+		return nil, err
+	}
+	httpClient := newARMHTTPClient()
 	return &AzureProvider{
 		cfg:      cfg,
 		client:   newQueryClient(httpClient, credential, endpoint),
 		resolver: newNodeResourceGroupResolver(httpClient, credential, endpoint),
-	}
+	}, nil
 }
 
 func (p *AzureProvider) Name() string { return "azure" }
@@ -42,12 +49,20 @@ func (p *AzureProvider) Name() string { return "azure" }
 // error path returns early with an explicit error rather than a partial or
 // zeroed Result — the caller (Runtime) is responsible for retaining the
 // last good snapshot on failure, never converting this error into $0.
+//
+// Every HTTP attempt this call makes — both resource-group queries, every
+// page of each, every bounded retry, and the node-resource-group lookup —
+// shares one requestBudget, so the independently reasonable per-call bounds
+// (maxPages, maxRetryAttempts) can never compound into an unbounded number
+// of outbound requests for a single refresh.
 func (p *AzureProvider) FetchBilling(ctx context.Context, req Request) (Result, error) {
 	identity, err := ParseAKSResourceID(p.cfg.AKSResourceID)
 	if err != nil {
 		return Result{}, err
 	}
-	nodeRG, err := p.resolver.Resolve(ctx, p.cfg)
+	budget := newRequestBudget(maxRequestsPerRefresh)
+
+	nodeRG, err := p.resolver.Resolve(ctx, p.cfg, budget)
 	if err != nil {
 		return Result{}, err
 	}
@@ -61,9 +76,10 @@ func (p *AzureProvider) FetchBilling(ctx context.Context, req Request) (Result, 
 
 	var allRows []queryRow
 	for _, rg := range scopeResourceGroups {
-		rows, err := p.client.query(ctx, resourceGroupScope(identity.SubscriptionID, rg), body)
+		operation := fmt.Sprintf("Cost Management query for resource group %q", rg)
+		rows, err := p.client.query(ctx, resourceGroupScope(identity.SubscriptionID, rg), body, budget, operation)
 		if err != nil {
-			return Result{}, fmt.Errorf("querying resource group %q: %w", rg, err)
+			return Result{}, err
 		}
 		allRows = append(allRows, rows...)
 	}
@@ -88,7 +104,7 @@ func (p *AzureProvider) FetchBilling(ctx context.Context, req Request) (Result, 
 		Source:      "Azure Cost Management API (Query - Usage, resource-group scope)",
 		Scope:       scopeDescription(identity, nodeRG),
 		Coverage:    coverageDescription(identity, nodeRG),
-		Disclosures: billingDisclosures(),
+		Disclosures: billingDisclosures(identity.ResourceGroup, nodeRG),
 		Lines:       lines,
 		RowCount:    len(allRows),
 	}, nil
@@ -138,13 +154,22 @@ func scopeDescription(identity AKSIdentity, nodeRG string) string {
 		identity.ClusterName, identity.ResourceGroup, nodeRG, identity.SubscriptionID)
 }
 
+// coverageDescription leads with "two-resource-group" framing deliberately:
+// this is a sum over every resource billed inside two resource groups, not
+// a filtered "only AKS-owned resources" total. Neither resource group's
+// membership is independently verified by this package: the node resource
+// group is ordinarily AKS-managed, but an operator can override it to any
+// value (ClusterConfig.NodeResourceGroup), and the cluster's own resource
+// group is never guaranteed to contain only AKS-related resources either.
+// See billingDisclosures for the explicit disclosure of that.
 func coverageDescription(identity AKSIdentity, nodeRG string) string {
-	return fmt.Sprintf("Resource-level Azure billing for every resource inside resource groups %q and %q, attributed by exact Azure resource ID. Includes AKS control-plane charges (if any), node VM/VMSS compute, managed disks, load balancers, and public IPs billed within these resource groups.",
+	return fmt.Sprintf("Two-resource-group Azure billing total: every resource billed inside resource group %q (the AKS cluster's own resource group) and resource group %q (the AKS cluster's node resource group), attributed by exact Azure resource ID. Includes AKS control-plane charges (if any), node VM/VMSS compute, managed disks, load balancers, and public IPs billed within these resource groups.",
 		identity.ResourceGroup, nodeRG)
 }
 
-func billingDisclosures() []string {
+func billingDisclosures(clusterResourceGroup, nodeResourceGroup string) []string {
 	return []string{
+		fmt.Sprintf("This total includes all billed resources in both configured resource groups (%q and %q). Resources unrelated to this cluster may be included; cluster ownership has not been independently verified.", clusterResourceGroup, nodeResourceGroup),
 		"Shared or externally hosted resources billed outside the cluster and node resource groups (for example a hub-network egress path, shared DNS, or cross-subscription resources) are not included in this total.",
 		"Kubernetes-level Idle/Used/System allocation, as shown in the Azure Portal's AKS Cost Analysis view, is not exposed through a public API and is not shown here; this total reflects Azure resource billing only, not per-namespace or per-pod allocation.",
 	}

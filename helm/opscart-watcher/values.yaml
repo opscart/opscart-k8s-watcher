@@ -67,6 +67,7 @@ azureBilling:
   #   clusters:
   #     - cluster: my-context
   #       enabled: true
+  #       authMode: workload-identity   # or azure-cli for local dashboard use; no default, no fallback between them
   #       subscriptionId: "<subscription-id>"
   #       aksResourceId: "/subscriptions/<sub>/resourceGroups/<rg>/providers/Microsoft.ContainerService/managedClusters/<name>"
   config: ""

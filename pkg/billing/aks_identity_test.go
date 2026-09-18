@@ -20,7 +20,7 @@ func TestNodeResourceGroupResolverPrefersExplicitConfig(t *testing.T) {
 	cfg := validClusterConfig()
 	cfg.NodeResourceGroup = "MC_operator-supplied_rg"
 
-	nrg, err := resolver.Resolve(context.Background(), cfg)
+	nrg, err := resolver.Resolve(context.Background(), cfg, nil)
 	if err != nil {
 		t.Fatalf("Resolve: %v", err)
 	}
@@ -52,7 +52,7 @@ func TestNodeResourceGroupResolverFetchesAndCaches(t *testing.T) {
 	cfg := validClusterConfig()
 
 	for i := 0; i < 3; i++ {
-		nrg, err := resolver.Resolve(context.Background(), cfg)
+		nrg, err := resolver.Resolve(context.Background(), cfg, nil)
 		if err != nil {
 			t.Fatalf("Resolve: %v", err)
 		}
@@ -73,7 +73,7 @@ func TestNodeResourceGroupResolverRejectsMissingProperty(t *testing.T) {
 	defer server.Close()
 
 	resolver := newNodeResourceGroupResolver(server.Client(), &fakeCredential{token: "t"}, server.URL)
-	if _, err := resolver.Resolve(context.Background(), validClusterConfig()); err == nil {
+	if _, err := resolver.Resolve(context.Background(), validClusterConfig(), nil); err == nil {
 		t.Fatal("expected an error when nodeResourceGroup is missing from the response")
 	}
 }
@@ -85,7 +85,7 @@ func TestNodeResourceGroupResolverPropagatesAuthFailure(t *testing.T) {
 	defer server.Close()
 
 	resolver := newNodeResourceGroupResolver(server.Client(), &fakeCredential{token: "t"}, server.URL)
-	if _, err := resolver.Resolve(context.Background(), validClusterConfig()); err == nil {
+	if _, err := resolver.Resolve(context.Background(), validClusterConfig(), nil); err == nil {
 		t.Fatal("expected an error for a 403 response, got nil")
 	}
 }

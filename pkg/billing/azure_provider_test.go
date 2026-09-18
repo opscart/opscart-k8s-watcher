@@ -174,3 +174,62 @@ func TestFetchBillingUsesExplicitNodeResourceGroupOverride(t *testing.T) {
 		t.Errorf("managedClusters lookup called %d times despite an explicit override", calls)
 	}
 }
+
+func TestNewAzureProviderRejectsUnsupportedManagementEndpoint(t *testing.T) {
+	cfg := validClusterConfig()
+	cfg.ManagementEndpoint = "https://attacker.example.com"
+	if _, err := NewAzureProvider(cfg, &fakeCredential{token: "t"}); err == nil {
+		t.Fatal("expected NewAzureProvider to reject an unsupported managementEndpoint, got nil")
+	}
+}
+
+func TestNewAzureProviderAcceptsDefaultEndpoint(t *testing.T) {
+	cfg := validClusterConfig()
+	provider, err := NewAzureProvider(cfg, &fakeCredential{token: "t"})
+	if err != nil {
+		t.Fatalf("NewAzureProvider: %v", err)
+	}
+	if provider == nil {
+		t.Fatal("expected a non-nil provider")
+	}
+}
+
+func TestFetchBillingLabelsResultAsTwoResourceGroupTotal(t *testing.T) {
+	clusterRG := "rxr-rxp-e2e-01-cus-rg"
+	rows := map[string][][]any{
+		clusterRG:             {{1.0, "USD", "/r/1", clusterRG}},
+		testNodeResourceGroup: {{2.0, "USD", "/r/2", testNodeResourceGroup}},
+	}
+	server := httptest.NewServer(costQueryHandler(t, rows, testNodeResourceGroup))
+	defer server.Close()
+
+	provider := newTestAzureProvider(validClusterConfig(), server)
+	result, err := provider.FetchBilling(context.Background(), Request{
+		PeriodStart: time.Now().AddDate(0, 0, -1), PeriodEnd: time.Now(), CostBasis: CostBasisActualCost,
+	})
+	if err != nil {
+		t.Fatalf("FetchBilling: %v", err)
+	}
+	if !strings.Contains(result.Coverage, "Two-resource-group") {
+		t.Errorf("Coverage = %q, want it to lead with an explicit two-resource-group total label", result.Coverage)
+	}
+	if !strings.Contains(result.Coverage, clusterRG) || !strings.Contains(result.Coverage, testNodeResourceGroup) {
+		t.Errorf("Coverage = %q, want both resource group names named explicitly", result.Coverage)
+	}
+	foundOverstateDisclosure := false
+	for _, d := range result.Disclosures {
+		// Must warn generically ("ownership has not been independently
+		// verified") rather than asserting the node resource group is
+		// safe — that would be a claim this package cannot actually
+		// verify, since NodeResourceGroup can be set to any value.
+		if strings.Contains(d, "ownership has not been independently verified") {
+			foundOverstateDisclosure = true
+		}
+		if strings.Contains(d, "exclusively AKS-managed") {
+			t.Errorf("disclosure %q asserts unverified ownership of the node resource group", d)
+		}
+	}
+	if !foundOverstateDisclosure {
+		t.Error("expected a disclosure warning that either configured resource group's total can include unrelated resources")
+	}
+}

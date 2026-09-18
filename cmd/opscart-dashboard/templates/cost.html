@@ -35,7 +35,7 @@
 </section>
 {{if .Billing.Stale}}<div class="warning">Azure billing could not refresh and is showing the last successful result{{if .Billing.UnavailableReason}}: {{.Billing.UnavailableReason}}{{end}}.</div>{{else if eq .Billing.Status "unavailable"}}<div class="warning">Azure billing is unavailable{{if .Billing.UnavailableReason}}: {{.Billing.UnavailableReason}}{{end}}. The estimate below reflects public/list pricing only.</div>{{end}}
 {{range .Billing.Disclosures}}<div class="section-note">{{.}}</div>{{end}}
-{{if not .Billing.LastRefresh.IsZero}}<div class="section-note">Azure billing last refreshed {{.Billing.LastRefresh.Format "2006-01-02 15:04 MST"}}.</div>{{end}}
+{{if not .Billing.LastAttempt.IsZero}}<div class="section-note">Last attempted refresh: {{.Billing.LastAttempt.Format "2006-01-02 15:04 MST"}}. Last successful refresh: {{if .Billing.LastSuccess.IsZero}}never{{else}}{{.Billing.LastSuccess.Format "2006-01-02 15:04 MST"}}{{end}}.</div>{{end}}
 {{else}}
 <div class="section-note">Estimate-only mode: Azure billing is not configured for this cluster. Figures below are public/list-rate estimates, not billing data.</div>
 {{end}}

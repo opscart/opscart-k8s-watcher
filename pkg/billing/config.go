@@ -2,6 +2,7 @@ package billing
 
 import (
 	"fmt"
+	"net/url"
 	"os"
 	"regexp"
 	"strings"
@@ -31,6 +32,14 @@ func LoadFromEnv() (*Config, error) {
 // entirely off the Kubernetes scan and page-render paths.
 const DefaultRefreshInterval = 6 * time.Hour
 
+// MinRefreshInterval is the smallest refreshInterval Validate accepts.
+// Even at this floor, two queries per refresh stay far under Cost
+// Management's per-tenant QPU quotas (12 QPU/10s, 60 QPU/min, 600 QPU/hour:
+// https://learn.microsoft.com/azure/cost-management-billing/costs/manage-automation#qpu-quotas),
+// while still catching an operator's typo (e.g. "1s") long before it
+// becomes a production incident.
+const MinRefreshInterval = 15 * time.Minute
+
 // DefaultReportingPeriodMode reports the current calendar month to date, in
 // UTC, matching the Azure Portal Cost Analysis default view so a dashboard
 // figure and a portal figure are comparing the same window unless a custom
@@ -44,6 +53,55 @@ const customReportingPeriodMode = "custom"
 // case-insensitively on the provider/resource-type segments, since ARM
 // resource IDs are case-insensitive there.
 var aksResourceIDPattern = regexp.MustCompile(`(?i)^/subscriptions/([^/]+)/resourceGroups/([^/]+)/providers/Microsoft\.ContainerService/managedClusters/([^/]+)$`)
+
+// allowedManagementHosts lists every Azure Resource Manager host this
+// package will ever attach a bearer token to. A configured
+// managementEndpoint must resolve to one of these — never an arbitrary
+// operator-supplied host, since that host would receive the same
+// ARM-scoped token used for the real Azure Cost Management API.
+//
+// Azure Commercial only, for now: armTokenScope (query_client.go) is
+// hardcoded to https://management.azure.com/.default, and credential
+// construction (credential.go) does not configure a sovereign-cloud
+// authority. Accepting management.usgovcloudapi.net or
+// management.chinacloudapi.cn here without also wiring the matching token
+// audience and AAD authority together would silently produce a token that
+// doesn't match the endpoint it's sent to — every sovereign-cloud call
+// would just fail authentication, not work partially. Add those hosts back
+// only alongside that wiring, not on their own.
+var allowedManagementHosts = map[string]bool{
+	"management.azure.com": true, // Azure Public/Commercial
+}
+
+// validateManagementEndpoint rejects anything but a plain https URL to one
+// of allowedManagementHosts: no userinfo/credentials embedded in the URL,
+// no query string, no fragment, and no path beyond the host itself.
+func validateManagementEndpoint(raw string) error {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return fmt.Errorf("managementEndpoint %q: %w", raw, err)
+	}
+	if u.Scheme != "https" {
+		return fmt.Errorf("managementEndpoint %q: must use https", raw)
+	}
+	if u.User != nil {
+		return fmt.Errorf("managementEndpoint %q: must not include userinfo", raw)
+	}
+	if u.RawQuery != "" {
+		return fmt.Errorf("managementEndpoint %q: must not include a query string", raw)
+	}
+	if u.Fragment != "" {
+		return fmt.Errorf("managementEndpoint %q: must not include a fragment", raw)
+	}
+	if p := strings.Trim(u.Path, "/"); p != "" {
+		return fmt.Errorf("managementEndpoint %q: must not include a path", raw)
+	}
+	host := strings.ToLower(u.Hostname())
+	if !allowedManagementHosts[host] {
+		return fmt.Errorf("managementEndpoint %q: host %q is not a supported Azure Resource Manager endpoint", raw, host)
+	}
+	return nil
+}
 
 // PeriodConfig describes the reporting window. Mode "month-to-date" (the
 // default) recomputes the window relative to now on every refresh. Mode
@@ -66,6 +124,11 @@ type ClusterConfig struct {
 	// Enabled gates this cluster's billing runtime. Absent/false means
 	// disabled — the documented default for the whole feature.
 	Enabled bool `yaml:"enabled"`
+
+	// AuthMode selects exactly one Azure credential type — "azure-cli" or
+	// "workload-identity" — with no default and no fallback (see
+	// credential.go). Required.
+	AuthMode string `yaml:"authMode"`
 
 	SubscriptionID string `yaml:"subscriptionId"`
 	// AKSResourceID is the full ARM resource ID of the AKS cluster. Its
@@ -90,8 +153,10 @@ type ClusterConfig struct {
 	RefreshInterval time.Duration `yaml:"refreshInterval,omitempty"`
 
 	// ManagementEndpoint overrides the ARM endpoint (default
-	// https://management.azure.com). Only meaningful for sovereign clouds
-	// or tests; never required for normal Azure Commercial use.
+	// https://management.azure.com). Must still resolve to
+	// allowedManagementHosts, which currently only lists Azure Commercial —
+	// there is no supported way to point this at a sovereign cloud yet (see
+	// that var's doc comment). Never required for normal use.
 	ManagementEndpoint string `yaml:"managementEndpoint,omitempty"`
 }
 
@@ -153,6 +218,9 @@ func (c ClusterConfig) Validate() error {
 	if strings.TrimSpace(c.ClusterContext) == "" {
 		return fmt.Errorf("cluster is required")
 	}
+	if _, err := ParseAuthMode(c.AuthMode); err != nil {
+		return err
+	}
 	if strings.TrimSpace(c.SubscriptionID) == "" {
 		return fmt.Errorf("subscriptionId is required")
 	}
@@ -190,7 +258,24 @@ func (c ClusterConfig) Validate() error {
 	if c.RefreshInterval < 0 {
 		return fmt.Errorf("refreshInterval must not be negative")
 	}
+	if c.RefreshInterval > 0 && c.RefreshInterval < MinRefreshInterval {
+		return fmt.Errorf("refreshInterval %s is below the minimum %s", c.RefreshInterval, MinRefreshInterval)
+	}
+	if c.ManagementEndpoint != "" {
+		if err := validateManagementEndpoint(c.ManagementEndpoint); err != nil {
+			return err
+		}
+	}
 	return nil
+}
+
+// EffectiveAuthMode returns the configured, already-validated auth mode.
+// Call only after Validate has succeeded — this accessor is not itself a
+// validation point, so an invalid/empty AuthMode silently returns "" here
+// instead of erroring; NewCredential("") then fails explicitly.
+func (c ClusterConfig) EffectiveAuthMode() AuthMode {
+	mode, _ := ParseAuthMode(c.AuthMode)
+	return mode
 }
 
 // EffectiveCostBasis returns the configured cost basis, defaulting to

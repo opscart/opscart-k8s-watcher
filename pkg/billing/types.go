@@ -69,6 +69,9 @@ type Result struct {
 	CostBasis   CostBasis
 	PeriodStart time.Time
 	PeriodEnd   time.Time
+	// RetrievedAt is when this successful result was retrieved — it exists
+	// only on a Result because a Provider only ever returns one on success.
+	// Runtime is what tracks failed attempts too (Snapshot.LastAttemptedAt).
 	RetrievedAt time.Time
 
 	// Source is a human-readable description of the API/provider used.
@@ -117,7 +120,18 @@ type Snapshot struct {
 	Disclosures []string
 	RowCount    int
 
-	RetrievedAt       time.Time
-	Stale             bool
+	// RetrievedAt is when the last SUCCESSFUL refresh completed. It never
+	// advances on a failed attempt — it is the "last successful refresh"
+	// fact, distinct from LastAttemptedAt below.
+	RetrievedAt time.Time
+	// LastAttemptedAt is when the most recent refresh attempt finished,
+	// whether it succeeded or failed. A dashboard showing only RetrievedAt
+	// cannot tell "billing has been failing for days" from "billing just
+	// refreshed" — LastAttemptedAt is what makes that distinction visible.
+	LastAttemptedAt time.Time
+	Stale           bool
+	// UnavailableReason is a safe, sanitized description of the most
+	// recent failure (see AzureAPIError) — never a raw Azure response
+	// body. Empty when the most recent attempt succeeded.
 	UnavailableReason string
 }

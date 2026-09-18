@@ -54,6 +54,22 @@ func TestBuildBillingPageDataStaleRetainsPriorTotal(t *testing.T) {
 	}
 }
 
+func TestBuildBillingPageDataDistinguishesLastAttemptFromLastSuccess(t *testing.T) {
+	lastSuccess := time.Date(2026, 9, 15, 6, 0, 0, 0, time.UTC)
+	lastAttempt := time.Date(2026, 9, 17, 6, 0, 0, 0, time.UTC)
+	snap := billing.Snapshot{
+		Status: billing.StatusStale, Stale: true, Total: 100, Currency: "USD",
+		UnavailableReason: "throttled", RetrievedAt: lastSuccess, LastAttemptedAt: lastAttempt,
+	}
+	data := buildBillingPageData(snap, true)
+	if !data.LastSuccess.Equal(lastSuccess) {
+		t.Errorf("LastSuccess = %v, want %v", data.LastSuccess, lastSuccess)
+	}
+	if !data.LastAttempt.Equal(lastAttempt) {
+		t.Errorf("LastAttempt = %v, want %v", data.LastAttempt, lastAttempt)
+	}
+}
+
 func TestBuildBillingPageDataUnavailableNeverReportsZeroAsCost(t *testing.T) {
 	snap := billing.Snapshot{Status: billing.StatusUnavailable, UnavailableReason: "authentication failed"}
 	data := buildBillingPageData(snap, true)

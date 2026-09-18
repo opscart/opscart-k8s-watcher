@@ -14,6 +14,7 @@ func validClusterConfig() ClusterConfig {
 	return ClusterConfig{
 		ClusterContext: "prod",
 		Enabled:        true,
+		AuthMode:       string(AuthModeAzureCLI),
 		SubscriptionID: validSubscriptionID,
 		AKSResourceID:  validAKSResourceID,
 	}
@@ -50,6 +51,22 @@ func TestParseAKSResourceIDRejectsMalformed(t *testing.T) {
 func TestClusterConfigValidateAcceptsMinimalValid(t *testing.T) {
 	if err := validClusterConfig().Validate(); err != nil {
 		t.Fatalf("Validate: %v", err)
+	}
+}
+
+func TestClusterConfigValidateRejectsMissingAuthMode(t *testing.T) {
+	cfg := validClusterConfig()
+	cfg.AuthMode = ""
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("expected a missing authMode error, got nil")
+	}
+}
+
+func TestClusterConfigValidateRejectsInvalidAuthMode(t *testing.T) {
+	cfg := validClusterConfig()
+	cfg.AuthMode = "auto"
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("expected an invalid authMode error, got nil")
 	}
 }
 
@@ -161,6 +178,7 @@ func TestLoadRejectsInvalidClusterConfig(t *testing.T) {
 clusters:
   - cluster: prod
     enabled: true
+    authMode: azure-cli
     subscriptionId: "22222222-2222-2222-2222-222222222222"
     aksResourceId: "` + validAKSResourceID + `"
 `
@@ -172,6 +190,24 @@ clusters:
 	}
 }
 
+func TestLoadRejectsMissingAuthMode(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "billing.yaml")
+	content := `
+clusters:
+  - cluster: prod
+    enabled: true
+    subscriptionId: "` + validSubscriptionID + `"
+    aksResourceId: "` + validAKSResourceID + `"
+`
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	if _, err := Load(path); err == nil {
+		t.Fatal("expected Load to reject a missing authMode, got nil")
+	}
+}
+
 func TestLoadAndClusterByContext(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "billing.yaml")
@@ -179,6 +215,7 @@ func TestLoadAndClusterByContext(t *testing.T) {
 clusters:
   - cluster: prod
     enabled: true
+    authMode: azure-cli
     subscriptionId: "` + validSubscriptionID + `"
     aksResourceId: "` + validAKSResourceID + `"
     refreshInterval: 1h
@@ -217,5 +254,104 @@ func TestLoadFromEnvUnsetIsDisabled(t *testing.T) {
 	}
 	if cfg != nil {
 		t.Errorf("expected nil Config when %s is unset, got %+v", configPathEnvVar, cfg)
+	}
+}
+
+func TestValidateManagementEndpointAcceptsAzureCommercial(t *testing.T) {
+	if err := validateManagementEndpoint("https://management.azure.com"); err != nil {
+		t.Errorf("validateManagementEndpoint(https://management.azure.com): %v", err)
+	}
+}
+
+// TestValidateManagementEndpointRejectsSovereignCloudsForNow documents a
+// deliberate current limitation, not an oversight: armTokenScope
+// (query_client.go) is hardcoded to Azure Commercial's token audience, and
+// credential construction does not configure a sovereign-cloud AAD
+// authority. Accepting these hosts without that wiring would produce a
+// token whose audience never matches the endpoint — every sovereign-cloud
+// call would fail authentication. See allowedManagementHosts' doc comment.
+func TestValidateManagementEndpointRejectsSovereignCloudsForNow(t *testing.T) {
+	for _, host := range []string{"management.usgovcloudapi.net", "management.chinacloudapi.cn"} {
+		if err := validateManagementEndpoint("https://" + host); err == nil {
+			t.Errorf("validateManagementEndpoint(https://%s): expected rejection (sovereign clouds not yet supported), got nil", host)
+		}
+	}
+}
+
+func TestValidateManagementEndpointRejectsUnknownHost(t *testing.T) {
+	if err := validateManagementEndpoint("https://management.evil.example.com"); err == nil {
+		t.Fatal("expected an error for an unsupported host, got nil")
+	}
+}
+
+func TestValidateManagementEndpointRejectsHTTP(t *testing.T) {
+	if err := validateManagementEndpoint("http://management.azure.com"); err == nil {
+		t.Fatal("expected an error for a plain-http endpoint, got nil")
+	}
+}
+
+func TestValidateManagementEndpointRejectsUserinfo(t *testing.T) {
+	if err := validateManagementEndpoint("https://user:pass@management.azure.com"); err == nil {
+		t.Fatal("expected an error for an endpoint carrying userinfo, got nil")
+	}
+}
+
+func TestValidateManagementEndpointRejectsQueryString(t *testing.T) {
+	if err := validateManagementEndpoint("https://management.azure.com?x=1"); err == nil {
+		t.Fatal("expected an error for an endpoint carrying a query string, got nil")
+	}
+}
+
+func TestValidateManagementEndpointRejectsFragment(t *testing.T) {
+	if err := validateManagementEndpoint("https://management.azure.com#x"); err == nil {
+		t.Fatal("expected an error for an endpoint carrying a fragment, got nil")
+	}
+}
+
+func TestValidateManagementEndpointRejectsPath(t *testing.T) {
+	if err := validateManagementEndpoint("https://management.azure.com/some/path"); err == nil {
+		t.Fatal("expected an error for an endpoint carrying a path, got nil")
+	}
+}
+
+func TestClusterConfigValidateRejectsUnsupportedManagementEndpoint(t *testing.T) {
+	cfg := validClusterConfig()
+	cfg.ManagementEndpoint = "https://attacker.example.com"
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("expected an error for an unsupported managementEndpoint, got nil")
+	}
+}
+
+func TestClusterConfigValidateAcceptsEmptyManagementEndpoint(t *testing.T) {
+	cfg := validClusterConfig()
+	cfg.ManagementEndpoint = ""
+	if err := cfg.Validate(); err != nil {
+		t.Errorf("Validate with default (empty) managementEndpoint: %v", err)
+	}
+}
+
+func TestClusterConfigValidateRejectsRefreshIntervalBelowMinimum(t *testing.T) {
+	cfg := validClusterConfig()
+	cfg.RefreshInterval = time.Second
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("expected an error for a refreshInterval below MinRefreshInterval, got nil")
+	}
+}
+
+func TestClusterConfigValidateAcceptsRefreshIntervalAtMinimum(t *testing.T) {
+	cfg := validClusterConfig()
+	cfg.RefreshInterval = MinRefreshInterval
+	if err := cfg.Validate(); err != nil {
+		t.Errorf("Validate with refreshInterval == MinRefreshInterval: %v", err)
+	}
+}
+
+func TestClusterConfigValidateAcceptsZeroRefreshInterval(t *testing.T) {
+	// Zero means "use DefaultRefreshInterval" (config.go), not "below the
+	// floor" — only an explicit too-small positive value is rejected.
+	cfg := validClusterConfig()
+	cfg.RefreshInterval = 0
+	if err := cfg.Validate(); err != nil {
+		t.Errorf("Validate with zero refreshInterval: %v", err)
 	}
 }

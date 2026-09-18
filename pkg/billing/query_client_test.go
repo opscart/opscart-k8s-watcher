@@ -3,9 +3,11 @@ package billing
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -60,7 +62,7 @@ func TestQueryParsesColumnsRegardlessOfOrder(t *testing.T) {
 	defer server.Close()
 
 	client := newTestClient(t, server)
-	rows, err := client.query(context.Background(), "/subscriptions/s/resourceGroups/rg1", buildResourceGroupQuery(CostBasisActualCost, time.Now(), time.Now()))
+	rows, err := client.query(context.Background(), "/subscriptions/s/resourceGroups/rg1", buildResourceGroupQuery(CostBasisActualCost, time.Now(), time.Now()), nil, "test query")
 	if err != nil {
 		t.Fatalf("query: %v", err)
 	}
@@ -78,29 +80,31 @@ func TestQueryParsesColumnsRegardlessOfOrder(t *testing.T) {
 }
 
 func TestQueryFollowsPagination(t *testing.T) {
-	var page2URL string
+	var nextLink string
 	calls := 0
-	mux := http.NewServeMux()
-	mux.HandleFunc("/subscriptions/s/resourceGroups/rg1/providers/Microsoft.CostManagement/query", func(w http.ResponseWriter, r *http.Request) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		calls++
+		// A real Azure nextLink reuses the exact same scope/operation path
+		// with a different query string (a continuation token) — this
+		// distinguishes page 1 from page 2 by query, not path, matching
+		// that real shape.
+		if r.URL.Query().Get("$skiptoken") == "next" {
+			writeQueryResponse(w,
+				[]queryColumn{{Name: "Cost"}, {Name: "Currency"}, {Name: "ResourceId"}, {Name: "ResourceGroupName"}},
+				[][]any{{2.0, "USD", "/r/2", "rg1"}},
+				"")
+			return
+		}
 		writeQueryResponse(w,
 			[]queryColumn{{Name: "Cost"}, {Name: "Currency"}, {Name: "ResourceId"}, {Name: "ResourceGroupName"}},
 			[][]any{{1.0, "USD", "/r/1", "rg1"}},
-			page2URL)
-	})
-	mux.HandleFunc("/page2", func(w http.ResponseWriter, r *http.Request) {
-		calls++
-		writeQueryResponse(w,
-			[]queryColumn{{Name: "Cost"}, {Name: "Currency"}, {Name: "ResourceId"}, {Name: "ResourceGroupName"}},
-			[][]any{{2.0, "USD", "/r/2", "rg1"}},
-			"")
-	})
-	server := httptest.NewServer(mux)
+			nextLink)
+	}))
 	defer server.Close()
-	page2URL = server.URL + "/page2"
+	nextLink = server.URL + "/subscriptions/s/resourceGroups/rg1/providers/Microsoft.CostManagement/query?api-version=" + costManagementAPIVersion + "&$skiptoken=next"
 
 	client := newTestClient(t, server)
-	rows, err := client.query(context.Background(), "/subscriptions/s/resourceGroups/rg1", buildResourceGroupQuery(CostBasisActualCost, time.Now(), time.Now()))
+	rows, err := client.query(context.Background(), "/subscriptions/s/resourceGroups/rg1", buildResourceGroupQuery(CostBasisActualCost, time.Now(), time.Now()), nil, "test query")
 	if err != nil {
 		t.Fatalf("query: %v", err)
 	}
@@ -109,6 +113,32 @@ func TestQueryFollowsPagination(t *testing.T) {
 	}
 	if calls != 2 {
 		t.Errorf("server received %d calls, want 2", calls)
+	}
+}
+
+func TestQueryDoesNotFollowRedirects(t *testing.T) {
+	evilCalls := 0
+	evil := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		evilCalls++
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer evil.Close()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, evil.URL+"/steal-token", http.StatusFound)
+	}))
+	defer server.Close()
+
+	// newQueryClient's nil-httpClient fallback (newARMHTTPClient) is the
+	// exact client production code uses — verify redirect rejection
+	// through that path, not a test-only client configuration.
+	client := newQueryClient(nil, &fakeCredential{token: "test-token"}, server.URL)
+	_, err := client.query(context.Background(), "/subscriptions/s/resourceGroups/rg1", buildResourceGroupQuery(CostBasisActualCost, time.Now(), time.Now()), nil, "test query")
+	if err == nil {
+		t.Fatal("expected an error when the server responds with a redirect, got nil")
+	}
+	if evilCalls != 0 {
+		t.Errorf("redirect was followed: %d calls to the untrusted host", evilCalls)
 	}
 }
 
@@ -129,12 +159,63 @@ func TestQueryRejectsContinuationToDifferentHost(t *testing.T) {
 	defer server.Close()
 
 	client := newTestClient(t, server)
-	_, err := client.query(context.Background(), "/subscriptions/s/resourceGroups/rg1", buildResourceGroupQuery(CostBasisActualCost, time.Now(), time.Now()))
+	_, err := client.query(context.Background(), "/subscriptions/s/resourceGroups/rg1", buildResourceGroupQuery(CostBasisActualCost, time.Now(), time.Now()), nil, "test query")
 	if err == nil {
 		t.Fatal("expected an error for a cross-host continuation, got nil")
 	}
 	if evilCalls != 0 {
 		t.Errorf("cross-host continuation was followed: %d calls to the untrusted host", evilCalls)
+	}
+}
+
+func TestQueryRejectsContinuationToDifferentScope(t *testing.T) {
+	rg2Calls := 0
+	var evilPath string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.Contains(r.URL.Path, "resourceGroups/rg2") {
+			rg2Calls++
+		}
+		// Same host as the original request (the host check alone would
+		// allow this), but nextLink below points at a different resource
+		// group's Cost Management query path — must still be rejected.
+		writeQueryResponse(w,
+			[]queryColumn{{Name: "Cost"}, {Name: "Currency"}, {Name: "ResourceId"}, {Name: "ResourceGroupName"}},
+			[][]any{{1.0, "USD", "/r/1", "rg1"}},
+			evilPath)
+	}))
+	defer server.Close()
+	evilPath = server.URL + "/subscriptions/s/resourceGroups/rg2/providers/Microsoft.CostManagement/query?api-version=" + costManagementAPIVersion
+
+	client := newTestClient(t, server)
+	_, err := client.query(context.Background(), "/subscriptions/s/resourceGroups/rg1", buildResourceGroupQuery(CostBasisActualCost, time.Now(), time.Now()), nil, "test query")
+	if err == nil {
+		t.Fatal("expected an error for a same-host, different-scope continuation, got nil")
+	}
+	if rg2Calls != 0 {
+		t.Errorf("same-host, different-scope continuation was followed: %d calls to resourceGroups/rg2", rg2Calls)
+	}
+}
+
+func TestQueryRejectsRepeatedContinuation(t *testing.T) {
+	calls := 0
+	var loopLink string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		writeQueryResponse(w,
+			[]queryColumn{{Name: "Cost"}, {Name: "Currency"}, {Name: "ResourceId"}, {Name: "ResourceGroupName"}},
+			[][]any{{1.0, "USD", "/r/1", "rg1"}},
+			loopLink) // always points back at the exact same URL — must not loop
+	}))
+	defer server.Close()
+	loopLink = server.URL + "/subscriptions/s/resourceGroups/rg1/providers/Microsoft.CostManagement/query?api-version=" + costManagementAPIVersion
+
+	client := newTestClient(t, server)
+	_, err := client.query(context.Background(), "/subscriptions/s/resourceGroups/rg1", buildResourceGroupQuery(CostBasisActualCost, time.Now(), time.Now()), nil, "test query")
+	if err == nil {
+		t.Fatal("expected an error for a repeated (non-progressing) continuation, got nil")
+	}
+	if calls != 1 {
+		t.Errorf("server received %d calls, want exactly 1 (rejected before repeating)", calls)
 	}
 }
 
@@ -155,7 +236,7 @@ func TestQueryRetriesThrottlingWithRetryAfter(t *testing.T) {
 	defer server.Close()
 
 	client := newTestClient(t, server)
-	rows, err := client.query(context.Background(), "/subscriptions/s/resourceGroups/rg1", buildResourceGroupQuery(CostBasisActualCost, time.Now(), time.Now()))
+	rows, err := client.query(context.Background(), "/subscriptions/s/resourceGroups/rg1", buildResourceGroupQuery(CostBasisActualCost, time.Now(), time.Now()), nil, "test query")
 	if err != nil {
 		t.Fatalf("query: %v", err)
 	}
@@ -177,12 +258,58 @@ func TestQueryExhaustsBoundedRetries(t *testing.T) {
 	defer server.Close()
 
 	client := newTestClient(t, server)
-	_, err := client.query(context.Background(), "/subscriptions/s/resourceGroups/rg1", buildResourceGroupQuery(CostBasisActualCost, time.Now(), time.Now()))
+	_, err := client.query(context.Background(), "/subscriptions/s/resourceGroups/rg1", buildResourceGroupQuery(CostBasisActualCost, time.Now(), time.Now()), nil, "test query")
 	if err == nil {
 		t.Fatal("expected an error after exhausting retries, got nil")
 	}
 	if calls != maxRetryAttempts {
 		t.Errorf("server received %d calls, want exactly %d (bounded retry)", calls, maxRetryAttempts)
+	}
+}
+
+// TestQueryPreservesFinalAttemptCooldown is a regression test: earlier
+// versions of doWithRetry returned a plain *AzureAPIError once
+// maxRetryAttempts was reached, silently discarding a mandated retry delay
+// on that final attempt even when the response carried one — losing the
+// one piece of information (when it's actually safe to retry) that
+// matters most once every retry within this call is exhausted.
+func TestQueryPreservesFinalAttemptCooldown(t *testing.T) {
+	calls := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		w.Header().Set("x-ms-request-id", "req-final")
+		if calls < maxRetryAttempts {
+			w.Header().Set("Retry-After", "0") // short — the earlier attempts retry normally
+		} else {
+			w.Header().Set("Retry-After", "28800") // 8 hours — mandated only on the final attempt
+		}
+		w.WriteHeader(http.StatusTooManyRequests)
+	}))
+	defer server.Close()
+
+	client := newTestClient(t, server)
+	before := time.Now()
+	_, err := client.query(context.Background(), "/subscriptions/s/resourceGroups/rg1", buildResourceGroupQuery(CostBasisActualCost, time.Now(), time.Now()), nil, "test query")
+	if calls != maxRetryAttempts {
+		t.Fatalf("server received %d calls, want exactly %d", calls, maxRetryAttempts)
+	}
+	if err == nil {
+		t.Fatal("expected an error after exhausting retries, got nil")
+	}
+
+	var deferred *DeferredError
+	if !errors.As(err, &deferred) {
+		t.Fatalf("error = %v (%T), want a *DeferredError carrying the final attempt's mandated cooldown", err, err)
+	}
+	if deferred.StatusCode != http.StatusTooManyRequests {
+		t.Errorf("StatusCode = %d, want %d", deferred.StatusCode, http.StatusTooManyRequests)
+	}
+	if deferred.RequestID != "req-final" {
+		t.Errorf("RequestID = %q, want req-final", deferred.RequestID)
+	}
+	wantNotBefore := before.Add(8 * time.Hour)
+	if diff := deferred.NotBefore.Sub(wantNotBefore); diff < -2*time.Second || diff > 2*time.Second {
+		t.Errorf("NotBefore = %v, want approximately %v (8h from the final attempt)", deferred.NotBefore, wantNotBefore)
 	}
 }
 
@@ -196,7 +323,7 @@ func TestQueryDoesNotRetryAuthFailure(t *testing.T) {
 	defer server.Close()
 
 	client := newTestClient(t, server)
-	_, err := client.query(context.Background(), "/subscriptions/s/resourceGroups/rg1", buildResourceGroupQuery(CostBasisActualCost, time.Now(), time.Now()))
+	_, err := client.query(context.Background(), "/subscriptions/s/resourceGroups/rg1", buildResourceGroupQuery(CostBasisActualCost, time.Now(), time.Now()), nil, "test query")
 	if err == nil {
 		t.Fatal("expected an authorization error, got nil")
 	}
@@ -212,7 +339,7 @@ func TestQueryHandlesNoContentAsZeroRows(t *testing.T) {
 	defer server.Close()
 
 	client := newTestClient(t, server)
-	rows, err := client.query(context.Background(), "/subscriptions/s/resourceGroups/rg1", buildResourceGroupQuery(CostBasisActualCost, time.Now(), time.Now()))
+	rows, err := client.query(context.Background(), "/subscriptions/s/resourceGroups/rg1", buildResourceGroupQuery(CostBasisActualCost, time.Now(), time.Now()), nil, "test query")
 	if err != nil {
 		t.Fatalf("query: %v", err)
 	}
@@ -229,7 +356,7 @@ func TestQueryRejectsMalformedResponse(t *testing.T) {
 	defer server.Close()
 
 	client := newTestClient(t, server)
-	_, err := client.query(context.Background(), "/subscriptions/s/resourceGroups/rg1", buildResourceGroupQuery(CostBasisActualCost, time.Now(), time.Now()))
+	_, err := client.query(context.Background(), "/subscriptions/s/resourceGroups/rg1", buildResourceGroupQuery(CostBasisActualCost, time.Now(), time.Now()), nil, "test query")
 	if err == nil {
 		t.Fatal("expected a decode error for malformed JSON, got nil")
 	}
@@ -245,7 +372,7 @@ func TestQueryRejectsMismatchedRowWidth(t *testing.T) {
 	defer server.Close()
 
 	client := newTestClient(t, server)
-	_, err := client.query(context.Background(), "/subscriptions/s/resourceGroups/rg1", buildResourceGroupQuery(CostBasisActualCost, time.Now(), time.Now()))
+	_, err := client.query(context.Background(), "/subscriptions/s/resourceGroups/rg1", buildResourceGroupQuery(CostBasisActualCost, time.Now(), time.Now()), nil, "test query")
 	if err == nil {
 		t.Fatal("expected an error for a row/column width mismatch, got nil")
 	}
@@ -264,9 +391,61 @@ func TestQueryRespectsContextTimeout(t *testing.T) {
 	client := newTestClient(t, server)
 	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
 	defer cancel()
-	_, err := client.query(ctx, "/subscriptions/s/resourceGroups/rg1", buildResourceGroupQuery(CostBasisActualCost, time.Now(), time.Now()))
+	_, err := client.query(ctx, "/subscriptions/s/resourceGroups/rg1", buildResourceGroupQuery(CostBasisActualCost, time.Now(), time.Now()), nil, "test query")
 	if err == nil {
 		t.Fatal("expected a context deadline error, got nil")
+	}
+}
+
+func TestQueryRejectsOversizedResponse(t *testing.T) {
+	old := maxResponseBytes
+	maxResponseBytes = 100 // shrink so the test doesn't allocate a real 10 MiB body
+	defer func() { maxResponseBytes = old }()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		// A well-formed but oversized response — padding via many rows,
+		// not a huge single field, so this also proves the bound applies
+		// to the whole body, not just one value.
+		rows := make([][]any, 0, 20)
+		for i := 0; i < 20; i++ {
+			rows = append(rows, []any{1.0, "USD", fmt.Sprintf("/subscriptions/s/resourceGroups/rg1/providers/x/y%d", i), "rg1"})
+		}
+		writeQueryResponse(w, []queryColumn{{Name: "Cost"}, {Name: "Currency"}, {Name: "ResourceId"}, {Name: "ResourceGroupName"}}, rows, "")
+	}))
+	defer server.Close()
+
+	client := newTestClient(t, server)
+	_, err := client.query(context.Background(), "/subscriptions/s/resourceGroups/rg1", buildResourceGroupQuery(CostBasisActualCost, time.Now(), time.Now()), nil, "test query")
+	if err == nil {
+		t.Fatal("expected an error for a response exceeding the size bound, got nil")
+	}
+	if !strings.Contains(err.Error(), "size limit") {
+		t.Errorf("error = %v, want a size-limit classification", err)
+	}
+}
+
+func TestQueryRejectsTooManyRows(t *testing.T) {
+	old := maxTotalRows
+	maxTotalRows = 5
+	defer func() { maxTotalRows = old }()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		rows := make([][]any, 0, 10)
+		for i := 0; i < 10; i++ {
+			rows = append(rows, []any{1.0, "USD", fmt.Sprintf("/r/%d", i), "rg1"})
+		}
+		writeQueryResponse(w, []queryColumn{{Name: "Cost"}, {Name: "Currency"}, {Name: "ResourceId"}, {Name: "ResourceGroupName"}}, rows, "")
+	}))
+	defer server.Close()
+
+	client := newTestClient(t, server)
+	_, err := client.query(context.Background(), "/subscriptions/s/resourceGroups/rg1", buildResourceGroupQuery(CostBasisActualCost, time.Now(), time.Now()), nil, "test query")
+	if err == nil {
+		t.Fatal("expected an error for a response exceeding the row bound, got nil")
+	}
+	if !strings.Contains(err.Error(), "row limit") {
+		t.Errorf("error = %v, want a row-limit classification", err)
 	}
 }
 
