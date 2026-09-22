@@ -86,6 +86,89 @@ func TestRuntimeRefreshSuccessIsAvailable(t *testing.T) {
 	}
 }
 
+func TestRuntimeSnapshotCarriesAttributionFieldsFromResult(t *testing.T) {
+	lines := []ResourceCost{
+		{ResourceID: "/subscriptions/s/resourceGroups/rg/providers/Microsoft.ContainerService/managedClusters/aks", ResourceGroup: "rg", Cost: 10, Currency: "USD", Attributed: true},
+		{ResourceID: "/subscriptions/s/resourceGroups/rg/providers/Microsoft.Compute/virtualMachineScaleSets/x", ResourceGroup: "rg", Cost: 90, Currency: "USD", Attributed: false},
+	}
+	result := Result{
+		Total: 100, Currency: "USD", RowCount: 2, RetrievedAt: time.Now(),
+		Lines:             lines,
+		ClusterResourceID: "/subscriptions/s/resourceGroups/rg/providers/Microsoft.ContainerService/managedClusters/aks",
+		AttributedTotal:   10,
+		UnattributedTotal: 90,
+	}
+	provider := &fakeProvider{result: result}
+	rt := newTestRuntime(provider)
+	rt.refreshOnce(context.Background())
+
+	snap := rt.Snapshot()
+	if len(snap.Lines) != 2 {
+		t.Fatalf("len(Lines) = %d, want 2", len(snap.Lines))
+	}
+	if snap.ClusterResourceID != result.ClusterResourceID {
+		t.Errorf("ClusterResourceID = %q, want %q", snap.ClusterResourceID, result.ClusterResourceID)
+	}
+	if snap.AttributedTotal != 10 || snap.UnattributedTotal != 90 {
+		t.Errorf("AttributedTotal/UnattributedTotal = %v/%v, want 10/90", snap.AttributedTotal, snap.UnattributedTotal)
+	}
+	if snap.AttributedTotal+snap.UnattributedTotal != snap.Total {
+		t.Errorf("AttributedTotal + UnattributedTotal = %v, want Total %v", snap.AttributedTotal+snap.UnattributedTotal, snap.Total)
+	}
+}
+
+func TestRuntimeRecordSuccessClonesLinesAndDisclosures(t *testing.T) {
+	lines := []ResourceCost{{ResourceID: "/r/1", ResourceGroup: "rg", Cost: 10, Currency: "USD", Attributed: true}}
+	disclosures := []string{"original disclosure"}
+	result := Result{Total: 10, Currency: "USD", RowCount: 1, RetrievedAt: time.Now(), Lines: lines, Disclosures: disclosures}
+
+	provider := &fakeProvider{result: result}
+	rt := newTestRuntime(provider)
+	rt.refreshOnce(context.Background())
+
+	// Mutate the caller's original slices after the fact — this must never
+	// reach the cached Snapshot, which proves recordSuccess cloned rather
+	// than aliased them.
+	lines[0].Cost = 99999
+	lines[0].ResourceID = "/mutated"
+	disclosures[0] = "mutated disclosure"
+
+	snap := rt.Snapshot()
+	if snap.Lines[0].Cost != 10 || snap.Lines[0].ResourceID != "/r/1" {
+		t.Errorf("cached Lines mutated by the original result's slice: %+v", snap.Lines[0])
+	}
+	if snap.Disclosures[0] != "original disclosure" {
+		t.Errorf("cached Disclosures mutated by the original result's slice: %q", snap.Disclosures[0])
+	}
+}
+
+func TestRuntimeSnapshotClonesLinesAndDisclosures(t *testing.T) {
+	result := Result{
+		Total: 10, Currency: "USD", RowCount: 1, RetrievedAt: time.Now(),
+		Lines:       []ResourceCost{{ResourceID: "/r/1", ResourceGroup: "rg", Cost: 10, Currency: "USD"}},
+		Disclosures: []string{"original disclosure"},
+	}
+	provider := &fakeProvider{result: result}
+	rt := newTestRuntime(provider)
+	rt.refreshOnce(context.Background())
+
+	first := rt.Snapshot()
+	// Mutate the caller's copy of the returned Snapshot — this must never
+	// reach Runtime's cached snapshot or a subsequent Snapshot() call,
+	// which proves Snapshot() clones rather than aliases them.
+	first.Lines[0].Cost = 99999
+	first.Lines[0].ResourceID = "/mutated"
+	first.Disclosures[0] = "mutated disclosure"
+
+	second := rt.Snapshot()
+	if second.Lines[0].Cost != 10 || second.Lines[0].ResourceID != "/r/1" {
+		t.Errorf("cached snapshot mutated by an earlier Snapshot() call's returned slice: %+v", second.Lines[0])
+	}
+	if second.Disclosures[0] != "original disclosure" {
+		t.Errorf("cached snapshot mutated by an earlier Snapshot() call's returned slice: %q", second.Disclosures[0])
+	}
+}
+
 func TestRuntimeZeroRowsIsNoData(t *testing.T) {
 	provider := &fakeProvider{result: Result{Total: 0, RowCount: 0, RetrievedAt: time.Now()}}
 	rt := newTestRuntime(provider)

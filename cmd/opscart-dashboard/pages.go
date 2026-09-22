@@ -2402,11 +2402,14 @@ func buildCostOptimizationSignals(r *models.CloudCostReport) []costOptimizationS
 var getCostTmpl = sync.OnceValue(func() *template.Template {
 	return template.Must(
 		template.New("cost.html").
-			Funcs(template.FuncMap{"money": formatMoney}).
+			Funcs(template.FuncMap{"money": formatMoney, "billingMoney": formatBillingMoney}).
 			ParseFS(templateFS, "templates/base.html", "templates/cost.html"))
 })
 
-func buildCostPageData(scan *clusterScan, activeCtx string, clusterList []string, billingSnapshot billing.Snapshot, billingConfigured bool) costPageData {
+// billingPage/billingPageSize are the raw, unvalidated cached-billing-rows
+// pagination request (0 meaning "use the default") — see
+// paginateBillingRows for how they're validated and bounded.
+func buildCostPageData(scan *clusterScan, activeCtx string, clusterList []string, billingSnapshot billing.Snapshot, billingConfigured bool, billingPage, billingPageSize int) costPageData {
 	q := ""
 	if activeCtx != "" {
 		q = "?cluster=" + url.QueryEscape(activeCtx)
@@ -2420,7 +2423,7 @@ func buildCostPageData(scan *clusterScan, activeCtx string, clusterList []string
 		WasteURL: "/waste" + q, ActivePage: "costs", Version: Version,
 		Currency: "USD", Provider: "Unknown", Region: "Not detected",
 		PricingCoverage: "Pricing unavailable", CapacityTypes: "None",
-		Billing: buildBillingPageData(billingSnapshot, billingConfigured),
+		Billing: buildBillingPageData(billingSnapshot, billingConfigured, activeCtx, billingPage, billingPageSize),
 	}
 
 	if scan != nil && scan.report != nil {
@@ -2593,8 +2596,8 @@ func titleProvider(provider string) string {
 	}
 }
 
-func renderCostPage(scan *clusterScan, activeCtx string, clusterList []string, billingSnapshot billing.Snapshot, billingConfigured bool) string {
-	data := buildCostPageData(scan, activeCtx, clusterList, billingSnapshot, billingConfigured)
+func renderCostPage(scan *clusterScan, activeCtx string, clusterList []string, billingSnapshot billing.Snapshot, billingConfigured bool, billingPage, billingPageSize int) string {
+	data := buildCostPageData(scan, activeCtx, clusterList, billingSnapshot, billingConfigured, billingPage, billingPageSize)
 	var buf strings.Builder
 	if err := getCostTmpl().Execute(&buf, data); err != nil {
 		log.Printf("cost template: %v", err)

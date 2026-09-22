@@ -299,6 +299,23 @@ func (srv *server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 	ctx := srv.activeCtx(r)
 	state := srv.getState(ctx)
 
+	// A cached-billing-rows page/size was requested: this branch is
+	// strictly cache-only and must be handled BEFORE the empty-HTML
+	// fallback below, which calls state.refresh() (an Azure/Kubernetes
+	// acquisition call). Falling through into that fallback would mean a
+	// pagination link — Previous/Next, or a typed-in ?billingPage= URL —
+	// could trigger a real refresh merely because this cluster's page
+	// cache happened to be empty. It never does: renderCachedBillingPage
+	// reads only state.scan and billing.Runtime.Snapshot() (itself a
+	// cached read, never a network call), and renders a safe placeholder
+	// instead of a scan if this cluster has no cached scan yet.
+	if billingPage, billingPageSize, requested := billingPaginationParams(r); requested {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		w.Header().Set("Cache-Control", "no-cache, no-store, must-revalidate")
+		fmt.Fprint(w, srv.renderCachedBillingPage(state, ctx, billingPage, billingPageSize))
+		return
+	}
+
 	state.mu.RLock()
 	page := state.htmlPage
 	state.mu.RUnlock()
@@ -312,9 +329,69 @@ func (srv *server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 		page = state.htmlPage
 		state.mu.RUnlock()
 	}
+
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-cache, no-store, must-revalidate")
 	fmt.Fprint(w, page)
+}
+
+// renderCachedBillingPage renders the Cost page for a billing-rows
+// pagination request using ONLY whatever is already cached for this
+// cluster context — never triggering a scan refresh or a billing refresh.
+// If this cluster has no cached scan yet (e.g. its first hit is a
+// pagination link before an unpaginated /costs visit populated the
+// cache), it renders a minimal, explicit "not loaded yet" placeholder
+// instead of a mostly-empty full page — still without triggering any
+// refresh, and still preserving ctx in its own link back to /costs.
+func (srv *server) renderCachedBillingPage(state *dashboardState, ctx string, billingPage, billingPageSize int) string {
+	state.mu.RLock()
+	scan := state.scan
+	state.mu.RUnlock()
+
+	if scan == nil {
+		return renderBillingPaginationUnavailablePage(ctx)
+	}
+
+	var billingSnapshot billing.Snapshot
+	if state.billingRuntime != nil {
+		billingSnapshot = state.billingRuntime.Snapshot()
+	}
+	return renderCostPage(scan, ctx, srv.clusterList, billingSnapshot, state.billingRuntime != nil, billingPage, billingPageSize)
+}
+
+// renderBillingPaginationUnavailablePage is the safe fallback a billing-
+// rows pagination request renders when this cluster has no cached scan
+// yet. It must never itself trigger the refresh that would populate that
+// cache — see handleDashboard and renderCachedBillingPage.
+func renderBillingPaginationUnavailablePage(activeCtx string) string {
+	costsURL := "/costs"
+	if activeCtx != "" {
+		costsURL += "?cluster=" + url.QueryEscape(activeCtx)
+	}
+	return `<!DOCTYPE html><html><head><meta charset="UTF-8"><title>Cost Intelligence</title></head><body><main class="main"><p class="section-note">No cached scan is available yet for this cluster. Billing-rows pagination reads only already-cached data and never triggers a refresh. Open <a href="` +
+		template.HTMLEscapeString(costsURL) +
+		`">the Cost page</a> to load the initial scan, then retry pagination.</p></main></body></html>`
+}
+
+// billingPaginationParams reports whether the request asked for a specific
+// cached-billing-rows page (?billingPage=N) or page size
+// (?billingPageSize=N). A malformed value is treated the same as an absent
+// one (0) rather than rejected — paginateBillingRows already validates and
+// bounds 0/out-of-range values into a safe default.
+func billingPaginationParams(r *http.Request) (page, pageSize int, requested bool) {
+	q := r.URL.Query()
+	pageStr := q.Get("billingPage")
+	sizeStr := q.Get("billingPageSize")
+	if pageStr == "" && sizeStr == "" {
+		return 0, 0, false
+	}
+	if n, err := strconv.Atoi(pageStr); err == nil {
+		page = n
+	}
+	if n, err := strconv.Atoi(sizeStr); err == nil {
+		pageSize = n
+	}
+	return page, pageSize, true
 }
 
 func (srv *server) handleRefresh(w http.ResponseWriter, r *http.Request) {
@@ -1935,7 +2012,11 @@ var getOverviewTmpl = sync.OnceValue(func() *template.Template {
 })
 
 func renderHTML(scan *clusterScan, activeCtx string, clusterList []string, billingSnapshot billing.Snapshot, billingConfigured bool) string {
-	return renderCostPage(scan, activeCtx, clusterList, billingSnapshot, billingConfigured)
+	// 0, 0: the default cached-billing-rows page (1) at the default page
+	// size — this is the pre-rendered page handleDashboard serves for the
+	// common, unpaginated request; see billingPaginationParams for the
+	// per-request override.
+	return renderCostPage(scan, activeCtx, clusterList, billingSnapshot, billingConfigured, 0, 0)
 }
 
 func confidenceColorHex(pct int) string {
@@ -1988,18 +2069,30 @@ func warRoomTypeLabel(t string) (iconClass, label string) {
 
 // formatMoney formats a float as comma-grouped integer string.
 func formatMoney(amount float64) string {
-	s := fmt.Sprintf("%.0f", amount)
-	if len(s) <= 3 {
-		return s
+	// The sign is stripped before grouping and reattached after: the
+	// comma-placement loop below indexes from the end of the digit
+	// string, and a leading "-" character shifted that indexing by one
+	// for negative amounts, inserting a comma immediately after the sign
+	// on values like -999 ("-,999" instead of "-999") whenever the digit
+	// count was a multiple of 3. Grouping only ever the digits keeps that
+	// math correct regardless of sign.
+	sign := ""
+	if amount < 0 {
+		sign = "-"
+		amount = -amount
+	}
+	digits := fmt.Sprintf("%.0f", amount)
+	if len(digits) <= 3 {
+		return sign + digits
 	}
 	var result strings.Builder
-	for i, c := range s {
-		if i > 0 && (len(s)-i)%3 == 0 {
+	for i, c := range digits {
+		if i > 0 && (len(digits)-i)%3 == 0 {
 			result.WriteByte(',')
 		}
 		result.WriteRune(c)
 	}
-	return result.String()
+	return sign + result.String()
 }
 
 // ── Full scan pipeline ────────────────────────────────────────────────────────

@@ -84,29 +84,44 @@ func (p *AzureProvider) FetchBilling(ctx context.Context, req Request) (Result, 
 		allRows = append(allRows, rows...)
 	}
 
-	lines, currency, err := aggregateRows(allRows)
+	lines, currency, err := aggregateRows(allRows, identity.ResourceID)
 	if err != nil {
 		return Result{}, err
 	}
 
-	total := 0.0
+	total, attributedTotal := 0.0, 0.0
 	for _, l := range lines {
 		total += l.Cost
+		if l.Attributed {
+			attributedTotal += l.Cost
+		}
 	}
 
 	return Result{
-		Total:       total,
-		Currency:    currency,
-		CostBasis:   req.CostBasis,
-		PeriodStart: req.PeriodStart,
-		PeriodEnd:   req.PeriodEnd,
-		RetrievedAt: time.Now(),
-		Source:      "Azure Cost Management API (Query - Usage, resource-group scope)",
-		Scope:       scopeDescription(identity, nodeRG),
-		Coverage:    coverageDescription(identity, nodeRG),
-		Disclosures: billingDisclosures(identity.ResourceGroup, nodeRG),
-		Lines:       lines,
-		RowCount:    len(allRows),
+		Total:             total,
+		Currency:          currency,
+		CostBasis:         req.CostBasis,
+		PeriodStart:       req.PeriodStart,
+		PeriodEnd:         req.PeriodEnd,
+		RetrievedAt:       time.Now(),
+		Source:            "Azure Cost Management API (Query - Usage, resource-group scope)",
+		Scope:             scopeDescription(identity, nodeRG),
+		Coverage:          coverageDescription(identity, nodeRG),
+		Disclosures:       billingDisclosures(identity.ResourceGroup, nodeRG),
+		Lines:             lines,
+		RowCount:          len(allRows),
+		ClusterResourceID: identity.ResourceID,
+		AttributedTotal:   attributedTotal,
+		// total - attributedTotal rather than a second summation loop, so
+		// UnattributedTotal is defined as Total's complement by
+		// construction (including when a line is a negative
+		// credit/adjustment) rather than as an independently-summed value
+		// that could drift from Total. This does not make
+		// AttributedTotal + UnattributedTotal bit-exact with Total in
+		// general — float64 addition and subtraction are not exact
+		// inverses — callers must compare reconciliation with a small
+		// tolerance, never ==.
+		UnattributedTotal: total - attributedTotal,
 	}, nil
 }
 
@@ -116,7 +131,13 @@ func (p *AzureProvider) FetchBilling(ctx context.Context, req Request) (Result, 
 // happened to appear in both queried scopes (defensive; the two scopes are
 // always distinct resource groups by construction, but this makes that
 // invariant unconditional rather than assumed).
-func aggregateRows(rows []queryRow) ([]ResourceCost, string, error) {
+//
+// clusterResourceID is the exact configured AKS resource ID. A row is
+// marked Attributed only when its ResourceId matches clusterResourceID
+// exactly (case-insensitively) — this is the one ownership fact available
+// without an additional Azure call. It deliberately does not infer
+// ownership from ResourceGroupName or from resource-name conventions.
+func aggregateRows(rows []queryRow, clusterResourceID string) ([]ResourceCost, string, error) {
 	seen := make(map[string]bool, len(rows))
 	var lines []ResourceCost
 	currency := ""
@@ -144,7 +165,8 @@ func aggregateRows(rows []queryRow) ([]ResourceCost, string, error) {
 			}
 			seen[key] = true
 		}
-		lines = append(lines, ResourceCost{ResourceID: resourceID, ResourceGroup: resourceGroup, Cost: cost, Currency: rowCurrency})
+		attributed := resourceID != "" && strings.EqualFold(resourceID, clusterResourceID)
+		lines = append(lines, ResourceCost{ResourceID: resourceID, ResourceGroup: resourceGroup, Cost: cost, Currency: rowCurrency, Attributed: attributed})
 	}
 	return lines, currency, nil
 }
@@ -170,6 +192,7 @@ func coverageDescription(identity AKSIdentity, nodeRG string) string {
 func billingDisclosures(clusterResourceGroup, nodeResourceGroup string) []string {
 	return []string{
 		fmt.Sprintf("This total includes all billed resources in both configured resource groups (%q and %q). Resources unrelated to this cluster may be included; cluster ownership has not been independently verified.", clusterResourceGroup, nodeResourceGroup),
+		"Only the resource whose ID exactly matches the configured AKS resource ID is currently marked cluster-attributed. Every other resource in these two resource groups — including node VMs, disks, and load balancers — is shown as unattributed until ownership is verified by a stronger signal than resource-group membership or a namespace-like name.",
 		"Shared or externally hosted resources billed outside the cluster and node resource groups (for example a hub-network egress path, shared DNS, or cross-subscription resources) are not included in this total.",
 		"Kubernetes-level Idle/Used/System allocation, as shown in the Azure Portal's AKS Cost Analysis view, is not exposed through a public API and is not shown here; this total reflects Azure resource billing only, not per-namespace or per-pod allocation.",
 	}

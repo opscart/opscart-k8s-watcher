@@ -81,6 +81,111 @@ func TestFetchBillingAggregatesClusterAndNodeResourceGroupsWithoutDoubleCounting
 	}
 }
 
+// costTolerance is the tolerance used to compare reconciled cost totals.
+// AttributedTotal + UnattributedTotal reconciles to Total by construction
+// (see Result.UnattributedTotal's doc comment), not because float64
+// addition/subtraction are exact inverses — tests must never compare
+// reconciled totals with ==.
+const costTolerance = 0.001
+
+func almostEqual(a, b float64) bool {
+	diff := a - b
+	return diff <= costTolerance && diff >= -costTolerance
+}
+
+func TestFetchBillingAttributesOnlyExactAKSResourceIDMatch(t *testing.T) {
+	clusterRG := "rxr-rxp-e2e-01-cus-rg"
+	rows := map[string][][]any{
+		// The AKS managed-cluster control-plane charge: ResourceId matches
+		// validAKSResourceID exactly, so this is the only attributed line.
+		clusterRG: {{100.0, "USD", validAKSResourceID, clusterRG}},
+		// Node VMSS and a credit, both in the node resource group. Despite
+		// living in the node RG (an AKS-managed convention), neither has a
+		// resource ID matching the configured AKS resource ID, so neither
+		// is attributed — node-RG residence alone must not prove ownership.
+		testNodeResourceGroup: {
+			{5328.0, "USD", "/subscriptions/s/resourceGroups/" + testNodeResourceGroup + "/providers/Microsoft.Compute/virtualMachineScaleSets/user", testNodeResourceGroup},
+			{-50.0, "USD", "/subscriptions/s/resourceGroups/" + testNodeResourceGroup + "/providers/Microsoft.Compute/virtualMachineScaleSets/credit", testNodeResourceGroup},
+		},
+	}
+	server := httptest.NewServer(costQueryHandler(t, rows, testNodeResourceGroup))
+	defer server.Close()
+
+	provider := newTestAzureProvider(validClusterConfig(), server)
+	result, err := provider.FetchBilling(context.Background(), Request{
+		PeriodStart: time.Now().AddDate(0, 0, -1), PeriodEnd: time.Now(), CostBasis: CostBasisActualCost,
+	})
+	if err != nil {
+		t.Fatalf("FetchBilling: %v", err)
+	}
+
+	if result.ClusterResourceID != validAKSResourceID {
+		t.Errorf("ClusterResourceID = %q, want %q", result.ClusterResourceID, validAKSResourceID)
+	}
+	if !almostEqual(result.AttributedTotal, 100.0) {
+		t.Errorf("AttributedTotal = %v, want ~100 (only the exact AKS resource ID match)", result.AttributedTotal)
+	}
+	wantUnattributed := 5328.0 - 50.0
+	if !almostEqual(result.UnattributedTotal, wantUnattributed) {
+		t.Errorf("UnattributedTotal = %v, want ~%v", result.UnattributedTotal, wantUnattributed)
+	}
+	if !almostEqual(result.AttributedTotal+result.UnattributedTotal, result.Total) {
+		t.Errorf("AttributedTotal + UnattributedTotal = %v, want Total %v within tolerance (must reconcile, including the negative credit)", result.AttributedTotal+result.UnattributedTotal, result.Total)
+	}
+
+	attributedCount := 0
+	for _, l := range result.Lines {
+		if l.Attributed {
+			attributedCount++
+			if l.ResourceID != validAKSResourceID {
+				t.Errorf("unexpected attributed line %q", l.ResourceID)
+			}
+		}
+	}
+	if attributedCount != 1 {
+		t.Errorf("attributed line count = %d, want 1", attributedCount)
+	}
+}
+
+// TestFetchBillingReconciliationHoldsWithinToleranceForFractionalCosts uses
+// fractional-cent line items — the shape most likely to expose float64
+// rounding — to prove AttributedTotal + UnattributedTotal reconciles to
+// Total within costTolerance. It deliberately does not assert bit-exact
+// equality: UnattributedTotal is defined as Total - AttributedTotal by
+// construction, but a + (b - a) is not guaranteed to be bit-identical to b
+// under IEEE 754 float64 arithmetic for arbitrary a, b.
+func TestFetchBillingReconciliationHoldsWithinToleranceForFractionalCosts(t *testing.T) {
+	clusterRG := "rxr-rxp-e2e-01-cus-rg"
+	rows := map[string][][]any{
+		clusterRG: {{19.99, "USD", validAKSResourceID, clusterRG}},
+		testNodeResourceGroup: {
+			{5308.01, "USD", "/subscriptions/s/resourceGroups/" + testNodeResourceGroup + "/providers/Microsoft.Compute/virtualMachineScaleSets/user", testNodeResourceGroup},
+			{-12.34, "USD", "/subscriptions/s/resourceGroups/" + testNodeResourceGroup + "/providers/Microsoft.Compute/virtualMachineScaleSets/credit", testNodeResourceGroup},
+		},
+	}
+	server := httptest.NewServer(costQueryHandler(t, rows, testNodeResourceGroup))
+	defer server.Close()
+
+	provider := newTestAzureProvider(validClusterConfig(), server)
+	result, err := provider.FetchBilling(context.Background(), Request{
+		PeriodStart: time.Now().AddDate(0, 0, -1), PeriodEnd: time.Now(), CostBasis: CostBasisActualCost,
+	})
+	if err != nil {
+		t.Fatalf("FetchBilling: %v", err)
+	}
+
+	wantTotal := 19.99 + 5308.01 - 12.34
+	if !almostEqual(result.Total, wantTotal) {
+		t.Fatalf("Total = %v, want ~%v", result.Total, wantTotal)
+	}
+	if !almostEqual(result.AttributedTotal, 19.99) {
+		t.Errorf("AttributedTotal = %v, want ~19.99", result.AttributedTotal)
+	}
+	if !almostEqual(result.AttributedTotal+result.UnattributedTotal, result.Total) {
+		t.Errorf("AttributedTotal + UnattributedTotal = %v, want Total %v within tolerance", result.AttributedTotal+result.UnattributedTotal, result.Total)
+	}
+}
+
 func TestFetchBillingRejectsMixedCurrencies(t *testing.T) {
 	clusterRG := "rxr-rxp-e2e-01-cus-rg"
 	rows := map[string][][]any{
