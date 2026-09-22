@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -43,6 +44,81 @@ func writeQueryResponse(w http.ResponseWriter, columns []queryColumn, rows [][]a
 	resp.Properties.NextLink = nextLink
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(resp)
+}
+
+// TestBuildResourceGroupQueryPayloadForConfiguredPeriod pins the exact
+// request payload buildResourceGroupQuery produces for the dashboard's
+// documented example period (2026-08-17 to 2026-09-15, the inclusive UI
+// dates ResolvePeriod resolves — see TestResolvePeriodCustomInclusiveEndDate
+// in config_test.go). It checks both the Go struct fields and the literal
+// marshaled JSON bytes, since the latter is exactly what query() sends to
+// Azure (query_client.go).
+func TestBuildResourceGroupQueryPayloadForConfiguredPeriod(t *testing.T) {
+	start := time.Date(2026, 8, 17, 0, 0, 0, 0, time.UTC)
+	end := time.Date(2026, 9, 15, 23, 59, 59, 0, time.UTC)
+
+	body := buildResourceGroupQuery(CostBasisActualCost, start, end)
+
+	if body.Type != "ActualCost" {
+		t.Errorf("Type = %q, want ActualCost", body.Type)
+	}
+	if body.Timeframe != "Custom" {
+		t.Errorf("Timeframe = %q, want Custom", body.Timeframe)
+	}
+	// The From/To boundaries must cover the entire displayed period: from
+	// the first instant of the inclusive start date through the last
+	// instant (23:59:59) of the inclusive end date. Neither boundary may
+	// be date-only (which would leave Azure to infer an implicit
+	// time-of-day) nor truncated to midnight of the end date (which would
+	// silently drop that day's charges).
+	if body.TimePeriod.From != "2026-08-17T00:00:00Z" {
+		t.Errorf("TimePeriod.From = %q, want 2026-08-17T00:00:00Z", body.TimePeriod.From)
+	}
+	if body.TimePeriod.To != "2026-09-15T23:59:59Z" {
+		t.Errorf("TimePeriod.To = %q, want 2026-09-15T23:59:59Z (last instant of the inclusive end date)", body.TimePeriod.To)
+	}
+	if body.Dataset.Granularity != "None" {
+		t.Errorf("Dataset.Granularity = %q, want None (one summed total for the whole period, not daily buckets)", body.Dataset.Granularity)
+	}
+	wantAgg := map[string]queryAggregate{"totalCost": {Name: "Cost", Function: "Sum"}}
+	if !reflect.DeepEqual(body.Dataset.Aggregation, wantAgg) {
+		t.Errorf("Dataset.Aggregation = %+v, want %+v (Sum, matching a resource-level cost total)", body.Dataset.Aggregation, wantAgg)
+	}
+	wantGrouping := []queryGrouping{{Type: "Dimension", Name: "ResourceId"}, {Type: "Dimension", Name: "ResourceGroupName"}}
+	if !reflect.DeepEqual(body.Dataset.Grouping, wantGrouping) {
+		t.Errorf("Dataset.Grouping = %+v, want %+v", body.Dataset.Grouping, wantGrouping)
+	}
+
+	// Marshal to JSON and check the literal wire bytes for the period and
+	// cost-type fields — this is exactly what query() (query_client.go)
+	// sends to the Cost Management API, not just the Go struct.
+	raw, err := json.Marshal(body)
+	if err != nil {
+		t.Fatalf("json.Marshal: %v", err)
+	}
+	wireBody := string(raw)
+	for _, want := range []string{
+		`"type":"ActualCost"`,
+		`"timeframe":"Custom"`,
+		`"from":"2026-08-17T00:00:00Z"`,
+		`"to":"2026-09-15T23:59:59Z"`,
+		`"granularity":"None"`,
+	} {
+		if !strings.Contains(wireBody, want) {
+			t.Errorf("marshaled request body missing %q; got %s", want, wireBody)
+		}
+	}
+}
+
+// TestBuildResourceGroupQueryUsesConfiguredCostBasis confirms the request
+// Type tracks whatever CostBasis the caller passes (ActualCost by default
+// per ClusterConfig.EffectiveCostBasis, AmortizedCost only when explicitly
+// configured) rather than a value hardcoded independent of it.
+func TestBuildResourceGroupQueryUsesConfiguredCostBasis(t *testing.T) {
+	body := buildResourceGroupQuery(CostBasisAmortizedCost, time.Now(), time.Now())
+	if body.Type != "AmortizedCost" {
+		t.Errorf("Type = %q, want AmortizedCost", body.Type)
+	}
 }
 
 func TestQueryParsesColumnsRegardlessOfOrder(t *testing.T) {

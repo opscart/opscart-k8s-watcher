@@ -3,9 +3,12 @@ package billing
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -78,6 +81,99 @@ func TestFetchBillingAggregatesClusterAndNodeResourceGroupsWithoutDoubleCounting
 	}
 	if len(result.Lines) != 3 {
 		t.Errorf("len(Lines) = %d, want 3 (one per resource, no double counting)", len(result.Lines))
+	}
+}
+
+// TestFetchBillingSendsIdenticalFullPeriodToBothResourceGroupScopes proves,
+// at the actual FetchBilling call boundary (not just buildResourceGroupQuery
+// in isolation), that the cluster-resource-group and node-resource-group
+// Cost Management queries carry byte-identical period/cost-type/aggregation
+// payloads for the dashboard's documented example period (2026-08-17 to
+// 2026-09-15) — no truncation and no drift between the two scopes.
+func TestFetchBillingSendsIdenticalFullPeriodToBothResourceGroupScopes(t *testing.T) {
+	clusterRG := "rxr-rxp-e2e-01-cus-rg"
+	periodStart := time.Date(2026, 8, 17, 0, 0, 0, 0, time.UTC)
+	periodEnd := time.Date(2026, 9, 15, 23, 59, 59, 0, time.UTC)
+
+	var mu sync.Mutex
+	capturedByRG := make(map[string]queryRequestBody)
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.Contains(r.URL.Path, "Microsoft.ContainerService/managedClusters") {
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{"properties": map[string]any{"nodeResourceGroup": testNodeResourceGroup}})
+			return
+		}
+		parts := strings.Split(r.URL.Path, "/")
+		var rg string
+		for i, p := range parts {
+			if strings.EqualFold(p, "resourceGroups") && i+1 < len(parts) {
+				rg = parts[i+1]
+			}
+		}
+		raw, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Fatalf("reading request body: %v", err)
+		}
+		var body queryRequestBody
+		if err := json.Unmarshal(raw, &body); err != nil {
+			t.Fatalf("decoding request body: %v", err)
+		}
+		mu.Lock()
+		capturedByRG[rg] = body
+		mu.Unlock()
+
+		writeQueryResponse(w,
+			[]queryColumn{{Name: "Cost"}, {Name: "Currency"}, {Name: "ResourceId"}, {Name: "ResourceGroupName"}},
+			nil, "")
+	}))
+	defer server.Close()
+
+	provider := newTestAzureProvider(validClusterConfig(), server)
+	_, err := provider.FetchBilling(context.Background(), Request{
+		PeriodStart: periodStart, PeriodEnd: periodEnd, CostBasis: CostBasisActualCost,
+	})
+	if err != nil {
+		t.Fatalf("FetchBilling: %v", err)
+	}
+
+	if len(capturedByRG) != 2 {
+		t.Fatalf("captured %d resource-group query payloads, want 2 (cluster RG and node RG); captured = %+v", len(capturedByRG), capturedByRG)
+	}
+	clusterBody, ok := capturedByRG[clusterRG]
+	if !ok {
+		t.Fatalf("no query captured for cluster resource group %q; captured = %+v", clusterRG, capturedByRG)
+	}
+	nodeBody, ok := capturedByRG[testNodeResourceGroup]
+	if !ok {
+		t.Fatalf("no query captured for node resource group %q; captured = %+v", testNodeResourceGroup, capturedByRG)
+	}
+
+	wantPeriod := queryPeriod{From: "2026-08-17T00:00:00Z", To: "2026-09-15T23:59:59Z"}
+	if clusterBody.TimePeriod != wantPeriod {
+		t.Errorf("cluster RG TimePeriod = %+v, want %+v (the full displayed Aug 17 - Sep 15 period, not truncated)", clusterBody.TimePeriod, wantPeriod)
+	}
+	if nodeBody.TimePeriod != wantPeriod {
+		t.Errorf("node RG TimePeriod = %+v, want %+v (the full displayed Aug 17 - Sep 15 period, not truncated)", nodeBody.TimePeriod, wantPeriod)
+	}
+	if clusterBody.TimePeriod != nodeBody.TimePeriod {
+		t.Error("cluster RG and node RG queries used inconsistent date boundaries")
+	}
+
+	wantAgg := map[string]queryAggregate{"totalCost": {Name: "Cost", Function: "Sum"}}
+	for name, body := range map[string]queryRequestBody{"cluster RG": clusterBody, "node RG": nodeBody} {
+		if body.Type != string(CostBasisActualCost) {
+			t.Errorf("%s Type = %q, want %q", name, body.Type, CostBasisActualCost)
+		}
+		if body.Timeframe != "Custom" {
+			t.Errorf("%s Timeframe = %q, want Custom", name, body.Timeframe)
+		}
+		if body.Dataset.Granularity != "None" {
+			t.Errorf("%s Dataset.Granularity = %q, want None (one aggregate total for the whole period, not daily buckets)", name, body.Dataset.Granularity)
+		}
+		if !reflect.DeepEqual(body.Dataset.Aggregation, wantAgg) {
+			t.Errorf("%s Dataset.Aggregation = %+v, want %+v", name, body.Dataset.Aggregation, wantAgg)
+		}
 	}
 }
 
