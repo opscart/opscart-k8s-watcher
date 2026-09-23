@@ -15,7 +15,6 @@ import (
 
 	"github.com/opscart/opscart-k8s-watcher/pkg/aianalysis"
 	"github.com/opscart/opscart-k8s-watcher/pkg/analyzer"
-	"github.com/opscart/opscart-k8s-watcher/pkg/billing"
 	"github.com/opscart/opscart-k8s-watcher/pkg/store"
 	"github.com/spf13/cobra"
 )
@@ -110,10 +109,6 @@ func runDashboard(_ *cobra.Command, _ []string) error {
 	if err != nil {
 		return fmt.Errorf("AI configuration: %w", err)
 	}
-	billingConfig, err := billing.LoadFromEnv()
-	if err != nil {
-		return fmt.Errorf("Azure billing configuration: %w", err)
-	}
 	cl := parseClusterList()
 	dbPath := os.Getenv("OPSCART_DB_PATH")
 	if dbPath == "" {
@@ -150,8 +145,6 @@ func runDashboard(_ *cobra.Command, _ []string) error {
 	if aiProvider != nil {
 		srv.aiRuntime = newWarRoomAIRuntime(aiConfig.Provider, aiConfig.Model)
 	}
-	srv.billingConfig = billingConfig
-
 	backgroundCtx, stopBackground := context.WithCancel(context.Background())
 	defer func() {
 		stopBackground()
@@ -168,7 +161,6 @@ func runDashboard(_ *cobra.Command, _ []string) error {
 	// dashboard), and only then start every cluster's Coordinator — see
 	// startAnalysisCoordinators' doc comment for why that ordering matters.
 	srv.startAcquisitionRuntimes(backgroundCtx)
-	srv.startBillingRuntimes(backgroundCtx)
 	srv.waitForAcquisitionSync(backgroundCtx, cl)
 
 	log.Printf("Scanning cluster %q ...", displayName(cl[0]))

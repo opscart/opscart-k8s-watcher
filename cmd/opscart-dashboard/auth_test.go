@@ -188,7 +188,7 @@ func TestMuxOtherRoutesRequireAuth(t *testing.T) {
 	srv := newServer([]string{"test-ctx"}, &store.NullStore{}, 90, false)
 	mux := srv.newMux()
 
-	routes := []string{"/", "/costs", "/api/summary", "/warroom", "/settings"}
+	routes := []string{"/", "/api/summary", "/warroom", "/settings"}
 	for _, route := range routes {
 		t.Run(route, func(t *testing.T) {
 			req := httptest.NewRequest(http.MethodGet, route, nil)
@@ -202,5 +202,21 @@ func TestMuxOtherRoutesRequireAuth(t *testing.T) {
 				t.Fatalf("%s: expected WWW-Authenticate header on 401 response", route)
 			}
 		})
+	}
+}
+
+func TestMuxCostRouteDisabled(t *testing.T) {
+	t.Setenv("OPSCART_AUTH_USER", "muxuser")
+	t.Setenv("OPSCART_AUTH_PASS", "muxpass")
+
+	srv := newServer([]string{"test-ctx"}, &store.NullStore{}, 90, false)
+	mux := srv.newMux()
+	req := httptest.NewRequest(http.MethodGet, "/costs", nil)
+	req.SetBasicAuth("muxuser", "muxpass")
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("/costs status = %d, want %d", rec.Code, http.StatusNotFound)
 	}
 }
