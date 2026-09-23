@@ -14,10 +14,23 @@ func NewAIProvider(config Config) (AIProvider, error) {
 	}
 
 	provider := strings.ToLower(strings.TrimSpace(config.Provider))
-	if provider != ProviderOpenAI {
+	if provider != ProviderOpenAI && provider != ProviderAzureFoundry {
 		return nil, fmt.Errorf("unsupported AI provider %q", provider)
 	}
-	if strings.TrimSpace(config.APIKey) == "" {
+	authMode := strings.ToLower(strings.TrimSpace(config.AuthMode))
+	if authMode == "" && provider == ProviderOpenAI {
+		authMode = AuthModeAPIKey
+	}
+	if authMode == "" {
+		return nil, fmt.Errorf("AI provider authentication mode is required")
+	}
+	if provider == ProviderOpenAI && authMode != AuthModeAPIKey {
+		return nil, fmt.Errorf("unsupported authentication mode %q for AI provider %q", authMode, provider)
+	}
+	if provider == ProviderAzureFoundry && authMode != AuthModeAPIKey && authMode != AuthModeWorkloadIdentity && authMode != AuthModeAzureCLI {
+		return nil, fmt.Errorf("unsupported authentication mode %q for AI provider %q", authMode, provider)
+	}
+	if authMode == AuthModeAPIKey && strings.TrimSpace(config.APIKey) == "" {
 		return nil, fmt.Errorf("AI provider credential is required")
 	}
 	if strings.TrimSpace(config.Model) == "" {
@@ -31,6 +44,26 @@ func NewAIProvider(config Config) (AIProvider, error) {
 	if err != nil || (baseURL.Scheme != "http" && baseURL.Scheme != "https") || baseURL.Host == "" || baseURL.User != nil || baseURL.RawQuery != "" || baseURL.Fragment != "" {
 		return nil, fmt.Errorf("AI provider base URL must be an HTTP(S) URL without credentials, query, or fragment")
 	}
+	if provider == ProviderAzureFoundry {
+		if err := validateAzureFoundryBaseURL(baseURL); err != nil {
+			return nil, err
+		}
+	}
 
-	return newOpenAIProvider(config, baseURL), nil
+	authenticator, err := newRequestAuthenticator(config, provider, authMode)
+	if err != nil {
+		return nil, err
+	}
+
+	return newOpenAIProvider(config, baseURL, authenticator), nil
+}
+
+func validateAzureFoundryBaseURL(baseURL *url.URL) error {
+	host := strings.ToLower(baseURL.Hostname())
+	if baseURL.Scheme != "https" || baseURL.Port() != "" ||
+		(!strings.HasSuffix(host, ".openai.azure.com") && !strings.HasSuffix(host, ".services.ai.azure.com")) ||
+		strings.TrimRight(baseURL.EscapedPath(), "/") != "/openai/v1" {
+		return fmt.Errorf("Azure Foundry base URL must be an HTTPS Azure OpenAI endpoint ending in /openai/v1")
+	}
+	return nil
 }
