@@ -4,9 +4,101 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"strings"
 	"testing"
 	"time"
 )
+
+// parseSubscriptionKubernetesSpikeDate parses value as a strict YYYY-MM-DD
+// calendar date — no other format (RFC3339, slashes, a bare year, etc.)
+// is accepted.
+func parseSubscriptionKubernetesSpikeDate(value string) (time.Time, error) {
+	t, err := time.Parse("2006-01-02", value)
+	if err != nil {
+		return time.Time{}, fmt.Errorf("invalid date %q: use YYYY-MM-DD", value)
+	}
+	return t.UTC(), nil
+}
+
+// resolveSubscriptionKubernetesSpikePeriod converts the manual diagnostic's
+// strict YYYY-MM-DD OPSCART_BILLING_SPIKE_FROM/OPSCART_BILLING_SPIKE_TO
+// values into explicit UTC period boundaries: fromValue becomes
+// 00:00:00.000 UTC of that day, toValue becomes 23:59:59.000 UTC of that
+// day — the last instant of the inclusive end date, matching production's
+// ResolvePeriod/endOfDay convention (config.go). The millisecond ".000" is
+// produced later, when buildSubscriptionKubernetesQuery formats these
+// values with subscriptionKubernetesQueryTimeFormat.
+//
+// This is a pure function: no credential, no HTTP client, no import of
+// azcore or net/http. A missing, invalid, or reversed period is always
+// rejected here — structurally before
+// TestManualSubscriptionKubernetesQueryDiagnostic can ever call
+// NewCredential or runSubscriptionKubernetesQuery — see
+// TestResolveSubscriptionKubernetesSpikePeriodRejectsMissingOrReversedDates,
+// which exercises exactly that and is not gated behind
+// OPSCART_BILLING_SPIKE_MANUAL.
+func resolveSubscriptionKubernetesSpikePeriod(fromValue, toValue string) (start, end time.Time, err error) {
+	if strings.TrimSpace(fromValue) == "" || strings.TrimSpace(toValue) == "" {
+		return time.Time{}, time.Time{}, fmt.Errorf("OPSCART_BILLING_SPIKE_FROM and OPSCART_BILLING_SPIKE_TO are both required (YYYY-MM-DD)")
+	}
+	fromDate, err := parseSubscriptionKubernetesSpikeDate(fromValue)
+	if err != nil {
+		return time.Time{}, time.Time{}, fmt.Errorf("OPSCART_BILLING_SPIKE_FROM: %w", err)
+	}
+	toDate, err := parseSubscriptionKubernetesSpikeDate(toValue)
+	if err != nil {
+		return time.Time{}, time.Time{}, fmt.Errorf("OPSCART_BILLING_SPIKE_TO: %w", err)
+	}
+	start = time.Date(fromDate.Year(), fromDate.Month(), fromDate.Day(), 0, 0, 0, 0, time.UTC)
+	end = time.Date(toDate.Year(), toDate.Month(), toDate.Day(), 23, 59, 59, 0, time.UTC)
+	if end.Before(start) {
+		return time.Time{}, time.Time{}, fmt.Errorf("OPSCART_BILLING_SPIKE_TO %q must not be before OPSCART_BILLING_SPIKE_FROM %q", toValue, fromValue)
+	}
+	return start, end, nil
+}
+
+func TestResolveSubscriptionKubernetesSpikePeriodRejectsMissingOrReversedDates(t *testing.T) {
+	tests := []struct {
+		name, from, to string
+	}{
+		{"both missing", "", ""},
+		{"from missing", "", "2026-09-15"},
+		{"to missing", "2026-08-17", ""},
+		{"reversed", "2026-09-15", "2026-08-17"},
+		{"from invalid", "not-a-date", "2026-09-15"},
+		{"to invalid", "2026-08-17", "not-a-date"},
+		{"from wrong format", "08/17/2026", "2026-09-15"},
+		{"to wrong format", "2026-08-17", "2026-09-15T00:00:00Z"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if _, _, err := resolveSubscriptionKubernetesSpikePeriod(tt.from, tt.to); err == nil {
+				t.Errorf("resolveSubscriptionKubernetesSpikePeriod(%q, %q): expected error, got nil", tt.from, tt.to)
+			}
+		})
+	}
+}
+
+func TestResolveSubscriptionKubernetesSpikePeriodInclusiveUTCConversion(t *testing.T) {
+	start, end, err := resolveSubscriptionKubernetesSpikePeriod("2026-08-17", "2026-09-15")
+	if err != nil {
+		t.Fatalf("resolveSubscriptionKubernetesSpikePeriod: %v", err)
+	}
+	wantStart := time.Date(2026, 8, 17, 0, 0, 0, 0, time.UTC)
+	wantEnd := time.Date(2026, 9, 15, 23, 59, 59, 0, time.UTC)
+	if !start.Equal(wantStart) {
+		t.Errorf("start = %v, want %v (00:00:00.000 UTC of the FROM date)", start, wantStart)
+	}
+	if !end.Equal(wantEnd) {
+		t.Errorf("end = %v, want %v (23:59:59.000 UTC of the TO date)", end, wantEnd)
+	}
+	if got := start.Format(subscriptionKubernetesQueryTimeFormat); got != "2026-08-17T00:00:00.000Z" {
+		t.Errorf("start formatted = %q, want 2026-08-17T00:00:00.000Z", got)
+	}
+	if got := end.Format(subscriptionKubernetesQueryTimeFormat); got != "2026-09-15T23:59:59.000Z" {
+		t.Errorf("end formatted = %q, want 2026-09-15T23:59:59.000Z", got)
+	}
+}
 
 // TestManualSubscriptionKubernetesQueryDiagnostic is a manually invoked,
 // opt-in diagnostic — it is NEVER run by `go test ./...` (including CI)
@@ -21,6 +113,8 @@ import (
 //	OPSCART_BILLING_SPIKE_MANUAL=1 \
 //	OPSCART_BILLING_SPIKE_SUBSCRIPTION_ID=<subscription-id> \
 //	OPSCART_BILLING_SPIKE_CLUSTER_RESOURCE_ID=<aks-cluster-arm-resource-id> \
+//	OPSCART_BILLING_SPIKE_FROM=<YYYY-MM-DD> \
+//	OPSCART_BILLING_SPIKE_TO=<YYYY-MM-DD> \
 //	go test ./pkg/billing/ -run TestManualSubscriptionKubernetesQueryDiagnostic -v
 //
 // Safety properties (all deliberate, none configurable):
@@ -29,17 +123,23 @@ import (
 //     chain, and no new credential construction path.
 //   - Permissions: requests exactly armTokenScope, the same ARM scope
 //     production billing already uses — nothing broader.
+//   - Period: OPSCART_BILLING_SPIKE_FROM/_TO are required, strict
+//     YYYY-MM-DD, and validated by resolveSubscriptionKubernetesSpikePeriod
+//     — missing, invalid, or reversed values are rejected before
+//     NewCredential is ever called, so a bad period can never even reach
+//     the point of acquiring a credential, let alone making a request.
 //   - Requests: at most one HTTP call (runSubscriptionKubernetesQuery
 //     never retries or follows pagination — see
 //     TestSubscriptionKubernetesQuerySpikeMakesExactlyOneRequestOnFailure).
 //   - Timeout: bounded to 15s via ctx, tighter than newARMHTTPClient's own
 //     30s client-level timeout.
 //   - Redirects: disabled (newARMHTTPClient, shared with production).
-//   - Output: prints only the total, currency, queried period, and a
-//     fixed, safe status classification — see AzureAPIError/SafeError,
+//   - Output: prints only status, total, currency, period, row count, and
+//     the response's column names (schema, never values) — see
+//     AzureAPIError/SafeError/subscriptionKubernetesQueryNoDataError,
 //     which every failure from runSubscriptionKubernetesQuery already
-//     routes through. Never a token, subscription ID, cluster resource
-//     ID, raw response body, or request URL.
+//     routes through. Never a token, Authorization header, subscription
+//     ID, cluster resource ID, request URL, or response rows/body.
 //   - No automatic refresh: this is one manual invocation, not wired into
 //     Runtime.Start or any ticker/schedule.
 //
@@ -55,29 +155,40 @@ func TestManualSubscriptionKubernetesQueryDiagnostic(t *testing.T) {
 		t.Fatal("OPSCART_BILLING_SPIKE_SUBSCRIPTION_ID and OPSCART_BILLING_SPIKE_CLUSTER_RESOURCE_ID are both required")
 	}
 
+	// Period validation happens before any credential is acquired or
+	// request made — see resolveSubscriptionKubernetesSpikePeriod's doc
+	// comment.
+	fromValue := os.Getenv("OPSCART_BILLING_SPIKE_FROM")
+	toValue := os.Getenv("OPSCART_BILLING_SPIKE_TO")
+	start, end, periodErr := resolveSubscriptionKubernetesSpikePeriod(fromValue, toValue)
+	if periodErr != nil {
+		t.Fatalf("invalid period: %v", periodErr)
+	}
+	periodLabel := fromValue + " to " + toValue // the exact supplied values, not a reformatted round-trip
+
 	credential, err := NewCredential(AuthModeAzureCLI)
 	if err != nil {
 		t.Fatalf("credential: %v", err)
 	}
 
-	now := time.Now().UTC()
-	start := time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, time.UTC) // month-to-date, matching ClusterConfig's default period mode
-	end := now
-	periodLabel := start.Format("2006-01-02") + " to " + end.Format("2006-01-02")
-
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 
-	total, currency, queryErr := runSubscriptionKubernetesQuery(ctx, newARMHTTPClient(), credential, defaultManagementEndpoint, subscriptionID, clusterResourceID, start, end)
+	total, currency, rowCount, columnNames, queryErr := runSubscriptionKubernetesQuery(ctx, newARMHTTPClient(), credential, defaultManagementEndpoint, subscriptionID, clusterResourceID, start, end)
 
-	// queryErr, when non-nil, is always an *AzureAPIError or *SafeError —
-	// both types are already safe to print verbatim (see their doc
-	// comments in azure_error.go): fixed operation label, fixed status
-	// classification, Azure's own request ID. Never the raw response,
-	// subscription ID, cluster resource ID, or request URL.
+	// queryErr, when non-nil, is always an *AzureAPIError, *SafeError, or
+	// *subscriptionKubernetesQueryNoDataError — all three are already
+	// safe to print verbatim (see their doc comments): fixed operation
+	// label, fixed status classification, Azure's own request ID where
+	// applicable. Never the raw response, subscription ID, cluster
+	// resource ID, or request URL. columnNames is schema metadata (column
+	// names only, never row values) and is safe to print for the same
+	// reason.
 	if queryErr != nil {
-		fmt.Printf("status: error: %s\nperiod: %s\n", queryErr.Error(), periodLabel)
+		fmt.Printf("status: error: %s\nperiod: %s\nrow count: %d\nresponse columns: %s\n",
+			queryErr.Error(), periodLabel, rowCount, strings.Join(columnNames, ","))
 		t.Fatalf("diagnostic query failed: %v", queryErr)
 	}
-	fmt.Printf("status: ok\ntotal: %.2f\ncurrency: %s\nperiod: %s\n", total, currency, periodLabel)
+	fmt.Printf("status: ok\ntotal: %.2f\ncurrency: %s\nperiod: %s\nrow count: %d\nresponse columns: %s\n",
+		total, currency, periodLabel, rowCount, strings.Join(columnNames, ","))
 }
