@@ -503,6 +503,160 @@ func finalResourceNameSegment(id string) string {
 	return id
 }
 
+// armManagedClusterIDPattern is the strict, exact-shape managedClusters
+// ARM ID: /subscriptions/{sub}/resourceGroups/{rg}/providers/{provider}/{type}/{name}
+// — anchored at both ends. Unlike armResourceIDShapePattern (which
+// accepts any resource type under any provider, with any number of
+// trailing path segments), this pattern matches only this one exact
+// five-component shape: it rejects a nested child resource, a value with
+// extra segments appended after a valid ID, or one with a segment
+// missing. A value that fails this pattern gets Valid = false from
+// parseARMManagedClusterComponents — reported only as a "path-shape
+// difference" (see classifyARMComponentDifference), never guessed at
+// component-by-component.
+var armManagedClusterIDPattern = regexp.MustCompile(`(?i)^/subscriptions/([^/]+)/resourceGroups/([^/]+)/providers/([^/]+)/([^/]+)/([^/]+)$`)
+
+// armManagedClusterComponents is one Azure ARM managedClusters resource
+// ID's parsed components — every field already lowercased, since every
+// comparison this diagnostic makes is explicitly case-insensitive. Valid
+// is false whenever the source id did not match
+// armManagedClusterIDPattern; in that case every other field is the zero
+// value and must not be used for comparison. Instances of this type are
+// always local and transient: never appended to a slice outside their
+// immediate use, never logged, never hashed, and never part of
+// subscriptionKubernetesDiscoveryResult or any error this file returns.
+type armManagedClusterComponents struct {
+	Valid              bool
+	SubscriptionLower  string
+	ResourceGroupLower string
+	ProviderLower      string
+	ResourceTypeLower  string
+	NameLower          string
+}
+
+// parseARMManagedClusterComponents parses id into its ARM components if,
+// and only if, it matches the exact managedClusters shape
+// (armManagedClusterIDPattern). It never rewrites or infers a component —
+// a value that doesn't fit the exact shape gets Valid = false, not a
+// best-effort partial parse.
+func parseARMManagedClusterComponents(id string) armManagedClusterComponents {
+	m := armManagedClusterIDPattern.FindStringSubmatch(strings.TrimSpace(id))
+	if m == nil {
+		return armManagedClusterComponents{}
+	}
+	return armManagedClusterComponents{
+		Valid:              true,
+		SubscriptionLower:  strings.ToLower(m[1]),
+		ResourceGroupLower: strings.ToLower(m[2]),
+		ProviderLower:      strings.ToLower(m[3]),
+		ResourceTypeLower:  strings.ToLower(m[4]),
+		NameLower:          strings.ToLower(m[5]),
+	}
+}
+
+// subscriptionKubernetesUniqueComponentDiagnostics tallies, over UNIQUE
+// discovered Cluster values (never repeated billing rows — see
+// runSubscriptionKubernetesDiscoveryQuery), which single ARM component
+// differs for candidates whose final resource name already matches the
+// configured target's. It exists to answer "the name matches, so which
+// part of the ID doesn't?" without ever naming the differing value
+// itself: every field here is a count. Provider namespace and resource
+// type are always combined into one "provider/type" dimension for the
+// difference buckets (SubscriptionOnlyDifferenceCount/
+// ResourceGroupOnlyDifferenceCount/ProviderOrTypeOnlyDifferenceCount/
+// MultipleComponentDifferenceCount) — a candidate differing in only
+// provider, only type, or both, is still fundamentally "a different
+// resource type," reported as one bucket.
+//
+// These counts are never used for cost attribution — see
+// runSubscriptionKubernetesDiscoveryQuery's doc comment. A candidate that
+// fails to parse (Valid = false in either candidate or target) is counted
+// only in PathShapeDifferenceCount, never guessed into one of the
+// component-difference buckets.
+type subscriptionKubernetesUniqueComponentDiagnostics struct {
+	NameMatchingUniqueCandidateCount               int
+	SameSubscriptionCount                          int
+	SameResourceGroupCount                         int
+	SameProviderNamespaceCount                     int
+	SameResourceTypeCount                          int
+	SameSubscriptionAndResourceGroupCount          int
+	SameSubscriptionResourceGroupProviderTypeCount int
+	SubscriptionOnlyDifferenceCount                int
+	ResourceGroupOnlyDifferenceCount               int
+	ProviderOrTypeOnlyDifferenceCount              int
+	PathShapeDifferenceCount                       int
+	MultipleComponentDifferenceCount               int
+}
+
+// classifyARMComponentDifference tallies exactly the counters that apply
+// to one unique, name-matching candidate into tally, given its
+// already-parsed components and the target's. The caller (
+// runSubscriptionKubernetesDiscoveryQuery) invokes this at most once per
+// distinct Cluster value — repeated billing rows for the same cluster
+// never call this twice. It never returns or retains a component value;
+// only integer counters in tally are mutated.
+func classifyARMComponentDifference(candidate, target armManagedClusterComponents, tally *subscriptionKubernetesUniqueComponentDiagnostics) {
+	tally.NameMatchingUniqueCandidateCount++
+
+	if !candidate.Valid || !target.Valid {
+		// Cannot reliably decompose one or both sides — report the shape
+		// problem itself rather than guessing which component differs.
+		tally.PathShapeDifferenceCount++
+		return
+	}
+
+	sameSubscription := candidate.SubscriptionLower == target.SubscriptionLower
+	sameResourceGroup := candidate.ResourceGroupLower == target.ResourceGroupLower
+	sameProvider := candidate.ProviderLower == target.ProviderLower
+	sameResourceType := candidate.ResourceTypeLower == target.ResourceTypeLower
+	sameProviderOrType := sameProvider && sameResourceType
+
+	if sameSubscription {
+		tally.SameSubscriptionCount++
+	}
+	if sameResourceGroup {
+		tally.SameResourceGroupCount++
+	}
+	if sameProvider {
+		tally.SameProviderNamespaceCount++
+	}
+	if sameResourceType {
+		tally.SameResourceTypeCount++
+	}
+	if sameSubscription && sameResourceGroup {
+		tally.SameSubscriptionAndResourceGroupCount++
+	}
+	if sameSubscription && sameResourceGroup && sameProviderOrType {
+		tally.SameSubscriptionResourceGroupProviderTypeCount++
+	}
+
+	differingDimensions := 0
+	if !sameSubscription {
+		differingDimensions++
+	}
+	if !sameResourceGroup {
+		differingDimensions++
+	}
+	if !sameProviderOrType {
+		differingDimensions++
+	}
+
+	switch {
+	case differingDimensions == 0:
+		// Every component matches — this candidate is already counted by
+		// the exact/case-insensitive/normalized full-ID tiers above; no
+		// "difference" bucket applies to it.
+	case differingDimensions > 1:
+		tally.MultipleComponentDifferenceCount++
+	case !sameSubscription:
+		tally.SubscriptionOnlyDifferenceCount++
+	case !sameResourceGroup:
+		tally.ResourceGroupOnlyDifferenceCount++
+	default:
+		tally.ProviderOrTypeOnlyDifferenceCount++
+	}
+}
+
 // subscriptionKubernetesDiscoveryResult is every value discovery mode is
 // allowed to compute and surface — see this package's file-level doc
 // comment and the "Safe output" list in the task this file implements.
@@ -517,15 +671,20 @@ func finalResourceNameSegment(id string) string {
 // earlier: it is true only when the matching loop actually ran to
 // completion, so UniqueClusterValueCount/ARMShapedClusterValueCount/
 // ExactMatchCount/CaseInsensitiveMatchCount/NormalizedARMMatchCount/
-// NameOnlyMatchCount are real, computed zeros or higher — never left at
-// their Go zero value because processing stopped before counting began
-// (e.g. the row-count safety bound, subscriptionKubernetesQueryMaxDiscoveryRows,
-// was exceeded). Every early-return failure path in
-// runSubscriptionKubernetesDiscoveryQuery leaves CountsEvaluated false by
-// construction (it only appears in the one result literal built after the
-// loop completes); a caller must not print those six counts, or must
-// print them as "not evaluated", whenever CountsEvaluated is false — see
-// writeDiscoverySafeOutput.
+// NameOnlyMatchingRowCount/ComponentDiagnostics are real, computed zeros
+// or higher — never left at their Go zero value because processing
+// stopped before counting began (e.g. the row-count safety bound,
+// subscriptionKubernetesQueryMaxDiscoveryRows, was exceeded). Every
+// early-return failure path in runSubscriptionKubernetesDiscoveryQuery
+// leaves CountsEvaluated false by construction (it only appears in the
+// one result literal built after the loop completes); a caller must not
+// print those counts, or must print them as "not evaluated", whenever
+// CountsEvaluated is false — see writeDiscoverySafeOutput.
+//
+// NameOnlyMatchingRowCount counts ROWS (repeated billing rows for the
+// same cluster all count), and is never a unique-identity count —
+// ComponentDiagnostics.NameMatchingUniqueCandidateCount is that, computed
+// over distinct Cluster values only.
 type subscriptionKubernetesDiscoveryResult struct {
 	RowCount        int
 	ColumnNames     []string
@@ -536,10 +695,14 @@ type subscriptionKubernetesDiscoveryResult struct {
 	ExactMatchCount            int
 	CaseInsensitiveMatchCount  int
 	NormalizedARMMatchCount    int
-	NameOnlyMatchCount         int
-	HasSafeMatch               bool
-	MatchedTotal               float64
-	MatchedCurrency            string
+	// NameOnlyMatchingRowCount is a row-level count — see this type's doc
+	// comment — kept for backward-compatible diagnostic value, explicitly
+	// never presented as a unique-identity count.
+	NameOnlyMatchingRowCount int
+	ComponentDiagnostics     subscriptionKubernetesUniqueComponentDiagnostics
+	HasSafeMatch             bool
+	MatchedTotal             float64
+	MatchedCurrency          string
 }
 
 // runSubscriptionKubernetesDiscoveryQuery issues exactly ONE HTTP request
@@ -651,13 +814,15 @@ func runSubscriptionKubernetesDiscoveryQuery(ctx context.Context, httpClient *ht
 
 	targetNormalized := normalizeARMResourceIDForComparison(clusterResourceID)
 	targetName := strings.ToLower(finalResourceNameSegment(clusterResourceID))
+	targetComponents := parseARMManagedClusterComponents(clusterResourceID)
 
 	uniqueValues := make(map[string]struct{}, rowCount)
 	var (
-		armShapedCount, exactCount, foldCount, normalizedCount, nameOnlyCount int
-		matchedTotal                                                          float64
-		matchedCurrency                                                       string
-		hasSafeMatch                                                          bool
+		armShapedCount, exactCount, foldCount, normalizedCount, nameOnlyMatchingRowCount int
+		matchedTotal                                                                     float64
+		matchedCurrency                                                                  string
+		hasSafeMatch                                                                     bool
+		componentTally                                                                   subscriptionKubernetesUniqueComponentDiagnostics
 	)
 
 	for _, row := range rows {
@@ -667,13 +832,6 @@ func runSubscriptionKubernetesDiscoveryQuery(ctx context.Context, httpClient *ht
 		clusterValue, ok := row.string("Cluster")
 		if !ok || clusterValue == "" {
 			return subscriptionKubernetesDiscoveryResult{RowCount: rowCount, ColumnNames: columnNames}, newSafeError(subscriptionKubernetesQueryOperation, safeReasonInvalidResponse, fmt.Errorf("row missing a usable Cluster value"))
-		}
-
-		if _, seen := uniqueValues[clusterValue]; !seen {
-			uniqueValues[clusterValue] = struct{}{}
-			if armResourceIDShapePattern.MatchString(clusterValue) {
-				armShapedCount++
-			}
 		}
 
 		exact := clusterValue == clusterResourceID
@@ -690,12 +848,27 @@ func runSubscriptionKubernetesDiscoveryQuery(ctx context.Context, httpClient *ht
 			normalizedCount++
 		}
 		if nameOnly {
-			nameOnlyCount++
+			// Row-level count — see subscriptionKubernetesDiscoveryResult's
+			// doc comment. Repeated billing rows for the same cluster each
+			// increment this; the unique-candidate classification below
+			// happens at most once per distinct Cluster value.
+			nameOnlyMatchingRowCount++
+		}
+
+		if _, seen := uniqueValues[clusterValue]; !seen {
+			uniqueValues[clusterValue] = struct{}{}
+			if armResourceIDShapePattern.MatchString(clusterValue) {
+				armShapedCount++
+			}
+			if nameOnly {
+				candidateComponents := parseARMManagedClusterComponents(clusterValue)
+				classifyARMComponentDifference(candidateComponents, targetComponents, &componentTally)
+			}
 		}
 
 		// Name-only alone never proves cluster identity — it does not
-		// contribute to the matched total, only to NameOnlyMatchCount
-		// above.
+		// contribute to the matched total, only to NameOnlyMatchingRowCount
+		// and ComponentDiagnostics above.
 		if !(exact || fold || normalized) {
 			continue
 		}
@@ -737,7 +910,8 @@ func runSubscriptionKubernetesDiscoveryQuery(ctx context.Context, httpClient *ht
 		ExactMatchCount:            exactCount,
 		CaseInsensitiveMatchCount:  foldCount,
 		NormalizedARMMatchCount:    normalizedCount,
-		NameOnlyMatchCount:         nameOnlyCount,
+		NameOnlyMatchingRowCount:   nameOnlyMatchingRowCount,
+		ComponentDiagnostics:       componentTally,
 		HasSafeMatch:               hasSafeMatch,
 		MatchedTotal:               matchedTotal,
 		MatchedCurrency:            matchedCurrency,
@@ -1313,8 +1487,8 @@ func TestSubscriptionKubernetesQueryDiscoveryMatchCountsAndTotalAreCorrect(t *te
 	if result.NormalizedARMMatchCount != 3 {
 		t.Errorf("NormalizedARMMatchCount = %d, want 3 (rowExact, rowTrailingSlash, rowDifferentCase)", result.NormalizedARMMatchCount)
 	}
-	if result.NameOnlyMatchCount != 4 {
-		t.Errorf("NameOnlyMatchCount = %d, want 4 (every row except rowUnrelated)", result.NameOnlyMatchCount)
+	if result.NameOnlyMatchingRowCount != 4 {
+		t.Errorf("NameOnlyMatchingRowCount = %d, want 4 (every row except rowUnrelated)", result.NameOnlyMatchingRowCount)
 	}
 	if !result.HasSafeMatch {
 		t.Fatal("HasSafeMatch = false, want true")
@@ -1324,6 +1498,36 @@ func TestSubscriptionKubernetesQueryDiscoveryMatchCountsAndTotalAreCorrect(t *te
 	}
 	if result.MatchedCurrency != "USD" {
 		t.Errorf("MatchedCurrency = %q, want USD", result.MatchedCurrency)
+	}
+
+	// Unique, name-matching candidates: rowExact and rowDifferentCase are
+	// full component matches (0 differences — already counted by the
+	// tiers above, so no difference bucket applies); rowTrailingSlash
+	// fails the strict managed-cluster shape (its trailing slash is a
+	// genuine shape deviation, exactly as armResourceIDShapePattern
+	// already treats it — see ARMShapedClusterValueCount above), landing
+	// in PathShapeDifferenceCount rather than being guessed at
+	// component-by-component; rowNameOnly differs in both subscription
+	// and resource group, a multiple-component difference. rowUnrelated's
+	// name does not match, so it never reaches the classifier at all.
+	cd := result.ComponentDiagnostics
+	if cd.NameMatchingUniqueCandidateCount != 4 {
+		t.Errorf("NameMatchingUniqueCandidateCount = %d, want 4", cd.NameMatchingUniqueCandidateCount)
+	}
+	if cd.PathShapeDifferenceCount != 1 {
+		t.Errorf("PathShapeDifferenceCount = %d, want 1 (rowTrailingSlash)", cd.PathShapeDifferenceCount)
+	}
+	if cd.MultipleComponentDifferenceCount != 1 {
+		t.Errorf("MultipleComponentDifferenceCount = %d, want 1 (rowNameOnly differs in both subscription and resource group)", cd.MultipleComponentDifferenceCount)
+	}
+	if cd.SubscriptionOnlyDifferenceCount != 0 || cd.ResourceGroupOnlyDifferenceCount != 0 || cd.ProviderOrTypeOnlyDifferenceCount != 0 {
+		t.Errorf("expected no single-component difference buckets set, got %+v", cd)
+	}
+	if cd.SameSubscriptionCount != 2 || cd.SameResourceGroupCount != 2 || cd.SameSubscriptionAndResourceGroupCount != 2 || cd.SameSubscriptionResourceGroupProviderTypeCount != 2 {
+		t.Errorf("expected rowExact and rowDifferentCase (2 candidates) to be reported same on every subscription/resource-group dimension, got %+v", cd)
+	}
+	if cd.SameProviderNamespaceCount != 3 || cd.SameResourceTypeCount != 3 {
+		t.Errorf("expected rowExact, rowDifferentCase, and rowNameOnly (3 candidates) to share the same provider namespace and resource type, got %+v", cd)
 	}
 }
 
@@ -1523,5 +1727,294 @@ func TestSubscriptionKubernetesQueryDiscoveryFailsSafelyOnMissingColumns(t *test
 				t.Fatal("expected an error, got nil")
 			}
 		})
+	}
+}
+
+// TestSubscriptionKubernetesQueryDiscoveryComponentDifferenceClassification
+// covers each single-dimension ARM component difference bucket in
+// subscriptionKubernetesUniqueComponentDiagnostics: a candidate whose
+// final resource name matches the target's, but whose subscription,
+// resource group, or provider/type differs — and nothing else — must land
+// in exactly the matching "X-only difference" bucket, and in none of the
+// others. A separately shaped (malformed) candidate whose name still
+// matches must land only in PathShapeDifferenceCount, since its other
+// components cannot be reliably decomposed at all.
+func TestSubscriptionKubernetesQueryDiscoveryComponentDifferenceClassification(t *testing.T) {
+	const target = "/subscriptions/11111111-1111-1111-1111-111111111111/resourceGroups/My-RG/providers/Microsoft.ContainerService/managedClusters/My-AKS-Cluster"
+
+	tests := []struct {
+		name      string
+		candidate string
+		check     func(t *testing.T, cd subscriptionKubernetesUniqueComponentDiagnostics)
+	}{
+		{
+			name:      "subscription-only difference",
+			candidate: "/subscriptions/22222222-2222-2222-2222-222222222222/resourceGroups/My-RG/providers/Microsoft.ContainerService/managedClusters/My-AKS-Cluster",
+			check: func(t *testing.T, cd subscriptionKubernetesUniqueComponentDiagnostics) {
+				if cd.SubscriptionOnlyDifferenceCount != 1 {
+					t.Errorf("SubscriptionOnlyDifferenceCount = %d, want 1", cd.SubscriptionOnlyDifferenceCount)
+				}
+				if cd.ResourceGroupOnlyDifferenceCount != 0 || cd.ProviderOrTypeOnlyDifferenceCount != 0 || cd.PathShapeDifferenceCount != 0 || cd.MultipleComponentDifferenceCount != 0 {
+					t.Errorf("expected only SubscriptionOnlyDifferenceCount set, got %+v", cd)
+				}
+				if cd.SameResourceGroupCount != 1 || cd.SameProviderNamespaceCount != 1 || cd.SameResourceTypeCount != 1 {
+					t.Errorf("expected resource group, provider, and type to be reported same, got %+v", cd)
+				}
+				if cd.SameSubscriptionCount != 0 || cd.SameSubscriptionAndResourceGroupCount != 0 || cd.SameSubscriptionResourceGroupProviderTypeCount != 0 {
+					t.Errorf("expected no subscription-inclusive same-counters set, got %+v", cd)
+				}
+			},
+		},
+		{
+			name:      "resource-group-only difference",
+			candidate: "/subscriptions/11111111-1111-1111-1111-111111111111/resourceGroups/Other-RG/providers/Microsoft.ContainerService/managedClusters/My-AKS-Cluster",
+			check: func(t *testing.T, cd subscriptionKubernetesUniqueComponentDiagnostics) {
+				if cd.ResourceGroupOnlyDifferenceCount != 1 {
+					t.Errorf("ResourceGroupOnlyDifferenceCount = %d, want 1", cd.ResourceGroupOnlyDifferenceCount)
+				}
+				if cd.SubscriptionOnlyDifferenceCount != 0 || cd.ProviderOrTypeOnlyDifferenceCount != 0 || cd.PathShapeDifferenceCount != 0 || cd.MultipleComponentDifferenceCount != 0 {
+					t.Errorf("expected only ResourceGroupOnlyDifferenceCount set, got %+v", cd)
+				}
+				if cd.SameSubscriptionCount != 1 || cd.SameProviderNamespaceCount != 1 || cd.SameResourceTypeCount != 1 {
+					t.Errorf("expected subscription, provider, and type to be reported same, got %+v", cd)
+				}
+				if cd.SameResourceGroupCount != 0 || cd.SameSubscriptionAndResourceGroupCount != 0 || cd.SameSubscriptionResourceGroupProviderTypeCount != 0 {
+					t.Errorf("expected no resource-group-inclusive same-counters set, got %+v", cd)
+				}
+			},
+		},
+		{
+			name:      "provider/type-only difference",
+			candidate: "/subscriptions/11111111-1111-1111-1111-111111111111/resourceGroups/My-RG/providers/Microsoft.ContainerService/otherManagedClusters/My-AKS-Cluster",
+			check: func(t *testing.T, cd subscriptionKubernetesUniqueComponentDiagnostics) {
+				if cd.ProviderOrTypeOnlyDifferenceCount != 1 {
+					t.Errorf("ProviderOrTypeOnlyDifferenceCount = %d, want 1", cd.ProviderOrTypeOnlyDifferenceCount)
+				}
+				if cd.SubscriptionOnlyDifferenceCount != 0 || cd.ResourceGroupOnlyDifferenceCount != 0 || cd.PathShapeDifferenceCount != 0 || cd.MultipleComponentDifferenceCount != 0 {
+					t.Errorf("expected only ProviderOrTypeOnlyDifferenceCount set, got %+v", cd)
+				}
+				if cd.SameSubscriptionCount != 1 || cd.SameResourceGroupCount != 1 || cd.SameSubscriptionAndResourceGroupCount != 1 {
+					t.Errorf("expected subscription, resource group, and their combination to be reported same, got %+v", cd)
+				}
+				if cd.SameProviderNamespaceCount != 1 {
+					t.Errorf("expected the provider namespace itself to still be reported same (only the type differs), got %+v", cd)
+				}
+				if cd.SameResourceTypeCount != 0 || cd.SameSubscriptionResourceGroupProviderTypeCount != 0 {
+					t.Errorf("expected resource type not reported same, got %+v", cd)
+				}
+			},
+		},
+		{
+			name:      "malformed/additional path difference",
+			candidate: "/subscriptions/11111111-1111-1111-1111-111111111111/providers/Microsoft.ContainerService/managedClusters/My-AKS-Cluster",
+			check: func(t *testing.T, cd subscriptionKubernetesUniqueComponentDiagnostics) {
+				if cd.PathShapeDifferenceCount != 1 {
+					t.Errorf("PathShapeDifferenceCount = %d, want 1", cd.PathShapeDifferenceCount)
+				}
+				if cd.SubscriptionOnlyDifferenceCount != 0 || cd.ResourceGroupOnlyDifferenceCount != 0 || cd.ProviderOrTypeOnlyDifferenceCount != 0 || cd.MultipleComponentDifferenceCount != 0 {
+					t.Errorf("expected only PathShapeDifferenceCount set, got %+v", cd)
+				}
+				if cd.SameSubscriptionCount != 0 || cd.SameResourceGroupCount != 0 || cd.SameProviderNamespaceCount != 0 || cd.SameResourceTypeCount != 0 {
+					t.Errorf("a malformed candidate must never be guessed into any same-component counter, got %+v", cd)
+				}
+			},
+		},
+		{
+			name:      "multiple-component difference",
+			candidate: "/subscriptions/22222222-2222-2222-2222-222222222222/resourceGroups/Other-RG/providers/Microsoft.ContainerService/managedClusters/My-AKS-Cluster",
+			check: func(t *testing.T, cd subscriptionKubernetesUniqueComponentDiagnostics) {
+				if cd.MultipleComponentDifferenceCount != 1 {
+					t.Errorf("MultipleComponentDifferenceCount = %d, want 1", cd.MultipleComponentDifferenceCount)
+				}
+				if cd.SubscriptionOnlyDifferenceCount != 0 || cd.ResourceGroupOnlyDifferenceCount != 0 || cd.ProviderOrTypeOnlyDifferenceCount != 0 || cd.PathShapeDifferenceCount != 0 {
+					t.Errorf("expected only MultipleComponentDifferenceCount set, got %+v", cd)
+				}
+				if cd.SameProviderNamespaceCount != 1 || cd.SameResourceTypeCount != 1 {
+					t.Errorf("expected provider and type to be reported same, got %+v", cd)
+				}
+				if cd.SameSubscriptionCount != 0 || cd.SameResourceGroupCount != 0 || cd.SameSubscriptionAndResourceGroupCount != 0 {
+					t.Errorf("expected subscription and resource group not reported same, got %+v", cd)
+				}
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				writeQueryResponse(w,
+					[]queryColumn{{Name: "Cluster"}, {Name: "ResourceLocation"}, {Name: "Cost"}, {Name: "Currency"}},
+					[][]any{{tt.candidate, "eastus2", 1.0, "USD"}}, "")
+			}))
+			defer server.Close()
+
+			cred := &fakeCredential{token: "t"}
+			ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+			defer cancel()
+
+			result, _ := runSubscriptionKubernetesDiscoveryQuery(ctx, newARMHTTPClient(), cred, server.URL, "11111111-1111-1111-1111-111111111111", target, time.Now(), time.Now())
+			// err is intentionally ignored: a component-only-differing
+			// candidate is, by construction, never a safe match, so a
+			// no-match error is the expected outcome here — what this test
+			// asserts is the component classification carried in result,
+			// which is fully populated regardless of that error (see
+			// TestSubscriptionKubernetesQueryDiscoveryReturnsNoMatchErrorWhenNothingSafelyMatches).
+			if !result.CountsEvaluated {
+				t.Fatal("CountsEvaluated = false, want true")
+			}
+			if result.ComponentDiagnostics.NameMatchingUniqueCandidateCount != 1 {
+				t.Fatalf("NameMatchingUniqueCandidateCount = %d, want 1", result.ComponentDiagnostics.NameMatchingUniqueCandidateCount)
+			}
+			tt.check(t, result.ComponentDiagnostics)
+		})
+	}
+}
+
+// TestSubscriptionKubernetesQueryDiscoveryComponentDiagnosticsCountUniqueCandidatesOnce
+// proves that repeated billing rows for the same differing-component
+// cluster value are tallied once in ComponentDiagnostics (per requirement
+// 2: unique Cluster identities, not repeated billing rows), while the
+// row-level NameOnlyMatchingRowCount still reflects every row.
+func TestSubscriptionKubernetesQueryDiscoveryComponentDiagnosticsCountUniqueCandidatesOnce(t *testing.T) {
+	const target = "/subscriptions/11111111-1111-1111-1111-111111111111/resourceGroups/My-RG/providers/Microsoft.ContainerService/managedClusters/My-AKS-Cluster"
+	const repeated = "/subscriptions/22222222-2222-2222-2222-222222222222/resourceGroups/My-RG/providers/Microsoft.ContainerService/managedClusters/My-AKS-Cluster"
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		writeQueryResponse(w,
+			[]queryColumn{{Name: "Cluster"}, {Name: "ResourceLocation"}, {Name: "Cost"}, {Name: "Currency"}},
+			[][]any{
+				{repeated, "eastus2", 5.0, "USD"},
+				{repeated, "eastus2", 6.0, "USD"},
+				{repeated, "eastus2", 7.0, "USD"},
+			}, "")
+	}))
+	defer server.Close()
+
+	cred := &fakeCredential{token: "t"}
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	result, _ := runSubscriptionKubernetesDiscoveryQuery(ctx, newARMHTTPClient(), cred, server.URL, "11111111-1111-1111-1111-111111111111", target, time.Now(), time.Now())
+	if !result.CountsEvaluated {
+		t.Fatal("CountsEvaluated = false, want true")
+	}
+	if result.UniqueClusterValueCount != 1 {
+		t.Errorf("UniqueClusterValueCount = %d, want 1", result.UniqueClusterValueCount)
+	}
+	if result.NameOnlyMatchingRowCount != 3 {
+		t.Errorf("NameOnlyMatchingRowCount = %d, want 3 (row-level, every repeated row counts)", result.NameOnlyMatchingRowCount)
+	}
+	if result.ComponentDiagnostics.NameMatchingUniqueCandidateCount != 1 {
+		t.Errorf("NameMatchingUniqueCandidateCount = %d, want 1 (unique-identity level, the repeat must count once)", result.ComponentDiagnostics.NameMatchingUniqueCandidateCount)
+	}
+	if result.ComponentDiagnostics.SubscriptionOnlyDifferenceCount != 1 {
+		t.Errorf("SubscriptionOnlyDifferenceCount = %d, want 1", result.ComponentDiagnostics.SubscriptionOnlyDifferenceCount)
+	}
+}
+
+// TestSubscriptionKubernetesQueryDiscoveryUnsafeComponentMatchesNeverContributeCost
+// proves that a candidate identified only by a component difference (here:
+// subscription-only) — even a very large one — never contributes to
+// MatchedTotal. Only the exact/case-insensitive/normalized full-ID tiers
+// are allowed to (see runSubscriptionKubernetesDiscoveryQuery's cost-gate
+// and requirement 5 in this file's originating task).
+func TestSubscriptionKubernetesQueryDiscoveryUnsafeComponentMatchesNeverContributeCost(t *testing.T) {
+	const target = "/subscriptions/11111111-1111-1111-1111-111111111111/resourceGroups/My-RG/providers/Microsoft.ContainerService/managedClusters/My-AKS-Cluster"
+	const subscriptionOnlyDiffering = "/subscriptions/22222222-2222-2222-2222-222222222222/resourceGroups/My-RG/providers/Microsoft.ContainerService/managedClusters/My-AKS-Cluster"
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		writeQueryResponse(w,
+			[]queryColumn{{Name: "Cluster"}, {Name: "ResourceLocation"}, {Name: "Cost"}, {Name: "Currency"}},
+			[][]any{
+				{target, "eastus2", 10.0, "USD"},
+				{subscriptionOnlyDiffering, "westus2", 99999.0, "USD"},
+			}, "")
+	}))
+	defer server.Close()
+
+	cred := &fakeCredential{token: "t"}
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	result, err := runSubscriptionKubernetesDiscoveryQuery(ctx, newARMHTTPClient(), cred, server.URL, "11111111-1111-1111-1111-111111111111", target, time.Now(), time.Now())
+	if err != nil {
+		t.Fatalf("runSubscriptionKubernetesDiscoveryQuery: %v", err)
+	}
+	if !result.HasSafeMatch {
+		t.Fatal("HasSafeMatch = false, want true")
+	}
+	if result.MatchedTotal != 10 {
+		t.Errorf("MatchedTotal = %v, want 10 (the subscription-only-differing candidate's 99999 must never be included)", result.MatchedTotal)
+	}
+	if result.ComponentDiagnostics.SubscriptionOnlyDifferenceCount != 1 {
+		t.Errorf("SubscriptionOnlyDifferenceCount = %d, want 1", result.ComponentDiagnostics.SubscriptionOnlyDifferenceCount)
+	}
+}
+
+// TestSubscriptionKubernetesQueryDiscoverySafeOutputNeverExposesComponentValues
+// extends the general safe-output leak test with fixtures specifically
+// engineered to exercise every new component-difference bucket, and
+// proves the captured diagnostic output — success path and no-match error
+// path alike — never contains any subscription ID, resource group name,
+// provider namespace, resource type, or cluster name for either the
+// target or any candidate, while still reporting the real (non-zero)
+// component-diagnostic counts.
+func TestSubscriptionKubernetesQueryDiscoverySafeOutputNeverExposesComponentValues(t *testing.T) {
+	const target = "/subscriptions/11111111-1111-1111-1111-111111111111/resourceGroups/My-RG/providers/Microsoft.ContainerService/managedClusters/My-AKS-Cluster"
+	const subOnly = "/subscriptions/22222222-2222-2222-2222-222222222222/resourceGroups/My-RG/providers/Microsoft.ContainerService/managedClusters/My-AKS-Cluster"
+	const rgOnly = "/subscriptions/11111111-1111-1111-1111-111111111111/resourceGroups/Other-RG/providers/Microsoft.ContainerService/managedClusters/My-AKS-Cluster"
+	const providerTypeOnly = "/subscriptions/11111111-1111-1111-1111-111111111111/resourceGroups/My-RG/providers/Microsoft.ContainerService/otherManagedClusters/My-AKS-Cluster"
+	const malformed = "/subscriptions/11111111-1111-1111-1111-111111111111/providers/Microsoft.ContainerService/managedClusters/My-AKS-Cluster"
+	const multi = "/subscriptions/22222222-2222-2222-2222-222222222222/resourceGroups/Other-RG/providers/Microsoft.ContainerService/managedClusters/My-AKS-Cluster"
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		writeQueryResponse(w,
+			[]queryColumn{{Name: "Cluster"}, {Name: "ResourceLocation"}, {Name: "Cost"}, {Name: "Currency"}},
+			[][]any{
+				{subOnly, "eastus2", 111.0, "USD"},
+				{rgOnly, "eastus2", 222.0, "USD"},
+				{providerTypeOnly, "eastus2", 333.0, "USD"},
+				{malformed, "eastus2", 444.0, "USD"},
+				{multi, "eastus2", 555.0, "USD"},
+			}, "")
+	}))
+	defer server.Close()
+
+	cred := &fakeCredential{token: "t"}
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	result, err := runSubscriptionKubernetesDiscoveryQuery(ctx, newARMHTTPClient(), cred, server.URL, "11111111-1111-1111-1111-111111111111", target, time.Now(), time.Now())
+
+	var buf bytes.Buffer
+	writeDiscoverySafeOutput(&buf, "2026-08-17 to 2026-09-15", subscriptionKubernetesQueryFilterModeDiscovery, result, err)
+	output := buf.String()
+	if err != nil {
+		output += "\nerror: " + err.Error()
+	}
+
+	for _, forbidden := range []string{
+		target, subOnly, rgOnly, providerTypeOnly, malformed, multi,
+		"11111111-1111-1111-1111-111111111111", "22222222-2222-2222-2222-222222222222",
+		"My-RG", "Other-RG", "My-AKS-Cluster", "Microsoft.ContainerService",
+		"managedClusters", "otherManagedClusters",
+		"/subscriptions/", "111", "222", "333", "444", "555",
+	} {
+		if strings.Contains(output, forbidden) {
+			t.Errorf("diagnostic output/error contains %q — no candidate identity or component may ever appear in captured output or errors; output:\n%s", forbidden, output)
+		}
+	}
+
+	for _, wantLine := range []string{
+		"unique name-matching candidates: 5",
+		"subscription-only difference: 1",
+		"resource-group-only difference: 1",
+		"provider/type-only difference: 1",
+		"path-shape difference: 1",
+		"multiple-component difference: 1",
+	} {
+		if !strings.Contains(output, wantLine) {
+			t.Errorf("diagnostic output missing %q; output:\n%s", wantLine, output)
+		}
 	}
 }

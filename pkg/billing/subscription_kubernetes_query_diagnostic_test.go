@@ -315,13 +315,24 @@ func writeDiscoverySafeOutput(w io.Writer, periodLabel string, filterMode subscr
 	if !result.CountsEvaluated {
 		// Processing stopped before the matching loop ran (see
 		// subscriptionKubernetesDiscoveryResult.CountsEvaluated) — these
-		// six counts are not real computed zeros, so they must never be
+		// counts are not real computed zeros, so they must never be
 		// printed as if they were.
 		fmt.Fprintf(w, "match counts: not evaluated\n")
 		return
 	}
-	fmt.Fprintf(w, "unique cluster values: %d\narm-shaped cluster values: %d\nexact matches: %d\ncase-insensitive matches: %d\nnormalized arm matches: %d\nname-only matches: %d\n",
-		result.UniqueClusterValueCount, result.ARMShapedClusterValueCount, result.ExactMatchCount, result.CaseInsensitiveMatchCount, result.NormalizedARMMatchCount, result.NameOnlyMatchCount)
+	fmt.Fprintf(w, "unique cluster values: %d\narm-shaped cluster values: %d\nexact matches: %d\ncase-insensitive matches: %d\nnormalized arm matches: %d\nname-only matching rows: %d\n",
+		result.UniqueClusterValueCount, result.ARMShapedClusterValueCount, result.ExactMatchCount, result.CaseInsensitiveMatchCount, result.NormalizedARMMatchCount, result.NameOnlyMatchingRowCount)
+
+	// Component diagnostics are computed over UNIQUE Cluster identities
+	// whose final resource name already matches the target's — never used
+	// for cost attribution (see MatchedTotal above, computed only from the
+	// exact/case-insensitive/normalized full-ID tiers).
+	cd := result.ComponentDiagnostics
+	fmt.Fprintf(w, "unique name-matching candidates: %d\nsame subscription: %d\nsame resource group: %d\nsame provider namespace: %d\nsame resource type: %d\nsame subscription+resource group: %d\nsame subscription+resource group+provider/type: %d\nsubscription-only difference: %d\nresource-group-only difference: %d\nprovider/type-only difference: %d\npath-shape difference: %d\nmultiple-component difference: %d\n",
+		cd.NameMatchingUniqueCandidateCount, cd.SameSubscriptionCount, cd.SameResourceGroupCount, cd.SameProviderNamespaceCount, cd.SameResourceTypeCount,
+		cd.SameSubscriptionAndResourceGroupCount, cd.SameSubscriptionResourceGroupProviderTypeCount,
+		cd.SubscriptionOnlyDifferenceCount, cd.ResourceGroupOnlyDifferenceCount, cd.ProviderOrTypeOnlyDifferenceCount, cd.PathShapeDifferenceCount, cd.MultipleComponentDifferenceCount)
+
 	if result.HasSafeMatch {
 		fmt.Fprintf(w, "matched total: %.2f\nmatched currency: %s\n", result.MatchedTotal, result.MatchedCurrency)
 	}
@@ -412,7 +423,8 @@ func TestSubscriptionKubernetesQueryDiscoverySafeOutputOmitsCountsWhenRowCapExce
 
 	for _, misleading := range []string{
 		"exact matches: 0", "case-insensitive matches: 0", "normalized arm matches: 0",
-		"name-only matches: 0", "unique cluster values: 0", "arm-shaped cluster values: 0",
+		"name-only matching rows: 0", "unique cluster values: 0", "arm-shaped cluster values: 0",
+		"unique name-matching candidates: 0",
 	} {
 		if strings.Contains(output, misleading) {
 			t.Errorf("output must never print a zero match count when processing stopped before counting; got %q in:\n%s", misleading, output)
