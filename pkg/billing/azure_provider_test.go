@@ -3,14 +3,17 @@ package billing
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
 
-const testNodeResourceGroup = "MC_rxr-rxp-e2e-01-cus-rg_rxr-rxp-e2e-01-cus-aks_centralus"
+const testNodeResourceGroup = "MC_example-aks-rg_example-aks_centralus"
 
 // newTestAzureProvider wires an AzureProvider at a single synthetic HTTP
 // endpoint (both the Cost Management query calls and the AKS identity
@@ -52,7 +55,7 @@ func costQueryHandler(t *testing.T, rowsByResourceGroup map[string][][]any, node
 }
 
 func TestFetchBillingAggregatesClusterAndNodeResourceGroupsWithoutDoubleCounting(t *testing.T) {
-	clusterRG := "rxr-rxp-e2e-01-cus-rg"
+	clusterRG := "example-aks-rg"
 	rows := map[string][][]any{
 		clusterRG:             {{100.0, "USD", "/subscriptions/s/resourceGroups/" + clusterRG + "/providers/Microsoft.ContainerService/managedClusters/x", clusterRG}},
 		testNodeResourceGroup: {{5328.0, "USD", "/subscriptions/s/resourceGroups/" + testNodeResourceGroup + "/providers/Microsoft.Compute/virtualMachineScaleSets/user", testNodeResourceGroup}, {190.06, "USD", "/subscriptions/s/resourceGroups/" + testNodeResourceGroup + "/providers/Microsoft.Compute/virtualMachineScaleSets/system", testNodeResourceGroup}},
@@ -81,8 +84,206 @@ func TestFetchBillingAggregatesClusterAndNodeResourceGroupsWithoutDoubleCounting
 	}
 }
 
+// TestFetchBillingSendsIdenticalFullPeriodToBothResourceGroupScopes proves,
+// at the actual FetchBilling call boundary (not just buildResourceGroupQuery
+// in isolation), that the cluster-resource-group and node-resource-group
+// Cost Management queries carry byte-identical period/cost-type/aggregation
+// payloads for the dashboard's documented example period (2026-08-17 to
+// 2026-09-15) — no truncation and no drift between the two scopes.
+func TestFetchBillingSendsIdenticalFullPeriodToBothResourceGroupScopes(t *testing.T) {
+	clusterRG := "example-aks-rg"
+	periodStart := time.Date(2026, 8, 17, 0, 0, 0, 0, time.UTC)
+	periodEnd := time.Date(2026, 9, 15, 23, 59, 59, 0, time.UTC)
+
+	var mu sync.Mutex
+	capturedByRG := make(map[string]queryRequestBody)
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.Contains(r.URL.Path, "Microsoft.ContainerService/managedClusters") {
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{"properties": map[string]any{"nodeResourceGroup": testNodeResourceGroup}})
+			return
+		}
+		parts := strings.Split(r.URL.Path, "/")
+		var rg string
+		for i, p := range parts {
+			if strings.EqualFold(p, "resourceGroups") && i+1 < len(parts) {
+				rg = parts[i+1]
+			}
+		}
+		raw, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Fatalf("reading request body: %v", err)
+		}
+		var body queryRequestBody
+		if err := json.Unmarshal(raw, &body); err != nil {
+			t.Fatalf("decoding request body: %v", err)
+		}
+		mu.Lock()
+		capturedByRG[rg] = body
+		mu.Unlock()
+
+		writeQueryResponse(w,
+			[]queryColumn{{Name: "Cost"}, {Name: "Currency"}, {Name: "ResourceId"}, {Name: "ResourceGroupName"}},
+			nil, "")
+	}))
+	defer server.Close()
+
+	provider := newTestAzureProvider(validClusterConfig(), server)
+	_, err := provider.FetchBilling(context.Background(), Request{
+		PeriodStart: periodStart, PeriodEnd: periodEnd, CostBasis: CostBasisActualCost,
+	})
+	if err != nil {
+		t.Fatalf("FetchBilling: %v", err)
+	}
+
+	if len(capturedByRG) != 2 {
+		t.Fatalf("captured %d resource-group query payloads, want 2 (cluster RG and node RG); captured = %+v", len(capturedByRG), capturedByRG)
+	}
+	clusterBody, ok := capturedByRG[clusterRG]
+	if !ok {
+		t.Fatalf("no query captured for cluster resource group %q; captured = %+v", clusterRG, capturedByRG)
+	}
+	nodeBody, ok := capturedByRG[testNodeResourceGroup]
+	if !ok {
+		t.Fatalf("no query captured for node resource group %q; captured = %+v", testNodeResourceGroup, capturedByRG)
+	}
+
+	wantPeriod := queryPeriod{From: "2026-08-17T00:00:00Z", To: "2026-09-15T23:59:59Z"}
+	if clusterBody.TimePeriod != wantPeriod {
+		t.Errorf("cluster RG TimePeriod = %+v, want %+v (the full displayed Aug 17 - Sep 15 period, not truncated)", clusterBody.TimePeriod, wantPeriod)
+	}
+	if nodeBody.TimePeriod != wantPeriod {
+		t.Errorf("node RG TimePeriod = %+v, want %+v (the full displayed Aug 17 - Sep 15 period, not truncated)", nodeBody.TimePeriod, wantPeriod)
+	}
+	if clusterBody.TimePeriod != nodeBody.TimePeriod {
+		t.Error("cluster RG and node RG queries used inconsistent date boundaries")
+	}
+
+	wantAgg := map[string]queryAggregate{"totalCost": {Name: "Cost", Function: "Sum"}}
+	for name, body := range map[string]queryRequestBody{"cluster RG": clusterBody, "node RG": nodeBody} {
+		if body.Type != string(CostBasisActualCost) {
+			t.Errorf("%s Type = %q, want %q", name, body.Type, CostBasisActualCost)
+		}
+		if body.Timeframe != "Custom" {
+			t.Errorf("%s Timeframe = %q, want Custom", name, body.Timeframe)
+		}
+		if body.Dataset.Granularity != "None" {
+			t.Errorf("%s Dataset.Granularity = %q, want None (one aggregate total for the whole period, not daily buckets)", name, body.Dataset.Granularity)
+		}
+		if !reflect.DeepEqual(body.Dataset.Aggregation, wantAgg) {
+			t.Errorf("%s Dataset.Aggregation = %+v, want %+v", name, body.Dataset.Aggregation, wantAgg)
+		}
+	}
+}
+
+// costTolerance is the tolerance used to compare reconciled cost totals.
+// AttributedTotal + UnattributedTotal reconciles to Total by construction
+// (see Result.UnattributedTotal's doc comment), not because float64
+// addition/subtraction are exact inverses — tests must never compare
+// reconciled totals with ==.
+const costTolerance = 0.001
+
+func almostEqual(a, b float64) bool {
+	diff := a - b
+	return diff <= costTolerance && diff >= -costTolerance
+}
+
+func TestFetchBillingAttributesOnlyExactAKSResourceIDMatch(t *testing.T) {
+	clusterRG := "example-aks-rg"
+	rows := map[string][][]any{
+		// The AKS managed-cluster control-plane charge: ResourceId matches
+		// validAKSResourceID exactly, so this is the only attributed line.
+		clusterRG: {{100.0, "USD", validAKSResourceID, clusterRG}},
+		// Node VMSS and a credit, both in the node resource group. Despite
+		// living in the node RG (an AKS-managed convention), neither has a
+		// resource ID matching the configured AKS resource ID, so neither
+		// is attributed — node-RG residence alone must not prove ownership.
+		testNodeResourceGroup: {
+			{5328.0, "USD", "/subscriptions/s/resourceGroups/" + testNodeResourceGroup + "/providers/Microsoft.Compute/virtualMachineScaleSets/user", testNodeResourceGroup},
+			{-50.0, "USD", "/subscriptions/s/resourceGroups/" + testNodeResourceGroup + "/providers/Microsoft.Compute/virtualMachineScaleSets/credit", testNodeResourceGroup},
+		},
+	}
+	server := httptest.NewServer(costQueryHandler(t, rows, testNodeResourceGroup))
+	defer server.Close()
+
+	provider := newTestAzureProvider(validClusterConfig(), server)
+	result, err := provider.FetchBilling(context.Background(), Request{
+		PeriodStart: time.Now().AddDate(0, 0, -1), PeriodEnd: time.Now(), CostBasis: CostBasisActualCost,
+	})
+	if err != nil {
+		t.Fatalf("FetchBilling: %v", err)
+	}
+
+	if result.ClusterResourceID != validAKSResourceID {
+		t.Errorf("ClusterResourceID = %q, want %q", result.ClusterResourceID, validAKSResourceID)
+	}
+	if !almostEqual(result.AttributedTotal, 100.0) {
+		t.Errorf("AttributedTotal = %v, want ~100 (only the exact AKS resource ID match)", result.AttributedTotal)
+	}
+	wantUnattributed := 5328.0 - 50.0
+	if !almostEqual(result.UnattributedTotal, wantUnattributed) {
+		t.Errorf("UnattributedTotal = %v, want ~%v", result.UnattributedTotal, wantUnattributed)
+	}
+	if !almostEqual(result.AttributedTotal+result.UnattributedTotal, result.Total) {
+		t.Errorf("AttributedTotal + UnattributedTotal = %v, want Total %v within tolerance (must reconcile, including the negative credit)", result.AttributedTotal+result.UnattributedTotal, result.Total)
+	}
+
+	attributedCount := 0
+	for _, l := range result.Lines {
+		if l.Attributed {
+			attributedCount++
+			if l.ResourceID != validAKSResourceID {
+				t.Errorf("unexpected attributed line %q", l.ResourceID)
+			}
+		}
+	}
+	if attributedCount != 1 {
+		t.Errorf("attributed line count = %d, want 1", attributedCount)
+	}
+}
+
+// TestFetchBillingReconciliationHoldsWithinToleranceForFractionalCosts uses
+// fractional-cent line items — the shape most likely to expose float64
+// rounding — to prove AttributedTotal + UnattributedTotal reconciles to
+// Total within costTolerance. It deliberately does not assert bit-exact
+// equality: UnattributedTotal is defined as Total - AttributedTotal by
+// construction, but a + (b - a) is not guaranteed to be bit-identical to b
+// under IEEE 754 float64 arithmetic for arbitrary a, b.
+func TestFetchBillingReconciliationHoldsWithinToleranceForFractionalCosts(t *testing.T) {
+	clusterRG := "example-aks-rg"
+	rows := map[string][][]any{
+		clusterRG: {{19.99, "USD", validAKSResourceID, clusterRG}},
+		testNodeResourceGroup: {
+			{5308.01, "USD", "/subscriptions/s/resourceGroups/" + testNodeResourceGroup + "/providers/Microsoft.Compute/virtualMachineScaleSets/user", testNodeResourceGroup},
+			{-12.34, "USD", "/subscriptions/s/resourceGroups/" + testNodeResourceGroup + "/providers/Microsoft.Compute/virtualMachineScaleSets/credit", testNodeResourceGroup},
+		},
+	}
+	server := httptest.NewServer(costQueryHandler(t, rows, testNodeResourceGroup))
+	defer server.Close()
+
+	provider := newTestAzureProvider(validClusterConfig(), server)
+	result, err := provider.FetchBilling(context.Background(), Request{
+		PeriodStart: time.Now().AddDate(0, 0, -1), PeriodEnd: time.Now(), CostBasis: CostBasisActualCost,
+	})
+	if err != nil {
+		t.Fatalf("FetchBilling: %v", err)
+	}
+
+	wantTotal := 19.99 + 5308.01 - 12.34
+	if !almostEqual(result.Total, wantTotal) {
+		t.Fatalf("Total = %v, want ~%v", result.Total, wantTotal)
+	}
+	if !almostEqual(result.AttributedTotal, 19.99) {
+		t.Errorf("AttributedTotal = %v, want ~19.99", result.AttributedTotal)
+	}
+	if !almostEqual(result.AttributedTotal+result.UnattributedTotal, result.Total) {
+		t.Errorf("AttributedTotal + UnattributedTotal = %v, want Total %v within tolerance", result.AttributedTotal+result.UnattributedTotal, result.Total)
+	}
+}
+
 func TestFetchBillingRejectsMixedCurrencies(t *testing.T) {
-	clusterRG := "rxr-rxp-e2e-01-cus-rg"
+	clusterRG := "example-aks-rg"
 	rows := map[string][][]any{
 		clusterRG:             {{100.0, "USD", "/r/1", clusterRG}},
 		testNodeResourceGroup: {{50.0, "EUR", "/r/2", testNodeResourceGroup}},
@@ -100,7 +301,7 @@ func TestFetchBillingRejectsMixedCurrencies(t *testing.T) {
 }
 
 func TestFetchBillingPreservesCreditsAndValidZeroTotal(t *testing.T) {
-	clusterRG := "rxr-rxp-e2e-01-cus-rg"
+	clusterRG := "example-aks-rg"
 	rows := map[string][][]any{
 		clusterRG:             {{10.0, "USD", "/r/1", clusterRG}},
 		testNodeResourceGroup: {{-10.0, "USD", "/r/2", testNodeResourceGroup}}, // a credit exactly offsetting the charge
@@ -195,7 +396,7 @@ func TestNewAzureProviderAcceptsDefaultEndpoint(t *testing.T) {
 }
 
 func TestFetchBillingLabelsResultAsTwoResourceGroupTotal(t *testing.T) {
-	clusterRG := "rxr-rxp-e2e-01-cus-rg"
+	clusterRG := "example-aks-rg"
 	rows := map[string][][]any{
 		clusterRG:             {{1.0, "USD", "/r/1", clusterRG}},
 		testNodeResourceGroup: {{2.0, "USD", "/r/2", testNodeResourceGroup}},

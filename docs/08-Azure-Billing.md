@@ -80,12 +80,12 @@ entry in that file.
 ```yaml
 # azure-billing.yaml
 clusters:
-  - cluster: rxr-rxp-e2e-01-cus-aks         # must exactly match --cluster/--clusters
+  - cluster: <aks-cluster-name>              # must exactly match --cluster/--clusters
     enabled: true
     authMode: workload-identity              # or azure-cli — required, no default (see Authentication below)
     subscriptionId: "<subscription-id>"      # placeholder — supply your real subscription ID
-    aksResourceId: "/subscriptions/<subscription-id>/resourceGroups/rxr-rxp-e2e-01-cus-rg/providers/Microsoft.ContainerService/managedClusters/rxr-rxp-e2e-01-cus-aks"
-    # nodeResourceGroup: "MC_rxr-rxp-e2e-01-cus-rg_rxr-rxp-e2e-01-cus-aks_centralus"
+    aksResourceId: "/subscriptions/<subscription-id>/resourceGroups/<aks-resource-group>/providers/Microsoft.ContainerService/managedClusters/<aks-cluster-name>"
+    # nodeResourceGroup: "<node-resource-group>"
     # ^ optional. If omitted, OpsCart resolves it once from the AKS
     #   resource's own properties.nodeResourceGroup and caches it for the
     #   life of the process. Set it explicitly only if that read is not
@@ -138,7 +138,7 @@ response.
 az login                                            # placeholder — interactive login
 export OPSCART_AZURE_BILLING_CONFIG=/path/to/azure-billing.yaml
 # In azure-billing.yaml, set authMode: azure-cli for this cluster's entry.
-./opscart-dashboard --cluster=rxr-rxp-e2e-01-cus-aks
+./opscart-dashboard --cluster=<aks-cluster-name>
 ```
 
 ### AKS / Helm (Workload Identity)
@@ -176,11 +176,11 @@ export OPSCART_AZURE_BILLING_CONFIG=/path/to/azure-billing.yaml
        enabled: true
      config: |
        clusters:
-         - cluster: rxr-rxp-e2e-01-cus-aks
+         - cluster: <aks-cluster-name>
            enabled: true
            authMode: workload-identity
            subscriptionId: "<subscription-id>"
-           aksResourceId: "/subscriptions/<subscription-id>/resourceGroups/rxr-rxp-e2e-01-cus-rg/providers/Microsoft.ContainerService/managedClusters/rxr-rxp-e2e-01-cus-aks"
+           aksResourceId: "/subscriptions/<subscription-id>/resourceGroups/<aks-resource-group>/providers/Microsoft.ContainerService/managedClusters/<aks-cluster-name>"
    ```
 
    `azureBilling.workloadIdentity.enabled` only adds the

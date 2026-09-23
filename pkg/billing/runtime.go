@@ -206,27 +206,69 @@ func (r *Runtime) recordSuccess(result Result) {
 	defer r.mu.Unlock()
 	r.notBefore = time.Time{}
 	r.snapshot = Snapshot{
-		Status:          status,
-		Total:           result.Total,
-		Currency:        result.Currency,
-		CostBasis:       result.CostBasis,
-		PeriodStart:     result.PeriodStart,
-		PeriodEnd:       result.PeriodEnd,
-		Source:          result.Source,
-		Scope:           result.Scope,
-		Coverage:        result.Coverage,
-		Disclosures:     result.Disclosures,
-		RowCount:        result.RowCount,
-		RetrievedAt:     result.RetrievedAt,
-		LastAttemptedAt: result.RetrievedAt,
+		Status:      status,
+		Total:       result.Total,
+		Currency:    result.Currency,
+		CostBasis:   result.CostBasis,
+		PeriodStart: result.PeriodStart,
+		PeriodEnd:   result.PeriodEnd,
+		Source:      result.Source,
+		Scope:       result.Scope,
+		Coverage:    result.Coverage,
+		// Cloned rather than aliased: result is caller-owned (in
+		// production, a fresh AzureProvider.FetchBilling return value, but
+		// any Provider implementation), and Runtime.Snapshot below hands
+		// this same data out to every page render. Without cloning here,
+		// a caller mutating its Result after this call — or two renders
+		// mutating what they got from two different Snapshot() calls —
+		// would corrupt or race on Runtime's one cached copy.
+		Disclosures:       cloneStrings(result.Disclosures),
+		RowCount:          result.RowCount,
+		Lines:             cloneResourceCosts(result.Lines),
+		ClusterResourceID: result.ClusterResourceID,
+		AttributedTotal:   result.AttributedTotal,
+		UnattributedTotal: result.UnattributedTotal,
+		RetrievedAt:       result.RetrievedAt,
+		LastAttemptedAt:   result.RetrievedAt,
 	}
 	r.hasSnapshot = true
 }
 
 // Snapshot returns the current cached billing view. It never blocks on or
 // triggers network activity — safe to call from an HTTP page-render path.
+//
+// Lines and Disclosures are cloned on the way out, mirroring recordSuccess
+// cloning them on the way in: the returned Snapshot is a page render's own
+// copy, so mutating it (or a slice within it) can never reach back into
+// Runtime's cached snapshot or another concurrent caller's copy.
 func (r *Runtime) Snapshot() Snapshot {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	return r.snapshot
+	snapshot := r.snapshot
+	snapshot.Lines = cloneResourceCosts(r.snapshot.Lines)
+	snapshot.Disclosures = cloneStrings(r.snapshot.Disclosures)
+	return snapshot
+}
+
+// cloneResourceCosts returns an independent copy of lines. ResourceCost is
+// a plain value type (no pointer/slice fields), so copying the slice
+// itself is sufficient to make the result independent of the original
+// backing array.
+func cloneResourceCosts(lines []ResourceCost) []ResourceCost {
+	if lines == nil {
+		return nil
+	}
+	cloned := make([]ResourceCost, len(lines))
+	copy(cloned, lines)
+	return cloned
+}
+
+// cloneStrings returns an independent copy of values.
+func cloneStrings(values []string) []string {
+	if values == nil {
+		return nil
+	}
+	cloned := make([]string, len(values))
+	copy(cloned, values)
+	return cloned
 }

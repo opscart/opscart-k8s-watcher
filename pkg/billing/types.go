@@ -43,14 +43,21 @@ const (
 	CostBasisAmortizedCost CostBasis = "AmortizedCost"
 )
 
-// ResourceCost is one attributed line item: a single Azure resource's summed
-// cost for the queried period, from a single query scope (cluster resource or
-// node resource group).
+// ResourceCost is one billed line item: a single Azure resource's summed
+// cost for the queried period, from a single query scope (cluster resource
+// group or node resource group). Despite its name, a ResourceCost is not
+// necessarily cluster-attributed — see Attributed.
 type ResourceCost struct {
 	ResourceID    string
 	ResourceGroup string
 	Cost          float64
 	Currency      string
+	// Attributed is true only when ResourceID exactly matches the
+	// configured AKS resource ID (Result.ClusterResourceID) — the one
+	// ownership fact this package can currently establish without an
+	// additional Azure call. Namespace-like resource names and mere
+	// residence in the node resource group never set this true.
+	Attributed bool
 }
 
 // Request describes one billing retrieval for a configured cluster.
@@ -92,6 +99,21 @@ type Result struct {
 	// len(Lines) when duplicate resource IDs across scopes were merged.
 	Lines    []ResourceCost
 	RowCount int
+
+	// ClusterResourceID is the exact configured AKS resource ID
+	// (AKSIdentity.ResourceID) used to identify Lines[i].Attributed by
+	// exact match.
+	ClusterResourceID string
+	// AttributedTotal is the sum of Lines with Attributed == true.
+	// UnattributedTotal is Total - AttributedTotal: every other billed
+	// resource in the queried resource groups, whose cluster ownership has
+	// not been independently verified. AttributedTotal + UnattributedTotal
+	// reconciles to Total by construction — UnattributedTotal is literally
+	// defined as that difference — including when either total is negative
+	// (a credit or adjustment line). This is not a claim that float64
+	// arithmetic is exact: compare with a small tolerance, never ==.
+	AttributedTotal   float64
+	UnattributedTotal float64
 }
 
 // Provider is the provider-neutral billing contract. Azure is the first
@@ -119,6 +141,15 @@ type Snapshot struct {
 	Coverage    string
 	Disclosures []string
 	RowCount    int
+
+	// Lines, ClusterResourceID, AttributedTotal, and UnattributedTotal
+	// carry the same resource-level attribution evidence as Result — see
+	// those fields there. They are cached here so a page render can show
+	// them without triggering a network call.
+	Lines             []ResourceCost
+	ClusterResourceID string
+	AttributedTotal   float64
+	UnattributedTotal float64
 
 	// RetrievedAt is when the last SUCCESSFUL refresh completed. It never
 	// advances on a failed attempt — it is the "last successful refresh"

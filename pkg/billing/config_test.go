@@ -7,7 +7,7 @@ import (
 	"time"
 )
 
-const validAKSResourceID = "/subscriptions/11111111-1111-1111-1111-111111111111/resourceGroups/rxr-rxp-e2e-01-cus-rg/providers/Microsoft.ContainerService/managedClusters/rxr-rxp-e2e-01-cus-aks"
+const validAKSResourceID = "/subscriptions/11111111-1111-1111-1111-111111111111/resourceGroups/example-aks-rg/providers/Microsoft.ContainerService/managedClusters/example-aks"
 const validSubscriptionID = "11111111-1111-1111-1111-111111111111"
 
 func validClusterConfig() ClusterConfig {
@@ -28,10 +28,10 @@ func TestParseAKSResourceID(t *testing.T) {
 	if identity.SubscriptionID != validSubscriptionID {
 		t.Errorf("SubscriptionID = %q", identity.SubscriptionID)
 	}
-	if identity.ResourceGroup != "rxr-rxp-e2e-01-cus-rg" {
+	if identity.ResourceGroup != "example-aks-rg" {
 		t.Errorf("ResourceGroup = %q", identity.ResourceGroup)
 	}
-	if identity.ClusterName != "rxr-rxp-e2e-01-cus-aks" {
+	if identity.ClusterName != "example-aks" {
 		t.Errorf("ClusterName = %q", identity.ClusterName)
 	}
 }
@@ -80,7 +80,7 @@ func TestClusterConfigValidateRejectsSubscriptionMismatch(t *testing.T) {
 
 func TestClusterConfigValidateRejectsNodeResourceGroupEqualsClusterResourceGroup(t *testing.T) {
 	cfg := validClusterConfig()
-	cfg.NodeResourceGroup = "rxr-rxp-e2e-01-cus-rg"
+	cfg.NodeResourceGroup = "example-aks-rg"
 	if err := cfg.Validate(); err == nil {
 		t.Fatal("expected node resource group collision error, got nil")
 	}

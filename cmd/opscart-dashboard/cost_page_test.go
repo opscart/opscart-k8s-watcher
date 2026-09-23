@@ -19,7 +19,7 @@ func TestAWSCostPageIsProviderHonest(t *testing.T) {
 		NodePoolCosts:   []models.NodePoolCost{{Name: "spot", Provider: "aws", Region: "us-east-1", VMSize: "m7i.large", NodeCount: 1, Priority: "SPOT"}},
 		NamespaceCosts:  []models.NamespaceCostInfo{{Name: "default", PodCount: 1}},
 	}}
-	html := renderCostPage(scan, "named/context", []string{"named/context"}, billing.Snapshot{}, false)
+	html := renderCostPage(scan, "named/context", []string{"named/context"}, billing.Snapshot{}, false, 0, 0)
 	for _, forbidden := range []string{"Azure retail", "Azure RI savings</th>", "grid-template-columns:1fr 340px", `class="wr-mini-card"`, "Critical Issues", "Security Score", "Waste Resources"} {
 		if strings.Contains(html, forbidden) {
 			t.Errorf("AWS cost page contains %q", forbidden)
@@ -42,7 +42,7 @@ func TestCostPageNeedsOnlyCostReportData(t *testing.T) {
 		NamespaceCosts:   []models.NamespaceCostInfo{{Name: "payments", PodCount: 2, WeightedShare: 0.25, EstimatedCost: models.CostRange{Low: 25, Best: 25, High: 25}}},
 		TotalMonthlyCost: 100,
 	}}
-	html := renderCostPage(scan, "", []string{""}, billing.Snapshot{}, false)
+	html := renderCostPage(scan, "", []string{""}, billing.Snapshot{}, false, 0, 0)
 	if html == "" {
 		t.Fatal("cost-only report did not render")
 	}
@@ -72,7 +72,7 @@ func TestManualAzureOverrideIsProminent(t *testing.T) {
 		ProviderWarning:       "Azure pricing is enabled by manual provider override; the cluster provider was not detected as Azure.",
 		Region:                "eastus2", Currency: "USD",
 	}
-	html := renderCostPage(&clusterScan{report: report}, "", []string{""}, billing.Snapshot{}, false)
+	html := renderCostPage(&clusterScan{report: report}, "", []string{""}, billing.Snapshot{}, false, 0, 0)
 	if !strings.Contains(html, report.ProviderWarning) || !strings.Contains(html, "Manual provider override") {
 		t.Fatalf("manual override warning is not prominent")
 	}
@@ -87,7 +87,7 @@ func TestCostPageDoesNotInferCapabilitiesFromAzureName(t *testing.T) {
 		}},
 	}
 	scan := &clusterScan{report: report}
-	html := renderCostPage(scan, "", []string{""}, billing.Snapshot{}, false)
+	html := renderCostPage(scan, "", []string{""}, billing.Snapshot{}, false, 0, 0)
 	if !strings.Contains(html, "Supported capacity types</dt><dd>Not available") {
 		t.Fatal("unknown capabilities were inferred from the Azure provider name")
 	}
