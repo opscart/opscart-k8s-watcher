@@ -26,7 +26,24 @@ import (
 // and cmd/opscart-dashboard/templates/cost.html's "AKS cluster actual
 // cost" figure remains explicitly "Unavailable" until that changes.
 //
-// Every field below reproduces the captured request exactly:
+// A live run against a real subscription (see the manual diagnostic,
+// subscription_kubernetes_query_diagnostic_test.go) found: the request
+// succeeded (correct auth, endpoint, period, and response decoding all
+// work), the response declared columns Cluster, ResourceLocation, Cost,
+// Currency, and it returned zero rows — the composite "and" Cluster
+// filter matched nothing. This file now supports two filter
+// representations so that can be narrowed down without ever guessing
+// blind against the real API:
+//
+//   - subscriptionKubernetesQueryFilterModeCapturedAnd: the exact shape
+//     captured from the portal — an "and" of two separate Cluster/In
+//     expressions, one per case variant.
+//   - subscriptionKubernetesQueryFilterModeCombinedValues: a single
+//     Cluster/In dimensions expression carrying both case variants in one
+//     values array, in case the API rejects (or silently empties) a
+//     composite "and" over the same dimension.
+//
+// Every other field below still reproduces the captured request exactly:
 //   - endpoint: subscription scope (no resource group), preview API
 //     version 2023-04-01-preview — distinct from production's
 //     costManagementAPIVersion (2023-11-01)
@@ -40,9 +57,6 @@ import (
 //   - dataSet.aggregation serialized as the empty object {} — present,
 //     not omitted
 //   - dataSet.sorting by Cost, lowercase "descending"
-//   - dataSet.filter: an "and" (not "or") of two Cluster-dimension "In"
-//     expressions — the canonical (as-configured) cluster ARM resource ID
-//     and its fully lowercased form
 //   - dataSet.grouping by Cluster then ResourceLocation, in that order
 //
 // Types here deliberately duplicate rather than extend query_client.go's
@@ -67,22 +81,24 @@ type subscriptionKubernetesQueryPeriod struct {
 
 // subscriptionKubernetesQueryFilterDimension is one Cost Management
 // dimension comparison: Name is the dimension ("Cluster", per the portal
-// capture), Operator is "In", and Values holds exactly one value — either
-// the canonical cluster ARM resource ID or its fully lowercased form (see
-// subscriptionKubernetesQueryFilter).
+// capture), Operator is "In", and Values holds either one value (the
+// captured-and mode's per-expression case variant) or both case variants
+// together (the combined-values mode's single expression).
 type subscriptionKubernetesQueryFilterDimension struct {
 	Name     string   `json:"name"`
 	Operator string   `json:"operator"`
 	Values   []string `json:"values"`
 }
 
-// subscriptionKubernetesQueryFilterExpression is one leaf of the filter's
-// "and" composite.
+// subscriptionKubernetesQueryFilterExpression is one leaf of the
+// captured-and filter's "and" composite, and is also, on its own, the
+// entire filter body for combined-values mode (see
+// buildSubscriptionKubernetesQueryFilter).
 type subscriptionKubernetesQueryFilterExpression struct {
 	Dimensions subscriptionKubernetesQueryFilterDimension `json:"dimensions"`
 }
 
-// subscriptionKubernetesQueryFilter is the captured request's composite
+// subscriptionKubernetesQueryFilter is the captured-and mode's composite
 // filter: an "and" (not "or") of two Cluster-dimension expressions. The
 // captured request sends both the canonical (as-configured) cluster ARM
 // resource ID and its fully lowercased form, rather than relying on the
@@ -106,6 +122,15 @@ type subscriptionKubernetesQuerySort struct {
 	Name      string `json:"name"`
 }
 
+// subscriptionKubernetesQueryDataset's Filter is json.RawMessage rather
+// than a fixed struct type: the two filter modes (captured-and,
+// combined-values) marshal to genuinely different JSON shapes — one keyed
+// by "and", the other a single "dimensions" object — and RawMessage lets
+// buildSubscriptionKubernetesQueryFilter produce either without an
+// interface{} field forcing every reader to type-switch. A caller that
+// wants structural assertions unmarshal Filter into whichever concrete
+// type its filter mode implies (see the tests below); the raw bytes are
+// always available for literal wire-shape checks.
 type subscriptionKubernetesQueryDataset struct {
 	Granularity string `json:"granularity"`
 	// Aggregation is the empty object {} the captured request sent — not
@@ -116,7 +141,7 @@ type subscriptionKubernetesQueryDataset struct {
 	Aggregation map[string]subscriptionKubernetesQueryAggregate `json:"aggregation"`
 	Grouping    []subscriptionKubernetesQueryGrouping           `json:"grouping"`
 	Sorting     []subscriptionKubernetesQuerySort               `json:"sorting"`
-	Filter      subscriptionKubernetesQueryFilter               `json:"filter"`
+	Filter      json.RawMessage                                 `json:"filter"`
 }
 
 // subscriptionKubernetesQueryBody's Dataset field is deliberately tagged
@@ -137,12 +162,59 @@ type subscriptionKubernetesQueryBody struct {
 // second-precision "2006-01-02T15:04:05Z".
 const subscriptionKubernetesQueryTimeFormat = "2006-01-02T15:04:05.000Z"
 
+// subscriptionKubernetesQueryFilterMode selects which of the two filter
+// shapes buildSubscriptionKubernetesQuery sends. There is no default and
+// no automatic fallback from one to the other — see
+// runSubscriptionKubernetesQuery's doc comment and
+// TestSubscriptionKubernetesQuerySpikeEachFilterModeMakesOneRequestAndReportsNoDataOnZeroRows.
+type subscriptionKubernetesQueryFilterMode string
+
+const (
+	// subscriptionKubernetesQueryFilterModeCapturedAnd is the exact shape
+	// captured from the Azure Portal: dataSet.filter.and, two Cluster/In
+	// expressions.
+	subscriptionKubernetesQueryFilterModeCapturedAnd subscriptionKubernetesQueryFilterMode = "captured-and"
+	// subscriptionKubernetesQueryFilterModeCombinedValues is a single
+	// Cluster/In dimensions expression carrying both case variants in one
+	// values array — no "and"/"or" composite at all.
+	subscriptionKubernetesQueryFilterModeCombinedValues subscriptionKubernetesQueryFilterMode = "combined-values"
+)
+
+// buildSubscriptionKubernetesQueryFilter builds the dataSet.filter bytes
+// for the given mode. clusterResourceID is the canonical (as-configured)
+// AKS cluster ARM resource ID; its fully lowercased form is always the
+// second value/expression, never a separately-configured value, so the
+// two can never drift apart.
+func buildSubscriptionKubernetesQueryFilter(clusterResourceID string, filterMode subscriptionKubernetesQueryFilterMode) (json.RawMessage, error) {
+	lowercased := strings.ToLower(clusterResourceID)
+	switch filterMode {
+	case subscriptionKubernetesQueryFilterModeCapturedAnd:
+		return json.Marshal(subscriptionKubernetesQueryFilter{
+			And: []subscriptionKubernetesQueryFilterExpression{
+				{Dimensions: subscriptionKubernetesQueryFilterDimension{Name: "Cluster", Operator: "In", Values: []string{clusterResourceID}}},
+				{Dimensions: subscriptionKubernetesQueryFilterDimension{Name: "Cluster", Operator: "In", Values: []string{lowercased}}},
+			},
+		})
+	case subscriptionKubernetesQueryFilterModeCombinedValues:
+		return json.Marshal(subscriptionKubernetesQueryFilterExpression{
+			Dimensions: subscriptionKubernetesQueryFilterDimension{Name: "Cluster", Operator: "In", Values: []string{clusterResourceID, lowercased}},
+		})
+	default:
+		return nil, fmt.Errorf("unknown filter mode %q: use %q or %q", filterMode, subscriptionKubernetesQueryFilterModeCapturedAnd, subscriptionKubernetesQueryFilterModeCombinedValues)
+	}
+}
+
 // buildSubscriptionKubernetesQuery reproduces the Cost Management Query
 // API request captured from the Azure Portal's AKS Cost Analysis view for
 // a subscription scope filtered to one AKS cluster by its ARM resource
 // ID — see this file's package doc comment for the full field-by-field
-// reproduction.
-func buildSubscriptionKubernetesQuery(clusterResourceID string, start, end time.Time) subscriptionKubernetesQueryBody {
+// reproduction, and buildSubscriptionKubernetesQueryFilter for the two
+// supported filter shapes.
+func buildSubscriptionKubernetesQuery(clusterResourceID string, start, end time.Time, filterMode subscriptionKubernetesQueryFilterMode) (subscriptionKubernetesQueryBody, error) {
+	filter, err := buildSubscriptionKubernetesQueryFilter(clusterResourceID, filterMode)
+	if err != nil {
+		return subscriptionKubernetesQueryBody{}, err
+	}
 	return subscriptionKubernetesQueryBody{
 		Type:      string(CostBasisAmortizedCost),
 		Timeframe: "Custom",
@@ -161,14 +233,9 @@ func buildSubscriptionKubernetesQuery(clusterResourceID string, start, end time.
 			Sorting: []subscriptionKubernetesQuerySort{
 				{Direction: "descending", Name: "Cost"},
 			},
-			Filter: subscriptionKubernetesQueryFilter{
-				And: []subscriptionKubernetesQueryFilterExpression{
-					{Dimensions: subscriptionKubernetesQueryFilterDimension{Name: "Cluster", Operator: "In", Values: []string{clusterResourceID}}},
-					{Dimensions: subscriptionKubernetesQueryFilterDimension{Name: "Cluster", Operator: "In", Values: []string{strings.ToLower(clusterResourceID)}}},
-				},
-			},
+			Filter: filter,
 		},
-	}
+	}, nil
 }
 
 // subscriptionOnlyScope returns the Cost Management scope path for a bare
@@ -191,12 +258,13 @@ const subscriptionKubernetesQueryOperation = "subscription-scoped Kubernetes Cos
 // zero, see TestSubscriptionKubernetesQuerySpikeZeroCostRowIsValid) — a
 // caller must never treat "no rows at all" as "$0 total, status ok",
 // since that would silently hide a scoping/filter mistake (e.g. a Cluster
-// filter that matched nothing) behind an apparently valid zero total.
+// filter that matched nothing, as the live run that motivated this file's
+// two filter modes found) behind an apparently valid zero total.
 // It carries no dynamic content, so it is always safe to print verbatim.
 type subscriptionKubernetesQueryNoDataError struct{}
 
 func (e *subscriptionKubernetesQueryNoDataError) Error() string {
-	return subscriptionKubernetesQueryOperation + ": succeeded with zero rows (no data for the requested period/cluster)"
+	return subscriptionKubernetesQueryOperation + ": succeeded with zero rows (no data for the requested period/cluster/filter mode)"
 }
 
 // hasColumn reports whether the response declared a column named name
@@ -222,13 +290,18 @@ func columnNamesOf(columns []queryColumn) []string {
 	return names
 }
 
-// runSubscriptionKubernetesQuery issues exactly ONE HTTP request for the
-// subscription-scoped, Cluster-filtered query spike and returns its
-// summed total, displayed currency, the number of rows the response
-// declared, and the response's declared column names (schema only — never
-// row values). Unlike production's queryClient.query, it never retries
-// and never follows a nextLink continuation — both the synthetic tests
-// below and the manually invoked diagnostic
+// runSubscriptionKubernetesQuery issues exactly ONE HTTP request, for
+// exactly the one filterMode passed in, and returns its summed total,
+// displayed currency, the number of rows the response declared, and the
+// response's declared column names (schema only — never row values).
+// There is no fallback: if the caller wants to compare filter modes, it
+// must call this twice with two different filterMode values and two
+// separate, deliberate invocations — this function itself never tries a
+// second shape after the first, on any outcome (see
+// TestSubscriptionKubernetesQuerySpikeEachFilterModeMakesOneRequestAndReportsNoDataOnZeroRows).
+// Unlike production's queryClient.query, it also never retries and never
+// follows a nextLink continuation — both the synthetic tests below and
+// the manually invoked diagnostic
 // (subscription_kubernetes_query_diagnostic_test.go) depend on "at most
 // one request" holding here.
 //
@@ -254,8 +327,12 @@ func columnNamesOf(columns []queryColumn) []string {
 // three are already safe to print or log verbatim: never a token,
 // subscription ID, cluster resource ID, raw response body, or request
 // URL.
-func runSubscriptionKubernetesQuery(ctx context.Context, httpClient *http.Client, credential azcore.TokenCredential, endpoint, subscriptionID, clusterResourceID string, start, end time.Time) (total float64, currency string, rowCount int, columnNames []string, err error) {
-	payload, marshalErr := json.Marshal(buildSubscriptionKubernetesQuery(clusterResourceID, start, end))
+func runSubscriptionKubernetesQuery(ctx context.Context, httpClient *http.Client, credential azcore.TokenCredential, endpoint, subscriptionID, clusterResourceID string, start, end time.Time, filterMode subscriptionKubernetesQueryFilterMode) (total float64, currency string, rowCount int, columnNames []string, err error) {
+	body, buildErr := buildSubscriptionKubernetesQuery(clusterResourceID, start, end, filterMode)
+	if buildErr != nil {
+		return 0, "", 0, nil, newSafeError(subscriptionKubernetesQueryOperation, safeReasonInvalidRequest, buildErr)
+	}
+	payload, marshalErr := json.Marshal(body)
 	if marshalErr != nil {
 		return 0, "", 0, nil, newSafeError(subscriptionKubernetesQueryOperation, safeReasonInvalidRequest, marshalErr)
 	}
@@ -274,7 +351,7 @@ func runSubscriptionKubernetesQuery(ctx context.Context, httpClient *http.Client
 	req.Header.Set("Authorization", "Bearer "+token.Token)
 	req.Header.Set("Content-Type", "application/json")
 
-	resp, doErr := httpClient.Do(req) // the one and only request this call ever makes
+	resp, doErr := httpClient.Do(req) // the one and only request this call ever makes, for this one filterMode
 	if doErr != nil {
 		return 0, "", 0, nil, newSafeError(subscriptionKubernetesQueryOperation, safeReasonNetwork, doErr)
 	}
@@ -348,7 +425,10 @@ func TestBuildSubscriptionKubernetesQueryPayloadShape(t *testing.T) {
 	start := time.Date(2026, 8, 17, 0, 0, 0, 0, time.UTC)
 	end := time.Date(2026, 9, 15, 23, 59, 59, 0, time.UTC)
 
-	body := buildSubscriptionKubernetesQuery(clusterResourceID, start, end)
+	body, err := buildSubscriptionKubernetesQuery(clusterResourceID, start, end, subscriptionKubernetesQueryFilterModeCapturedAnd)
+	if err != nil {
+		t.Fatalf("buildSubscriptionKubernetesQuery: %v", err)
+	}
 
 	if body.Type != "AmortizedCost" {
 		t.Errorf("Type = %q, want AmortizedCost", body.Type)
@@ -385,18 +465,23 @@ func TestBuildSubscriptionKubernetesQueryPayloadShape(t *testing.T) {
 	if !reflect.DeepEqual(body.Dataset.Sorting, wantSorting) {
 		t.Errorf("Dataset.Sorting = %+v, want %+v (lowercase \"descending\")", body.Dataset.Sorting, wantSorting)
 	}
-	if len(body.Dataset.Filter.And) != 2 {
-		t.Fatalf("Dataset.Filter.And has %d expressions, want 2", len(body.Dataset.Filter.And))
+
+	var filter subscriptionKubernetesQueryFilter
+	if err := json.Unmarshal(body.Dataset.Filter, &filter); err != nil {
+		t.Fatalf("unmarshal Dataset.Filter as the captured-and shape: %v", err)
+	}
+	if len(filter.And) != 2 {
+		t.Fatalf("Dataset.Filter.And has %d expressions, want 2", len(filter.And))
 	}
 	wantFirst := subscriptionKubernetesQueryFilterDimension{Name: "Cluster", Operator: "In", Values: []string{clusterResourceID}}
-	if !reflect.DeepEqual(body.Dataset.Filter.And[0].Dimensions, wantFirst) {
-		t.Errorf("Dataset.Filter.And[0].Dimensions = %+v, want %+v (canonical ARM ID)", body.Dataset.Filter.And[0].Dimensions, wantFirst)
+	if !reflect.DeepEqual(filter.And[0].Dimensions, wantFirst) {
+		t.Errorf("Dataset.Filter.And[0].Dimensions = %+v, want %+v (canonical ARM ID)", filter.And[0].Dimensions, wantFirst)
 	}
 	wantSecond := subscriptionKubernetesQueryFilterDimension{Name: "Cluster", Operator: "In", Values: []string{lowercased}}
-	if !reflect.DeepEqual(body.Dataset.Filter.And[1].Dimensions, wantSecond) {
-		t.Errorf("Dataset.Filter.And[1].Dimensions = %+v, want %+v (fully lowercased form)", body.Dataset.Filter.And[1].Dimensions, wantSecond)
+	if !reflect.DeepEqual(filter.And[1].Dimensions, wantSecond) {
+		t.Errorf("Dataset.Filter.And[1].Dimensions = %+v, want %+v (fully lowercased form)", filter.And[1].Dimensions, wantSecond)
 	}
-	if body.Dataset.Filter.And[0].Dimensions.Values[0] == body.Dataset.Filter.And[1].Dimensions.Values[0] {
+	if filter.And[0].Dimensions.Values[0] == filter.And[1].Dimensions.Values[0] {
 		t.Error("both filter expressions carry the same value — the fixture cluster ID must contain letters to actually differ when lowercased")
 	}
 
@@ -432,6 +517,47 @@ func TestBuildSubscriptionKubernetesQueryPayloadShape(t *testing.T) {
 	}
 	if strings.Contains(wireBody, `"aggregation":null`) {
 		t.Error("aggregation must never marshal as null")
+	}
+}
+
+// TestBuildSubscriptionKubernetesQueryCombinedValuesModeMarshalsSingleDimensionsFilter
+// proves combined-values mode sends one Cluster/In dimensions expression
+// carrying both case variants in a single values array — not wrapped in
+// an "and" or "or" composite at all.
+func TestBuildSubscriptionKubernetesQueryCombinedValuesModeMarshalsSingleDimensionsFilter(t *testing.T) {
+	const clusterResourceID = "/subscriptions/11111111-1111-1111-1111-111111111111/resourceGroups/My-RG/providers/Microsoft.ContainerService/managedClusters/My-AKS-Cluster"
+	lowercased := strings.ToLower(clusterResourceID)
+	start := time.Date(2026, 8, 17, 0, 0, 0, 0, time.UTC)
+	end := time.Date(2026, 9, 15, 23, 59, 59, 0, time.UTC)
+
+	body, err := buildSubscriptionKubernetesQuery(clusterResourceID, start, end, subscriptionKubernetesQueryFilterModeCombinedValues)
+	if err != nil {
+		t.Fatalf("buildSubscriptionKubernetesQuery: %v", err)
+	}
+
+	var expr subscriptionKubernetesQueryFilterExpression
+	if err := json.Unmarshal(body.Dataset.Filter, &expr); err != nil {
+		t.Fatalf("unmarshal Dataset.Filter as a single dimensions expression: %v", err)
+	}
+	wantDims := subscriptionKubernetesQueryFilterDimension{Name: "Cluster", Operator: "In", Values: []string{clusterResourceID, lowercased}}
+	if !reflect.DeepEqual(expr.Dimensions, wantDims) {
+		t.Errorf("Dataset.Filter dimensions = %+v, want %+v (one expression, both values)", expr.Dimensions, wantDims)
+	}
+
+	wireFilter := string(body.Dataset.Filter)
+	if strings.Contains(wireFilter, `"and":`) || strings.Contains(wireFilter, `"or":`) {
+		t.Errorf("combined-values filter must not be wrapped in and/or; got %s", wireFilter)
+	}
+	if !strings.Contains(wireFilter, `"values":["`+clusterResourceID+`","`+lowercased+`"]`) {
+		t.Errorf("combined-values filter must carry both values in one values array; got %s", wireFilter)
+	}
+
+	raw, err := json.Marshal(body)
+	if err != nil {
+		t.Fatalf("json.Marshal: %v", err)
+	}
+	if !strings.Contains(string(raw), `"dataSet":`) {
+		t.Error("marshaled body missing the \"dataSet\" key — filter mode must not affect any other field")
 	}
 }
 
@@ -474,7 +600,7 @@ func TestSubscriptionKubernetesQuerySpikeAgainstSyntheticServer(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 
-	total, currency, rowCount, columnNames, err := runSubscriptionKubernetesQuery(ctx, newARMHTTPClient(), cred, server.URL, subscriptionID, clusterResourceID, start, end)
+	total, currency, rowCount, columnNames, err := runSubscriptionKubernetesQuery(ctx, newARMHTTPClient(), cred, server.URL, subscriptionID, clusterResourceID, start, end, subscriptionKubernetesQueryFilterModeCapturedAnd)
 	if err != nil {
 		t.Fatalf("runSubscriptionKubernetesQuery: %v", err)
 	}
@@ -495,8 +621,12 @@ func TestSubscriptionKubernetesQuerySpikeAgainstSyntheticServer(t *testing.T) {
 	if capturedBody.Type != "AmortizedCost" || capturedBody.Provider != "Microsoft.ContainerService" {
 		t.Errorf("Type/Provider (as actually sent over HTTP) = %q/%q, want AmortizedCost/Microsoft.ContainerService", capturedBody.Type, capturedBody.Provider)
 	}
-	if len(capturedBody.Dataset.Filter.And) != 2 {
-		t.Errorf("Filter.And (as actually sent over HTTP) has %d expressions, want 2", len(capturedBody.Dataset.Filter.And))
+	var capturedFilter subscriptionKubernetesQueryFilter
+	if err := json.Unmarshal(capturedBody.Dataset.Filter, &capturedFilter); err != nil {
+		t.Fatalf("unmarshal captured Dataset.Filter: %v", err)
+	}
+	if len(capturedFilter.And) != 2 {
+		t.Errorf("Filter.And (as actually sent over HTTP) has %d expressions, want 2", len(capturedFilter.And))
 	}
 
 	// CostUSD preferred and summed across both rows: 1100 + 220.
@@ -537,7 +667,7 @@ func TestSubscriptionKubernetesQuerySpikeFallsBackToCostAndCurrencyWithoutCostUS
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 
-	total, currency, rowCount, _, err := runSubscriptionKubernetesQuery(ctx, newARMHTTPClient(), cred, server.URL, "11111111-1111-1111-1111-111111111111", clusterResourceID, time.Now(), time.Now())
+	total, currency, rowCount, _, err := runSubscriptionKubernetesQuery(ctx, newARMHTTPClient(), cred, server.URL, "11111111-1111-1111-1111-111111111111", clusterResourceID, time.Now(), time.Now(), subscriptionKubernetesQueryFilterModeCapturedAnd)
 	if err != nil {
 		t.Fatalf("runSubscriptionKubernetesQuery: %v", err)
 	}
@@ -564,52 +694,16 @@ func TestSubscriptionKubernetesQuerySpikeRejectsMixedCurrenciesWithoutCostUSD(t 
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 
-	_, _, _, _, err := runSubscriptionKubernetesQuery(ctx, newARMHTTPClient(), cred, server.URL, "11111111-1111-1111-1111-111111111111", "cluster-resource-id", time.Now(), time.Now())
+	_, _, _, _, err := runSubscriptionKubernetesQuery(ctx, newARMHTTPClient(), cred, server.URL, "11111111-1111-1111-1111-111111111111", "cluster-resource-id", time.Now(), time.Now(), subscriptionKubernetesQueryFilterModeCapturedAnd)
 	if err == nil {
 		t.Fatal("expected an error for mixed currencies with no CostUSD column, got nil")
-	}
-}
-
-// TestSubscriptionKubernetesQuerySpikeZeroRowsReturnsNoDataNotZeroSuccess
-// proves a successful (HTTP 200) response containing zero rows returns
-// *subscriptionKubernetesQueryNoDataError rather than a "$0 total, status
-// ok" result — the two must never be confused (see
-// TestSubscriptionKubernetesQuerySpikeZeroCostRowIsValid for the real
-// zero-cost case, which must still succeed).
-func TestSubscriptionKubernetesQuerySpikeZeroRowsReturnsNoDataNotZeroSuccess(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		writeQueryResponse(w, []queryColumn{{Name: "Cost"}, {Name: "Currency"}}, nil, "")
-	}))
-	defer server.Close()
-
-	cred := &fakeCredential{token: "t"}
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-	defer cancel()
-
-	total, currency, rowCount, columnNames, err := runSubscriptionKubernetesQuery(ctx, newARMHTTPClient(), cred, server.URL, "11111111-1111-1111-1111-111111111111", "cluster-resource-id", time.Now(), time.Now())
-	if err == nil {
-		t.Fatal("expected a no-data error for a 200 response with zero rows, got nil")
-	}
-	var noData *subscriptionKubernetesQueryNoDataError
-	if !errors.As(err, &noData) {
-		t.Fatalf("error = %v (%T), want *subscriptionKubernetesQueryNoDataError", err, err)
-	}
-	if total != 0 || currency != "" {
-		t.Errorf("total/currency = %v/%q, want 0/\"\" alongside a no-data error", total, currency)
-	}
-	if rowCount != 0 {
-		t.Errorf("rowCount = %d, want 0", rowCount)
-	}
-	wantColumns := []string{"Cost", "Currency"}
-	if !reflect.DeepEqual(columnNames, wantColumns) {
-		t.Errorf("columnNames = %v, want %v (schema is still known even with zero rows)", columnNames, wantColumns)
 	}
 }
 
 // TestSubscriptionKubernetesQuerySpikeZeroCostRowIsValid proves a
 // legitimate row whose Cost is exactly 0 (with a valid currency) is a
 // normal, successful result — it must never be confused with "no rows
-// returned" (TestSubscriptionKubernetesQuerySpikeZeroRowsReturnsNoDataNotZeroSuccess).
+// returned".
 func TestSubscriptionKubernetesQuerySpikeZeroCostRowIsValid(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		writeQueryResponse(w, []queryColumn{{Name: "Cost"}, {Name: "Currency"}}, [][]any{{0.0, "USD"}}, "")
@@ -620,7 +714,7 @@ func TestSubscriptionKubernetesQuerySpikeZeroCostRowIsValid(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 
-	total, currency, rowCount, _, err := runSubscriptionKubernetesQuery(ctx, newARMHTTPClient(), cred, server.URL, "11111111-1111-1111-1111-111111111111", "cluster-resource-id", time.Now(), time.Now())
+	total, currency, rowCount, _, err := runSubscriptionKubernetesQuery(ctx, newARMHTTPClient(), cred, server.URL, "11111111-1111-1111-1111-111111111111", "cluster-resource-id", time.Now(), time.Now(), subscriptionKubernetesQueryFilterModeCapturedAnd)
 	if err != nil {
 		t.Fatalf("runSubscriptionKubernetesQuery: %v", err)
 	}
@@ -632,6 +726,54 @@ func TestSubscriptionKubernetesQuerySpikeZeroCostRowIsValid(t *testing.T) {
 	}
 	if rowCount != 1 {
 		t.Errorf("rowCount = %d, want 1", rowCount)
+	}
+}
+
+// TestSubscriptionKubernetesQuerySpikeEachFilterModeMakesOneRequestAndReportsNoDataOnZeroRows
+// mirrors the live-Azure finding that motivated combined-values mode:
+// columns Cluster, ResourceLocation, Cost, Currency, zero rows. For each
+// filter mode it proves exactly one request is made and a no-data error
+// is returned — never a $0 success, and never an automatic second
+// request trying the other mode.
+func TestSubscriptionKubernetesQuerySpikeEachFilterModeMakesOneRequestAndReportsNoDataOnZeroRows(t *testing.T) {
+	for _, mode := range []subscriptionKubernetesQueryFilterMode{
+		subscriptionKubernetesQueryFilterModeCapturedAnd,
+		subscriptionKubernetesQueryFilterModeCombinedValues,
+	} {
+		t.Run(string(mode), func(t *testing.T) {
+			requestCount := 0
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				requestCount++
+				writeQueryResponse(w,
+					[]queryColumn{{Name: "Cluster"}, {Name: "ResourceLocation"}, {Name: "Cost"}, {Name: "Currency"}},
+					nil, "")
+			}))
+			defer server.Close()
+
+			cred := &fakeCredential{token: "t"}
+			ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+			defer cancel()
+
+			total, currency, rowCount, columnNames, err := runSubscriptionKubernetesQuery(ctx, newARMHTTPClient(), cred, server.URL, "11111111-1111-1111-1111-111111111111", "cluster-resource-id", time.Now(), time.Now(), mode)
+
+			if requestCount != 1 {
+				t.Errorf("mode %s: server received %d requests, want exactly 1 (no automatic fallback to the other mode)", mode, requestCount)
+			}
+			var noData *subscriptionKubernetesQueryNoDataError
+			if !errors.As(err, &noData) {
+				t.Fatalf("mode %s: error = %v (%T), want *subscriptionKubernetesQueryNoDataError", mode, err, err)
+			}
+			if total != 0 || currency != "" {
+				t.Errorf("mode %s: total/currency = %v/%q, want 0/\"\" alongside a no-data error", mode, total, currency)
+			}
+			if rowCount != 0 {
+				t.Errorf("mode %s: rowCount = %d, want 0", mode, rowCount)
+			}
+			wantColumns := []string{"Cluster", "ResourceLocation", "Cost", "Currency"}
+			if !reflect.DeepEqual(columnNames, wantColumns) {
+				t.Errorf("mode %s: columnNames = %v, want %v (schema is still known even with zero rows)", mode, columnNames, wantColumns)
+			}
+		})
 	}
 }
 
@@ -653,7 +795,7 @@ func TestSubscriptionKubernetesQuerySpikeMakesExactlyOneRequestOnFailure(t *test
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 
-	_, _, _, _, err := runSubscriptionKubernetesQuery(ctx, newARMHTTPClient(), cred, server.URL, "11111111-1111-1111-1111-111111111111", "cluster-resource-id", time.Now(), time.Now())
+	_, _, _, _, err := runSubscriptionKubernetesQuery(ctx, newARMHTTPClient(), cred, server.URL, "11111111-1111-1111-1111-111111111111", "cluster-resource-id", time.Now(), time.Now(), subscriptionKubernetesQueryFilterModeCapturedAnd)
 	if err == nil {
 		t.Fatal("expected an error for the 429 response, got nil")
 	}
@@ -683,7 +825,7 @@ func TestSubscriptionKubernetesQuerySpikeRejectsRedirect(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 
-	_, _, _, _, err := runSubscriptionKubernetesQuery(ctx, newARMHTTPClient(), cred, server.URL, "11111111-1111-1111-1111-111111111111", "cluster-resource-id", time.Now(), time.Now())
+	_, _, _, _, err := runSubscriptionKubernetesQuery(ctx, newARMHTTPClient(), cred, server.URL, "11111111-1111-1111-1111-111111111111", "cluster-resource-id", time.Now(), time.Now(), subscriptionKubernetesQueryFilterModeCapturedAnd)
 	if err == nil {
 		t.Fatal("expected an error when the server issues a redirect, got nil")
 	}

@@ -100,13 +100,62 @@ func TestResolveSubscriptionKubernetesSpikePeriodInclusiveUTCConversion(t *testi
 	}
 }
 
+// parseSubscriptionKubernetesQueryFilterMode validates the manual
+// diagnostic's required OPSCART_BILLING_SPIKE_FILTER_MODE value against
+// exactly the two supported modes — case-sensitive, no default, no
+// inference from any other input. Like resolveSubscriptionKubernetesSpikePeriod,
+// this is a pure function (no credential, no HTTP client, no import of
+// azcore or net/http), so a missing or unknown mode is always rejected
+// before TestManualSubscriptionKubernetesQueryDiagnostic can acquire a
+// credential or make a request — see
+// TestParseSubscriptionKubernetesQueryFilterModeRejectsMissingOrUnknown.
+func parseSubscriptionKubernetesQueryFilterMode(value string) (subscriptionKubernetesQueryFilterMode, error) {
+	switch subscriptionKubernetesQueryFilterMode(value) {
+	case subscriptionKubernetesQueryFilterModeCapturedAnd, subscriptionKubernetesQueryFilterModeCombinedValues:
+		return subscriptionKubernetesQueryFilterMode(value), nil
+	default:
+		return "", fmt.Errorf("OPSCART_BILLING_SPIKE_FILTER_MODE %q: use %q or %q", value, subscriptionKubernetesQueryFilterModeCapturedAnd, subscriptionKubernetesQueryFilterModeCombinedValues)
+	}
+}
+
+func TestParseSubscriptionKubernetesQueryFilterModeRejectsMissingOrUnknown(t *testing.T) {
+	for _, value := range []string{"", "unknown", "captured-or", "CAPTURED-AND", "combinedvalues", " "} {
+		if _, err := parseSubscriptionKubernetesQueryFilterMode(value); err == nil {
+			t.Errorf("parseSubscriptionKubernetesQueryFilterMode(%q): expected error, got nil", value)
+		}
+	}
+}
+
+func TestParseSubscriptionKubernetesQueryFilterModeAcceptsExactValues(t *testing.T) {
+	for _, value := range []subscriptionKubernetesQueryFilterMode{
+		subscriptionKubernetesQueryFilterModeCapturedAnd,
+		subscriptionKubernetesQueryFilterModeCombinedValues,
+	} {
+		got, err := parseSubscriptionKubernetesQueryFilterMode(string(value))
+		if err != nil {
+			t.Errorf("parseSubscriptionKubernetesQueryFilterMode(%q): %v", value, err)
+		}
+		if got != value {
+			t.Errorf("parseSubscriptionKubernetesQueryFilterMode(%q) = %q, want %q", value, got, value)
+		}
+	}
+}
+
 // TestManualSubscriptionKubernetesQueryDiagnostic is a manually invoked,
 // opt-in diagnostic — it is NEVER run by `go test ./...` (including CI)
 // and is skipped unless explicitly enabled. It exists to empirically check
-// whether the request shape this package's synthetic spike tests validate
-// (subscription_kubernetes_query_spike_test.go) is actually accepted by
-// the real Azure Cost Management API, using a real subscription an
-// operator has access to.
+// whether the request shapes this package's synthetic spike tests
+// validate (subscription_kubernetes_query_spike_test.go) are actually
+// accepted — and matched by — the real Azure Cost Management API, using a
+// real subscription an operator has access to.
+//
+// A prior live run found: authentication, authorization, endpoint,
+// period, and response decoding all work, but the captured-and Cluster
+// filter matched zero rows. This diagnostic requires an explicit
+// OPSCART_BILLING_SPIKE_FILTER_MODE so an operator can compare that exact
+// captured shape against the combined-values alternative, one deliberate
+// invocation at a time — see runSubscriptionKubernetesQuery's doc comment
+// for why there is no automatic fallback between them.
 //
 // Run it explicitly:
 //
@@ -115,7 +164,11 @@ func TestResolveSubscriptionKubernetesSpikePeriodInclusiveUTCConversion(t *testi
 //	OPSCART_BILLING_SPIKE_CLUSTER_RESOURCE_ID=<aks-cluster-arm-resource-id> \
 //	OPSCART_BILLING_SPIKE_FROM=<YYYY-MM-DD> \
 //	OPSCART_BILLING_SPIKE_TO=<YYYY-MM-DD> \
+//	OPSCART_BILLING_SPIKE_FILTER_MODE=captured-and \
 //	go test ./pkg/billing/ -run TestManualSubscriptionKubernetesQueryDiagnostic -v
+//
+// (Repeat with OPSCART_BILLING_SPIKE_FILTER_MODE=combined-values as a
+// second, separate invocation to compare — never both in one run.)
 //
 // Safety properties (all deliberate, none configurable):
 //   - Credential: exactly AuthModeAzureCLI via the existing, already-
@@ -124,19 +177,26 @@ func TestResolveSubscriptionKubernetesSpikePeriodInclusiveUTCConversion(t *testi
 //   - Permissions: requests exactly armTokenScope, the same ARM scope
 //     production billing already uses — nothing broader.
 //   - Period: OPSCART_BILLING_SPIKE_FROM/_TO are required, strict
-//     YYYY-MM-DD, and validated by resolveSubscriptionKubernetesSpikePeriod
-//     — missing, invalid, or reversed values are rejected before
-//     NewCredential is ever called, so a bad period can never even reach
-//     the point of acquiring a credential, let alone making a request.
-//   - Requests: at most one HTTP call (runSubscriptionKubernetesQuery
-//     never retries or follows pagination — see
-//     TestSubscriptionKubernetesQuerySpikeMakesExactlyOneRequestOnFailure).
+//     YYYY-MM-DD, and validated by resolveSubscriptionKubernetesSpikePeriod.
+//   - Filter mode: OPSCART_BILLING_SPIKE_FILTER_MODE is required and must
+//     be exactly "captured-and" or "combined-values", validated by
+//     parseSubscriptionKubernetesQueryFilterMode.
+//   - All of the above — subscription ID, cluster resource ID, period,
+//     and filter mode — are validated before NewCredential is ever
+//     called, so bad input can never reach the point of acquiring a
+//     credential, let alone making a request.
+//   - Requests: at most one HTTP call, for exactly the one filter mode
+//     requested (runSubscriptionKubernetesQuery never retries, never
+//     follows pagination, and never tries the other filter mode — see
+//     TestSubscriptionKubernetesQuerySpikeMakesExactlyOneRequestOnFailure
+//     and
+//     TestSubscriptionKubernetesQuerySpikeEachFilterModeMakesOneRequestAndReportsNoDataOnZeroRows).
 //   - Timeout: bounded to 15s via ctx, tighter than newARMHTTPClient's own
 //     30s client-level timeout.
 //   - Redirects: disabled (newARMHTTPClient, shared with production).
-//   - Output: prints only status, total, currency, period, row count, and
-//     the response's column names (schema, never values) — see
-//     AzureAPIError/SafeError/subscriptionKubernetesQueryNoDataError,
+//   - Output: prints only status, total, currency, period, filter mode,
+//     row count, and the response's column names (schema, never values)
+//     — see AzureAPIError/SafeError/subscriptionKubernetesQueryNoDataError,
 //     which every failure from runSubscriptionKubernetesQuery already
 //     routes through. Never a token, Authorization header, subscription
 //     ID, cluster resource ID, request URL, or response rows/body.
@@ -155,9 +215,12 @@ func TestManualSubscriptionKubernetesQueryDiagnostic(t *testing.T) {
 		t.Fatal("OPSCART_BILLING_SPIKE_SUBSCRIPTION_ID and OPSCART_BILLING_SPIKE_CLUSTER_RESOURCE_ID are both required")
 	}
 
-	// Period validation happens before any credential is acquired or
-	// request made — see resolveSubscriptionKubernetesSpikePeriod's doc
-	// comment.
+	// Every input below is validated before NewCredential is ever called.
+	filterMode, modeErr := parseSubscriptionKubernetesQueryFilterMode(os.Getenv("OPSCART_BILLING_SPIKE_FILTER_MODE"))
+	if modeErr != nil {
+		t.Fatalf("invalid filter mode: %v", modeErr)
+	}
+
 	fromValue := os.Getenv("OPSCART_BILLING_SPIKE_FROM")
 	toValue := os.Getenv("OPSCART_BILLING_SPIKE_TO")
 	start, end, periodErr := resolveSubscriptionKubernetesSpikePeriod(fromValue, toValue)
@@ -174,7 +237,7 @@ func TestManualSubscriptionKubernetesQueryDiagnostic(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 
-	total, currency, rowCount, columnNames, queryErr := runSubscriptionKubernetesQuery(ctx, newARMHTTPClient(), credential, defaultManagementEndpoint, subscriptionID, clusterResourceID, start, end)
+	total, currency, rowCount, columnNames, queryErr := runSubscriptionKubernetesQuery(ctx, newARMHTTPClient(), credential, defaultManagementEndpoint, subscriptionID, clusterResourceID, start, end, filterMode)
 
 	// queryErr, when non-nil, is always an *AzureAPIError, *SafeError, or
 	// *subscriptionKubernetesQueryNoDataError — all three are already
@@ -182,13 +245,13 @@ func TestManualSubscriptionKubernetesQueryDiagnostic(t *testing.T) {
 	// label, fixed status classification, Azure's own request ID where
 	// applicable. Never the raw response, subscription ID, cluster
 	// resource ID, or request URL. columnNames is schema metadata (column
-	// names only, never row values) and is safe to print for the same
-	// reason.
+	// names only, never row values), and filterMode is one of two fixed
+	// literal strings — both are safe to print for the same reason.
 	if queryErr != nil {
-		fmt.Printf("status: error: %s\nperiod: %s\nrow count: %d\nresponse columns: %s\n",
-			queryErr.Error(), periodLabel, rowCount, strings.Join(columnNames, ","))
+		fmt.Printf("status: error: %s\nperiod: %s\nfilter mode: %s\nrow count: %d\nresponse columns: %s\n",
+			queryErr.Error(), periodLabel, filterMode, rowCount, strings.Join(columnNames, ","))
 		t.Fatalf("diagnostic query failed: %v", queryErr)
 	}
-	fmt.Printf("status: ok\ntotal: %.2f\ncurrency: %s\nperiod: %s\nrow count: %d\nresponse columns: %s\n",
-		total, currency, periodLabel, rowCount, strings.Join(columnNames, ","))
+	fmt.Printf("status: ok\ntotal: %.2f\ncurrency: %s\nperiod: %s\nfilter mode: %s\nrow count: %d\nresponse columns: %s\n",
+		total, currency, periodLabel, filterMode, rowCount, strings.Join(columnNames, ","))
 }
