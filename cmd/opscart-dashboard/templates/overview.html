@@ -126,7 +126,7 @@
 .posture-hdr{display:flex;justify-content:space-between;align-items:flex-start;gap:1rem;margin-bottom:1.05rem}
 .posture-title{font-size:1rem;font-weight:700}
 .posture-sub{font-size:.82rem;color:#a8b3c7;margin-top:.2rem;line-height:1.45}
-.posture-grid{display:grid;grid-template-columns:repeat(6,1fr);gap:.85rem}
+.posture-grid{display:grid;grid-template-columns:repeat(5,1fr);gap:.85rem}
 @media(max-width:1300px){.posture-grid{grid-template-columns:repeat(3,1fr)}}
 @media(max-width:760px){.posture-grid{grid-template-columns:1fr}}
 .posture-card{position:relative;display:flex;flex-direction:column;text-decoration:none;color:inherit;background:rgba(15,23,42,.34);border:1px solid var(--border);border-radius:var(--radius-sm);padding:1.05rem;min-height:150px;transition:border-color .15s,background .15s;overflow:hidden}
@@ -313,19 +313,6 @@
       <div class="posture-value{{if lt .SecurityScore 50}} bad{{else if lt .SecurityScore 80}} warn{{else}} good{{end}}">{{.SecurityScore}}/100</div>
       <div class="posture-copy">{{.PrivilegedContainers}} privileged container(s)</div>
       <div class="posture-state">Review risk →</div>
-    </a>
-    <a class="posture-card posture-cost" href="{{.CostsHref}}">
-      <div class="posture-icon"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75"><line x1="12" y1="2" x2="12" y2="22"/><path d="M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"/></svg></div>
-      <div class="posture-name">Cost</div>
-      {{if .CostAvailable}}
-      <div class="posture-value">${{money .MonthlyCost}}/mo</div>
-      <div class="posture-copy">Current monthly estimate from available provider/list pricing{{if .CostCoverage}} · {{.CostCoverage}}{{end}}</div>
-      <div class="posture-state">View cost evidence →</div>
-      {{else}}
-      <div class="posture-value unavailable">Unavailable</div>
-      <div class="posture-copy">{{if .CostCoverage}}{{.CostCoverage}}{{else}}No exact provider price is available{{end}}</div>
-      <div class="posture-state">Review pricing evidence →</div>
-      {{end}}
     </a>
     <a class="posture-card posture-waste" href="{{.WasteHref}}">
       <div class="posture-icon"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14H6L5 6"/><path d="M10 11v6M14 11v6"/><path d="M9 6V4h6v2"/></svg></div>

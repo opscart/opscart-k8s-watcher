@@ -200,6 +200,10 @@ func setLastViewedCursor(w http.ResponseWriter, at time.Time) {
 }
 
 func (srv *server) handleOverviewPage(w http.ResponseWriter, r *http.Request) {
+	if r.URL.Path != "/" {
+		http.NotFound(w, r)
+		return
+	}
 	ctx := srv.activeCtx(r)
 	state := srv.getState(ctx)
 
@@ -257,7 +261,6 @@ func (srv *server) newMux() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", srv.handleOverviewPage)
 	mux.Handle("/static/", http.FileServer(http.FS(staticFS)))
-	mux.HandleFunc("/costs", srv.handleDashboard)
 	mux.HandleFunc("/refresh", srv.handleRefresh)
 	mux.HandleFunc("/api/report", srv.handleReportJSON)
 	mux.HandleFunc("/api/overview", srv.handleOverview)

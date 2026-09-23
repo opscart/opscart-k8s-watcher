@@ -669,7 +669,6 @@ func TestOverviewTemplate_RendersFullyPopulatedData(t *testing.T) {
 		"Nodes",
 		"Namespaces",
 		"Security",
-		"Cost",
 		"Waste &amp; Drift",
 		"Node Optimization",
 		"In development",
@@ -720,7 +719,6 @@ func TestOverviewTemplate_CompactPostureLinksPreserveCluster(t *testing.T) {
 		{data.InfraHref, "posture-nodes"},
 		{data.NsHref, "posture-namespaces"},
 		{data.SecurityHref, "posture-security"},
-		{data.CostsHref, "posture-cost"},
 		{data.WasteHref, "posture-waste"},
 	} {
 		if tc.href == "" {
@@ -733,45 +731,12 @@ func TestOverviewTemplate_CompactPostureLinksPreserveCluster(t *testing.T) {
 			t.Errorf("posture link did not preserve active cluster: %q", tc.href)
 		}
 	}
+	if strings.Contains(out, `class="posture-card posture-cost"`) {
+		t.Errorf("overview rendered disabled Cost posture card")
+	}
 	if !strings.Contains(out, `class="posture-card posture-card-muted posture-optimization node-optimization-card"`) {
 		t.Errorf("expected non-actionable Node Optimization status card")
 	}
-}
-
-func TestOverviewTemplate_CostRequiresPricingAvailability(t *testing.T) {
-	t.Run("unavailable pricing never falls back to zero", func(t *testing.T) {
-		data := fullyPopulatedOverviewData()
-		data.MonthlyCost = 0
-		data.CostAvailable = false
-		data.CostCoverage = "0 of 3 nodes priced"
-
-		var buf strings.Builder
-		if err := getOverviewTmpl().Execute(&buf, data); err != nil {
-			t.Fatalf("template execution failed: %v", err)
-		}
-		out := buf.String()
-		if !strings.Contains(out, `<div class="posture-value unavailable">Unavailable</div>`) {
-			t.Fatalf("expected unavailable cost state")
-		}
-		if strings.Contains(out, "$0/mo") {
-			t.Fatalf("unavailable pricing rendered a zero-dollar fallback")
-		}
-		if !strings.Contains(out, "0 of 3 nodes priced") {
-			t.Fatalf("expected pricing coverage evidence")
-		}
-	})
-
-	t.Run("available pricing renders reported amount", func(t *testing.T) {
-		data := fullyPopulatedOverviewData()
-
-		var buf strings.Builder
-		if err := getOverviewTmpl().Execute(&buf, data); err != nil {
-			t.Fatalf("template execution failed: %v", err)
-		}
-		if !strings.Contains(buf.String(), "$1,235/mo") {
-			t.Fatalf("available provider pricing did not render reported amount")
-		}
-	})
 }
 
 func TestBuildOverviewData_CostAvailabilityUsesPricingEvidence(t *testing.T) {
@@ -1362,7 +1327,7 @@ func TestOverviewTemplate_DoesNotDuplicateDetailedHealthGrids(t *testing.T) {
 			t.Errorf("did not expect removed Overview section %q", forbidden)
 		}
 	}
-	for _, want := range []string{"Nodes", "Namespaces", "Security", "Cost", "Waste &amp; Drift", "Node Optimization"} {
+	for _, want := range []string{"Nodes", "Namespaces", "Security", "Waste &amp; Drift", "Node Optimization"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("expected compact posture card %q", want)
 		}
@@ -1426,7 +1391,7 @@ func TestSidebarTemplate_NewTaxonomyAndClusterPropagation(t *testing.T) {
 
 	labels := []string{
 		"Operations", "Overview", "War Room", "Incidents", "Nodes", "Namespaces",
-		"Efficiency", "Cost", "Node Optimization", "Waste &amp; Drift",
+		"Efficiency", "Node Optimization", "Waste &amp; Drift",
 		"Risk", "Security", "System", "Diagnostics", "Settings",
 	}
 	last := -1
@@ -1443,7 +1408,7 @@ func TestSidebarTemplate_NewTaxonomyAndClusterPropagation(t *testing.T) {
 
 	for _, href := range []string{
 		data.DashHref, data.WrHref, data.IncidentsHref, data.InfraHref, data.NsHref,
-		data.CostsHref, data.OptHref, data.WasteHref, data.SecurityHref,
+		data.OptHref, data.WasteHref, data.SecurityHref,
 		data.DiagnosticsHref, data.SettingsHref,
 	} {
 		if !strings.Contains(out, `href="`+href+`"`) {
@@ -1452,6 +1417,9 @@ func TestSidebarTemplate_NewTaxonomyAndClusterPropagation(t *testing.T) {
 	}
 	if !strings.Contains(out, `href="/?cluster=staging-west"`) {
 		t.Errorf("sidebar missing cluster switch link")
+	}
+	if strings.Contains(out, data.CostsHref) || strings.Contains(out, "> Cost<") {
+		t.Errorf("sidebar rendered disabled Cost navigation")
 	}
 	for _, obsolete := range []string{"Cost Intelligence", "Security Posture", "> Infrastructure<"} {
 		if strings.Contains(out, obsolete) {
