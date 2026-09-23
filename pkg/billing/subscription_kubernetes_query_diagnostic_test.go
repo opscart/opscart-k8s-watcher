@@ -20,7 +20,7 @@ import (
 //
 //	OPSCART_BILLING_SPIKE_MANUAL=1 \
 //	OPSCART_BILLING_SPIKE_SUBSCRIPTION_ID=<subscription-id> \
-//	OPSCART_BILLING_SPIKE_CLUSTER_NAME=<aks-cluster-name> \
+//	OPSCART_BILLING_SPIKE_CLUSTER_RESOURCE_ID=<aks-cluster-arm-resource-id> \
 //	go test ./pkg/billing/ -run TestManualSubscriptionKubernetesQueryDiagnostic -v
 //
 // Safety properties (all deliberate, none configurable):
@@ -38,8 +38,8 @@ import (
 //   - Output: prints only the total, currency, queried period, and a
 //     fixed, safe status classification — see AzureAPIError/SafeError,
 //     which every failure from runSubscriptionKubernetesQuery already
-//     routes through. Never a token, subscription ID, resource ID, raw
-//     response body, or request URL.
+//     routes through. Never a token, subscription ID, cluster resource
+//     ID, raw response body, or request URL.
 //   - No automatic refresh: this is one manual invocation, not wired into
 //     Runtime.Start or any ticker/schedule.
 //
@@ -50,9 +50,9 @@ func TestManualSubscriptionKubernetesQueryDiagnostic(t *testing.T) {
 		t.Skip("manual diagnostic — set OPSCART_BILLING_SPIKE_MANUAL=1 (see this test's doc comment) to run it against a real subscription")
 	}
 	subscriptionID := os.Getenv("OPSCART_BILLING_SPIKE_SUBSCRIPTION_ID")
-	clusterName := os.Getenv("OPSCART_BILLING_SPIKE_CLUSTER_NAME")
-	if subscriptionID == "" || clusterName == "" {
-		t.Fatal("OPSCART_BILLING_SPIKE_SUBSCRIPTION_ID and OPSCART_BILLING_SPIKE_CLUSTER_NAME are both required")
+	clusterResourceID := os.Getenv("OPSCART_BILLING_SPIKE_CLUSTER_RESOURCE_ID")
+	if subscriptionID == "" || clusterResourceID == "" {
+		t.Fatal("OPSCART_BILLING_SPIKE_SUBSCRIPTION_ID and OPSCART_BILLING_SPIKE_CLUSTER_RESOURCE_ID are both required")
 	}
 
 	credential, err := NewCredential(AuthModeAzureCLI)
@@ -68,13 +68,13 @@ func TestManualSubscriptionKubernetesQueryDiagnostic(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 
-	total, currency, queryErr := runSubscriptionKubernetesQuery(ctx, newARMHTTPClient(), credential, defaultManagementEndpoint, subscriptionID, clusterName, start, end)
+	total, currency, queryErr := runSubscriptionKubernetesQuery(ctx, newARMHTTPClient(), credential, defaultManagementEndpoint, subscriptionID, clusterResourceID, start, end)
 
 	// queryErr, when non-nil, is always an *AzureAPIError or *SafeError —
 	// both types are already safe to print verbatim (see their doc
 	// comments in azure_error.go): fixed operation label, fixed status
 	// classification, Azure's own request ID. Never the raw response,
-	// subscription ID, resource ID, or request URL.
+	// subscription ID, cluster resource ID, or request URL.
 	if queryErr != nil {
 		fmt.Printf("status: error: %s\nperiod: %s\n", queryErr.Error(), periodLabel)
 		t.Fatalf("diagnostic query failed: %v", queryErr)
