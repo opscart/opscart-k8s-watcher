@@ -1,8 +1,12 @@
 package billing
 
 import (
+	"bytes"
 	"context"
 	"fmt"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"strings"
 	"testing"
@@ -102,19 +106,21 @@ func TestResolveSubscriptionKubernetesSpikePeriodInclusiveUTCConversion(t *testi
 
 // parseSubscriptionKubernetesQueryFilterMode validates the manual
 // diagnostic's required OPSCART_BILLING_SPIKE_FILTER_MODE value against
-// exactly the two supported modes — case-sensitive, no default, no
+// exactly the three supported modes — case-sensitive, no default, no
 // inference from any other input. Like resolveSubscriptionKubernetesSpikePeriod,
 // this is a pure function (no credential, no HTTP client, no import of
-// azcore or net/http), so a missing or unknown mode is always rejected
-// before TestManualSubscriptionKubernetesQueryDiagnostic can acquire a
-// credential or make a request — see
+// azcore or net/http — this file's own net/http/httptest import is used
+// only by this file's synthetic-server tests below), so a missing or
+// unknown mode is always rejected before
+// TestManualSubscriptionKubernetesQueryDiagnostic can acquire a credential
+// or make a request — see
 // TestParseSubscriptionKubernetesQueryFilterModeRejectsMissingOrUnknown.
 func parseSubscriptionKubernetesQueryFilterMode(value string) (subscriptionKubernetesQueryFilterMode, error) {
 	switch subscriptionKubernetesQueryFilterMode(value) {
-	case subscriptionKubernetesQueryFilterModeCapturedAnd, subscriptionKubernetesQueryFilterModeCombinedValues:
+	case subscriptionKubernetesQueryFilterModeCapturedAnd, subscriptionKubernetesQueryFilterModeCombinedValues, subscriptionKubernetesQueryFilterModeDiscovery:
 		return subscriptionKubernetesQueryFilterMode(value), nil
 	default:
-		return "", fmt.Errorf("OPSCART_BILLING_SPIKE_FILTER_MODE %q: use %q or %q", value, subscriptionKubernetesQueryFilterModeCapturedAnd, subscriptionKubernetesQueryFilterModeCombinedValues)
+		return "", fmt.Errorf("OPSCART_BILLING_SPIKE_FILTER_MODE %q: use %q, %q, or %q", value, subscriptionKubernetesQueryFilterModeCapturedAnd, subscriptionKubernetesQueryFilterModeCombinedValues, subscriptionKubernetesQueryFilterModeDiscovery)
 	}
 }
 
@@ -130,6 +136,7 @@ func TestParseSubscriptionKubernetesQueryFilterModeAcceptsExactValues(t *testing
 	for _, value := range []subscriptionKubernetesQueryFilterMode{
 		subscriptionKubernetesQueryFilterModeCapturedAnd,
 		subscriptionKubernetesQueryFilterModeCombinedValues,
+		subscriptionKubernetesQueryFilterModeDiscovery,
 	} {
 		got, err := parseSubscriptionKubernetesQueryFilterMode(string(value))
 		if err != nil {
@@ -150,12 +157,17 @@ func TestParseSubscriptionKubernetesQueryFilterModeAcceptsExactValues(t *testing
 // real subscription an operator has access to.
 //
 // A prior live run found: authentication, authorization, endpoint,
-// period, and response decoding all work, but the captured-and Cluster
-// filter matched zero rows. This diagnostic requires an explicit
-// OPSCART_BILLING_SPIKE_FILTER_MODE so an operator can compare that exact
-// captured shape against the combined-values alternative, one deliberate
-// invocation at a time — see runSubscriptionKubernetesQuery's doc comment
-// for why there is no automatic fallback between them.
+// period, and response decoding all work, but both the captured-and and
+// combined-values Cluster filters matched zero rows. This diagnostic
+// requires an explicit OPSCART_BILLING_SPIKE_FILTER_MODE so an operator
+// can compare captured-and, combined-values, and — to determine whether
+// Azure exposes Cluster dimension rows here at all, and whether their
+// shape matches the configured AKS ARM ID — discovery (which omits the
+// filter entirely and reports only safe match counts; see
+// runSubscriptionKubernetesDiscoveryQuery), one deliberate invocation at
+// a time. See runSubscriptionKubernetesQuery's and
+// runSubscriptionKubernetesDiscoveryQuery's doc comments for why there is
+// no automatic fallback between any of these modes.
 //
 // Run it explicitly:
 //
@@ -167,8 +179,9 @@ func TestParseSubscriptionKubernetesQueryFilterModeAcceptsExactValues(t *testing
 //	OPSCART_BILLING_SPIKE_FILTER_MODE=captured-and \
 //	go test ./pkg/billing/ -run TestManualSubscriptionKubernetesQueryDiagnostic -v
 //
-// (Repeat with OPSCART_BILLING_SPIKE_FILTER_MODE=combined-values as a
-// second, separate invocation to compare — never both in one run.)
+// (Repeat with OPSCART_BILLING_SPIKE_FILTER_MODE set to combined-values,
+// then discovery, as separate invocations to compare — never more than
+// one mode in a single run.)
 //
 // Safety properties (all deliberate, none configurable):
 //   - Credential: exactly AuthModeAzureCLI via the existing, already-
@@ -179,27 +192,40 @@ func TestParseSubscriptionKubernetesQueryFilterModeAcceptsExactValues(t *testing
 //   - Period: OPSCART_BILLING_SPIKE_FROM/_TO are required, strict
 //     YYYY-MM-DD, and validated by resolveSubscriptionKubernetesSpikePeriod.
 //   - Filter mode: OPSCART_BILLING_SPIKE_FILTER_MODE is required and must
-//     be exactly "captured-and" or "combined-values", validated by
-//     parseSubscriptionKubernetesQueryFilterMode.
+//     be exactly "captured-and", "combined-values", or "discovery",
+//     validated by parseSubscriptionKubernetesQueryFilterMode.
 //   - All of the above — subscription ID, cluster resource ID, period,
 //     and filter mode — are validated before NewCredential is ever
 //     called, so bad input can never reach the point of acquiring a
 //     credential, let alone making a request.
 //   - Requests: at most one HTTP call, for exactly the one filter mode
-//     requested (runSubscriptionKubernetesQuery never retries, never
-//     follows pagination, and never tries the other filter mode — see
-//     TestSubscriptionKubernetesQuerySpikeMakesExactlyOneRequestOnFailure
-//     and
-//     TestSubscriptionKubernetesQuerySpikeEachFilterModeMakesOneRequestAndReportsNoDataOnZeroRows).
+//     requested — runSubscriptionKubernetesQuery and
+//     runSubscriptionKubernetesDiscoveryQuery each never retry, never
+//     follow pagination, and never try a different filter mode (see
+//     TestSubscriptionKubernetesQuerySpikeMakesExactlyOneRequestOnFailure,
+//     TestSubscriptionKubernetesQuerySpikeEachFilterModeMakesOneRequestAndReportsNoDataOnZeroRows,
+//     and TestSubscriptionKubernetesQueryDiscoveryMakesExactlyOneRequest).
+//   - Discovery additionally rejects a response of more than
+//     subscriptionKubernetesQueryMaxDiscoveryRows rows, defensively,
+//     before examining any row.
 //   - Timeout: bounded to 15s via ctx, tighter than newARMHTTPClient's own
 //     30s client-level timeout.
 //   - Redirects: disabled (newARMHTTPClient, shared with production).
-//   - Output: prints only status, total, currency, period, filter mode,
-//     row count, and the response's column names (schema, never values)
-//     — see AzureAPIError/SafeError/subscriptionKubernetesQueryNoDataError,
-//     which every failure from runSubscriptionKubernetesQuery already
-//     routes through. Never a token, Authorization header, subscription
-//     ID, cluster resource ID, request URL, or response rows/body.
+//   - Output: for captured-and/combined-values, prints only status,
+//     total, currency, period, filter mode, row count, and the response's
+//     column names (schema, never values). For discovery, prints only
+//     status, period, filter mode, row count, response column names,
+//     unique/ARM-shaped cluster-value counts, the four match-tier counts,
+//     and — only when a safe match exists — the matched total and
+//     currency (see writeDiscoverySafeOutput and
+//     subscriptionKubernetesDiscoveryResult). Every failure is an
+//     AzureAPIError, SafeError, subscriptionKubernetesQueryNoDataError, or
+//     subscriptionKubernetesQueryDiscoveryNoMatchError, all already safe
+//     to print verbatim. No mode ever prints a token, Authorization
+//     header, subscription ID, cluster resource ID, resource-group name,
+//     request URL, or response rows/body — discovery additionally never
+//     prints a cluster value or any hash of one, even transiently
+//     examined ones that didn't match.
 //   - No automatic refresh: this is one manual invocation, not wired into
 //     Runtime.Start or any ticker/schedule.
 //
@@ -237,6 +263,15 @@ func TestManualSubscriptionKubernetesQueryDiagnostic(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 
+	if filterMode == subscriptionKubernetesQueryFilterModeDiscovery {
+		result, discoveryErr := runSubscriptionKubernetesDiscoveryQuery(ctx, newARMHTTPClient(), credential, defaultManagementEndpoint, subscriptionID, clusterResourceID, start, end)
+		writeDiscoverySafeOutput(os.Stdout, periodLabel, filterMode, result, discoveryErr)
+		if discoveryErr != nil {
+			t.Fatalf("discovery query failed: %v", discoveryErr)
+		}
+		return
+	}
+
 	total, currency, rowCount, columnNames, queryErr := runSubscriptionKubernetesQuery(ctx, newARMHTTPClient(), credential, defaultManagementEndpoint, subscriptionID, clusterResourceID, start, end, filterMode)
 
 	// queryErr, when non-nil, is always an *AzureAPIError, *SafeError, or
@@ -245,7 +280,7 @@ func TestManualSubscriptionKubernetesQueryDiagnostic(t *testing.T) {
 	// label, fixed status classification, Azure's own request ID where
 	// applicable. Never the raw response, subscription ID, cluster
 	// resource ID, or request URL. columnNames is schema metadata (column
-	// names only, never row values), and filterMode is one of two fixed
+	// names only, never row values), and filterMode is one of three fixed
 	// literal strings — both are safe to print for the same reason.
 	if queryErr != nil {
 		fmt.Printf("status: error: %s\nperiod: %s\nfilter mode: %s\nrow count: %d\nresponse columns: %s\n",
@@ -254,4 +289,82 @@ func TestManualSubscriptionKubernetesQueryDiagnostic(t *testing.T) {
 	}
 	fmt.Printf("status: ok\ntotal: %.2f\ncurrency: %s\nperiod: %s\nfilter mode: %s\nrow count: %d\nresponse columns: %s\n",
 		total, currency, periodLabel, filterMode, rowCount, strings.Join(columnNames, ","))
+}
+
+// writeDiscoverySafeOutput writes exactly the fields discovery mode is
+// allowed to surface (see subscriptionKubernetesDiscoveryResult's doc
+// comment) to w. It takes an io.Writer rather than writing directly to
+// stdout so TestSubscriptionKubernetesQueryDiscoverySafeOutputNeverExposesClusterValues
+// can capture and inspect the exact text a real run would print, proving
+// no cluster ID, resource-group name, or subscription ID ever reaches it
+// — result and err are the only inputs, and neither type can carry one
+// (see their doc comments in subscription_kubernetes_query_spike_test.go).
+func writeDiscoverySafeOutput(w io.Writer, periodLabel string, filterMode subscriptionKubernetesQueryFilterMode, result subscriptionKubernetesDiscoveryResult, err error) {
+	status := "ok"
+	if err != nil {
+		status = "error: " + err.Error()
+	}
+	fmt.Fprintf(w, "status: %s\nperiod: %s\nfilter mode: %s\nrow count: %d\nresponse columns: %s\n"+
+		"unique cluster values: %d\narm-shaped cluster values: %d\nexact matches: %d\ncase-insensitive matches: %d\nnormalized arm matches: %d\nname-only matches: %d\n",
+		status, periodLabel, filterMode, result.RowCount, strings.Join(result.ColumnNames, ","),
+		result.UniqueClusterValueCount, result.ARMShapedClusterValueCount, result.ExactMatchCount, result.CaseInsensitiveMatchCount, result.NormalizedARMMatchCount, result.NameOnlyMatchCount)
+	if result.HasSafeMatch {
+		fmt.Fprintf(w, "matched total: %.2f\nmatched currency: %s\n", result.MatchedTotal, result.MatchedCurrency)
+	}
+}
+
+// TestSubscriptionKubernetesQueryDiscoverySafeOutputNeverExposesClusterValues
+// runs the real discovery flow (synthetic HTTP server, two clusters — the
+// configured target and an unrelated one with a distinctive high cost)
+// through writeDiscoverySafeOutput exactly as the manual diagnostic would,
+// and asserts the captured output text contains neither cluster's full
+// ARM ID, subscription ID, resource-group name, or cluster name — nor the
+// unrelated cluster's cost — while still reporting the real match counts
+// and the safely matched total.
+func TestSubscriptionKubernetesQueryDiscoverySafeOutputNeverExposesClusterValues(t *testing.T) {
+	const target = "/subscriptions/11111111-1111-1111-1111-111111111111/resourceGroups/My-RG/providers/Microsoft.ContainerService/managedClusters/My-AKS-Cluster"
+	const secretOther = "/subscriptions/22222222-2222-2222-2222-222222222222/resourceGroups/Other-RG/providers/Microsoft.ContainerService/managedClusters/secret-other-cluster"
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		writeQueryResponse(w,
+			[]queryColumn{{Name: "Cluster"}, {Name: "ResourceLocation"}, {Name: "Cost"}, {Name: "Currency"}},
+			[][]any{
+				{target, "eastus2", 10.0, "USD"},
+				{secretOther, "westus2", 99999.0, "USD"},
+			}, "")
+	}))
+	defer server.Close()
+
+	cred := &fakeCredential{token: "t"}
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	result, err := runSubscriptionKubernetesDiscoveryQuery(ctx, newARMHTTPClient(), cred, server.URL, "11111111-1111-1111-1111-111111111111", target, time.Now(), time.Now())
+	if err != nil {
+		t.Fatalf("runSubscriptionKubernetesDiscoveryQuery: %v", err)
+	}
+
+	var buf bytes.Buffer
+	writeDiscoverySafeOutput(&buf, "2026-08-17 to 2026-09-15", subscriptionKubernetesQueryFilterModeDiscovery, result, nil)
+	output := buf.String()
+
+	for _, forbidden := range []string{
+		target, secretOther,
+		"11111111-1111-1111-1111-111111111111", "22222222-2222-2222-2222-222222222222",
+		"My-RG", "Other-RG", "My-AKS-Cluster", "secret-other-cluster",
+		"/subscriptions/", "99999",
+	} {
+		if strings.Contains(output, forbidden) {
+			t.Errorf("diagnostic output contains %q — must never expose cluster/subscription/resource-group identifiers or unrelated cost values; output:\n%s", forbidden, output)
+		}
+	}
+	if !strings.Contains(output, "matched total: 10.00") {
+		t.Errorf("diagnostic output missing the matched total; output:\n%s", output)
+	}
+	if !strings.Contains(output, "unique cluster values: 2") {
+		t.Errorf("diagnostic output missing the unique cluster value count; output:\n%s", output)
+	}
+	if !strings.Contains(output, "exact matches: 1") {
+		t.Errorf("diagnostic output missing the exact match count; output:\n%s", output)
+	}
 }

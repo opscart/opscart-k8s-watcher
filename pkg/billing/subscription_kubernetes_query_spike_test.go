@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"reflect"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -42,6 +43,17 @@ import (
 //     Cluster/In dimensions expression carrying both case variants in one
 //     values array, in case the API rejects (or silently empties) a
 //     composite "and" over the same dimension.
+//   - subscriptionKubernetesQueryFilterModeDiscovery: omits dataSet.filter
+//     entirely, so the API returns every Cluster dimension value it is
+//     willing to report for this subscription/period. A live run found
+//     both captured-and and combined-values were accepted but returned
+//     zero rows; discovery mode exists to determine, without guessing
+//     blind, whether Azure exposes Cluster rows at all here and whether
+//     their shape matches the configured AKS ARM ID — see
+//     runSubscriptionKubernetesDiscoveryQuery. Every Cluster value it
+//     examines is used only transiently, in memory, to compute safe
+//     counts; none is ever printed, logged, returned in an error, or
+//     retained (not even as a hash) — see that function's doc comment.
 //
 // Every other field below still reproduces the captured request exactly:
 //   - endpoint: subscription scope (no resource group), preview API
@@ -141,7 +153,11 @@ type subscriptionKubernetesQueryDataset struct {
 	Aggregation map[string]subscriptionKubernetesQueryAggregate `json:"aggregation"`
 	Grouping    []subscriptionKubernetesQueryGrouping           `json:"grouping"`
 	Sorting     []subscriptionKubernetesQuerySort               `json:"sorting"`
-	Filter      json.RawMessage                                 `json:"filter"`
+	// Filter's "omitempty" matters only for discovery mode, whose
+	// buildSubscriptionKubernetesQueryFilter returns a nil RawMessage —
+	// without omitempty a nil []byte still marshals as the JSON literal
+	// `null`, which is not the same as omitting the property entirely.
+	Filter json.RawMessage `json:"filter,omitempty"`
 }
 
 // subscriptionKubernetesQueryBody's Dataset field is deliberately tagged
@@ -178,6 +194,9 @@ const (
 	// Cluster/In dimensions expression carrying both case variants in one
 	// values array — no "and"/"or" composite at all.
 	subscriptionKubernetesQueryFilterModeCombinedValues subscriptionKubernetesQueryFilterMode = "combined-values"
+	// subscriptionKubernetesQueryFilterModeDiscovery omits dataSet.filter
+	// entirely — see runSubscriptionKubernetesDiscoveryQuery.
+	subscriptionKubernetesQueryFilterModeDiscovery subscriptionKubernetesQueryFilterMode = "discovery"
 )
 
 // buildSubscriptionKubernetesQueryFilter builds the dataSet.filter bytes
@@ -199,8 +218,16 @@ func buildSubscriptionKubernetesQueryFilter(clusterResourceID string, filterMode
 		return json.Marshal(subscriptionKubernetesQueryFilterExpression{
 			Dimensions: subscriptionKubernetesQueryFilterDimension{Name: "Cluster", Operator: "In", Values: []string{clusterResourceID, lowercased}},
 		})
+	case subscriptionKubernetesQueryFilterModeDiscovery:
+		// nil, nil: the dataSet.filter property is omitted entirely (see
+		// subscriptionKubernetesQueryDataset.Filter's "omitempty" tag),
+		// not sent as an empty object or null. clusterResourceID is
+		// unused for request construction in this mode — it is used only
+		// afterward, in memory, to match against whatever Cluster values
+		// the unfiltered response returns (runSubscriptionKubernetesDiscoveryQuery).
+		return nil, nil
 	default:
-		return nil, fmt.Errorf("unknown filter mode %q: use %q or %q", filterMode, subscriptionKubernetesQueryFilterModeCapturedAnd, subscriptionKubernetesQueryFilterModeCombinedValues)
+		return nil, fmt.Errorf("unknown filter mode %q: use %q, %q, or %q", filterMode, subscriptionKubernetesQueryFilterModeCapturedAnd, subscriptionKubernetesQueryFilterModeCombinedValues, subscriptionKubernetesQueryFilterModeDiscovery)
 	}
 }
 
@@ -416,6 +443,286 @@ func runSubscriptionKubernetesQuery(ctx context.Context, httpClient *http.Client
 		total += cost
 	}
 	return total, currency, rowCount, columnNames, nil
+}
+
+// subscriptionKubernetesQueryMaxDiscoveryRows bounds how many rows
+// runSubscriptionKubernetesDiscoveryQuery will process. A discovery
+// response — no filter at all — could in principle return every
+// Kubernetes-cost-bearing cluster in the subscription; this is a
+// defensive ceiling, not an expected count, and a response exceeding it
+// is rejected outright rather than partially processed.
+const subscriptionKubernetesQueryMaxDiscoveryRows = 1000
+
+// subscriptionKubernetesQueryDiscoveryNoMatchError means discovery
+// completed successfully (a bounded number of rows, each with a usable
+// Cluster/Cost-or-CostUSD value) but none of them safely matched the
+// configured target cluster ARM resource ID — not even after
+// case-insensitive or normalized-ARM comparison. This is distinct from
+// subscriptionKubernetesQueryNoDataError (zero rows at all): here, other
+// clusters' cost data exists in the subscription, just not a safe match
+// for the configured one. It carries no dynamic content — never a
+// cluster ID examined during matching — so it is always safe to print
+// verbatim.
+type subscriptionKubernetesQueryDiscoveryNoMatchError struct{}
+
+func (e *subscriptionKubernetesQueryDiscoveryNoMatchError) Error() string {
+	return subscriptionKubernetesQueryOperation + ": discovery found rows but none safely matched the configured target (see the match counts)"
+}
+
+// armResourceIDShapePattern is a generic "looks like a full Azure ARM
+// resource ID" check (/subscriptions/{x}/resourceGroups/{y}/providers/{...})
+// used only to COUNT how many discovered Cluster dimension values have
+// this shape. It never extracts, logs, or retains any matched value —
+// only the count of matches is ever surfaced.
+var armResourceIDShapePattern = regexp.MustCompile(`(?i)^/subscriptions/[^/]+/resourceGroups/[^/]+/providers/[^/]+(?:/[^/]+)+$`)
+
+// normalizeARMResourceIDForComparison applies only the normalizations the
+// matching spec allows: trim surrounding whitespace, trim one trailing
+// slash, and lowercase for a case-insensitive compare. It deliberately
+// never rewrites the subscription, resource group, or provider segments
+// themselves — this is a comparison aid, not a canonicalizer.
+func normalizeARMResourceIDForComparison(id string) string {
+	id = strings.TrimSpace(id)
+	id = strings.TrimSuffix(id, "/")
+	return strings.ToLower(id)
+}
+
+// finalResourceNameSegment returns the last "/"-separated segment of id —
+// the managedClusters resource's own name, with no subscription/resource-
+// group/provider context. Used only to COUNT a name-only match (matching
+// spec tier 4); the segment itself is never returned, printed, or
+// retained beyond this function's local, transient comparison.
+func finalResourceNameSegment(id string) string {
+	id = strings.TrimSuffix(strings.TrimSpace(id), "/")
+	if idx := strings.LastIndex(id, "/"); idx >= 0 {
+		return id[idx+1:]
+	}
+	return id
+}
+
+// subscriptionKubernetesDiscoveryResult is every value discovery mode is
+// allowed to compute and surface — see this package's file-level doc
+// comment and the "Safe output" list in the task this file implements.
+// Every field is a count, a schema name, a currency code, or a matched
+// total: never a cluster ID, a resource-group name, a subscription ID, or
+// a raw row. HasSafeMatch distinguishes "matched, and the total is
+// legitimately 0" from "no safe match at all" (see
+// subscriptionKubernetesQueryDiscoveryNoMatchError) without relying on a
+// zero-value sentinel in MatchedTotal.
+type subscriptionKubernetesDiscoveryResult struct {
+	RowCount                   int
+	ColumnNames                []string
+	UniqueClusterValueCount    int
+	ARMShapedClusterValueCount int
+	ExactMatchCount            int
+	CaseInsensitiveMatchCount  int
+	NormalizedARMMatchCount    int
+	NameOnlyMatchCount         int
+	HasSafeMatch               bool
+	MatchedTotal               float64
+	MatchedCurrency            string
+}
+
+// runSubscriptionKubernetesDiscoveryQuery issues exactly ONE HTTP request
+// — the discovery-mode query (see buildSubscriptionKubernetesQueryFilter),
+// with dataSet.filter omitted entirely — and returns only the safe,
+// aggregate information listed on subscriptionKubernetesDiscoveryResult.
+// Like runSubscriptionKubernetesQuery, it never retries, never follows a
+// nextLink continuation, and never falls back to a different filter mode
+// on any outcome.
+//
+// Every Cluster dimension value the response declares is examined only
+// transiently, inside this function's row loop, for shape and equality
+// checks (see armResourceIDShapePattern, normalizeARMResourceIDForComparison,
+// finalResourceNameSegment) — no value is ever appended to a slice
+// outside that loop, logged, hashed, returned in an error, or included in
+// the returned result. A response reporting more than
+// subscriptionKubernetesQueryMaxDiscoveryRows rows is rejected outright,
+// defensively, before any row is examined for matching.
+//
+// Matching runs four independent, non-exclusive checks per row — exact
+// string equality, strings.EqualFold, normalized-ARM equality, and a
+// final-resource-name-only comparison — and counts each separately so an
+// operator can tell which normalization (if any) would be needed. Only
+// the first three ("safe" full-ID matches, at increasingly forgiving
+// normalization) ever contribute to MatchedTotal: a name-only match alone
+// never proves cluster identity (the same reasoning that already governs
+// this package's resource-group-scope attribution — a namespace-like name
+// is not ownership) and is reported only as a count. When the response
+// declares a CostUSD column, matched rows are summed in USD; otherwise
+// Cost is summed using the response's own Currency column, with the same
+// never-silently-mix-currencies check runSubscriptionKubernetesQuery
+// applies. If no row is a safe match, this returns
+// *subscriptionKubernetesQueryDiscoveryNoMatchError — a legitimate
+// zero-cost safe match is never confused with "no match" (HasSafeMatch
+// distinguishes them).
+func runSubscriptionKubernetesDiscoveryQuery(ctx context.Context, httpClient *http.Client, credential azcore.TokenCredential, endpoint, subscriptionID, clusterResourceID string, start, end time.Time) (subscriptionKubernetesDiscoveryResult, error) {
+	body, buildErr := buildSubscriptionKubernetesQuery(clusterResourceID, start, end, subscriptionKubernetesQueryFilterModeDiscovery)
+	if buildErr != nil {
+		return subscriptionKubernetesDiscoveryResult{}, newSafeError(subscriptionKubernetesQueryOperation, safeReasonInvalidRequest, buildErr)
+	}
+	payload, marshalErr := json.Marshal(body)
+	if marshalErr != nil {
+		return subscriptionKubernetesDiscoveryResult{}, newSafeError(subscriptionKubernetesQueryOperation, safeReasonInvalidRequest, marshalErr)
+	}
+
+	requestURL := strings.TrimRight(endpoint, "/") + subscriptionOnlyScope(subscriptionID) + "/providers/Microsoft.CostManagement/query?api-version=" + subscriptionKubernetesQueryAPIVersion
+
+	token, tokenErr := credential.GetToken(ctx, policy.TokenRequestOptions{Scopes: []string{armTokenScope}})
+	if tokenErr != nil {
+		return subscriptionKubernetesDiscoveryResult{}, newSafeError(subscriptionKubernetesQueryOperation, safeReasonAuthentication, tokenErr)
+	}
+
+	req, reqErr := http.NewRequestWithContext(ctx, http.MethodPost, requestURL, bytes.NewReader(payload))
+	if reqErr != nil {
+		return subscriptionKubernetesDiscoveryResult{}, newSafeError(subscriptionKubernetesQueryOperation, safeReasonInvalidRequest, reqErr)
+	}
+	req.Header.Set("Authorization", "Bearer "+token.Token)
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, doErr := httpClient.Do(req) // the one and only request this call ever makes
+	if doErr != nil {
+		return subscriptionKubernetesDiscoveryResult{}, newSafeError(subscriptionKubernetesQueryOperation, safeReasonNetwork, doErr)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return subscriptionKubernetesDiscoveryResult{}, newAzureAPIError(subscriptionKubernetesQueryOperation, resp)
+	}
+
+	raw, readErr := readBounded(resp.Body, subscriptionKubernetesQueryOperation) // bounded: see maxResponseBytes, query_client.go
+	if readErr != nil {
+		return subscriptionKubernetesDiscoveryResult{}, readErr
+	}
+
+	var decoded queryResponseBody
+	if err := json.Unmarshal(raw, &decoded); err != nil {
+		return subscriptionKubernetesDiscoveryResult{}, newSafeError(subscriptionKubernetesQueryOperation, safeReasonInvalidResponse, err)
+	}
+	columnNames := columnNamesOf(decoded.Properties.Columns)
+
+	rows, rowsErr := rowsFromColumns(decoded.Properties.Columns, decoded.Properties.Rows)
+	if rowsErr != nil {
+		return subscriptionKubernetesDiscoveryResult{ColumnNames: columnNames}, newSafeError(subscriptionKubernetesQueryOperation, safeReasonInvalidResponse, rowsErr)
+	}
+	rowCount := len(rows)
+
+	if rowCount == 0 {
+		return subscriptionKubernetesDiscoveryResult{ColumnNames: columnNames}, &subscriptionKubernetesQueryNoDataError{}
+	}
+	if rowCount > subscriptionKubernetesQueryMaxDiscoveryRows {
+		// Rejected before any row is examined for matching.
+		return subscriptionKubernetesDiscoveryResult{RowCount: rowCount, ColumnNames: columnNames}, newSafeError(subscriptionKubernetesQueryOperation, safeReasonTooManyRows, fmt.Errorf("discovery returned more than %d rows", subscriptionKubernetesQueryMaxDiscoveryRows))
+	}
+
+	if !hasColumn(decoded.Properties.Columns, "Cluster") {
+		return subscriptionKubernetesDiscoveryResult{RowCount: rowCount, ColumnNames: columnNames}, newSafeError(subscriptionKubernetesQueryOperation, safeReasonInvalidResponse, fmt.Errorf("response declares no Cluster column"))
+	}
+	hasCostUSD := hasColumn(decoded.Properties.Columns, "CostUSD")
+	hasCost := hasColumn(decoded.Properties.Columns, "Cost")
+	if !hasCostUSD && !hasCost {
+		return subscriptionKubernetesDiscoveryResult{RowCount: rowCount, ColumnNames: columnNames}, newSafeError(subscriptionKubernetesQueryOperation, safeReasonInvalidResponse, fmt.Errorf("response declares neither a Cost nor a CostUSD column"))
+	}
+	if !hasCostUSD && !hasColumn(decoded.Properties.Columns, "Currency") {
+		return subscriptionKubernetesDiscoveryResult{RowCount: rowCount, ColumnNames: columnNames}, newSafeError(subscriptionKubernetesQueryOperation, safeReasonInvalidResponse, fmt.Errorf("response declares Cost but no Currency column, and no CostUSD column"))
+	}
+
+	targetNormalized := normalizeARMResourceIDForComparison(clusterResourceID)
+	targetName := strings.ToLower(finalResourceNameSegment(clusterResourceID))
+
+	uniqueValues := make(map[string]struct{}, rowCount)
+	var (
+		armShapedCount, exactCount, foldCount, normalizedCount, nameOnlyCount int
+		matchedTotal                                                          float64
+		matchedCurrency                                                       string
+		hasSafeMatch                                                          bool
+	)
+
+	for _, row := range rows {
+		// clusterValue lives only for the duration of this loop
+		// iteration: it is compared, then discarded. It is never
+		// appended to a slice outside this scope, logged, or returned.
+		clusterValue, ok := row.string("Cluster")
+		if !ok || clusterValue == "" {
+			return subscriptionKubernetesDiscoveryResult{RowCount: rowCount, ColumnNames: columnNames}, newSafeError(subscriptionKubernetesQueryOperation, safeReasonInvalidResponse, fmt.Errorf("row missing a usable Cluster value"))
+		}
+
+		if _, seen := uniqueValues[clusterValue]; !seen {
+			uniqueValues[clusterValue] = struct{}{}
+			if armResourceIDShapePattern.MatchString(clusterValue) {
+				armShapedCount++
+			}
+		}
+
+		exact := clusterValue == clusterResourceID
+		fold := strings.EqualFold(clusterValue, clusterResourceID)
+		normalized := normalizeARMResourceIDForComparison(clusterValue) == targetNormalized
+		nameOnly := strings.EqualFold(finalResourceNameSegment(clusterValue), targetName)
+		if exact {
+			exactCount++
+		}
+		if fold {
+			foldCount++
+		}
+		if normalized {
+			normalizedCount++
+		}
+		if nameOnly {
+			nameOnlyCount++
+		}
+
+		// Name-only alone never proves cluster identity — it does not
+		// contribute to the matched total, only to NameOnlyMatchCount
+		// above.
+		if !(exact || fold || normalized) {
+			continue
+		}
+
+		var rowTotal float64
+		var rowCurrency string
+		if hasCostUSD {
+			v, ok := row.float64("CostUSD")
+			if !ok {
+				return subscriptionKubernetesDiscoveryResult{RowCount: rowCount, ColumnNames: columnNames}, newSafeError(subscriptionKubernetesQueryOperation, safeReasonInvalidResponse, fmt.Errorf("row missing a usable CostUSD value"))
+			}
+			rowTotal, rowCurrency = v, "USD"
+		} else {
+			v, ok := row.float64("Cost")
+			if !ok {
+				return subscriptionKubernetesDiscoveryResult{RowCount: rowCount, ColumnNames: columnNames}, newSafeError(subscriptionKubernetesQueryOperation, safeReasonInvalidResponse, fmt.Errorf("row missing a usable Cost value"))
+			}
+			rc, ok := row.string("Currency")
+			if !ok || rc == "" {
+				return subscriptionKubernetesDiscoveryResult{RowCount: rowCount, ColumnNames: columnNames}, newSafeError(subscriptionKubernetesQueryOperation, safeReasonInvalidResponse, fmt.Errorf("missing Currency column"))
+			}
+			rowTotal, rowCurrency = v, rc
+		}
+
+		if hasSafeMatch && !strings.EqualFold(matchedCurrency, rowCurrency) {
+			return subscriptionKubernetesDiscoveryResult{RowCount: rowCount, ColumnNames: columnNames}, newSafeError(subscriptionKubernetesQueryOperation, safeReasonInvalidResponse, fmt.Errorf("matched rows mix currencies"))
+		}
+		matchedCurrency = rowCurrency
+		matchedTotal += rowTotal
+		hasSafeMatch = true
+	}
+
+	result := subscriptionKubernetesDiscoveryResult{
+		RowCount:                   rowCount,
+		ColumnNames:                columnNames,
+		UniqueClusterValueCount:    len(uniqueValues),
+		ARMShapedClusterValueCount: armShapedCount,
+		ExactMatchCount:            exactCount,
+		CaseInsensitiveMatchCount:  foldCount,
+		NormalizedARMMatchCount:    normalizedCount,
+		NameOnlyMatchCount:         nameOnlyCount,
+		HasSafeMatch:               hasSafeMatch,
+		MatchedTotal:               matchedTotal,
+		MatchedCurrency:            matchedCurrency,
+	}
+	if !hasSafeMatch {
+		return result, &subscriptionKubernetesQueryDiscoveryNoMatchError{}
+	}
+	return result, nil
 }
 
 func TestBuildSubscriptionKubernetesQueryPayloadShape(t *testing.T) {
@@ -828,5 +1135,321 @@ func TestSubscriptionKubernetesQuerySpikeRejectsRedirect(t *testing.T) {
 	_, _, _, _, err := runSubscriptionKubernetesQuery(ctx, newARMHTTPClient(), cred, server.URL, "11111111-1111-1111-1111-111111111111", "cluster-resource-id", time.Now(), time.Now(), subscriptionKubernetesQueryFilterModeCapturedAnd)
 	if err == nil {
 		t.Fatal("expected an error when the server issues a redirect, got nil")
+	}
+}
+
+// TestBuildSubscriptionKubernetesQueryDiscoveryModeOmitsFilterEntirely
+// proves discovery mode's marshaled request has no "filter" property at
+// all — not an empty object, not null — while every other field stays
+// identical to the other filter modes.
+func TestBuildSubscriptionKubernetesQueryDiscoveryModeOmitsFilterEntirely(t *testing.T) {
+	const clusterResourceID = "/subscriptions/11111111-1111-1111-1111-111111111111/resourceGroups/My-RG/providers/Microsoft.ContainerService/managedClusters/My-AKS-Cluster"
+	start := time.Date(2026, 8, 17, 0, 0, 0, 0, time.UTC)
+	end := time.Date(2026, 9, 15, 23, 59, 59, 0, time.UTC)
+
+	body, err := buildSubscriptionKubernetesQuery(clusterResourceID, start, end, subscriptionKubernetesQueryFilterModeDiscovery)
+	if err != nil {
+		t.Fatalf("buildSubscriptionKubernetesQuery: %v", err)
+	}
+	if body.Dataset.Filter != nil {
+		t.Errorf("Dataset.Filter = %s, want nil (omitted)", body.Dataset.Filter)
+	}
+
+	raw, err := json.Marshal(body)
+	if err != nil {
+		t.Fatalf("json.Marshal: %v", err)
+	}
+	wireBody := string(raw)
+	if strings.Contains(wireBody, `"filter"`) {
+		t.Errorf("discovery request must omit the filter property entirely; got %s", wireBody)
+	}
+	for _, want := range []string{
+		`"type":"AmortizedCost"`,
+		`"timeframe":"Custom"`,
+		`"provider":"Microsoft.ContainerService"`,
+		`"dataSet":`,
+		`"from":"2026-08-17T00:00:00.000Z"`,
+		`"to":"2026-09-15T23:59:59.000Z"`,
+		`"granularity":"None"`,
+		`"aggregation":{}`,
+		`"grouping":[{"type":"Dimension","name":"Cluster"},{"type":"Dimension","name":"ResourceLocation"}]`,
+		`"sorting":[{"direction":"descending","name":"Cost"}]`,
+	} {
+		if !strings.Contains(wireBody, want) {
+			t.Errorf("discovery request missing %q (every field but filter must match the other modes); got %s", want, wireBody)
+		}
+	}
+}
+
+// TestSubscriptionKubernetesQueryDiscoveryMakesExactlyOneRequest proves
+// discovery mode, like the other two filter modes, issues exactly one
+// HTTP request.
+func TestSubscriptionKubernetesQueryDiscoveryMakesExactlyOneRequest(t *testing.T) {
+	const target = "/subscriptions/11111111-1111-1111-1111-111111111111/resourceGroups/My-RG/providers/Microsoft.ContainerService/managedClusters/My-AKS-Cluster"
+
+	requestCount := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requestCount++
+		if strings.Contains(string(mustReadBody(t, r)), `"filter"`) {
+			t.Error("discovery request body must never include a filter property")
+		}
+		writeQueryResponse(w,
+			[]queryColumn{{Name: "Cluster"}, {Name: "ResourceLocation"}, {Name: "Cost"}, {Name: "Currency"}},
+			[][]any{{target, "eastus2", 12.5, "USD"}}, "")
+	}))
+	defer server.Close()
+
+	cred := &fakeCredential{token: "t"}
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	_, err := runSubscriptionKubernetesDiscoveryQuery(ctx, newARMHTTPClient(), cred, server.URL, "11111111-1111-1111-1111-111111111111", target, time.Now(), time.Now())
+	if err != nil {
+		t.Fatalf("runSubscriptionKubernetesDiscoveryQuery: %v", err)
+	}
+	if requestCount != 1 {
+		t.Errorf("requestCount = %d, want exactly 1", requestCount)
+	}
+}
+
+// mustReadBody reads and restores r.Body so a handler can both inspect
+// and let writeQueryResponse-style helpers proceed normally; used only by
+// tests in this file.
+func mustReadBody(t *testing.T, r *http.Request) []byte {
+	t.Helper()
+	raw, err := io.ReadAll(r.Body)
+	if err != nil {
+		t.Fatalf("reading request body: %v", err)
+	}
+	r.Body.Close()
+	return raw
+}
+
+// TestSubscriptionKubernetesQueryDiscoveryMatchCountsAndTotalAreCorrect is
+// the core matching-hierarchy test. Five synthetic rows, each engineered
+// to land in exactly one additional matching tier than the last:
+//
+//   - rowExact: byte-identical to the target — matches all four tiers.
+//   - rowTrailingSlash: target + "/" — not exact, not EqualFold (extra
+//     character), but normalized-equal (trailing slash trimmed) and
+//     name-only equal.
+//   - rowDifferentCase: target uppercased — not exact, but EqualFold,
+//     normalized, and name-only equal.
+//   - rowNameOnly: a different subscription and resource group, but the
+//     same cluster name — only name-only equal.
+//   - rowUnrelated: a wholly different cluster — matches nothing.
+//
+// Only rowExact, rowTrailingSlash, and rowDifferentCase are safe matches;
+// their costs (10, 20, 30) must sum to the returned total, and
+// rowNameOnly's (9999) and rowUnrelated's (8888) must never appear in it.
+func TestSubscriptionKubernetesQueryDiscoveryMatchCountsAndTotalAreCorrect(t *testing.T) {
+	const target = "/subscriptions/11111111-1111-1111-1111-111111111111/resourceGroups/My-RG/providers/Microsoft.ContainerService/managedClusters/My-AKS-Cluster"
+	rowExact := target
+	rowTrailingSlash := target + "/"
+	rowDifferentCase := strings.ToUpper(target)
+	rowNameOnly := "/subscriptions/22222222-2222-2222-2222-222222222222/resourceGroups/Other-RG/providers/Microsoft.ContainerService/managedClusters/my-aks-cluster"
+	rowUnrelated := "/subscriptions/33333333-3333-3333-3333-333333333333/resourceGroups/Unrelated-RG/providers/Microsoft.ContainerService/managedClusters/totally-different"
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		writeQueryResponse(w,
+			[]queryColumn{{Name: "Cluster"}, {Name: "ResourceLocation"}, {Name: "Cost"}, {Name: "Currency"}},
+			[][]any{
+				{rowExact, "eastus2", 10.0, "USD"},
+				{rowTrailingSlash, "eastus2", 20.0, "USD"},
+				{rowDifferentCase, "eastus2", 30.0, "USD"},
+				{rowNameOnly, "westus2", 9999.0, "USD"},
+				{rowUnrelated, "centralus", 8888.0, "USD"},
+			}, "")
+	}))
+	defer server.Close()
+
+	cred := &fakeCredential{token: "t"}
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	result, err := runSubscriptionKubernetesDiscoveryQuery(ctx, newARMHTTPClient(), cred, server.URL, "11111111-1111-1111-1111-111111111111", target, time.Now(), time.Now())
+	if err != nil {
+		t.Fatalf("runSubscriptionKubernetesDiscoveryQuery: %v", err)
+	}
+
+	if result.RowCount != 5 {
+		t.Errorf("RowCount = %d, want 5", result.RowCount)
+	}
+	if result.UniqueClusterValueCount != 5 {
+		t.Errorf("UniqueClusterValueCount = %d, want 5", result.UniqueClusterValueCount)
+	}
+	if result.ARMShapedClusterValueCount != 4 {
+		t.Errorf("ARMShapedClusterValueCount = %d, want 4 (every fixture value except rowTrailingSlash, whose trailing slash makes it not strictly ARM-shaped — that's exactly why normalization, not shape-checking, is what makes it match)", result.ARMShapedClusterValueCount)
+	}
+	if result.ExactMatchCount != 1 {
+		t.Errorf("ExactMatchCount = %d, want 1 (rowExact only)", result.ExactMatchCount)
+	}
+	if result.CaseInsensitiveMatchCount != 2 {
+		t.Errorf("CaseInsensitiveMatchCount = %d, want 2 (rowExact, rowDifferentCase)", result.CaseInsensitiveMatchCount)
+	}
+	if result.NormalizedARMMatchCount != 3 {
+		t.Errorf("NormalizedARMMatchCount = %d, want 3 (rowExact, rowTrailingSlash, rowDifferentCase)", result.NormalizedARMMatchCount)
+	}
+	if result.NameOnlyMatchCount != 4 {
+		t.Errorf("NameOnlyMatchCount = %d, want 4 (every row except rowUnrelated)", result.NameOnlyMatchCount)
+	}
+	if !result.HasSafeMatch {
+		t.Fatal("HasSafeMatch = false, want true")
+	}
+	if result.MatchedTotal != 60 {
+		t.Errorf("MatchedTotal = %v, want 60 (10+20+30 — rowNameOnly's 9999 and rowUnrelated's 8888 must be excluded)", result.MatchedTotal)
+	}
+	if result.MatchedCurrency != "USD" {
+		t.Errorf("MatchedCurrency = %q, want USD", result.MatchedCurrency)
+	}
+}
+
+// TestSubscriptionKubernetesQueryDiscoveryReturnsNoMatchErrorWhenNothingSafelyMatches
+// proves that rows existing in the response (other clusters' cost data)
+// without any safe match for the configured target produce a distinct,
+// sanitized no-match error — never a $0 success and never the unrelated
+// cluster's cost.
+func TestSubscriptionKubernetesQueryDiscoveryReturnsNoMatchErrorWhenNothingSafelyMatches(t *testing.T) {
+	const target = "/subscriptions/11111111-1111-1111-1111-111111111111/resourceGroups/My-RG/providers/Microsoft.ContainerService/managedClusters/My-AKS-Cluster"
+	const other = "/subscriptions/22222222-2222-2222-2222-222222222222/resourceGroups/Other-RG/providers/Microsoft.ContainerService/managedClusters/totally-different"
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		writeQueryResponse(w,
+			[]queryColumn{{Name: "Cluster"}, {Name: "ResourceLocation"}, {Name: "Cost"}, {Name: "Currency"}},
+			[][]any{{other, "eastus2", 42.0, "USD"}}, "")
+	}))
+	defer server.Close()
+
+	cred := &fakeCredential{token: "t"}
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	result, err := runSubscriptionKubernetesDiscoveryQuery(ctx, newARMHTTPClient(), cred, server.URL, "11111111-1111-1111-1111-111111111111", target, time.Now(), time.Now())
+	var noMatch *subscriptionKubernetesQueryDiscoveryNoMatchError
+	if !errors.As(err, &noMatch) {
+		t.Fatalf("error = %v (%T), want *subscriptionKubernetesQueryDiscoveryNoMatchError", err, err)
+	}
+	if result.HasSafeMatch {
+		t.Error("HasSafeMatch = true, want false")
+	}
+	if strings.Contains(err.Error(), "totally-different") || strings.Contains(err.Error(), "Other-RG") {
+		t.Errorf("no-match error must never contain the examined cluster value; got %q", err.Error())
+	}
+}
+
+// TestSubscriptionKubernetesQueryDiscoveryZeroCostSafeMatchIsValid proves a
+// legitimate zero-cost safe match is reported as a real match (HasSafeMatch
+// true, MatchedTotal 0), never confused with "no match" or "no data".
+func TestSubscriptionKubernetesQueryDiscoveryZeroCostSafeMatchIsValid(t *testing.T) {
+	const target = "/subscriptions/11111111-1111-1111-1111-111111111111/resourceGroups/My-RG/providers/Microsoft.ContainerService/managedClusters/My-AKS-Cluster"
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		writeQueryResponse(w,
+			[]queryColumn{{Name: "Cluster"}, {Name: "ResourceLocation"}, {Name: "Cost"}, {Name: "Currency"}},
+			[][]any{{target, "eastus2", 0.0, "USD"}}, "")
+	}))
+	defer server.Close()
+
+	cred := &fakeCredential{token: "t"}
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	result, err := runSubscriptionKubernetesDiscoveryQuery(ctx, newARMHTTPClient(), cred, server.URL, "11111111-1111-1111-1111-111111111111", target, time.Now(), time.Now())
+	if err != nil {
+		t.Fatalf("runSubscriptionKubernetesDiscoveryQuery: %v", err)
+	}
+	if !result.HasSafeMatch {
+		t.Error("HasSafeMatch = false, want true (a real, valid zero-cost match)")
+	}
+	if result.MatchedTotal != 0 {
+		t.Errorf("MatchedTotal = %v, want 0", result.MatchedTotal)
+	}
+	if result.MatchedCurrency != "USD" {
+		t.Errorf("MatchedCurrency = %q, want USD", result.MatchedCurrency)
+	}
+}
+
+// TestSubscriptionKubernetesQueryDiscoveryRejectsMoreThanMaxRows proves a
+// response exceeding subscriptionKubernetesQueryMaxDiscoveryRows fails
+// safely and defensively, before any row is examined for matching.
+func TestSubscriptionKubernetesQueryDiscoveryRejectsMoreThanMaxRows(t *testing.T) {
+	rows := make([][]any, subscriptionKubernetesQueryMaxDiscoveryRows+1)
+	for i := range rows {
+		rows[i] = []any{
+			fmt.Sprintf("/subscriptions/11111111-1111-1111-1111-111111111111/resourceGroups/rg/providers/Microsoft.ContainerService/managedClusters/cluster-%d", i),
+			"eastus2", 1.0, "USD",
+		}
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		writeQueryResponse(w, []queryColumn{{Name: "Cluster"}, {Name: "ResourceLocation"}, {Name: "Cost"}, {Name: "Currency"}}, rows, "")
+	}))
+	defer server.Close()
+
+	cred := &fakeCredential{token: "t"}
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	result, err := runSubscriptionKubernetesDiscoveryQuery(ctx, newARMHTTPClient(), cred, server.URL, "11111111-1111-1111-1111-111111111111", "cluster-resource-id", time.Now(), time.Now())
+	if err == nil {
+		t.Fatal("expected an error for more than the max row count, got nil")
+	}
+	if result.RowCount != subscriptionKubernetesQueryMaxDiscoveryRows+1 {
+		t.Errorf("RowCount = %d, want %d", result.RowCount, subscriptionKubernetesQueryMaxDiscoveryRows+1)
+	}
+	if result.ExactMatchCount != 0 || result.HasSafeMatch {
+		t.Error("no matching should have been attempted once the row cap was exceeded")
+	}
+	var safeErr *SafeError
+	if !errors.As(err, &safeErr) {
+		t.Fatalf("error = %v (%T), want *SafeError", err, err)
+	}
+	if safeErr.Reason != safeReasonTooManyRows {
+		t.Errorf("Reason = %q, want %q", safeErr.Reason, safeReasonTooManyRows)
+	}
+}
+
+// TestSubscriptionKubernetesQueryDiscoveryFailsSafelyOnMissingColumns
+// proves a response missing the Cluster column, both Cost and CostUSD, or
+// Currency (with no CostUSD present) fails safely rather than silently
+// treating the query as a match or a $0 success.
+func TestSubscriptionKubernetesQueryDiscoveryFailsSafelyOnMissingColumns(t *testing.T) {
+	const target = "/subscriptions/11111111-1111-1111-1111-111111111111/resourceGroups/My-RG/providers/Microsoft.ContainerService/managedClusters/My-AKS-Cluster"
+	tests := []struct {
+		name    string
+		columns []queryColumn
+		rows    [][]any
+	}{
+		{
+			name:    "missing Cluster column",
+			columns: []queryColumn{{Name: "ResourceLocation"}, {Name: "Cost"}, {Name: "Currency"}},
+			rows:    [][]any{{"eastus2", 1.0, "USD"}},
+		},
+		{
+			name:    "missing Cost and CostUSD columns",
+			columns: []queryColumn{{Name: "Cluster"}, {Name: "ResourceLocation"}, {Name: "Currency"}},
+			rows:    [][]any{{target, "eastus2", "USD"}},
+		},
+		{
+			name:    "missing Currency column with no CostUSD",
+			columns: []queryColumn{{Name: "Cluster"}, {Name: "ResourceLocation"}, {Name: "Cost"}},
+			rows:    [][]any{{target, "eastus2", 1.0}},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				writeQueryResponse(w, tt.columns, tt.rows, "")
+			}))
+			defer server.Close()
+
+			cred := &fakeCredential{token: "t"}
+			ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+			defer cancel()
+
+			_, err := runSubscriptionKubernetesDiscoveryQuery(ctx, newARMHTTPClient(), cred, server.URL, "11111111-1111-1111-1111-111111111111", target, time.Now(), time.Now())
+			if err == nil {
+				t.Fatal("expected an error, got nil")
+			}
+		})
 	}
 }
