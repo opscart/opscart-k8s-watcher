@@ -44,16 +44,38 @@ func TestBuildBillingPageDataAvailable(t *testing.T) {
 	}
 }
 
+// testSubscriptionID is a recognizable, obviously-synthetic subscription
+// UUID used throughout this file's fixtures — tests assert it (and the
+// literal "/subscriptions/" prefix) never appear anywhere in rendered
+// billing HTML, since the full resource IDs built from it are kept
+// internally for attribution matching and sort ordering only.
+const testSubscriptionID = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+
+// testARMResourceID builds a syntactically valid, fully-qualified Azure
+// resource ID for a non-cluster resource (a disk, by convention) — enough
+// for sanitizeResourceID to extract a distinguishable resource type/name
+// pair for test assertions.
+func testARMResourceID(resourceGroup, name string) string {
+	return "/subscriptions/" + testSubscriptionID + "/resourceGroups/" + resourceGroup + "/providers/Microsoft.Compute/disks/" + name
+}
+
+// testARMClusterResourceID builds a syntactically valid AKS managedClusters
+// resource ID — the shape ClusterResourceID/attribution matching expects.
+func testARMClusterResourceID(resourceGroup, name string) string {
+	return "/subscriptions/" + testSubscriptionID + "/resourceGroups/" + resourceGroup + "/providers/Microsoft.ContainerService/managedClusters/" + name
+}
+
 func testAttributionSnapshot() billing.Snapshot {
+	clusterID := testARMClusterResourceID("rg-cluster", "aks")
 	return billing.Snapshot{
 		Status: billing.StatusAvailable, Total: 300, Currency: "USD",
-		ClusterResourceID: "/subscriptions/s/resourceGroups/rg-cluster/providers/Microsoft.ContainerService/managedClusters/aks",
+		ClusterResourceID: clusterID,
 		AttributedTotal:   100,
 		UnattributedTotal: 200,
 		Lines: []billing.ResourceCost{
-			{ResourceID: "/r/z", ResourceGroup: "rg-node", Cost: 50, Currency: "USD"},
-			{ResourceID: "/subscriptions/s/resourceGroups/rg-cluster/providers/Microsoft.ContainerService/managedClusters/aks", ResourceGroup: "rg-cluster", Cost: 100, Currency: "USD", Attributed: true},
-			{ResourceID: "/r/a", ResourceGroup: "rg-node", Cost: 150, Currency: "USD"},
+			{ResourceID: testARMResourceID("rg-node", "disk-z"), ResourceGroup: "rg-node", Cost: 50, Currency: "USD"},
+			{ResourceID: clusterID, ResourceGroup: "rg-cluster", Cost: 100, Currency: "USD", Attributed: true},
+			{ResourceID: testARMResourceID("rg-node", "disk-a"), ResourceGroup: "rg-node", Cost: 150, Currency: "USD"},
 		},
 	}
 }
@@ -62,8 +84,8 @@ func TestBuildBillingPageDataComputesSubtotalsByResourceGroupDeterministically(t
 	snap := testAttributionSnapshot()
 	data := buildBillingPageData(snap, true, "", 0, 0)
 
-	if data.ClusterResourceID != snap.ClusterResourceID {
-		t.Errorf("ClusterResourceID = %q, want %q", data.ClusterResourceID, snap.ClusterResourceID)
+	if data.ClusterResourceType != "Microsoft.ContainerService/managedClusters" || data.ClusterResourceName != "aks" {
+		t.Errorf("ClusterResourceType/ClusterResourceName = %q/%q, want Microsoft.ContainerService/managedClusters/aks", data.ClusterResourceType, data.ClusterResourceName)
 	}
 	if data.AttributedTotal != 100 || data.UnattributedTotal != 200 {
 		t.Errorf("AttributedTotal/UnattributedTotal = %v/%v, want 100/200", data.AttributedTotal, data.UnattributedTotal)
@@ -87,16 +109,20 @@ func TestBuildBillingPageDataComputesSubtotalsByResourceGroupDeterministically(t
 	if len(data.ResourceRows) != 3 {
 		t.Fatalf("len(ResourceRows) = %d, want 3 (fits on one page)", len(data.ResourceRows))
 	}
-	// Flat row list sorted by (resource group, then resource ID):
-	// "rg-cluster" before "rg-node", "/r/a" before "/r/z" within rg-node.
+	// Flat row list sorted by (resource group, then the full resource ID
+	// — never exposed on billingResourceRow itself): "rg-cluster" before
+	// "rg-node", "disk-a" before "disk-z" within rg-node.
 	wantOrder := []string{clusterSubtotal.ResourceGroup, "rg-node", "rg-node"}
 	for i, want := range wantOrder {
 		if data.ResourceRows[i].ResourceGroup != want {
 			t.Fatalf("ResourceRows[%d].ResourceGroup = %q, want %q (order = %+v)", i, data.ResourceRows[i].ResourceGroup, want, data.ResourceRows)
 		}
 	}
-	if data.ResourceRows[1].ResourceID != "/r/a" || data.ResourceRows[2].ResourceID != "/r/z" {
+	if data.ResourceRows[1].ResourceName != "disk-a" || data.ResourceRows[2].ResourceName != "disk-z" {
 		t.Fatalf("rg-node rows order = %+v", data.ResourceRows[1:])
+	}
+	if data.ResourceRows[1].ResourceType != "Microsoft.Compute/disks" {
+		t.Errorf("ResourceType = %q, want Microsoft.Compute/disks", data.ResourceRows[1].ResourceType)
 	}
 	if !data.ResourceRows[0].Attributed {
 		t.Errorf("the exact-match row should be Attributed: %+v", data.ResourceRows[0])
@@ -106,7 +132,7 @@ func TestBuildBillingPageDataComputesSubtotalsByResourceGroupDeterministically(t
 func TestBuildBillingPageDataPaginatesResourceRowsAndValidatesRequestedParams(t *testing.T) {
 	lines := make([]billing.ResourceCost, 0, 120)
 	for i := 0; i < 120; i++ {
-		lines = append(lines, billing.ResourceCost{ResourceID: fmt.Sprintf("/r/%03d", i), ResourceGroup: "rg-node", Cost: 1})
+		lines = append(lines, billing.ResourceCost{ResourceID: testARMResourceID("rg-node", fmt.Sprintf("disk-%03d", i)), ResourceGroup: "rg-node", Cost: 1})
 	}
 	snap := billing.Snapshot{Status: billing.StatusAvailable, Total: 120, Currency: "USD", Lines: lines}
 
@@ -293,7 +319,8 @@ func TestRenderCostPageShowsAttributionSplitAndHidesEstimateBadgeWhenBillingAvai
 		Timestamp: time.Now(), ClusterName: "rxr-rxp-e2e-01-cus-aks", Provider: "azure", Region: "centralus",
 		Currency: "USD",
 	}}
-	clusterResourceID := "/subscriptions/s/resourceGroups/rg-cluster/providers/Microsoft.ContainerService/managedClusters/aks"
+	clusterResourceID := testARMClusterResourceID("rg-cluster", "aks")
+	nodeResourceID := testARMResourceID("rg-node", "disk-user")
 	snap := billing.Snapshot{
 		Status: billing.StatusAvailable, Total: 5000, Currency: "USD",
 		CostBasis:         billing.CostBasisActualCost,
@@ -306,7 +333,7 @@ func TestRenderCostPageShowsAttributionSplitAndHidesEstimateBadgeWhenBillingAvai
 		UnattributedTotal: 4800,
 		Lines: []billing.ResourceCost{
 			{ResourceID: clusterResourceID, ResourceGroup: "rg-cluster", Cost: 200, Currency: "USD", Attributed: true},
-			{ResourceID: "/r/vmss", ResourceGroup: "rg-node", Cost: 4800, Currency: "USD"},
+			{ResourceID: nodeResourceID, ResourceGroup: "rg-node", Cost: 4800, Currency: "USD"},
 		},
 	}
 	html := renderCostPage(scan, "", []string{""}, snap, true, 0, 0)
@@ -320,11 +347,26 @@ func TestRenderCostPageShowsAttributionSplitAndHidesEstimateBadgeWhenBillingAvai
 	if !strings.Contains(html, "Cluster-attributed") || !strings.Contains(html, "Unattributed") {
 		t.Error("attribution split (cluster-attributed vs unattributed) not rendered")
 	}
-	if !strings.Contains(html, "Two-resource-group total (reconciliation)") {
-		t.Error("the two-resource-group reconciliation total is not clearly labeled")
+	if !strings.Contains(html, "AKS control-plane charge") {
+		t.Error("the exact-match figure should be labeled as the control-plane charge, not implied to be the cluster's cost")
 	}
-	if !strings.Contains(html, clusterResourceID) {
-		t.Error("the exact configured AKS resource ID is not shown")
+	if !strings.Contains(html, "AKS cluster actual cost") || !strings.Contains(html, "Unavailable") {
+		t.Error("the AKS cluster's actual cost should be explicitly shown as unavailable")
+	}
+	if !strings.Contains(html, "Scope total (reconciliation)") {
+		t.Error("the reconciliation total should be labeled as a scope total, not implied to be the AKS cluster's cost")
+	}
+	if strings.Contains(html, "Two-resource-group total") {
+		t.Error("the old \"two-resource-group total\" wording must not remain")
+	}
+	if strings.Contains(html, clusterResourceID) || strings.Contains(html, nodeResourceID) {
+		t.Error("full Azure resource IDs must never appear in rendered billing HTML")
+	}
+	if strings.Contains(html, testSubscriptionID) || strings.Contains(html, "/subscriptions/") {
+		t.Error("the subscription ID (or the literal \"/subscriptions/\" prefix) must never appear in rendered billing HTML")
+	}
+	if !strings.Contains(html, "Microsoft.ContainerService/managedClusters") || !strings.Contains(html, "Microsoft.Compute/disks") {
+		t.Error("sanitized resource types should still be shown in place of the full resource ID")
 	}
 	if !strings.Contains(html, "rg-cluster") || !strings.Contains(html, "rg-node") {
 		t.Error("resource-group subtotals not rendered")
@@ -336,10 +378,13 @@ func TestRenderCostPageShowsAttributionSplitAndHidesEstimateBadgeWhenBillingAvai
 
 // largeResourceLineSnapshot returns a Snapshot with n cached lines spread
 // across two resource groups, sorted so callers can assert on ordering.
+// Each line's ResourceID is a syntactically valid, fully-qualified Azure
+// resource ID (built from testSubscriptionID) so sanitizeResourceID
+// produces distinguishable, index-numbered resource names.
 func largeResourceLineSnapshot(n int) billing.Snapshot {
 	lines := make([]billing.ResourceCost, 0, n)
 	for i := 0; i < n; i++ {
-		lines = append(lines, billing.ResourceCost{ResourceID: fmt.Sprintf("/r/%04d", i), ResourceGroup: "rg-node", Cost: 1, Currency: "USD"})
+		lines = append(lines, billing.ResourceCost{ResourceID: testARMResourceID("rg-node", fmt.Sprintf("disk-%04d", i)), ResourceGroup: "rg-node", Cost: 1, Currency: "USD"})
 	}
 	return billing.Snapshot{Status: billing.StatusAvailable, Total: float64(n), Currency: "USD", Lines: lines}
 }
@@ -348,18 +393,24 @@ func largeResourceLineSnapshot(n int) billing.Snapshot {
 // the rendered HTML itself contains only one page's worth of resource
 // rows — not all rows client-side-hidden by CSS/JS the way the namespace
 // filter above works. Only rows for the requested page should ever reach
-// the response body.
+// the response body. It also proves the full resource ID and subscription
+// UUID never reach the response, on every page — only the sanitized
+// resource type/name.
 func TestRenderCostPageActuallyPaginatesRowsInsteadOfHidingThemWithJS(t *testing.T) {
 	scan := &clusterScan{report: &models.CloudCostReport{Timestamp: time.Now(), ClusterName: "aks", Currency: "USD"}}
 	snap := largeResourceLineSnapshot(120)
 
-	const rowCellMarker = `<td class="resource-id-cell">`
+	// Every line in this fixture sanitizes to the same resource type
+	// ("Microsoft.Compute/disks"), so counting its Type cell is an exact
+	// per-row count — unlike counting the generic .resource-cell class,
+	// which now appears twice per row (type and name).
+	const rowCellMarker = `<td class="resource-cell">Microsoft.Compute/disks</td>`
 
 	page1 := renderCostPage(scan, "", []string{""}, snap, true, 0, 0)
 	if got := strings.Count(page1, rowCellMarker); got != 50 {
-		t.Fatalf("page 1: rendered %d resource-id-cell rows, want 50 (only the current page, not all 120)", got)
+		t.Fatalf("page 1: rendered %d resource rows, want 50 (only the current page, not all 120)", got)
 	}
-	if !strings.Contains(page1, "/r/0000") || strings.Contains(page1, "/r/0119") {
+	if !strings.Contains(page1, "disk-0000") || strings.Contains(page1, "disk-0119") {
 		t.Error("page 1 should contain the first row and not the last row")
 	}
 	if !strings.Contains(page1, "Page 1 of 3") {
@@ -368,21 +419,30 @@ func TestRenderCostPageActuallyPaginatesRowsInsteadOfHidingThemWithJS(t *testing
 	if !strings.Contains(page1, `href="/costs?billingPage=2"`) {
 		t.Error("a plain, working Next link to page 2 was not rendered")
 	}
+	if strings.Contains(page1, testSubscriptionID) || strings.Contains(page1, "/subscriptions/") {
+		t.Error("page 1 must never render the full resource ID or subscription UUID")
+	}
 
 	page2 := renderCostPage(scan, "", []string{""}, snap, true, 2, 0)
 	if got := strings.Count(page2, rowCellMarker); got != 50 {
-		t.Fatalf("page 2: rendered %d resource-id-cell rows, want 50", got)
+		t.Fatalf("page 2: rendered %d resource rows, want 50", got)
 	}
-	if strings.Contains(page2, "/r/0000") || !strings.Contains(page2, "/r/0050") {
+	if strings.Contains(page2, "disk-0000") || !strings.Contains(page2, "disk-0050") {
 		t.Error("page 2 should not contain page 1's rows and should contain its own")
+	}
+	if strings.Contains(page2, testSubscriptionID) || strings.Contains(page2, "/subscriptions/") {
+		t.Error("page 2 must never render the full resource ID or subscription UUID")
 	}
 
 	page3 := renderCostPage(scan, "", []string{""}, snap, true, 3, 0)
 	if got := strings.Count(page3, rowCellMarker); got != 20 {
-		t.Fatalf("page 3 (last, partial): rendered %d resource-id-cell rows, want 20 (120 - 2*50)", got)
+		t.Fatalf("page 3 (last, partial): rendered %d resource rows, want 20 (120 - 2*50)", got)
 	}
-	if !strings.Contains(page3, "/r/0119") {
+	if !strings.Contains(page3, "disk-0119") {
 		t.Error("the last page should contain the final row")
+	}
+	if strings.Contains(page3, testSubscriptionID) || strings.Contains(page3, "/subscriptions/") {
+		t.Error("page 3 must never render the full resource ID or subscription UUID")
 	}
 }
 
@@ -416,8 +476,8 @@ func TestRenderCostPageAttributionGridUsesResponsiveCSSNotInlineColumnOverride(t
 	if !strings.Contains(html, `class="attribution-grid"`) {
 		t.Error("attribution grid should use the responsive .attribution-grid class")
 	}
-	if !strings.Contains(html, "resource-id-cell") {
-		t.Error("resource ID cells should carry the wrapping class so long IDs don't clip")
+	if !strings.Contains(html, "resource-cell") {
+		t.Error("resource type/name cells should carry the wrapping class so long values don't clip")
 	}
 }
 

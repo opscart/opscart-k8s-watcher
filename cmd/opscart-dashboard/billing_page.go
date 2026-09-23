@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"math"
 	"net/url"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -42,17 +43,25 @@ type billingPageData struct {
 	Coverage       string
 	Disclosures    []string
 
-	// ClusterResourceID, AttributedTotal, and UnattributedTotal describe
-	// the increment-one attribution split: AttributedTotal is billed cost
-	// on the single resource whose ID exactly matches ClusterResourceID;
-	// UnattributedTotal is every other resource billed in the same two
-	// resource groups, whose cluster ownership has not been verified.
-	// AttributedTotal + UnattributedTotal reconciles to Total by
-	// construction (see billing.Result.UnattributedTotal) — not bit-exact
-	// float64 equality.
-	ClusterResourceID string
-	AttributedTotal   float64
-	UnattributedTotal float64
+	// ClusterResourceType/ClusterResourceName and AttributedTotal/
+	// UnattributedTotal describe the increment-one attribution split:
+	// AttributedTotal is billed cost on the single resource whose full ID
+	// exactly matches the configured AKS resource ID — sanitized here to
+	// its ARM resource type and name, never the full ID (which contains
+	// the subscription ID and resource group). UnattributedTotal is every
+	// other resource billed in the same two resource groups, whose
+	// cluster ownership has not been verified. AttributedTotal +
+	// UnattributedTotal reconciles to Total by construction (see
+	// billing.Result.UnattributedTotal) — not bit-exact float64 equality.
+	//
+	// Neither of these is the AKS cluster's actual cost: that requires a
+	// subscription-scoped Kubernetes cost query this package does not yet
+	// implement — see the template's "AKS cluster actual cost" figure,
+	// which is unconditionally rendered as unavailable.
+	ClusterResourceType string
+	ClusterResourceName string
+	AttributedTotal     float64
+	UnattributedTotal   float64
 	// ResourceGroupSubtotals is each queried resource group's subtotal and
 	// row count computed from the COMPLETE cached dataset (snapshot.Lines),
 	// independent of ResourceRows' pagination below. Sorted by resource
@@ -84,9 +93,14 @@ type billingPageData struct {
 }
 
 // billingResourceRow is one cached resource-level billing line, as shown on
-// one page of the paginated resource-rows table.
+// one page of the paginated resource-rows table. It deliberately never
+// carries the full Azure resource ID — only the sanitized ResourceType/
+// ResourceName pair (see sanitizeResourceID) — so a full ID (which embeds
+// the subscription ID and resource group) can never reach the rendered
+// page, a title/data attribute, or a log line through this struct.
 type billingResourceRow struct {
-	ResourceID    string
+	ResourceType  string
+	ResourceName  string
 	ResourceGroup string
 	Cost          float64
 	Attributed    bool
@@ -145,7 +159,7 @@ func buildBillingPageData(snapshot billing.Snapshot, configured bool, activeCtx 
 		data.Scope = snapshot.Scope
 		data.Coverage = snapshot.Coverage
 		data.Disclosures = snapshot.Disclosures
-		data.ClusterResourceID = snapshot.ClusterResourceID
+		data.ClusterResourceType, data.ClusterResourceName = sanitizeResourceID(snapshot.ClusterResourceID)
 		data.AttributedTotal = snapshot.AttributedTotal
 		data.UnattributedTotal = snapshot.UnattributedTotal
 		// Computed from the complete dataset (snapshot.Lines), not from
@@ -197,21 +211,61 @@ func buildBillingResourceGroupSubtotals(lines []billing.ResourceCost) []billingR
 }
 
 // buildBillingResourceRows flattens the cached lines into a single,
-// deterministically ordered list (by resource group, then resource ID),
-// independent of whatever order the Cost Management API happened to
-// return rows in. Pagination is applied afterward by paginateBillingRows.
+// deterministically ordered list (by resource group, then the full
+// resource ID), independent of whatever order the Cost Management API
+// happened to return rows in. The full resource ID is used only for this
+// sort — sanitizeResourceID converts each line to its display-safe
+// ResourceType/ResourceName before it is ever stored in a billingResourceRow,
+// so the full ID (which embeds the subscription ID and resource group)
+// never reaches the returned rows. Pagination is applied afterward by
+// paginateBillingRows.
 func buildBillingResourceRows(lines []billing.ResourceCost) []billingResourceRow {
-	rows := make([]billingResourceRow, len(lines))
-	for i, l := range lines {
-		rows[i] = billingResourceRow{ResourceID: l.ResourceID, ResourceGroup: l.ResourceGroup, Cost: l.Cost, Attributed: l.Attributed}
-	}
-	sort.Slice(rows, func(i, j int) bool {
-		if rows[i].ResourceGroup != rows[j].ResourceGroup {
-			return rows[i].ResourceGroup < rows[j].ResourceGroup
+	sorted := append([]billing.ResourceCost(nil), lines...)
+	sort.Slice(sorted, func(i, j int) bool {
+		if sorted[i].ResourceGroup != sorted[j].ResourceGroup {
+			return sorted[i].ResourceGroup < sorted[j].ResourceGroup
 		}
-		return rows[i].ResourceID < rows[j].ResourceID
+		return sorted[i].ResourceID < sorted[j].ResourceID
 	})
+
+	rows := make([]billingResourceRow, len(sorted))
+	for i, l := range sorted {
+		resourceType, resourceName := sanitizeResourceID(l.ResourceID)
+		rows[i] = billingResourceRow{
+			ResourceType:  resourceType,
+			ResourceName:  resourceName,
+			ResourceGroup: l.ResourceGroup,
+			Cost:          l.Cost,
+			Attributed:    l.Attributed,
+		}
+	}
 	return rows
+}
+
+// armResourceIDPattern extracts the non-sensitive parts of a full Azure ARM
+// resource ID: everything between "providers/" and the final path segment
+// is the resource type (e.g. "Microsoft.Compute/virtualMachineScaleSets"
+// or "Microsoft.ContainerService/managedClusters"); the final segment is
+// the resource's own name. It deliberately never captures the
+// subscription ID or resource group name.
+var armResourceIDPattern = regexp.MustCompile(`(?i)^/subscriptions/[^/]+/resourceGroups/[^/]+/providers/(.+)/([^/]+)$`)
+
+// sanitizeResourceID converts a full Azure resource ID into a display-safe
+// (resourceType, resourceName) pair — never the subscription ID, the
+// resource group, or the full ARM path. A full resource ID is used only
+// for exact-match attribution (pkg/billing, unchanged by this function)
+// and for stable sort ordering (buildBillingResourceRows above); every
+// other consumer in this package must go through this function before a
+// resource identity reaches a rendered page, a title/data attribute, or a
+// log line. An ID that doesn't match the expected ARM shape (defensive;
+// Cost Management always returns full ARM IDs) sanitizes to "unknown" for
+// both fields rather than echoing back an unrecognized string verbatim.
+func sanitizeResourceID(id string) (resourceType, resourceName string) {
+	m := armResourceIDPattern.FindStringSubmatch(strings.TrimSpace(id))
+	if m == nil {
+		return "unknown", "unknown"
+	}
+	return m[1], m[2]
 }
 
 // paginateBillingRows selects one page out of all, validating and bounding
