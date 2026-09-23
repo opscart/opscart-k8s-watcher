@@ -304,9 +304,23 @@ func writeDiscoverySafeOutput(w io.Writer, periodLabel string, filterMode subscr
 	if err != nil {
 		status = "error: " + err.Error()
 	}
-	fmt.Fprintf(w, "status: %s\nperiod: %s\nfilter mode: %s\nrow count: %d\nresponse columns: %s\n"+
-		"unique cluster values: %d\narm-shaped cluster values: %d\nexact matches: %d\ncase-insensitive matches: %d\nnormalized arm matches: %d\nname-only matches: %d\n",
-		status, periodLabel, filterMode, result.RowCount, strings.Join(result.ColumnNames, ","),
+	// Row count and response column names are always safe to print —
+	// they describe the response's shape, not the match outcome — so
+	// they print unconditionally, even when processing stopped before
+	// any counting happened (e.g. the row-count safety bound was
+	// exceeded).
+	fmt.Fprintf(w, "status: %s\nperiod: %s\nfilter mode: %s\nrow count: %d\nresponse columns: %s\n",
+		status, periodLabel, filterMode, result.RowCount, strings.Join(result.ColumnNames, ","))
+
+	if !result.CountsEvaluated {
+		// Processing stopped before the matching loop ran (see
+		// subscriptionKubernetesDiscoveryResult.CountsEvaluated) — these
+		// six counts are not real computed zeros, so they must never be
+		// printed as if they were.
+		fmt.Fprintf(w, "match counts: not evaluated\n")
+		return
+	}
+	fmt.Fprintf(w, "unique cluster values: %d\narm-shaped cluster values: %d\nexact matches: %d\ncase-insensitive matches: %d\nnormalized arm matches: %d\nname-only matches: %d\n",
 		result.UniqueClusterValueCount, result.ARMShapedClusterValueCount, result.ExactMatchCount, result.CaseInsensitiveMatchCount, result.NormalizedARMMatchCount, result.NameOnlyMatchCount)
 	if result.HasSafeMatch {
 		fmt.Fprintf(w, "matched total: %.2f\nmatched currency: %s\n", result.MatchedTotal, result.MatchedCurrency)
@@ -366,5 +380,51 @@ func TestSubscriptionKubernetesQueryDiscoverySafeOutputNeverExposesClusterValues
 	}
 	if !strings.Contains(output, "exact matches: 1") {
 		t.Errorf("diagnostic output missing the exact match count; output:\n%s", output)
+	}
+}
+
+// TestSubscriptionKubernetesQueryDiscoverySafeOutputOmitsCountsWhenRowCapExceeded
+// proves that once the row-count safety bound is exceeded — so
+// runSubscriptionKubernetesDiscoveryQuery never ran its matching loop —
+// writeDiscoverySafeOutput never prints any of the six match-count lines
+// as a misleading zero. Row count and response column names, which are
+// known regardless of whether counting ran, still print.
+func TestSubscriptionKubernetesQueryDiscoverySafeOutputOmitsCountsWhenRowCapExceeded(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		writeQueryResponse(w,
+			[]queryColumn{{Name: "Cluster"}, {Name: "ResourceLocation"}, {Name: "Cost"}, {Name: "Currency"}},
+			discoveryRowFixtures(subscriptionKubernetesQueryMaxDiscoveryRows+1), "")
+	}))
+	defer server.Close()
+
+	cred := &fakeCredential{token: "t"}
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	result, err := runSubscriptionKubernetesDiscoveryQuery(ctx, newARMHTTPClient(), cred, server.URL, "11111111-1111-1111-1111-111111111111", "cluster-resource-id", time.Now(), time.Now())
+	if err == nil {
+		t.Fatal("expected a too-many-rows error, got nil")
+	}
+
+	var buf bytes.Buffer
+	writeDiscoverySafeOutput(&buf, "2026-08-17 to 2026-09-15", subscriptionKubernetesQueryFilterModeDiscovery, result, err)
+	output := buf.String()
+
+	for _, misleading := range []string{
+		"exact matches: 0", "case-insensitive matches: 0", "normalized arm matches: 0",
+		"name-only matches: 0", "unique cluster values: 0", "arm-shaped cluster values: 0",
+	} {
+		if strings.Contains(output, misleading) {
+			t.Errorf("output must never print a zero match count when processing stopped before counting; got %q in:\n%s", misleading, output)
+		}
+	}
+	if !strings.Contains(output, "not evaluated") {
+		t.Errorf("output should explicitly say the match counts were not evaluated; got:\n%s", output)
+	}
+	if !strings.Contains(output, fmt.Sprintf("row count: %d", subscriptionKubernetesQueryMaxDiscoveryRows+1)) {
+		t.Errorf("row count should still be printed even though counting did not run; got:\n%s", output)
+	}
+	if !strings.Contains(output, "response columns: Cluster,ResourceLocation,Cost,Currency") {
+		t.Errorf("response columns should still be printed even though counting did not run; got:\n%s", output)
 	}
 }

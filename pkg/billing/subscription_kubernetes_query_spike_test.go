@@ -448,10 +448,13 @@ func runSubscriptionKubernetesQuery(ctx context.Context, httpClient *http.Client
 // subscriptionKubernetesQueryMaxDiscoveryRows bounds how many rows
 // runSubscriptionKubernetesDiscoveryQuery will process. A discovery
 // response — no filter at all — could in principle return every
-// Kubernetes-cost-bearing cluster in the subscription; this is a
-// defensive ceiling, not an expected count, and a response exceeding it
-// is rejected outright rather than partially processed.
-const subscriptionKubernetesQueryMaxDiscoveryRows = 1000
+// Kubernetes-cost-bearing cluster in the subscription; this is a fixed,
+// non-configurable defensive ceiling, not an expected count, and a
+// response exceeding it is rejected outright rather than partially
+// processed — see subscriptionKubernetesDiscoveryResult.CountsEvaluated
+// for how that rejection is distinguished from a real zero-match result
+// in output.
+const subscriptionKubernetesQueryMaxDiscoveryRows = 5000
 
 // subscriptionKubernetesQueryDiscoveryNoMatchError means discovery
 // completed successfully (a bounded number of rows, each with a usable
@@ -509,9 +512,25 @@ func finalResourceNameSegment(id string) string {
 // legitimately 0" from "no safe match at all" (see
 // subscriptionKubernetesQueryDiscoveryNoMatchError) without relying on a
 // zero-value sentinel in MatchedTotal.
+//
+// CountsEvaluated distinguishes the same kind of ambiguity one level
+// earlier: it is true only when the matching loop actually ran to
+// completion, so UniqueClusterValueCount/ARMShapedClusterValueCount/
+// ExactMatchCount/CaseInsensitiveMatchCount/NormalizedARMMatchCount/
+// NameOnlyMatchCount are real, computed zeros or higher — never left at
+// their Go zero value because processing stopped before counting began
+// (e.g. the row-count safety bound, subscriptionKubernetesQueryMaxDiscoveryRows,
+// was exceeded). Every early-return failure path in
+// runSubscriptionKubernetesDiscoveryQuery leaves CountsEvaluated false by
+// construction (it only appears in the one result literal built after the
+// loop completes); a caller must not print those six counts, or must
+// print them as "not evaluated", whenever CountsEvaluated is false — see
+// writeDiscoverySafeOutput.
 type subscriptionKubernetesDiscoveryResult struct {
-	RowCount                   int
-	ColumnNames                []string
+	RowCount        int
+	ColumnNames     []string
+	CountsEvaluated bool
+
 	UniqueClusterValueCount    int
 	ARMShapedClusterValueCount int
 	ExactMatchCount            int
@@ -611,7 +630,10 @@ func runSubscriptionKubernetesDiscoveryQuery(ctx context.Context, httpClient *ht
 		return subscriptionKubernetesDiscoveryResult{ColumnNames: columnNames}, &subscriptionKubernetesQueryNoDataError{}
 	}
 	if rowCount > subscriptionKubernetesQueryMaxDiscoveryRows {
-		// Rejected before any row is examined for matching.
+		// Rejected before any row is examined for matching — the
+		// returned result's CountsEvaluated stays false (this literal
+		// never sets it), so a caller can tell "row cap exceeded, nothing
+		// counted" apart from a real zero-match result.
 		return subscriptionKubernetesDiscoveryResult{RowCount: rowCount, ColumnNames: columnNames}, newSafeError(subscriptionKubernetesQueryOperation, safeReasonTooManyRows, fmt.Errorf("discovery returned more than %d rows", subscriptionKubernetesQueryMaxDiscoveryRows))
 	}
 
@@ -709,6 +731,7 @@ func runSubscriptionKubernetesDiscoveryQuery(ctx context.Context, httpClient *ht
 	result := subscriptionKubernetesDiscoveryResult{
 		RowCount:                   rowCount,
 		ColumnNames:                columnNames,
+		CountsEvaluated:            true, // reached only once the loop above has fully processed every row
 		UniqueClusterValueCount:    len(uniqueValues),
 		ARMShapedClusterValueCount: armShapedCount,
 		ExactMatchCount:            exactCount,
@@ -1369,19 +1392,65 @@ func TestSubscriptionKubernetesQueryDiscoveryZeroCostSafeMatchIsValid(t *testing
 	}
 }
 
+// discoveryRowFixtures returns n synthetic discovery rows using a single,
+// short, deliberately non-ARM-shaped placeholder Cluster value repeated n
+// times. These row-count tests exercise the row-count safety bound
+// itself, not match content or per-row uniqueness, so there is no reason
+// to construct n distinct (or realistic-length) ARM resource ID strings —
+// doing so at n in the thousands would only slow the test down and bloat
+// this file for no additional coverage.
+func discoveryRowFixtures(n int) [][]any {
+	rows := make([][]any, n)
+	for i := range rows {
+		rows[i] = []any{"cluster", "eastus2", 1.0, "USD"}
+	}
+	return rows
+}
+
+// TestSubscriptionKubernetesQueryDiscoveryAcceptsExactlyMaxRows proves the
+// row-count safety bound is inclusive: exactly
+// subscriptionKubernetesQueryMaxDiscoveryRows rows must still be
+// processed (CountsEvaluated true), not rejected — only a response
+// exceeding the bound is rejected (see the next test).
+func TestSubscriptionKubernetesQueryDiscoveryAcceptsExactlyMaxRows(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		writeQueryResponse(w,
+			[]queryColumn{{Name: "Cluster"}, {Name: "ResourceLocation"}, {Name: "Cost"}, {Name: "Currency"}},
+			discoveryRowFixtures(subscriptionKubernetesQueryMaxDiscoveryRows), "")
+	}))
+	defer server.Close()
+
+	cred := &fakeCredential{token: "t"}
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	result, err := runSubscriptionKubernetesDiscoveryQuery(ctx, newARMHTTPClient(), cred, server.URL, "11111111-1111-1111-1111-111111111111", "cluster-resource-id", time.Now(), time.Now())
+	// The fixture's "cluster" placeholder never matches
+	// "cluster-resource-id", so a no-match error is the expected outcome
+	// here — what this test actually proves is that the row cap itself
+	// did not reject exactly the max row count.
+	var tooMany *SafeError
+	if errors.As(err, &tooMany) && tooMany.Reason == safeReasonTooManyRows {
+		t.Fatalf("exactly %d rows must be accepted, not rejected as too many: %v", subscriptionKubernetesQueryMaxDiscoveryRows, err)
+	}
+	if result.RowCount != subscriptionKubernetesQueryMaxDiscoveryRows {
+		t.Errorf("RowCount = %d, want %d", result.RowCount, subscriptionKubernetesQueryMaxDiscoveryRows)
+	}
+	if !result.CountsEvaluated {
+		t.Error("CountsEvaluated = false, want true — counting must run for exactly the max row count")
+	}
+}
+
 // TestSubscriptionKubernetesQueryDiscoveryRejectsMoreThanMaxRows proves a
 // response exceeding subscriptionKubernetesQueryMaxDiscoveryRows fails
-// safely and defensively, before any row is examined for matching.
+// safely and defensively, before any row is examined for matching — and
+// that CountsEvaluated stays false, so a caller never mistakes "nothing
+// was counted" for "zero matches were found."
 func TestSubscriptionKubernetesQueryDiscoveryRejectsMoreThanMaxRows(t *testing.T) {
-	rows := make([][]any, subscriptionKubernetesQueryMaxDiscoveryRows+1)
-	for i := range rows {
-		rows[i] = []any{
-			fmt.Sprintf("/subscriptions/11111111-1111-1111-1111-111111111111/resourceGroups/rg/providers/Microsoft.ContainerService/managedClusters/cluster-%d", i),
-			"eastus2", 1.0, "USD",
-		}
-	}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		writeQueryResponse(w, []queryColumn{{Name: "Cluster"}, {Name: "ResourceLocation"}, {Name: "Cost"}, {Name: "Currency"}}, rows, "")
+		writeQueryResponse(w,
+			[]queryColumn{{Name: "Cluster"}, {Name: "ResourceLocation"}, {Name: "Cost"}, {Name: "Currency"}},
+			discoveryRowFixtures(subscriptionKubernetesQueryMaxDiscoveryRows+1), "")
 	}))
 	defer server.Close()
 
@@ -1395,6 +1464,9 @@ func TestSubscriptionKubernetesQueryDiscoveryRejectsMoreThanMaxRows(t *testing.T
 	}
 	if result.RowCount != subscriptionKubernetesQueryMaxDiscoveryRows+1 {
 		t.Errorf("RowCount = %d, want %d", result.RowCount, subscriptionKubernetesQueryMaxDiscoveryRows+1)
+	}
+	if result.CountsEvaluated {
+		t.Error("CountsEvaluated = true, want false — the row cap must reject before any counting")
 	}
 	if result.ExactMatchCount != 0 || result.HasSafeMatch {
 		t.Error("no matching should have been attempted once the row cap was exceeded")
