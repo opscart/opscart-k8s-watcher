@@ -47,10 +47,10 @@ Never claim that an action was executed or that cluster state was changed.`
 )
 
 type openAIProvider struct {
-	endpoint string
-	model    string
-	apiKey   string
-	client   *http.Client
+	endpoint      string
+	model         string
+	authenticator requestAuthenticator
+	client        *http.Client
 }
 
 type openAIRequest struct {
@@ -112,11 +112,11 @@ var (
 	errInvalidStructuredResponse = errors.New("AI provider returned invalid structured output")
 )
 
-func newOpenAIProvider(config Config, baseURL *url.URL) AIProvider {
+func newOpenAIProvider(config Config, baseURL *url.URL, authenticator requestAuthenticator) AIProvider {
 	return &openAIProvider{
-		endpoint: strings.TrimRight(baseURL.String(), "/") + "/responses",
-		model:    strings.TrimSpace(config.Model),
-		apiKey:   strings.TrimSpace(config.APIKey),
+		endpoint:      strings.TrimRight(baseURL.String(), "/") + "/responses",
+		model:         strings.TrimSpace(config.Model),
+		authenticator: authenticator,
 		client: &http.Client{
 			Timeout: config.Timeout,
 			CheckRedirect: func(*http.Request, []*http.Request) error {
@@ -157,7 +157,12 @@ func (provider *openAIProvider) Analyze(ctx context.Context, req AnalysisRequest
 	if err != nil {
 		return nil, errors.New("create AI provider request")
 	}
-	httpRequest.Header.Set("Authorization", "Bearer "+provider.apiKey)
+	if err := provider.authenticator.Authorize(ctx, httpRequest); err != nil {
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			return nil, err
+		}
+		return nil, errProviderAuthentication
+	}
 	httpRequest.Header.Set("Content-Type", "application/json")
 
 	httpResponse, err := provider.client.Do(httpRequest)

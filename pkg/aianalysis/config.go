@@ -9,7 +9,12 @@ import (
 )
 
 const (
-	ProviderOpenAI = "openai"
+	ProviderOpenAI       = "openai"
+	ProviderAzureFoundry = "azure-foundry"
+
+	AuthModeAPIKey           = "api-key"
+	AuthModeWorkloadIdentity = "workload-identity"
+	AuthModeAzureCLI         = "azure-cli"
 
 	DefaultBaseURL = "https://api.openai.com/v1"
 	DefaultTimeout = 30 * time.Second
@@ -20,13 +25,14 @@ const (
 type Config struct {
 	Enabled  bool
 	Provider string
+	AuthMode string
 	BaseURL  string
 	Model    string
 	APIKey   string
 	Timeout  time.Duration
 }
 
-// LoadConfigFromEnv reads the Phase 1 environment-backed configuration.
+// LoadConfigFromEnv reads the environment-backed provider configuration.
 func LoadConfigFromEnv() (Config, error) {
 	config := Config{
 		Provider: ProviderOpenAI,
@@ -46,6 +52,9 @@ func LoadConfigFromEnv() (Config, error) {
 	}
 	if value := strings.TrimSpace(os.Getenv("OPSCART_AI_PROVIDER")); value != "" {
 		config.Provider = strings.ToLower(value)
+	}
+	if value := strings.TrimSpace(os.Getenv("OPSCART_AI_AUTH_MODE")); value != "" {
+		config.AuthMode = strings.ToLower(value)
 	}
 	if value := strings.TrimSpace(os.Getenv("OPSCART_AI_BASE_URL")); value != "" {
 		config.BaseURL = value

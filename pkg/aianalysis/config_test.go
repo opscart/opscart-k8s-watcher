@@ -1,6 +1,7 @@
 package aianalysis
 
 import (
+	"net/url"
 	"strings"
 	"testing"
 	"time"
@@ -10,6 +11,7 @@ func TestLoadConfigFromEnvDefaultsDisabled(t *testing.T) {
 	for _, name := range []string{
 		"OPSCART_AI_ENABLED",
 		"OPSCART_AI_PROVIDER",
+		"OPSCART_AI_AUTH_MODE",
 		"OPSCART_AI_BASE_URL",
 		"OPSCART_AI_MODEL",
 		"OPSCART_AI_API_KEY",
@@ -42,6 +44,7 @@ func TestLoadConfigFromEnvDefaultsDisabled(t *testing.T) {
 func TestLoadConfigFromEnv(t *testing.T) {
 	t.Setenv("OPSCART_AI_ENABLED", "true")
 	t.Setenv("OPSCART_AI_PROVIDER", "OPENAI")
+	t.Setenv("OPSCART_AI_AUTH_MODE", "API-KEY")
 	t.Setenv("OPSCART_AI_BASE_URL", "https://llm.example.test/v1")
 	t.Setenv("OPSCART_AI_MODEL", "test-model")
 	t.Setenv("OPSCART_AI_API_KEY", "synthetic-key")
@@ -51,7 +54,7 @@ func TestLoadConfigFromEnv(t *testing.T) {
 	if err != nil {
 		t.Fatalf("LoadConfigFromEnv() error = %v", err)
 	}
-	if !config.Enabled || config.Provider != ProviderOpenAI || config.BaseURL != "https://llm.example.test/v1" || config.Model != "test-model" || config.APIKey != "synthetic-key" || config.Timeout != 7*time.Second {
+	if !config.Enabled || config.Provider != ProviderOpenAI || config.AuthMode != AuthModeAPIKey || config.BaseURL != "https://llm.example.test/v1" || config.Model != "test-model" || config.APIKey != "synthetic-key" || config.Timeout != 7*time.Second {
 		t.Fatalf("LoadConfigFromEnv() = %#v", config)
 	}
 }
@@ -121,6 +124,23 @@ func TestNewAIProviderConfigurationErrors(t *testing.T) {
 			wantErr: "unsupported AI provider",
 		},
 		{
+			name: "Azure authentication mode required",
+			config: Config{
+				Enabled:  true,
+				Provider: ProviderAzureFoundry,
+			},
+			wantErr: "authentication mode is required",
+		},
+		{
+			name: "OpenAI rejects Azure authentication",
+			config: Config{
+				Enabled:  true,
+				Provider: ProviderOpenAI,
+				AuthMode: AuthModeWorkloadIdentity,
+			},
+			wantErr: "unsupported authentication mode",
+		},
+		{
 			name: "missing credential",
 			config: Config{
 				Enabled:  true,
@@ -148,6 +168,19 @@ func TestNewAIProviderConfigurationErrors(t *testing.T) {
 			wantErr: "timeout must be positive",
 		},
 		{
+			name: "Azure rejects non-Azure endpoint",
+			config: Config{
+				Enabled:  true,
+				Provider: ProviderAzureFoundry,
+				AuthMode: AuthModeAPIKey,
+				BaseURL:  "https://api.openai.com/v1",
+				Model:    "deployment-name",
+				APIKey:   "synthetic-key",
+				Timeout:  time.Second,
+			},
+			wantErr: "Azure Foundry base URL",
+		},
+		{
 			name: "URL credentials",
 			config: Config{
 				Enabled:  true,
@@ -169,6 +202,71 @@ func TestNewAIProviderConfigurationErrors(t *testing.T) {
 			}
 			if provider != nil {
 				t.Fatalf("NewAIProvider() = %T, want nil", provider)
+			}
+		})
+	}
+}
+
+func TestNewAIProviderAzureFoundryAPIKey(t *testing.T) {
+	provider, err := NewAIProvider(Config{
+		Enabled:  true,
+		Provider: ProviderAzureFoundry,
+		AuthMode: AuthModeAPIKey,
+		BaseURL:  "https://example.openai.azure.com/openai/v1",
+		Model:    "deployment-name",
+		APIKey:   "synthetic-key",
+		Timeout:  time.Second,
+	})
+	if err != nil {
+		t.Fatalf("NewAIProvider() error = %v", err)
+	}
+	if provider == nil {
+		t.Fatal("NewAIProvider() = nil")
+	}
+}
+
+func TestNewAIProviderAzureFoundryAzureCLIRequiresNoAPIKey(t *testing.T) {
+	provider, err := NewAIProvider(Config{
+		Enabled:  true,
+		Provider: ProviderAzureFoundry,
+		AuthMode: AuthModeAzureCLI,
+		BaseURL:  "https://example.openai.azure.com/openai/v1",
+		Model:    "deployment-name",
+		Timeout:  time.Second,
+	})
+	if err != nil {
+		t.Fatalf("NewAIProvider() error = %v", err)
+	}
+	if provider == nil {
+		t.Fatal("NewAIProvider() = nil")
+	}
+}
+
+func TestValidateAzureFoundryBaseURL(t *testing.T) {
+	tests := []struct {
+		value string
+		valid bool
+	}{
+		{value: "https://example.openai.azure.com/openai/v1", valid: true},
+		{value: "https://example.services.ai.azure.com/openai/v1/", valid: true},
+		{value: "http://example.openai.azure.com/openai/v1"},
+		{value: "https://example.openai.azure.com:8443/openai/v1"},
+		{value: "https://example.openai.azure.com/api/projects/project"},
+		{value: "https://example.openai.azure.com/openai/v1/responses"},
+		{value: "https://example.openai.azure.com.evil.test/openai/v1"},
+	}
+	for _, test := range tests {
+		t.Run(test.value, func(t *testing.T) {
+			parsed, err := url.Parse(test.value)
+			if err != nil {
+				t.Fatalf("url.Parse() error = %v", err)
+			}
+			err = validateAzureFoundryBaseURL(parsed)
+			if test.valid && err != nil {
+				t.Fatalf("validateAzureFoundryBaseURL() error = %v", err)
+			}
+			if !test.valid && err == nil {
+				t.Fatal("validateAzureFoundryBaseURL() error = nil")
 			}
 		})
 	}
