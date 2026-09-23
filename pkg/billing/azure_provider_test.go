@@ -13,7 +13,7 @@ import (
 	"time"
 )
 
-const testNodeResourceGroup = "MC_rxr-rxp-e2e-01-cus-rg_rxr-rxp-e2e-01-cus-aks_centralus"
+const testNodeResourceGroup = "MC_example-aks-rg_example-aks_centralus"
 
 // newTestAzureProvider wires an AzureProvider at a single synthetic HTTP
 // endpoint (both the Cost Management query calls and the AKS identity
@@ -55,7 +55,7 @@ func costQueryHandler(t *testing.T, rowsByResourceGroup map[string][][]any, node
 }
 
 func TestFetchBillingAggregatesClusterAndNodeResourceGroupsWithoutDoubleCounting(t *testing.T) {
-	clusterRG := "rxr-rxp-e2e-01-cus-rg"
+	clusterRG := "example-aks-rg"
 	rows := map[string][][]any{
 		clusterRG:             {{100.0, "USD", "/subscriptions/s/resourceGroups/" + clusterRG + "/providers/Microsoft.ContainerService/managedClusters/x", clusterRG}},
 		testNodeResourceGroup: {{5328.0, "USD", "/subscriptions/s/resourceGroups/" + testNodeResourceGroup + "/providers/Microsoft.Compute/virtualMachineScaleSets/user", testNodeResourceGroup}, {190.06, "USD", "/subscriptions/s/resourceGroups/" + testNodeResourceGroup + "/providers/Microsoft.Compute/virtualMachineScaleSets/system", testNodeResourceGroup}},
@@ -91,7 +91,7 @@ func TestFetchBillingAggregatesClusterAndNodeResourceGroupsWithoutDoubleCounting
 // payloads for the dashboard's documented example period (2026-08-17 to
 // 2026-09-15) — no truncation and no drift between the two scopes.
 func TestFetchBillingSendsIdenticalFullPeriodToBothResourceGroupScopes(t *testing.T) {
-	clusterRG := "rxr-rxp-e2e-01-cus-rg"
+	clusterRG := "example-aks-rg"
 	periodStart := time.Date(2026, 8, 17, 0, 0, 0, 0, time.UTC)
 	periodEnd := time.Date(2026, 9, 15, 23, 59, 59, 0, time.UTC)
 
@@ -190,7 +190,7 @@ func almostEqual(a, b float64) bool {
 }
 
 func TestFetchBillingAttributesOnlyExactAKSResourceIDMatch(t *testing.T) {
-	clusterRG := "rxr-rxp-e2e-01-cus-rg"
+	clusterRG := "example-aks-rg"
 	rows := map[string][][]any{
 		// The AKS managed-cluster control-plane charge: ResourceId matches
 		// validAKSResourceID exactly, so this is the only attributed line.
@@ -251,7 +251,7 @@ func TestFetchBillingAttributesOnlyExactAKSResourceIDMatch(t *testing.T) {
 // construction, but a + (b - a) is not guaranteed to be bit-identical to b
 // under IEEE 754 float64 arithmetic for arbitrary a, b.
 func TestFetchBillingReconciliationHoldsWithinToleranceForFractionalCosts(t *testing.T) {
-	clusterRG := "rxr-rxp-e2e-01-cus-rg"
+	clusterRG := "example-aks-rg"
 	rows := map[string][][]any{
 		clusterRG: {{19.99, "USD", validAKSResourceID, clusterRG}},
 		testNodeResourceGroup: {
@@ -283,7 +283,7 @@ func TestFetchBillingReconciliationHoldsWithinToleranceForFractionalCosts(t *tes
 }
 
 func TestFetchBillingRejectsMixedCurrencies(t *testing.T) {
-	clusterRG := "rxr-rxp-e2e-01-cus-rg"
+	clusterRG := "example-aks-rg"
 	rows := map[string][][]any{
 		clusterRG:             {{100.0, "USD", "/r/1", clusterRG}},
 		testNodeResourceGroup: {{50.0, "EUR", "/r/2", testNodeResourceGroup}},
@@ -301,7 +301,7 @@ func TestFetchBillingRejectsMixedCurrencies(t *testing.T) {
 }
 
 func TestFetchBillingPreservesCreditsAndValidZeroTotal(t *testing.T) {
-	clusterRG := "rxr-rxp-e2e-01-cus-rg"
+	clusterRG := "example-aks-rg"
 	rows := map[string][][]any{
 		clusterRG:             {{10.0, "USD", "/r/1", clusterRG}},
 		testNodeResourceGroup: {{-10.0, "USD", "/r/2", testNodeResourceGroup}}, // a credit exactly offsetting the charge
@@ -396,7 +396,7 @@ func TestNewAzureProviderAcceptsDefaultEndpoint(t *testing.T) {
 }
 
 func TestFetchBillingLabelsResultAsTwoResourceGroupTotal(t *testing.T) {
-	clusterRG := "rxr-rxp-e2e-01-cus-rg"
+	clusterRG := "example-aks-rg"
 	rows := map[string][][]any{
 		clusterRG:             {{1.0, "USD", "/r/1", clusterRG}},
 		testNodeResourceGroup: {{2.0, "USD", "/r/2", testNodeResourceGroup}},

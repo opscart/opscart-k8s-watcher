@@ -42,7 +42,7 @@ func TestNodeResourceGroupResolverFetchesAndCaches(t *testing.T) {
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]any{
 			"properties": map[string]any{
-				"nodeResourceGroup": "MC_rxr-rxp-e2e-01-cus-rg_rxr-rxp-e2e-01-cus-aks_centralus",
+				"nodeResourceGroup": "MC_example-aks-rg_example-aks_centralus",
 			},
 		})
 	}))
@@ -56,7 +56,7 @@ func TestNodeResourceGroupResolverFetchesAndCaches(t *testing.T) {
 		if err != nil {
 			t.Fatalf("Resolve: %v", err)
 		}
-		if nrg != "MC_rxr-rxp-e2e-01-cus-rg_rxr-rxp-e2e-01-cus-aks_centralus" {
+		if nrg != "MC_example-aks-rg_example-aks_centralus" {
 			t.Errorf("nrg = %q", nrg)
 		}
 	}

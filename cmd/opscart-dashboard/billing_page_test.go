@@ -274,7 +274,7 @@ func TestBuildBillingPageDataUnavailableNeverReportsZeroAsCost(t *testing.T) {
 
 func TestRenderCostPageShowsBillingWhenConfiguredAndAvailable(t *testing.T) {
 	scan := &clusterScan{report: &models.CloudCostReport{
-		Timestamp: time.Now(), ClusterName: "rxr-rxp-e2e-01-cus-aks", Provider: "azure", Region: "centralus",
+		Timestamp: time.Now(), ClusterName: "example-aks", Provider: "azure", Region: "centralus",
 		Currency: "USD",
 	}}
 	snap := billing.Snapshot{
@@ -316,7 +316,7 @@ func TestRenderCostPageEstimateOnlyModeWhenNotConfigured(t *testing.T) {
 
 func TestRenderCostPageShowsAttributionSplitAndHidesEstimateBadgeWhenBillingAvailable(t *testing.T) {
 	scan := &clusterScan{report: &models.CloudCostReport{
-		Timestamp: time.Now(), ClusterName: "rxr-rxp-e2e-01-cus-aks", Provider: "azure", Region: "centralus",
+		Timestamp: time.Now(), ClusterName: "example-aks", Provider: "azure", Region: "centralus",
 		Currency: "USD",
 	}}
 	clusterResourceID := testARMClusterResourceID("rg-cluster", "aks")
