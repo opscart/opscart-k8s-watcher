@@ -26,6 +26,26 @@ type investigationAIPageData struct {
 	Selector string
 	Endpoint string
 
+	// CanInvestigateDeeper gates the Investigate-deeper control: shown only
+	// for a current GENERATED analysis whose server-resolved focus pod and
+	// target container are known, have restarted, are previous-logs
+	// eligible, and are not the istio-proxy sidecar — see
+	// resolveAILogSignalsTarget (ai_log_signals.go), the single source of
+	// truth this and the preview endpoint both call.
+	CanInvestigateDeeper      bool
+	LogSignalsPreviewEndpoint string
+	RefineEndpoint            string
+	// AITimeoutMillis is the server's configured shared-refinement provider
+	// timeout (srv.aiTimeout, server.go), exposed so the browser's own
+	// refinement AbortController timeout can stay slightly longer than the
+	// server's actual bound rather than a hardcoded guess.
+	AITimeoutMillis int64
+	// Refined is true when Result was produced by the refine flow (an
+	// operator-approved log_signals evidence item was included) — the
+	// template must show the refined-result disclosure instead of the
+	// plain generated-result one.
+	Refined bool
+
 	// Status is one of: NOT_CONFIGURED, NOT_GENERATED, GENERATING, GENERATED, STALE, ERROR.
 	// StatusClass is its lowercase, hyphenated CSS-class form.
 	Status      string
@@ -192,6 +212,9 @@ func (srv *server) buildInvestigationAIPageData(scan *clusterScan, cluster, sele
 		investigationTabs:          tabs,
 		Selector:                   selector,
 		Endpoint:                   warRoomAIEndpoint(cluster),
+		LogSignalsPreviewEndpoint:  aiLogSignalsPreviewEndpoint(cluster),
+		RefineEndpoint:             aiRefineEndpoint(cluster),
+		AITimeoutMillis:            srv.aiTimeout.Milliseconds(),
 		ScannedAtMs:                time.Now().UnixMilli(),
 	}
 	data.BackURL = "/warroom?cluster=" + url.QueryEscape(cluster)
@@ -235,6 +258,20 @@ func (srv *server) resolveInvestigationAIState(data investigationAIPageData, sca
 	if err != nil {
 		if hasEntry {
 			populateInvestigationAIFromEntry(&data, entry)
+			if entry.Refined && entry.RuntimeKey == srv.aiRuntime.key() && entry.BaseCapture.Hash == entry.BaseEvidenceHash &&
+				entry.BaseCapture.Selection.Selector == selector && entry.ResolvedNamespace != "" && entry.ResolvedPodName != "" {
+				if incident, episodeErr := warRoomAIIncident(srv.db, cluster, entry.BaseCapture.Selection.Fingerprint, entry.BaseCapture.Selection.Issue); episodeErr == nil &&
+					incident.ReopenCount == entry.BaseCapture.Request.ReopenCount && incident.FirstSeen.Equal(entry.BaseCapture.Request.FirstDetected) {
+					data.Status = "GENERATED"
+					data.Message = warRoomAIRefinedDisclosure
+					data.CurrentEvidence = cloneEvidenceItems(entry.BaseCapture.Request.Evidence)
+					data.EvidenceTabHref = investigationEvidenceHref(entry.BaseCapture.Selection.Issue, cluster, from)
+					if srv.logsEnabled {
+						data.CanInvestigateDeeper = true
+					}
+					return data
+				}
+			}
 			data.Status = "STALE"
 			data.StaleReason = "This result is stale because the selected issue is no longer active."
 			return data
@@ -261,12 +298,29 @@ func (srv *server) resolveInvestigationAIState(data investigationAIPageData, sca
 	data.CurrentEvidence = capture.Request.Evidence
 	data.EvidenceCaptured = formatWarRoomAITime(capture.CapturedAt)
 
-	if hasEntry && entry.RuntimeKey == srv.aiRuntime.key() && entry.EvidenceHash == capture.Hash {
+	// BaseEvidenceHash (not EvidenceHash) is the correct comparison here:
+	// EvidenceHash is the full analysis-identity hash (base plus log_signals
+	// for a refined result) used for provider-call dedup, while
+	// BaseEvidenceHash is always just the current structured Kubernetes
+	// evidence — the same kind of hash capture.Hash always is. Comparing a
+	// combined refined hash directly against a freshly recomputed
+	// base-only hash would make a refined result appear stale immediately
+	// on the very next page render.
+	if hasEntry && entry.RuntimeKey == srv.aiRuntime.key() && entry.BaseEvidenceHash == capture.Hash {
 		populateInvestigationAIFromEntry(&data, entry)
 		data.Status = "GENERATED"
-		data.Message = "Analysis generated from the current sanitized evidence."
+		if entry.Refined {
+			data.Message = warRoomAIRefinedDisclosure
+		} else {
+			data.Message = "Analysis generated from the supplied read-only evidence."
+		}
 		data.CanGenerate = true
 		data.Regenerate = true
+		if srv.logsEnabled {
+			if _, _, _, err := resolveAILogSignalsTargetWithFallback(scan, cluster, srv.db, selector, srv.aiRuntime.cache); err == nil {
+				data.CanInvestigateDeeper = true
+			}
+		}
 		return data
 	}
 	if hasEntry {
@@ -319,8 +373,34 @@ func populateInvestigationAIFromEntry(data *investigationAIPageData, entry warRo
 	data.GeneratedAt = formatWarRoomAITime(entry.GeneratedAt)
 	data.GenerationEvidence = entry.Evidence
 	data.ConfidenceClass = warRoomAIConfidenceClass(entry.Response.Confidence)
+	data.Refined = entry.Refined
 	response := entry.Response
 	data.Result = &response
+}
+
+// aiLogSignalsPreviewEndpoint and aiRefineEndpoint build the log-signals
+// preview and refine endpoint URLs, mirroring warRoomAIEndpoint's
+// cluster-query-param convention.
+func aiLogSignalsPreviewEndpoint(cluster string) string {
+	values := url.Values{}
+	if cluster != "" {
+		values.Set("cluster", cluster)
+	}
+	if encoded := values.Encode(); encoded != "" {
+		return "/api/investigation/ai/log-signals/preview?" + encoded
+	}
+	return "/api/investigation/ai/log-signals/preview"
+}
+
+func aiRefineEndpoint(cluster string) string {
+	values := url.Values{}
+	if cluster != "" {
+		values.Set("cluster", cluster)
+	}
+	if encoded := values.Encode(); encoded != "" {
+		return "/api/investigation/ai/refine?" + encoded
+	}
+	return "/api/investigation/ai/refine"
 }
 
 var getInvestigationAITmpl = sync.OnceValue(func() *template.Template {

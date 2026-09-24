@@ -42,6 +42,14 @@ type warRoomAICapture struct {
 	Request    aianalysis.AnalysisRequest
 	CapturedAt time.Time
 	Hash       string
+	// StableEvidence is the hash-stable representation of Request.Evidence
+	// (volatile display-only fields, such as an Event's age, replaced with
+	// their stable form — see warRoomAIEvidenceSet.appendStable). It is
+	// never sent to the AI provider; it exists only so a caller extending
+	// this capture with additional evidence (see appendLogSignalsEvidence
+	// in ai_log_signals.go) can recompute a combined hash without
+	// re-deriving this capture's own stability rules.
+	StableEvidence []aianalysis.EvidenceItem
 }
 
 type warRoomAIEvidenceSet struct {
@@ -135,7 +143,8 @@ func captureWarRoomAIEvidence(scan *clusterScan, cluster string, db store.Store,
 	digest := sha256.Sum256(stableEncoded)
 	return warRoomAICapture{
 		Selection: selection, Request: request, CapturedAt: capturedAt,
-		Hash: hex.EncodeToString(digest[:]),
+		Hash:           hex.EncodeToString(digest[:]),
+		StableEvidence: evidence.stableItems,
 	}, nil
 }
 
@@ -183,10 +192,20 @@ func warRoomAIEvidenceForIssue(scan *clusterScan, issue warRoomIssue) (warRoomAI
 		if scan.wasteAudit != nil {
 			for _, pod := range scan.wasteAudit.StalePods {
 				if pod.Kind == analyzer.StalePodZombie && pod.Namespace == issue.Namespace && pod.Name == issue.Resource && zombieTypeForStatus(pod.Status) == canonicalType {
-					evidence.append(aianalysis.EvidenceItem{
+					// restart_count and resource_age_days both climb
+					// continuously for as long as the same incident stays
+					// active — they are not, by themselves, a change in
+					// what is wrong. Sent to the provider and shown to the
+					// operator exactly; excluded from the stable hash so
+					// this evidence item alone never invalidates an
+					// otherwise-identical cached analysis mid-incident.
+					// Episode identity (a resolve+reopen) is still tracked
+					// separately via AnalysisRequest.ReopenCount/
+					// FirstDetected, which the stable hash always includes.
+					evidence.appendStable(aianalysis.EvidenceItem{
 						Type: aianalysis.EvidenceMetric, Summary: "Observed pod counts",
 						Details: fmt.Sprintf("restart_count=%d; resource_age_days=%d", pod.RestartCount, pod.AgeDays),
-					})
+					}, "restart_count=stable; resource_age_days=stable")
 					appendWarRoomAIPodEvidence(&evidence, scan.aiPodEvidence, issue)
 					return evidence, nil
 				}

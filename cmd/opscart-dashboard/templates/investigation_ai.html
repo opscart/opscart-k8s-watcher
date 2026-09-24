@@ -41,6 +41,48 @@
 .ai-generate-btn{height:32px;border:1px solid var(--primary);border-radius:var(--radius-xs);background:var(--primary);color:#fff;padding:0 .9rem;font:inherit;font-size:.78rem;font-weight:700;cursor:pointer}
 .ai-generate-btn:hover{background:var(--primary-light);border-color:var(--primary-light)}
 .ai-generate-btn:disabled{opacity:.55;cursor:wait}
+.ai-secondary-btn{height:32px;border:1px solid var(--border);border-radius:var(--radius-xs);background:transparent;color:var(--text);padding:0 .9rem;font:inherit;font-size:.78rem;font-weight:700;cursor:pointer}
+.ai-secondary-btn:hover{background:var(--surface-hover)}
+.ai-secondary-btn:disabled{opacity:.5;cursor:wait}
+.ai-investigate-btn {
+  background: rgba(99, 102, 241, 0.12);
+  border-color: rgba(129, 140, 248, 0.55);
+  color: var(--primary-light);
+}
+.ai-investigate-btn:hover {
+  background: rgba(99, 102, 241, 0.22);
+  border-color: var(--primary-light);
+  color: #fff;
+}
+.ai-investigate-btn:focus-visible {
+  outline: 2px solid var(--primary-light);
+  outline-offset: 2px;
+}
+.ai-refined-note{margin-top:.4rem;padding:.55rem .75rem;border-radius:var(--radius-xs);background:rgba(99,102,241,.1);color:var(--primary-light);font-size:.78rem}
+/* Fixed, viewport-relative overlay — deliberately not relying on a native
+   <dialog>'s own centering margin, since this page's global reset
+   (base.html: *{margin:0}) would otherwise cancel it out. position:fixed
+   is anchored to the viewport, never the (possibly long) page document, so
+   this centers correctly regardless of scroll position or document length. */
+.ai-preview-dialog{position:fixed;inset:0;margin:0;width:100%;height:100%;max-width:none;max-height:none;border:none;background:transparent;padding:1rem;overflow:visible}
+.ai-preview-dialog[open]{display:grid;place-items:center}
+.ai-preview-dialog::backdrop{background:rgba(4,7,16,.6)}
+.ai-preview-panel{border:1px solid var(--border);border-radius:var(--radius);background:var(--surface);color:var(--text);width:min(480px,92vw);max-height:85vh;overflow-y:auto}
+.ai-preview-body{padding:1.1rem 1.25rem}
+.ai-preview-body h2{font-size:.95rem;margin-bottom:.5rem}
+.ai-preview-body p{font-size:.8rem;color:var(--text-secondary);line-height:1.5;margin-bottom:.7rem}
+.ai-preview-list{list-style:none;margin:0 0 .9rem;padding:0;font-size:.82rem;font-family:ui-monospace,Menlo,monospace}
+.ai-preview-list li{padding:.32rem 0;border-bottom:1px solid rgba(35,42,69,.6);overflow-wrap:anywhere}
+.ai-preview-list li:last-child{border-bottom:none}
+.ai-preview-signals-section{margin:0 0 .9rem;padding-top:.6rem;border-top:1px solid var(--border)}
+.ai-preview-signals-title{font-size:.68rem;text-transform:uppercase;letter-spacing:.05em;color:var(--text-muted);margin-bottom:.4rem;font-weight:700}
+.ai-preview-signals{list-style:none;margin:0;padding:0;font-size:.82rem;color:var(--text-secondary)}
+.ai-preview-signals li{display:flex;justify-content:space-between;align-items:baseline;gap:1rem;padding:.28rem 0;overflow-wrap:anywhere}
+.ai-preview-signals li span:first-child{overflow-wrap:anywhere}
+.ai-preview-signals li span:last-child{font-family:ui-monospace,Menlo,monospace;flex-shrink:0}
+.ai-preview-actions{display:flex;justify-content:flex-end;gap:.5rem;margin-top:.5rem}
+.ai-preview-status{font-size:.8rem;color:var(--text-secondary);margin-bottom:.6rem}
+.ai-preview-status.error{color:var(--danger)}
 .ai-message{color:var(--text-secondary);font-size:.82rem;line-height:1.5;margin-top:.5rem}
 .ai-head-meta{margin-top:.35rem;font-size:.72rem;color:var(--text-muted);overflow-wrap:anywhere}
 .ai-error{display:block;color:var(--danger);font-size:.82rem;margin-top:.4rem}
@@ -152,10 +194,18 @@
         <span class="ai-status {{.StatusClass}}" id="ai-status">{{.Status}}</span>
       </div>
       <div class="ai-head-right">
+        {{if .CanInvestigateDeeper}}<button class="ai-secondary-btn ai-investigate-btn" id="ai-investigate-deeper" type="button" data-preview-endpoint="{{.LogSignalsPreviewEndpoint}}" data-refine-endpoint="{{.RefineEndpoint}}" data-selector="{{.Selector}}" data-back-url="{{.BackURL}}" data-refine-timeout-ms="{{.AITimeoutMillis}}">Investigate deeper</button>{{end}}
         {{if .CanGenerate}}<button class="ai-generate-btn" id="ai-generate" type="button" data-endpoint="{{.Endpoint}}" data-selector="{{.Selector}}" data-regenerate="{{if .Regenerate}}1{{else}}0{{end}}">{{if .Regenerate}}Regenerate{{else}}Generate{{end}}</button>{{end}}
       </div>
     </div>
-    <div class="ai-message" id="ai-message">{{if eq .Status "STALE"}}{{.StaleReason}}{{else}}{{.Message}}{{end}}</div>
+    {{if .CanInvestigateDeeper}}<div class="ai-message" id="ai-investigate-result" role="status" hidden></div><button class="ai-secondary-btn" id="ai-investigate-cancel" type="button" hidden>Cancel inspection</button><details id="ai-investigate-details" hidden><summary>Local inspection details</summary><span>Unclassified error-like patterns observed locally: <span id="ai-investigate-unknown-count"></span></span></details><a id="ai-investigate-return" href="{{.BackURL}}" hidden>Return to War Room</a>{{end}}
+
+    <div
+      id="ai-message"
+      class="{{if and .Refined (eq .Status "GENERATED")}}ai-refined-note{{else}}ai-message{{end}}">
+      {{if eq .Status "STALE"}}{{.StaleReason}}{{else}}{{.Message}}{{end}}
+    </div>
+
     {{if or .EvidenceCaptured .GeneratedAt .Provider}}
     <div class="ai-head-meta">{{if .EvidenceCaptured}}Evidence captured {{.EvidenceCaptured}}{{end}}{{if .GeneratedAt}} · Generated {{.GeneratedAt}}{{end}}{{if .Provider}} · Provider: {{.Provider}} · {{.Model}}{{end}}{{if .Result}} · Model-reported confidence: {{.Result.Confidence}}{{end}}</div>
     {{end}}
@@ -236,6 +286,31 @@
   <div class="footer">OpsCart FinOps Engine &middot; AI Analysis &middot; {{.Identity}}</div>
 </main>
 </div>
+{{if .CanInvestigateDeeper}}
+<dialog class="ai-preview-dialog" id="ai-preview-dialog" aria-labelledby="ai-preview-title">
+  <div class="ai-preview-panel">
+    <div class="ai-preview-body">
+      <h2 id="ai-preview-title">Diagnostic signals from previous container logs</h2>
+      <p>OpsCart will read the selected failing container's previous run logs, classify them locally into a fixed set of diagnostic categories, and discard the raw log text immediately. Only the counts below would be sent to the AI provider.</p>
+      <div class="ai-preview-status" id="ai-preview-status" role="status">Requesting a preview…</div>
+      <ul class="ai-preview-list" id="ai-preview-list" hidden></ul>
+      <div class="ai-preview-signals-section" id="ai-preview-actionable-section" hidden>
+        <div class="ai-preview-signals-title">Actionable diagnostic categories</div>
+        <ul class="ai-preview-signals" id="ai-preview-actionable-list"></ul>
+      </div>
+      <div class="ai-preview-signals-section" id="ai-preview-observed-section" hidden>
+        <div class="ai-preview-signals-title">Unclassified error-like patterns observed locally</div>
+        <ul class="ai-preview-signals" id="ai-preview-observed-list"></ul>
+      </div>
+      <div class="ai-preview-actions">
+        <button class="ai-secondary-btn" id="ai-preview-return" type="button" hidden>Return to War Room</button>
+        <button class="ai-secondary-btn" id="ai-preview-cancel" type="button">Cancel</button>
+        <button class="ai-generate-btn" id="ai-preview-refine" type="button" disabled>Refine analysis</button>
+      </div>
+    </div>
+  </div>
+</dialog>
+{{end}}
 <script>
 (function(){
   var button=document.getElementById('ai-generate');
@@ -273,6 +348,346 @@
       error.hidden=false;
       button.disabled=false;
       button.textContent=regenerate?'Regenerate':'Generate';
+    });
+  });
+})();
+(function(){
+  var openBtn=document.getElementById('ai-investigate-deeper');
+  var dialog=document.getElementById('ai-preview-dialog');
+  if(!openBtn||!dialog)return;
+  var status=document.getElementById('ai-preview-status');
+  var list=document.getElementById('ai-preview-list');
+  var actionableSection=document.getElementById('ai-preview-actionable-section');
+  var actionableList=document.getElementById('ai-preview-actionable-list');
+  var observedSection=document.getElementById('ai-preview-observed-section');
+  var observedList=document.getElementById('ai-preview-observed-list');
+  var cancelBtn=document.getElementById('ai-preview-cancel');
+  var refineBtn=document.getElementById('ai-preview-refine');
+  var returnBtn=document.getElementById('ai-preview-return');
+
+  // Explicit client state machine — see the task this implements. Every
+  // fetch path below moves through exactly one of these states; nothing
+  // outside setState()/showError() touches control visibility/disabled
+  // state, so the UI can never end up in an inconsistent combination.
+  var STATE_IDLE='idle', STATE_LOADING='loading_preview',
+      STATE_ACTIONABLE='preview_actionable',
+      STATE_REFINING='refining', STATE_ERROR='error';
+  var state=STATE_IDLE;
+  var previewID=null;
+  var previewController=null;
+  var refineController=null;
+  var previewGeneration=0, refineGeneration=0;
+  var inlineResult=document.getElementById('ai-investigate-result');
+  var inlineCancel=document.getElementById('ai-investigate-cancel');
+  var inlineDetails=document.getElementById('ai-investigate-details');
+  var inlineCount=document.getElementById('ai-investigate-unknown-count');
+  var inlineReturn=document.getElementById('ai-investigate-return');
+
+  // Server bounds the preview's Kubernetes work to 5s
+  // (ai_log_signal_preview.go); this stays slightly longer so a real
+  // server-side timeout response always wins the race over the client's
+  // own abort.
+  var PREVIEW_TIMEOUT_MS=8000;
+  // Server bounds the shared refinement provider call to srv.aiTimeout
+  // (server.go); the browser reads that exact configured value rather
+  // than guessing, plus a fixed buffer for network/auth overhead.
+  var REFINE_TIMEOUT_MS=(parseInt(openBtn.dataset.refineTimeoutMs,10)||30000)+10000;
+
+  // Reason codes the server may return (see the aiReason* constants,
+  // ai_log_signal_preview.go / ai_refine.go) mapped to a safe, reworded,
+  // user-oriented message — the raw backend message is never shown for
+  // any of these. Reasons not listed here still only ever display the
+  // server's own message, which is always a fixed, safe string too.
+  var REASON_MESSAGES={
+    issue_not_active:'This issue changed or is no longer active. Return to War Room and reopen the current issue.',
+    analysis_context_expired:'This investigation context expired. Return to War Room and reopen the current issue.',
+    target_unavailable:'The target container is no longer available. Return to War Room and reopen the current issue.',
+    issue_changed:'The issue changed since this preview was captured. Request a new preview.',
+    preview_expired:'This preview expired. Request a new preview.',
+    no_signals:'No supported diagnostic signals were detected. No refinement request was sent.',
+    no_actionable_signals:'No actionable diagnostic signal was detected. No AI request will be made.',
+    cooldown:'Please wait a moment before trying again.',
+    in_progress:'An analysis is already in progress for this issue.',
+    timeout:'The request took too long. Please try again.',
+    canceled:'The request was canceled.',
+    provider_error:'The AI analysis could not be generated. Please try again.'
+  };
+  // Reasons for which "Return to War Room" is the correct next step —
+  // the investigation context itself is gone, not just this one request.
+  var RETURN_TO_WARROOM_REASONS={
+    issue_not_active:true, analysis_context_expired:true, target_unavailable:true
+  };
+
+  function clearChildren(el){
+    while(el.firstChild)el.removeChild(el.firstChild);
+  }
+
+  function humanizeCategory(category){
+    var spaced=String(category).replace(/_/g,' ');
+    return spaced.charAt(0).toUpperCase()+spaced.slice(1);
+  }
+
+  function pluralizeSignalCount(n){
+    return n===1?(n+' diagnostic signal category detected'):(n+' diagnostic signal categories detected');
+  }
+
+  function setState(next){
+    state=next;
+    status.classList.toggle('error',next===STATE_ERROR);
+    switch(next){
+      case STATE_LOADING:
+        refineBtn.hidden=false;
+        refineBtn.disabled=true;
+        refineBtn.textContent='Refine analysis';
+        cancelBtn.hidden=false;
+        cancelBtn.disabled=false;
+        cancelBtn.textContent='Cancel';
+        returnBtn.hidden=true;
+        break;
+      case STATE_ACTIONABLE:
+        refineBtn.hidden=false;
+        refineBtn.disabled=false;
+        refineBtn.textContent='Refine analysis';
+        cancelBtn.disabled=false;
+        cancelBtn.textContent='Cancel';
+        returnBtn.hidden=true;
+        break;
+      case STATE_REFINING:
+        refineBtn.disabled=true;
+        refineBtn.textContent='Refining…';
+        cancelBtn.disabled=false;
+        break;
+      case STATE_ERROR:
+        refineBtn.hidden=true;
+        previewID=null;
+        cancelBtn.disabled=false;
+        cancelBtn.textContent='Close';
+        break;
+    }
+  }
+
+  function resetDialog(){
+    previewID=null;
+    list.hidden=true;clearChildren(list);
+    actionableSection.hidden=true;clearChildren(actionableList);
+    observedSection.hidden=true;clearChildren(observedList);
+    returnBtn.hidden=true;
+    status.textContent='Requesting a preview…';
+    setState(STATE_LOADING);
+  }
+
+  function showError(reason,fallbackMessage){
+    setState(STATE_ERROR);
+    status.textContent=(reason&&REASON_MESSAGES[reason])||fallbackMessage||'Something went wrong. Please try again.';
+    list.hidden=true;
+    actionableSection.hidden=true;
+    observedSection.hidden=true;
+    returnBtn.hidden=!(reason&&RETURN_TO_WARROOM_REASONS[reason]);
+  }
+
+  function renderSignalGroups(signals){
+    clearChildren(actionableList);
+    clearChildren(observedList);
+    var actionableCount=0, observedCount=0;
+    signals.forEach(function(signal){
+      var li=document.createElement('li');
+      var name=document.createElement('span');
+      name.textContent=humanizeCategory(signal.category);
+      var count=document.createElement('span');
+      count.textContent=String(signal.count);
+      li.appendChild(name);
+      li.appendChild(count);
+      if(signal.category==='unknown_error_marker'){
+        observedList.appendChild(li);
+        observedCount++;
+      } else {
+        actionableList.appendChild(li);
+        actionableCount++;
+      }
+    });
+    actionableSection.hidden=actionableCount===0;
+    observedSection.hidden=observedCount===0;
+  }
+
+  function renderPreview(payload){
+    var signals=payload.signals||[];
+    var items=[
+      'Previous logs from the selected failing container',
+      payload.lines_requested+' lines requested',
+      payload.bytes_received+' bytes inspected locally',
+      pluralizeSignalCount(signals.length),
+      '0 raw log lines will be sent',
+      'Raw logs stored: No'
+    ];
+    clearChildren(list);
+    items.forEach(function(text){
+      var li=document.createElement('li');
+      li.textContent=text;
+      list.appendChild(li);
+    });
+    list.hidden=false;
+    renderSignalGroups(signals);
+
+    // can_refine is authoritative and server-computed — the browser never
+    // independently re-derives whether refinement is allowed.
+    if(payload.can_refine){
+      previewID=payload.preview_id;
+      status.textContent='Review the evidence below, then confirm refinement.';
+      setState(STATE_ACTIONABLE);
+    }
+  }
+
+  function abortInFlight(){
+	previewGeneration++;
+	refineGeneration++;
+    if(previewController){previewController.abort();previewController=null;}
+    if(refineController){refineController.abort();refineController=null;}
+  }
+
+  // Native <dialog> already moves focus into the dialog and (in evergreen
+  // browsers) restores it to the invoking element on close; the explicit
+  // calls below make both behaviors deterministic across browsers rather
+  // than relying on that native behavior alone. This also fires on
+  // Escape, which triggers 'cancel' then 'close' natively.
+  dialog.addEventListener('close',function(){
+    // A queued close event from an older dialog must not cancel a newly
+    // started inline preview or a newer open dialog.
+    if(dialog.open||state===STATE_LOADING)return;
+    abortInFlight();
+    previewID=null;
+    setState(STATE_IDLE);
+    openBtn.focus();
+  });
+  dialog.addEventListener('cancel',function(){
+    abortInFlight();
+    previewID=null;
+  });
+
+  openBtn.addEventListener('click',function(){
+    if(state===STATE_LOADING||state===STATE_REFINING)return; // no duplicate submissions
+    resetDialog();
+    inlineResult.hidden=false;
+    inlineResult.textContent='Inspecting previous container logs locally…';
+    inlineDetails.hidden=true;
+    inlineReturn.hidden=true;
+    inlineCancel.hidden=false;
+    openBtn.disabled=true;
+    var generation=++previewGeneration;
+
+    var hasAbort=typeof AbortController!=='undefined';
+    var controller=hasAbort?new AbortController():null;
+    previewController=controller;
+    var timedOut=false;
+    var timer=setTimeout(function(){
+      if(generation!==previewGeneration)return;
+      timedOut=true;
+      if(controller)controller.abort();
+    },PREVIEW_TIMEOUT_MS);
+
+    fetch(openBtn.dataset.previewEndpoint,{
+      method:'POST',credentials:'same-origin',
+      headers:{'Content-Type':'application/x-www-form-urlencoded'},
+      body:new URLSearchParams({issue:openBtn.dataset.selector}).toString(),
+      signal:controller?controller.signal:undefined
+    }).then(function(response){
+      return response.json().catch(function(){return{};}).then(function(payload){
+        if(!response.ok){
+          var err=new Error(payload.message||'Preview request failed.');
+          err.reason=payload.reason;
+          throw err;
+        }
+        return payload;
+      });
+    }).then(function(payload){
+      if(generation!==previewGeneration)return;
+      if(payload.can_refine&&payload.preview_id){
+        inlineResult.hidden=true;
+        renderPreview(payload);
+        dialog.showModal();
+        cancelBtn.focus();
+      }else{
+        previewID=null;
+        setState(STATE_IDLE);
+        inlineResult.textContent='No diagnostic signals eligible for AI refinement were found in the previous container logs. The existing analysis was not changed, and no AI request was made.';
+        var unknown=(payload.signals||[]).find(function(signal){return signal.category==='unknown_error_marker';});
+        if(unknown){inlineCount.textContent=String(unknown.count);inlineDetails.hidden=false;}
+      }
+    }).catch(function(err){
+      if(generation!==previewGeneration)return;
+      if(timedOut){inlineResult.textContent='The request took too long. Please try again.';setState(STATE_IDLE);return;}
+      if(err&&err.name==='AbortError')return;
+      inlineResult.textContent=(err&&REASON_MESSAGES[err.reason])||(err&&err.message)||'Something went wrong. Please try again.';
+      inlineReturn.hidden=!(err&&RETURN_TO_WARROOM_REASONS[err.reason]);
+      setState(STATE_IDLE);
+    }).finally(function(){
+      clearTimeout(timer);
+      if(generation===previewGeneration){previewController=null;openBtn.disabled=false;inlineCancel.hidden=true;}
+    });
+  });
+
+  inlineCancel.addEventListener('click',function(){
+    abortInFlight();
+    setState(STATE_IDLE);
+    inlineCancel.hidden=true;
+    inlineResult.hidden=true;
+    openBtn.disabled=false;
+    openBtn.focus();
+  });
+
+  cancelBtn.addEventListener('click',function(){
+    abortInFlight();
+    dialog.close();
+  });
+
+  returnBtn.addEventListener('click',function(){
+    window.location.href=openBtn.dataset.backUrl;
+  });
+
+  refineBtn.addEventListener('click',function(){
+    // Guards click, Enter (a focused button fires 'click' on Enter), and
+    // any hypothetical programmatic .click(): only the preview_actionable
+    // state, with a previewID the server actually issued, may submit.
+    if(state!==STATE_ACTIONABLE||!previewID)return;
+    var submittedPreviewID=previewID;
+    var generation=++refineGeneration;
+    setState(STATE_REFINING);
+    status.textContent='Refining the analysis with the diagnostic signals above. Raw logs were not sent.';
+
+    var hasAbort=typeof AbortController!=='undefined';
+    var controller=hasAbort?new AbortController():null;
+    refineController=controller;
+    var timedOut=false;
+    var timer=setTimeout(function(){
+      timedOut=true;
+      if(generation!==refineGeneration)return;
+      if(controller)controller.abort();
+    },REFINE_TIMEOUT_MS);
+
+    fetch(openBtn.dataset.refineEndpoint,{
+      method:'POST',credentials:'same-origin',
+      headers:{'Content-Type':'application/x-www-form-urlencoded'},
+      body:new URLSearchParams({issue:openBtn.dataset.selector,preview_id:submittedPreviewID}).toString(),
+      signal:controller?controller.signal:undefined
+    }).then(function(response){
+      return response.json().catch(function(){return{};}).then(function(payload){
+        if(!response.ok){
+          var err=new Error(payload.message||'Refinement request failed.');
+          err.reason=payload.reason;
+          throw err;
+        }
+        return payload;
+      });
+    }).then(function(){
+      if(generation!==refineGeneration)return;
+      window.location.reload();
+    }).catch(function(err){
+      if(generation!==refineGeneration)return;
+      if(timedOut){showError(null,'The request took too long. Please try again.');return;}
+      if(err&&err.name==='AbortError')return;
+      showError(err&&err.reason,err&&err.message);
+    }).finally(function(){
+      clearTimeout(timer);
+      if(generation===refineGeneration)refineController=null;
     });
   });
 })();

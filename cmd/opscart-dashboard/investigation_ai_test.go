@@ -310,6 +310,10 @@ func TestInvestigationAIStaleShowsOriginalGenerationEvidence(t *testing.T) {
 	updated, _ := warRoomAICrashFixture("prod", 99)
 	updated.report.Timestamp = updated.report.Timestamp.Add(time.Minute)
 	updated.wasteAudit.ScannedAt = updated.wasteAudit.ScannedAt.Add(time.Minute)
+	// A restart-count bump alone (7 -> 99) must not, by itself, make the
+	// cached analysis stale during the same incident — a new Warning Event
+	// is the genuinely meaningful evidence change driving staleness here.
+	updated.aiPodEvidence = warRoomAINewWarningEventEvidence("payments", "payments-0", updated.report.Timestamp)
 	srv.states["prod"].mu.Lock()
 	srv.states["prod"].scan = updated
 	srv.states["prod"].mu.Unlock()
@@ -420,7 +424,7 @@ func TestInvestigationAIRendersProviderTextEscaped(t *testing.T) {
 	response.Summary = `<script>alert("provider")</script>`
 	response.LikelyCauses[0].Title = `<img src=x onerror=alert(1)>`
 	srv.aiRuntime.cache.put(warRoomAICacheEntry{
-		ClusterKey: "prod", Selector: selection.Selector, EvidenceHash: capture.Hash,
+		ClusterKey: "prod", Selector: selection.Selector, EvidenceHash: capture.Hash, BaseEvidenceHash: capture.Hash,
 		RuntimeKey: srv.aiRuntime.key(), IssueIdentity: selection.Identity,
 		Provider: "openai", Model: "synthetic-model",
 		EvidenceCaptured: capture.CapturedAt, GeneratedAt: srv.aiRuntime.cache.now(), Response: *response,
@@ -678,7 +682,7 @@ func TestInvestigationAIRendersCompleteGenerationEvidence(t *testing.T) {
 	}
 	response := testWarRoomAIResponse()
 	srv.aiRuntime.cache.put(warRoomAICacheEntry{
-		ClusterKey: "prod", Selector: selection.Selector, EvidenceHash: capture.Hash,
+		ClusterKey: "prod", Selector: selection.Selector, EvidenceHash: capture.Hash, BaseEvidenceHash: capture.Hash,
 		RuntimeKey: srv.aiRuntime.key(), IssueIdentity: selection.Identity,
 		Provider: "openai", Model: "synthetic-model",
 		EvidenceCaptured: capture.CapturedAt, GeneratedAt: srv.aiRuntime.cache.now(),
@@ -764,7 +768,7 @@ func TestInvestigationAICacheVersionBumpInvalidatesOldResults(t *testing.T) {
 		t.Fatal("setup: old and current runtime keys must differ for this test to be meaningful")
 	}
 	srv.aiRuntime.cache.put(warRoomAICacheEntry{
-		ClusterKey: "prod", Selector: selection.Selector, EvidenceHash: capture.Hash,
+		ClusterKey: "prod", Selector: selection.Selector, EvidenceHash: capture.Hash, BaseEvidenceHash: capture.Hash,
 		RuntimeKey: oldRuntimeKey, IssueIdentity: selection.Identity,
 		Provider: "openai", Model: "synthetic-model",
 		EvidenceCaptured: capture.CapturedAt, GeneratedAt: srv.aiRuntime.cache.now(),

@@ -22,6 +22,12 @@ const (
 	EvidenceEvent         EvidenceType = "event"
 	EvidenceConfiguration EvidenceType = "configuration"
 	EvidenceLifecycle     EvidenceType = "lifecycle"
+	// EvidenceLogSignals identifies a controlled, locally derived diagnostic
+	// signal item: fixed category names and integer counts classified from
+	// bounded previous-container logs. It never carries raw log lines,
+	// excerpts, stack traces, or any other log-derived free-form string —
+	// see cmd/opscart-dashboard/ai_log_signals.go, the sole producer.
+	EvidenceLogSignals EvidenceType = "log_signals"
 )
 
 // EvidenceItem is the sanitization boundary for provider transmission.
@@ -102,7 +108,7 @@ func validateRequest(req AnalysisRequest) error {
 
 func validEvidenceType(value EvidenceType) bool {
 	switch value {
-	case EvidenceObservation, EvidenceMetric, EvidenceEvent, EvidenceConfiguration, EvidenceLifecycle:
+	case EvidenceObservation, EvidenceMetric, EvidenceEvent, EvidenceConfiguration, EvidenceLifecycle, EvidenceLogSignals:
 		return true
 	default:
 		return false

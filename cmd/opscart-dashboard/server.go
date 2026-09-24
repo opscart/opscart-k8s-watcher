@@ -4,6 +4,7 @@ import (
 	"context"
 	"embed"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"html/template"
 	"log"
@@ -22,6 +23,7 @@ import (
 	"github.com/opscart/opscart-k8s-watcher/pkg/billing"
 	"github.com/opscart/opscart-k8s-watcher/pkg/models"
 	"github.com/opscart/opscart-k8s-watcher/pkg/store"
+	"golang.org/x/sync/singleflight"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
@@ -96,6 +98,27 @@ type server struct {
 	investigationMu     sync.RWMutex
 	latestInvestigation investigationObservation
 
+	// aiLogSignalsPreviewCache and aiOperationCooldown back the operator-
+	// approved log-derived-evidence refinement flow (ai_log_signals.go,
+	// ai_log_preview_cache.go, ai_refine.go). Both are cheap, in-memory,
+	// and harmless when AI analysis is disabled — their handlers already
+	// gate on srv.aiProvider/srv.aiRuntime first.
+	aiLogSignalsPreviewCache *aiLogSignalsPreviewCache
+	aiOperationCooldown      *aiOperationCooldown
+	// aiRefineGroup shares one provider call across concurrent/retried
+	// identical refinements (see ai_refine.go). Its zero value is ready to
+	// use — no constructor needed.
+	aiRefineGroup singleflight.Group
+	// aiTimeout bounds the shared refinement provider call
+	// (performAIRefine, ai_refine.go) under a server-owned context —
+	// never an unbounded context.Background() alone, and never any one
+	// browser request's own context. It is preserved from the operator's
+	// validated aianalysis.Config.Timeout (see main.go and
+	// configureAITimeout below) — deliberately not a second, unrelated
+	// timeout environment variable. Must be positive; see
+	// configureAITimeout.
+	aiTimeout time.Duration
+
 	// billingConfig is the validated Azure billing configuration loaded at
 	// startup (see billing_runtime.go, main.go) — nil when
 	// OPSCART_AZURE_BILLING_CONFIG is unset, meaning billing stays disabled
@@ -117,11 +140,34 @@ func newServer(clusterList []string, db store.Store, retentionDays int, dbPersis
 		dbPersistent:  dbPersistent,
 		auth:          auth,
 		logsEnabled:   logPreviewEnabledFromEnv(),
+		// A safe, always-positive default so aiTimeout is never zero
+		// before (or absent) AI configuration applies its own validated
+		// value via configureAITimeout — see that method's doc comment.
+		aiTimeout: aianalysis.DefaultTimeout,
 		kubeClientFor: func(ctx string, localCounters *apiCounters) (kubernetes.Interface, error) {
 			return kubeClientWithCounters(ctx, localCounters)
 		},
-		podLogReader: readPodLogs,
+		podLogReader:             readPodLogs,
+		aiLogSignalsPreviewCache: newAILogSignalsPreviewCache(aiLogSignalsPreviewCacheCapacity, aiLogSignalsPreviewTTL, time.Now),
+		aiOperationCooldown:      newAIOperationCooldown(aiOperationCooldownWindow, time.Now),
 	}
+}
+
+// configureAITimeout sets the shared-refinement provider timeout (see
+// aiTimeout's doc comment) from the operator's own configuration. Callers
+// pass aianalysis.Config.Timeout directly — aianalysis.NewAIProvider
+// already rejects a non-positive Config.Timeout before an AI provider is
+// ever constructed (see pkg/aianalysis/factory.go), so a non-positive
+// value reaching here indicates a construction bug, not a runtime
+// condition to silently recover from. It returns an error rather than
+// terminating the process itself: a server/configuration helper must
+// leave that decision to its caller (main.go).
+func (srv *server) configureAITimeout(timeout time.Duration) error {
+	if timeout <= 0 {
+		return errors.New("AI timeout must be positive")
+	}
+	srv.aiTimeout = timeout
+	return nil
 }
 
 func (srv *server) getState(ctx string) *dashboardState {
@@ -267,6 +313,8 @@ func (srv *server) newMux() http.Handler {
 	mux.HandleFunc("/api/summary", srv.handleSummary)
 	mux.HandleFunc("/api/warroom", srv.handleWarRoom)
 	mux.HandleFunc("/api/warroom/ai-analysis", srv.handleWarRoomAIAnalysis)
+	mux.HandleFunc("/api/investigation/ai/log-signals/preview", srv.handleAILogSignalsPreview)
+	mux.HandleFunc("/api/investigation/ai/refine", srv.handleAIRefine)
 	mux.HandleFunc("/warroom", srv.handleWarRoomPage)
 	mux.HandleFunc("/infrastructure", srv.handleInfrastructurePage)
 	mux.HandleFunc("/namespaces", srv.handleNamespacesPage)

@@ -12,7 +12,32 @@ import (
 	"time"
 
 	"github.com/opscart/opscart-k8s-watcher/pkg/aianalysis"
+	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
+
+// warRoomAINewWarningEventEvidence builds a minimal pod/event snapshot for
+// namespace/podName carrying one Warning Event — a genuinely meaningful
+// evidence change (unlike a restart-count-only change, which must not by
+// itself invalidate a cached analysis mid-incident). Used by staleness
+// tests below to simulate "new evidence became available" realistically.
+func warRoomAINewWarningEventEvidence(namespace, podName string, capturedAt time.Time) *warRoomAIPodEvidenceIndex {
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: podName, Namespace: namespace},
+		Spec:       corev1.PodSpec{Containers: []corev1.Container{{Name: "app"}}},
+		Status: corev1.PodStatus{Phase: corev1.PodRunning, ContainerStatuses: []corev1.ContainerStatus{{
+			Name: "app", State: corev1.ContainerState{Waiting: &corev1.ContainerStateWaiting{Reason: "CrashLoopBackOff"}},
+		}}},
+	}
+	event := &corev1.Event{
+		ObjectMeta:     metav1.ObjectMeta{Name: "backoff-event", Namespace: namespace},
+		InvolvedObject: corev1.ObjectReference{Kind: "Pod", Namespace: namespace, Name: podName},
+		Type:           corev1.EventTypeWarning,
+		Reason:         "BackOff",
+		EventTime:      metav1.NewMicroTime(capturedAt),
+	}
+	return buildWarRoomAIPodEvidenceIndex([]*corev1.Pod{pod}, []*corev1.Event{event}, true, true, capturedAt)
+}
 
 type fakeWarRoomAIProvider struct {
 	mu       sync.Mutex
@@ -76,8 +101,14 @@ func newWarRoomAITestServer(clusters []string, scans map[string]*clusterScan, db
 	}
 	srv := &server{
 		clusterList: clusters, states: states, db: db,
-		auth:       &authConfig{username: "operator", password: "test-password", source: authSourceEnv},
-		aiProvider: provider,
+		auth:                     &authConfig{username: "operator", password: "test-password", source: authSourceEnv},
+		aiProvider:               provider,
+		aiLogSignalsPreviewCache: newAILogSignalsPreviewCache(aiLogSignalsPreviewCacheCapacity, aiLogSignalsPreviewTTL, time.Now),
+		aiOperationCooldown:      newAIOperationCooldown(aiOperationCooldownWindow, time.Now),
+		// Generous by default so ordinary tests (which don't exercise
+		// timeout behavior) are unaffected; timeout-specific tests
+		// override this with an explicit short value.
+		aiTimeout: aianalysis.DefaultTimeout,
 	}
 	if provider != nil {
 		srv.aiRuntime = newWarRoomAIRuntime("openai", "synthetic-model")
@@ -295,6 +326,10 @@ func TestWarRoomAIStaleEvidenceRequiresExplicitRegeneration(t *testing.T) {
 	updated, _ := warRoomAICrashFixture("prod", 8)
 	updated.report.Timestamp = updated.report.Timestamp.Add(time.Minute)
 	updated.wasteAudit.ScannedAt = updated.wasteAudit.ScannedAt.Add(time.Minute)
+	// A restart-count bump alone (7 -> 8) must not, by itself, make the
+	// cached analysis stale during the same incident — a new Warning Event
+	// is the genuinely meaningful evidence change driving staleness here.
+	updated.aiPodEvidence = warRoomAINewWarningEventEvidence("payments", "payments-0", updated.report.Timestamp)
 	srv.states["prod"].mu.Lock()
 	srv.states["prod"].scan = updated
 	srv.states["prod"].mu.Unlock()
@@ -370,6 +405,11 @@ func TestWarRoomAILateResponseIsMarkedStale(t *testing.T) {
 	}()
 	<-provider.started
 	updated, _ := warRoomAICrashFixture("prod", 9)
+	// See TestWarRoomAIStaleEvidenceRequiresExplicitRegeneration: the
+	// restart-count bump alone must not drive staleness, so this test's
+	// "late response" scenario needs a genuinely meaningful evidence
+	// change too.
+	updated.aiPodEvidence = warRoomAINewWarningEventEvidence("payments", "payments-0", updated.report.Timestamp)
 	srv.states["prod"].mu.Lock()
 	srv.states["prod"].scan = updated
 	srv.states["prod"].mu.Unlock()
