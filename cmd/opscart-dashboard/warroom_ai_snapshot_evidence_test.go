@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/opscart/opscart-k8s-watcher/pkg/aianalysis"
 	"github.com/opscart/opscart-k8s-watcher/pkg/analyzer"
 	"github.com/opscart/opscart-k8s-watcher/pkg/clusterstate"
 	"github.com/opscart/opscart-k8s-watcher/pkg/store"
@@ -119,8 +120,15 @@ func TestWarRoomAIPodEvidenceOrderingAndHashAreDeterministic(t *testing.T) {
 		t.Fatal("Event age did not remain relative to the evidence capture timestamp")
 	}
 
+	// A Warning Event's count (and, by extension, how many times it has
+	// repeated) must NOT invalidate the stable evidence hash: the event's
+	// reason is what matters for stable identity, not how many times the
+	// same warning fired or when it last fired (see appendWarRoomAIPodEvidence's
+	// "Warning Event observation" item, warroom_ai_snapshot_evidence.go).
+	// This deliberately replaces this test's prior assertion, which encoded
+	// the old (now-superseded) behavior.
 	changedEvents := deepCopyEvents(events)
-	changedEvents[1].Series.Count++
+	changedEvents[1].Series.Count += 24017 // 1 -> 24018, an enormous jump
 	changed := *base
 	changed.aiPodEvidence = buildWarRoomAIPodEvidenceIndex(
 		[]*corev1.Pod{pod}, changedEvents, true, true, now,
@@ -129,12 +137,25 @@ func TestWarRoomAIPodEvidenceOrderingAndHashAreDeterministic(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if first.Hash == fourth.Hash {
-		t.Fatal("sanitized Warning Event count change did not invalidate evidence hash")
+	if first.Hash != fourth.Hash {
+		t.Fatal("a Warning Event count change alone must not invalidate the stable evidence hash")
+	}
+	// The exact count sent to the provider must still differ — only the
+	// stable/cache identity ignores it.
+	if warRoomAITestJoinEvidenceBySummary(first.Request.Evidence, "Warning Event observation") ==
+		warRoomAITestJoinEvidenceBySummary(fourth.Request.Evidence, "Warning Event observation") {
+		t.Fatal("expected the exact (live) event count to differ between captures")
 	}
 
+	// A container restart-count change alone must NOT invalidate the
+	// stable evidence hash: restart_count climbs continuously for as long
+	// as the same incident stays active, and is not by itself a change in
+	// what is wrong (see appendWarRoomAIPodEvidence's "Target container
+	// runtime observation" item, warroom_ai_snapshot_evidence.go). This
+	// deliberately replaces this test's prior assertion, which encoded the
+	// old (now-superseded) behavior.
 	changedPod := pod.DeepCopy()
-	changedPod.Status.ContainerStatuses[1].RestartCount++
+	changedPod.Status.ContainerStatuses[1].RestartCount += 1983 // 17 -> 2000, an enormous jump
 	changed.aiPodEvidence = buildWarRoomAIPodEvidenceIndex(
 		[]*corev1.Pod{changedPod}, events, true, true, now,
 	)
@@ -142,9 +163,47 @@ func TestWarRoomAIPodEvidenceOrderingAndHashAreDeterministic(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if first.Hash == fifth.Hash {
-		t.Fatal("sanitized container restart count change did not invalidate evidence hash")
+	if first.Hash != fifth.Hash {
+		t.Fatal("a container restart count change alone must not invalidate the stable evidence hash during the same active incident")
 	}
+	// The exact restart count sent to the provider must still differ —
+	// only the stable/cache identity ignores it.
+	firstRestartItem := warRoomAITestFindEvidenceBySummary(t, first.Request.Evidence, "Target container runtime observation")
+	fifthRestartItem := warRoomAITestFindEvidenceBySummary(t, fifth.Request.Evidence, "Target container runtime observation")
+	if firstRestartItem.Details == fifthRestartItem.Details {
+		t.Fatalf("expected the exact (live) restart count to differ between captures, got identical Details %q", firstRestartItem.Details)
+	}
+	if !strings.Contains(fifthRestartItem.Details, "restart_count=2000") {
+		t.Fatalf("expected the live evidence to show the exact new restart count, got %q", fifthRestartItem.Details)
+	}
+}
+
+// warRoomAITestJoinEvidenceBySummary joins the Details of every evidence
+// item whose Summary matches, in order — used instead of
+// warRoomAITestFindEvidenceBySummary when more than one item can share the
+// same Summary (e.g. one "Warning Event observation" per tracked event).
+func warRoomAITestJoinEvidenceBySummary(items []aianalysis.EvidenceItem, summary string) string {
+	var joined strings.Builder
+	for _, item := range items {
+		if item.Summary == summary {
+			joined.WriteString(item.Details)
+			joined.WriteByte('\x00')
+		}
+	}
+	return joined.String()
+}
+
+// warRoomAITestFindEvidenceBySummary returns the first evidence item whose
+// Summary matches, failing the test if none is found.
+func warRoomAITestFindEvidenceBySummary(t *testing.T, items []aianalysis.EvidenceItem, summary string) aianalysis.EvidenceItem {
+	t.Helper()
+	for _, item := range items {
+		if item.Summary == summary {
+			return item
+		}
+	}
+	t.Fatalf("no evidence item with summary %q found in %+v", summary, items)
+	return aianalysis.EvidenceItem{}
 }
 
 func TestWarRoomAIPodEvidenceRepresentsUnavailableOptionalData(t *testing.T) {

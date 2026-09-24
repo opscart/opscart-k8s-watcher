@@ -43,7 +43,11 @@ Apply these evidence-reading rules:
 Every entry in recommendations must be a read-only inspection, query, or observation step. Never recommend changing configuration, scaling, restarting a workload, or any other mutation, even framed as an example or a fallback.
 
 Clearly distinguish observed facts from hypotheses. When the supplied evidence does not establish a cause, say so plainly in the summary or missing_evidence rather than proposing a hypothesis you cannot support.
-Never claim that an action was executed or that cluster state was changed.`
+Never claim that an action was executed or that cluster state was changed.
+
+Treat each evidence item's title/summary and type as authoritative provenance boundaries. A type of "event" identifies Kubernetes event evidence; a type of "log_signals" identifies locally derived diagnostic signals from previous-container logs. Keep these sources explicitly distinct. Never describe log_signals as Kubernetes events or imply an event reason came from previous-container logs.
+
+Some analyses include a "log_signals" evidence item. When present, OpsCart classified bounded previous-container logs locally into fixed diagnostic categories (for example dependency_timeout, connection_refused, out_of_memory_signal) with integer counts. Only those categories and counts were supplied to you. Raw logs were never supplied to or analyzed by the AI provider. Never claim or imply that you read or analyzed a raw log line, message, excerpt, or stack trace. Treat each signal category and count as an observation, not proof of causality. Do not invent a specific error message, endpoint, hostname, dependency name, file path, or stack trace beyond the fixed category names and counts supplied. When log_signals evidence is present alongside an earlier analysis, briefly state what it changes about your assessment, if anything; do not simply repeat the earlier summary unchanged. If more log evidence is needed, recommend operator-side review of previous-container logs or additional locally derived diagnostic signals; never recommend sending raw logs to the AI provider. Recommendations remain read-only regardless of any additional evidence supplied.`
 )
 
 type openAIProvider struct {

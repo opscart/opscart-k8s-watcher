@@ -217,12 +217,20 @@ func appendWarRoomAIPodEvidence(set *warRoomAIEvidenceSet, index *warRoomAIPodEv
 	})
 
 	if targetKnown {
-		set.append(aianalysis.EvidenceItem{
+		// restart_count is excluded from the stable hash for the same
+		// reason as "Observed pod counts" above (warroom_ai_evidence.go):
+		// it climbs continuously during an active incident without
+		// indicating a change in what is wrong. Every other field here
+		// (waiting/termination reason, exit code) remains exact in both
+		// representations — those are meaningful failure evidence.
+		set.appendStable(aianalysis.EvidenceItem{
 			Type: aianalysis.EvidenceObservation, Summary: "Target container runtime observation",
 			Details: fmt.Sprintf("container=%s; ready=%s; current_state=%s; waiting_reason=%s; last_termination_reason=%s; last_termination_exit_code=%s; restart_count=%s",
 				target.name, target.ready, target.currentState, target.waitingReason,
 				target.lastTerminationReason, target.lastTerminationExitCode, target.restartCount),
-		})
+		}, fmt.Sprintf("container=%s; ready=%s; current_state=%s; waiting_reason=%s; last_termination_reason=%s; last_termination_exit_code=%s; restart_count=stable",
+			target.name, target.ready, target.currentState, target.waitingReason,
+			target.lastTerminationReason, target.lastTerminationExitCode))
 		set.append(aianalysis.EvidenceItem{
 			Type: aianalysis.EvidenceConfiguration, Summary: "Target container resources and probes",
 			Details: fmt.Sprintf("container=%s; cpu_request=%s; memory_request=%s; cpu_limit=%s; memory_limit=%s; liveness_probe=%s; readiness_probe=%s; startup_probe=%s",
@@ -239,10 +247,16 @@ func appendWarRoomAIPodEvidence(set *warRoomAIEvidenceSet, index *warRoomAIPodEv
 		if event.observedAtKnown && index.capturedAtNanos >= event.observedAtNanos {
 			age = strconv.FormatInt((index.capturedAtNanos-event.observedAtNanos)/int64(time.Second), 10)
 		}
+		// Stable identity is the event's reason alone: a repeat of the same
+		// warning (count climbing) or the passage of time (age_seconds, or
+		// even the absolute observed-at instant of the latest repeat)
+		// updates this same Event object without being a change in what is
+		// wrong. Only a genuinely new/different reason appearing among the
+		// tracked warning events may change the stable hash.
 		set.appendStable(aianalysis.EvidenceItem{
 			Type: aianalysis.EvidenceEvent, Summary: "Warning Event observation",
 			Details: fmt.Sprintf("reason=%s; count=%s; age_seconds=%s", event.reason, event.count, age),
-		}, fmt.Sprintf("reason=%s; count=%s; observed_at_unix_nano=%s", event.reason, event.count, warRoomAIObservedAtHashValue(event)))
+		}, fmt.Sprintf("reason=%s", event.reason))
 	}
 }
 
@@ -406,11 +420,4 @@ func warRoomAIEventObservedAt(event *corev1.Event) (time.Time, bool) {
 		return event.CreationTimestamp.Time, true
 	}
 	return time.Time{}, false
-}
-
-func warRoomAIObservedAtHashValue(event warRoomAIWarningEventEvidence) string {
-	if !event.observedAtKnown {
-		return "unknown"
-	}
-	return strconv.FormatInt(event.observedAtNanos, 10)
 }

@@ -144,6 +144,9 @@ func runDashboard(_ *cobra.Command, _ []string) error {
 	srv.aiProvider = aiProvider
 	if aiProvider != nil {
 		srv.aiRuntime = newWarRoomAIRuntime(aiConfig.Provider, aiConfig.Model)
+		if err := srv.configureAITimeout(aiConfig.Timeout); err != nil {
+			return fmt.Errorf("AI configuration: %w", err)
+		}
 	}
 	backgroundCtx, stopBackground := context.WithCancel(context.Background())
 	defer func() {

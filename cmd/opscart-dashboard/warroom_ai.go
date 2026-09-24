@@ -18,6 +18,11 @@ const warRoomAIMaxFormBytes = 2 << 10
 type warRoomAIAPIResponse struct {
 	Status  string `json:"status"`
 	Message string `json:"message,omitempty"`
+	// Reason is a fixed, machine-readable code (see the aiReason* constants,
+	// ai_log_signal_preview.go) the browser can key UI behavior off of —
+	// never a selector, identifier, or anything derived from raw content.
+	// Empty for responses with no more specific reason than Message itself.
+	Reason string `json:"reason,omitempty"`
 }
 
 func (srv *server) warRoomCluster(r *http.Request) (string, bool) {
@@ -167,17 +172,26 @@ func (srv *server) handleWarRoomAIAnalysis(w http.ResponseWriter, r *http.Reques
 	}
 
 	generatedAt := srv.aiRuntime.cache.now()
+	// Best-effort: retains the server-resolved focus pod/target
+	// container/issue type (when this issue type supports log-derived
+	// signals) so a later preview can still validate against this exact,
+	// previously-resolved target if the selector momentarily drops out of
+	// a future scan cycle — see resolveAILogSignalsTargetWithFallback.
+	resolvedNamespace, resolvedPod, resolvedContainer, resolvedIssueType := aiLogSignalsResolvedTarget(scan, cluster, srv.db, selector)
 	entry := warRoomAICacheEntry{
-		ClusterKey: cluster, Selector: selector, EvidenceHash: capture.Hash,
+		ClusterKey: cluster, Selector: selector, EvidenceHash: capture.Hash, BaseEvidenceHash: capture.Hash,
 		RuntimeKey: srv.aiRuntime.key(), IssueIdentity: selection.Identity,
 		Provider: srv.aiRuntime.providerName, Model: srv.aiRuntime.model,
 		EvidenceCaptured: capture.CapturedAt, GeneratedAt: generatedAt, Response: *response,
-		Evidence: capture.Request.Evidence,
+		Evidence:          capture.Request.Evidence,
+		BaseCapture:       capture,
+		ResolvedNamespace: resolvedNamespace, ResolvedPodName: resolvedPod,
+		ResolvedContainerName: resolvedContainer, ResolvedIssueType: resolvedIssueType,
 	}
 	srv.aiRuntime.cache.put(entry)
 
 	status := "generated"
-	message := "Analysis generated from the current sanitized evidence."
+	message := "Analysis generated from the supplied read-only evidence."
 	if !srv.warRoomAICaptureStillCurrent(cluster, selector, capture.Hash) {
 		status = "stale"
 		message = "Analysis completed, but the issue or its evidence changed while generation was in progress."
@@ -238,6 +252,14 @@ func sameOriginWarRoomAIRequest(r *http.Request) bool {
 
 func writeWarRoomAIError(w http.ResponseWriter, status int, message string) {
 	writeWarRoomAIJSON(w, status, warRoomAIAPIResponse{Status: "error", Message: message})
+}
+
+// writeWarRoomAIErrorWithReason is writeWarRoomAIError plus a fixed
+// machine-readable reason code — used for the subset of rejections the
+// browser needs to distinguish (e.g. "issue_not_active" vs a generic
+// failure) without parsing the human-readable message.
+func writeWarRoomAIErrorWithReason(w http.ResponseWriter, status int, reason, message string) {
+	writeWarRoomAIJSON(w, status, warRoomAIAPIResponse{Status: "error", Message: message, Reason: reason})
 }
 
 func writeWarRoomAIJSON(w http.ResponseWriter, status int, response warRoomAIAPIResponse) {

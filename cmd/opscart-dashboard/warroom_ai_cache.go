@@ -18,7 +18,14 @@ const (
 	// v3: tightened analysisInstructions (pkg/aianalysis/openai.go) — a
 	// result generated under the old instructions must not be presented as
 	// current.
-	warRoomAIContractVersion = "warroom-ai-v3"
+	// v4: added the log_signals evidence type and its provider instructions
+	// (pkg/aianalysis/types.go, openai.go) — a result cached under the old
+	// contract must never be presented as a refined result, and an old
+	// cached result must not silently masquerade as current once refinement
+	// evidence exists.
+	// v5: prompt provenance now distinguishes Kubernetes events from
+	// locally derived log signals and forbids raw-log transmission advice.
+	warRoomAIContractVersion = "warroom-ai-v5"
 )
 
 type warRoomAIRuntime struct {
@@ -43,11 +50,27 @@ func (runtime *warRoomAIRuntime) key() string {
 }
 
 type warRoomAICacheEntry struct {
-	ClusterKey    string
-	Selector      string
-	EvidenceHash  string
-	RuntimeKey    string
-	IssueIdentity string
+	ClusterKey string
+	Selector   string
+	// EvidenceHash is the full analysis-identity hash: the stable evidence
+	// this specific Response was generated from — base structured
+	// Kubernetes evidence alone for a plain generation, or base plus the
+	// stable (bucketed) log_signals item for a refined one (see
+	// appendLogSignalsEvidence, ai_log_signal_preview.go). It is used for
+	// provider-call caching/deduplication (warRoomAICache.get), never for
+	// page-render staleness.
+	EvidenceHash string
+	// BaseEvidenceHash is always just the current structured Kubernetes
+	// evidence's hash — the exact same kind of value
+	// captureWarRoomAIEvidence's capture.Hash always is, regardless of
+	// whether this entry is refined. Page rendering (resolveInvestigationAIState,
+	// investigation_ai.go) compares against THIS field, never EvidenceHash,
+	// so a refined result does not appear stale the instant it is rendered:
+	// comparing a combined refined hash directly against a freshly
+	// recomputed base-only hash would never match.
+	BaseEvidenceHash string
+	RuntimeKey       string
+	IssueIdentity    string
 	// Provider and Model record the runtime identity that actually produced
 	// Response, independent of whatever provider/model is currently
 	// configured — a stale entry must keep showing what generated it.
@@ -61,6 +84,30 @@ type warRoomAICacheEntry struct {
 	// Response so a stale result can still show the evidence it was
 	// actually generated from, never the current scan's evidence.
 	Evidence []aianalysis.EvidenceItem
+	// BaseCapture is sanitized server-owned context for a transient snapshot gap.
+	BaseCapture warRoomAICapture
+	// Refined is true when Evidence includes an operator-triggered
+	// log_signals item (see ai_log_signals.go) — the page must show the
+	// refined-result disclosure instead of the plain generated-result one
+	// whenever this is true.
+	Refined bool
+
+	// ResolvedNamespace/ResolvedPodName/ResolvedContainerName/ResolvedIssueType
+	// are the server-resolved focus pod, target container, and canonical
+	// issue type this analysis was generated or refined against — best
+	// effort, empty when the issue type doesn't support log-derived signals
+	// (resolveAILogSignalsTarget, ai_log_signal_preview.go). They exist
+	// solely so a later preview request whose selector has momentarily
+	// dropped out of the current War Room snapshot (e.g. a transient
+	// rescan gap) can still be validated against a live Kubernetes
+	// Pods.Get for this exact, previously server-resolved target — never
+	// an arbitrary pod/container, and never anything the browser supplies.
+	// See resolveAILogSignalsTargetWithFallback.
+	ResolvedNamespace     string
+	ResolvedPodName       string
+	ResolvedContainerName string
+	ResolvedIssueType     string
+
 	accessed uint64
 }
 
@@ -109,6 +156,8 @@ func (cache *warRoomAICache) latest(cluster, selector string) (warRoomAICacheEnt
 	cache.entries[selector] = entry
 	entry.Response = cloneAnalysisResponse(entry.Response)
 	entry.Evidence = cloneEvidenceItems(entry.Evidence)
+	entry.BaseCapture.Request.Evidence = cloneEvidenceItems(entry.BaseCapture.Request.Evidence)
+	entry.BaseCapture.StableEvidence = cloneEvidenceItems(entry.BaseCapture.StableEvidence)
 	return entry, true
 }
 
@@ -123,6 +172,8 @@ func (cache *warRoomAICache) put(entry warRoomAICacheEntry) {
 	entry.accessed = cache.sequence
 	entry.Response = cloneAnalysisResponse(entry.Response)
 	entry.Evidence = cloneEvidenceItems(entry.Evidence)
+	entry.BaseCapture.Request.Evidence = cloneEvidenceItems(entry.BaseCapture.Request.Evidence)
+	entry.BaseCapture.StableEvidence = cloneEvidenceItems(entry.BaseCapture.StableEvidence)
 	cache.entries[entry.Selector] = entry
 	for len(cache.entries) > cache.capacity {
 		var oldestKey string
