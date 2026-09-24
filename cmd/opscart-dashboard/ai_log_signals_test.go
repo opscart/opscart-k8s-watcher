@@ -24,6 +24,11 @@ func TestClassifyLogSignalsDetectsEveryFixedCategory(t *testing.T) {
 		logSignalOutOfMemorySignal:     "Cannot allocate memory",
 		logSignalDiskFull:              "write failed: no space left on device",
 		logSignalProcessTermination:    "process terminated by signal: killed",
+		logSignalApplicationStartup:    "Started ExampleApplication in 2.5 seconds",
+		logSignalServerStartup:         "Server started on port 18080",
+		logSignalGracefulShutdown:      "Graceful shutdown requested",
+		logSignalSeverityError:         "2026-09-15 12:00:00.000 ERROR 1 --- [main] ExampleLogger : request failed",
+		logSignalSeverityWarning:       "2026-09-15 12:00:00.000 WARN 1 --- [main] ExampleLogger : retrying",
 		logSignalUnknownErrorMarker:    "an unexpected error occurred during processing",
 	}
 	for category, line := range lines {
@@ -57,7 +62,7 @@ func TestClassifyLogSignalsCountsRepeatedLines(t *testing.T) {
 }
 
 func TestClassifyLogSignalsNoMatchProducesNoCategories(t *testing.T) {
-	counts := classifyLogSignals([]byte("2026-09-15T00:00:00Z application started successfully\nready to serve traffic\n"))
+	counts := classifyLogSignals([]byte("2026-09-15T00:00:00Z worker initialized\nready to serve traffic\n"))
 	for category, count := range counts {
 		if count != 0 {
 			t.Fatalf("unexpected non-zero category %s=%d for benign input", category, count)

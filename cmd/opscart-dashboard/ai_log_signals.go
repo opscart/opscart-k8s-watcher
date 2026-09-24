@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"regexp"
 )
 
 const (
@@ -32,6 +33,11 @@ const (
 	logSignalOutOfMemorySignal     logSignalCategory = "out_of_memory_signal"
 	logSignalDiskFull              logSignalCategory = "disk_full"
 	logSignalProcessTermination    logSignalCategory = "process_termination"
+	logSignalApplicationStartup    logSignalCategory = "application_startup_complete"
+	logSignalServerStartup         logSignalCategory = "server_startup"
+	logSignalGracefulShutdown      logSignalCategory = "graceful_shutdown"
+	logSignalSeverityError         logSignalCategory = "severity_error"
+	logSignalSeverityWarning       logSignalCategory = "severity_warning"
 	logSignalUnknownErrorMarker    logSignalCategory = "unknown_error_marker"
 )
 
@@ -42,7 +48,9 @@ var logSignalCategoryOrder = []logSignalCategory{
 	logSignalDependencyTimeout, logSignalDNSFailure, logSignalConnectionRefused,
 	logSignalConnectionReset, logSignalTLSFailure, logSignalAuthenticationFailure,
 	logSignalAuthorizationFailure, logSignalConfigurationError, logSignalOutOfMemorySignal,
-	logSignalDiskFull, logSignalProcessTermination, logSignalUnknownErrorMarker,
+	logSignalDiskFull, logSignalProcessTermination,
+	logSignalApplicationStartup, logSignalServerStartup, logSignalGracefulShutdown,
+	logSignalSeverityError, logSignalSeverityWarning, logSignalUnknownErrorMarker,
 }
 
 // logSignalKeywords is the fixed, lowercase keyword vocabulary a line is
@@ -67,9 +75,10 @@ var logSignalKeywords = map[logSignalCategory][]string{
 	logSignalProcessTermination:    {"sigkill", "sigterm", "signal: killed", "signal: terminated"},
 }
 
-// logSignalGenericErrorMarkers back logSignalUnknownErrorMarker: a line
-// that looks error-like but did not match any specific category above.
-var logSignalGenericErrorMarkers = []string{"error", "exception", "failure", "failed"}
+// A generic marker must be a standalone message word. This deliberately
+// excludes class, bean, method, and channel names such as ExampleErrorSink
+// and error-channel.
+var logSignalGenericErrorMarker = regexp.MustCompile(`(?:^|[\s:([{])(?:error|exception|failure|failed)(?:$|[\s:,;!?)}\]])`)
 
 // classifyLogSignals inspects data locally, line by line, and returns only
 // fixed category counters — never a line, a captured substring, or any
@@ -83,10 +92,22 @@ func classifyLogSignals(data []byte) map[logSignalCategory]int {
 	for scanner.Scan() {
 		line := bytes.ToLower(scanner.Bytes())
 		matched := false
+		for _, category := range classifyLogLifecycle(line) {
+			incrementLogSignal(counts, category)
+			matched = true
+		}
+		switch structuredLogSeverity(line) {
+		case logSeverityError:
+			incrementLogSignal(counts, logSignalSeverityError)
+			matched = true
+		case logSeverityWarning:
+			incrementLogSignal(counts, logSignalSeverityWarning)
+			matched = true
+		}
 		for category, keywords := range logSignalKeywords {
 			for _, keyword := range keywords {
 				if bytes.Contains(line, []byte(keyword)) {
-					counts[category]++
+					incrementLogSignal(counts, category)
 					matched = true
 					break
 				}
@@ -95,14 +116,17 @@ func classifyLogSignals(data []byte) map[logSignalCategory]int {
 		if matched {
 			continue
 		}
-		for _, marker := range logSignalGenericErrorMarkers {
-			if bytes.Contains(line, []byte(marker)) {
-				counts[logSignalUnknownErrorMarker]++
-				break
-			}
+		if logSignalGenericErrorMarker.Match(line) {
+			incrementLogSignal(counts, logSignalUnknownErrorMarker)
 		}
 	}
 	return counts
+}
+
+func incrementLogSignal(counts map[logSignalCategory]int, category logSignalCategory) {
+	if counts[category] < int(investigationLogTailLines) {
+		counts[category]++
+	}
 }
 
 // logSignalCountBucket maps an exact, potentially volatile count to one of

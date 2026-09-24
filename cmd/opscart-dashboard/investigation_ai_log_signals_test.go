@@ -224,7 +224,7 @@ func TestInvestigationAIPreviewDialogStructuralFixes(t *testing.T) {
 	}
 	for _, want := range []string{
 		"payload.can_refine",
-		"No additional evidence was found in the previous container logs. The existing analysis was not changed, and no AI request was made.",
+		"No diagnostic signals eligible for AI refinement were found in the previous container logs. The existing analysis was not changed, and no AI request was made.",
 	} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("missing server-authoritative actionable gating %q: %s", want, body)

@@ -25,7 +25,9 @@ const (
 	// evidence exists.
 	// v5: prompt provenance now distinguishes Kubernetes events from
 	// locally derived log signals and forbids raw-log transmission advice.
-	warRoomAIContractVersion = "warroom-ai-v5"
+	// v6: lifecycle and structured-severity categories plus prompt rules
+	// that correlate lifecycle with Kubernetes evidence without claiming health.
+	warRoomAIContractVersion = "warroom-ai-v6"
 )
 
 type warRoomAIRuntime struct {

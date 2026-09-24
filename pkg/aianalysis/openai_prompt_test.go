@@ -32,6 +32,9 @@ func TestOpenAIPromptPreservesEventAndLogSignalProvenance(t *testing.T) {
 			"Raw logs were never supplied to or analyzed by the AI provider",
 			"operator-side review of previous-container logs or additional locally derived diagnostic signals",
 			"never recommend sending raw logs to the AI provider",
+			"A startup completion signal is not proof of health, readiness, or sustained availability",
+			"Correlate lifecycle signals with structured Kubernetes evidence",
+			"preserving their distinct provenance",
 		} {
 			if !strings.Contains(wire.Instructions, required) {
 				t.Errorf("provider prompt missing provenance rule %q", required)

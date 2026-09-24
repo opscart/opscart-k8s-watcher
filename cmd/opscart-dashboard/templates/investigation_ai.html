@@ -608,7 +608,7 @@
       }else{
         previewID=null;
         setState(STATE_IDLE);
-        inlineResult.textContent='No additional evidence was found in the previous container logs. The existing analysis was not changed, and no AI request was made.';
+        inlineResult.textContent='No diagnostic signals eligible for AI refinement were found in the previous container logs. The existing analysis was not changed, and no AI request was made.';
         var unknown=(payload.signals||[]).find(function(signal){return signal.category==='unknown_error_marker';});
         if(unknown){inlineCount.textContent=String(unknown.count);inlineDetails.hidden=false;}
       }
